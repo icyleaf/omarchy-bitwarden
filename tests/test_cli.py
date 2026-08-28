@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from bitwarden_helper.cli import main
 from bitwarden_helper.auth import AuthStatus, AuthResult
+from bitwarden_helper.vault import VaultItem
 
 def test_cli_config_get(tmp_path: Path, capsys):
     config_file = tmp_path / "config.json"
@@ -91,7 +92,6 @@ def test_cli_hook_install(tmp_path: Path, capsys):
             data = json.loads(captured.out)
             assert data["ok"] is True
             mock_inst.assert_called_once()
-from bitwarden_helper.vault import VaultItem
 
 def test_cli_vault_sync(tmp_path: Path, capsys):
     config_file = tmp_path / "config.json"
@@ -122,3 +122,25 @@ def test_cli_vault_search(tmp_path: Path, capsys):
             data = json.loads(captured.out)
             assert len(data) == 1
             assert data[0]["name"] == "GitHub"
+
+def test_cli_clipboard_copy(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.cli.ClipboardManager.copy", return_value=True) as mock_copy:
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "clipboard", "copy", "--text", "pass123", "--sensitive"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_copy.assert_called_once_with("pass123", sensitive=True, timeout_seconds=30)
+
+def test_cli_totp_generate(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.cli.generate_totp", return_value={"code": "123456", "ttl": 15, "period": 30}):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "totp", "generate", "--secret", "JBSWY3DPEHPK3PXP"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["code"] == "123456"
+            assert data["ttl"] == 15

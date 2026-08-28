@@ -11,6 +11,8 @@ from bitwarden_helper.health import check_cli_health
 from bitwarden_helper.auth import AuthManager
 from bitwarden_helper.hook import install_lock_hook
 from bitwarden_helper.vault import VaultManager
+from bitwarden_helper.clipboard import ClipboardManager
+from bitwarden_helper.totp import generate_totp
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -75,6 +77,24 @@ def create_parser() -> argparse.ArgumentParser:
     search_cmd = vault_sub.add_parser("search", help="Search vault items")
     search_cmd.add_argument("--query", dest="query", default="", help="Search query keyword")
     search_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note, ssh_key)")
+    
+    # clipboard command
+    clip_parser = subparsers.add_parser("clipboard", help="Wayland clipboard integration")
+    clip_sub = clip_parser.add_subparsers(dest="clip_action", required=True)
+    
+    copy_cmd = clip_sub.add_parser("copy", help="Copy text to clipboard")
+    copy_cmd.add_argument("--text", required=True, help="Text to copy")
+    copy_cmd.add_argument("--sensitive", action="store_true", help="Mark payload as sensitive for auto-clear")
+    copy_cmd.add_argument("--timeout", type=int, default=None, help="Auto-clear timeout in seconds")
+    
+    clip_sub.add_parser("clear", help="Clear clipboard immediately")
+    
+    # totp command
+    totp_parser = subparsers.add_parser("totp", help="Generate TOTP verification code")
+    totp_sub = totp_parser.add_subparsers(dest="totp_action", required=True)
+    
+    gen_cmd = totp_sub.add_parser("generate", help="Generate TOTP code from secret or otpauth URI")
+    gen_cmd.add_argument("--secret", required=True, help="Base32 secret or otpauth:// URI")
     
     return parser
 
@@ -160,6 +180,28 @@ def main(args: Optional[List[str]] = None) -> int:
             results = vault_mgr.search(items, query=parsed.query, category=parsed.category)
             print(json.dumps([asdict(i) for i in results], indent=2))
             return 0
+
+    elif parsed.command == "clipboard":
+        clip_mgr = ClipboardManager()
+        if parsed.clip_action == "copy":
+            timeout = parsed.timeout if parsed.timeout is not None else cfg.clipboard_clear_seconds
+            ok = clip_mgr.copy(parsed.text, sensitive=parsed.sensitive, timeout_seconds=timeout)
+            print(json.dumps({"ok": ok}, indent=2))
+            return 0 if ok else 1
+        elif parsed.clip_action == "clear":
+            ok = clip_mgr.clear()
+            print(json.dumps({"ok": ok}, indent=2))
+            return 0 if ok else 1
+
+    elif parsed.command == "totp":
+        if parsed.totp_action == "generate":
+            totp_res = generate_totp(parsed.secret)
+            if totp_res:
+                print(json.dumps(totp_res, indent=2))
+                return 0
+            else:
+                print(json.dumps({"error": "Invalid TOTP secret"}, indent=2))
+                return 1
         
     return 0
 

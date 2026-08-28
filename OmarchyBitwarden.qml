@@ -51,6 +51,13 @@ Item {
   property string activeCategory: "all"
   property int selectedIndex: 0
 
+  // Details Inspector State
+  property bool showPasswordRevealed: false
+  property bool showPrivateKeyRevealed: false
+  property var currentTotp: ({ code: "", ttl: 30, period: 30 })
+  property bool showActionPalette: false
+  property int actionPaletteIndex: 0
+
   property string currentView: "auto" // "auto" | "settings" | "login" | "unlock" | "search"
   property string loginMethod: "password" // "password" | "apikey"
   property string statusMessage: ""
@@ -64,6 +71,13 @@ Item {
   readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property string fontFamily: Style.font.menuFamily
 
+  readonly property var selectedItem: {
+    if (filteredItems && filteredItems.length > 0 && selectedIndex >= 0 && selectedIndex < filteredItems.length) {
+      return filteredItems[selectedIndex]
+    }
+    return null
+  }
+
   readonly property string effectiveView: {
     if (currentView !== "auto") return currentView
     if (authState.status === "unlocked") return "search"
@@ -76,6 +90,9 @@ Item {
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
+    root.showActionPalette = false
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
@@ -83,6 +100,7 @@ Item {
 
   function close() {
     root.opened = false
+    root.showActionPalette = false
   }
 
   function dismiss() {
@@ -180,10 +198,28 @@ Item {
 
     root.filteredItems = res
     if (root.selectedIndex >= res.length) root.selectedIndex = Math.max(0, res.length - 1)
+    root.onSelectedItemChanged()
   }
 
   onSearchQueryChanged: filterVaultItems()
   onActiveCategoryChanged: filterVaultItems()
+  onSelectedIndexChanged: onSelectedItemChanged()
+
+  function onSelectedItemChanged() {
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.updateTotpForSelected()
+  }
+
+  function updateTotpForSelected() {
+    var item = root.selectedItem
+    if (item && item.login && item.login.totp) {
+      totpGenProc.command = [root.helperPath, "totp", "generate", "--secret", item.login.totp]
+      totpGenProc.running = true
+    } else {
+      root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+    }
+  }
 
   function cycleCategory(forward) {
     var idx = root.categoryList.indexOf(root.activeCategory)
@@ -194,6 +230,112 @@ Item {
       idx = (idx - 1 + root.categoryList.length) % root.categoryList.length
     }
     root.activeCategory = root.categoryList[idx]
+  }
+
+  function copyToClipboard(text, isSensitive, label) {
+    if (!text) return
+    var cmd = [root.helperPath, "clipboard", "copy", "--text", text]
+    if (isSensitive) {
+      cmd.push("--sensitive")
+    }
+    clipCopyProc.command = cmd
+    clipCopyProc.running = true
+    root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? " (clears in 30s)" : "") + "."
+  }
+
+  function executePrimaryAction(item) {
+    if (!item) return
+    switch (item.type_name) {
+      case "login":
+        if (item.login && item.login.password) {
+          copyToClipboard(item.login.password, true, "password")
+        } else if (item.login && item.login.username) {
+          copyToClipboard(item.login.username, false, "username")
+        }
+        break
+      case "card":
+        if (item.card && item.card.number) {
+          copyToClipboard(item.card.number, true, "card number")
+        }
+        break
+      case "ssh_key":
+        if (item.ssh_key && item.ssh_key.private_key) {
+          copyToClipboard(item.ssh_key.private_key, true, "SSH private key")
+        } else if (item.ssh_key && item.ssh_key.public_key) {
+          copyToClipboard(item.ssh_key.public_key, false, "SSH public key")
+        }
+        break
+      case "note":
+        copyToClipboard(item.notes || "", false, "secure note")
+        break
+      case "identity":
+        if (item.identity && item.identity.email) {
+          copyToClipboard(item.identity.email, false, "identity email")
+        } else if (item.identity && (item.identity.firstName || item.identity.lastName)) {
+          copyToClipboard((item.identity.firstName + " " + item.identity.lastName).trim(), false, "name")
+        }
+        break
+      default:
+        copyToClipboard(item.notes || "", false, "content")
+    }
+  }
+
+  function getAvailableActions(item) {
+    if (!item) return []
+    var actions = []
+    
+    if (item.type_name === "login" && item.login) {
+      if (item.login.password) actions.push({ label: "Copy Password", icon: "🔒", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
+      if (item.login.username) actions.push({ label: "Copy Username", icon: "👤", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
+      if (root.currentTotp.code) actions.push({ label: "Copy TOTP Code", icon: "⏱️", action: function() { root.copyToClipboard(root.currentTotp.code, true, "TOTP code") } })
+      if (item.login.uris && item.login.uris.length > 0 && item.login.uris[0].uri) {
+        actions.push({ label: "Open URL", icon: "🌐", action: function() { Qt.openUrlExternally(item.login.uris[0].uri) } })
+      }
+    } else if (item.type_name === "card" && item.card) {
+      if (item.card.number) actions.push({ label: "Copy Card Number", icon: "💳", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
+      if (item.card.code) actions.push({ label: "Copy Security Code (CVV)", icon: "🔢", action: function() { root.copyToClipboard(item.card.code, true, "CVV") } })
+      if (item.card.cardholderName) actions.push({ label: "Copy Cardholder Name", icon: "👤", action: function() { root.copyToClipboard(item.card.cardholderName, false, "cardholder") } })
+    } else if (item.type_name === "ssh_key" && item.ssh_key) {
+      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "🔑", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
+      if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "🗝️", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
+      if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "🔒", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
+    } else if (item.type_name === "identity" && item.identity) {
+      if (item.identity.email) actions.push({ label: "Copy Email", icon: "✉️", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
+      if (item.identity.phone) actions.push({ label: "Copy Phone", icon: "📞", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
+    }
+
+    if (item.notes) {
+      actions.push({ label: "Copy Notes", icon: "📝", action: function() { root.copyToClipboard(item.notes, false, "notes") } })
+    }
+
+    // Check custom fields for PIN or other attributes
+    if (item.fields) {
+      for (var f = 0; f < item.fields.length; f++) {
+        var field = item.fields[f]
+        if (field.name && field.value) {
+          var fLower = field.name.toLowerCase()
+          if (fLower === "pin" || fLower.indexOf("pin") !== -1) {
+            (function(pinVal) {
+              actions.push({
+                label: "Copy PIN",
+                icon: "🔢",
+                action: function() { root.copyToClipboard(String(pinVal), true, "PIN") }
+              })
+            })(field.value)
+          } else {
+            (function(fld) {
+              actions.push({
+                label: "Copy " + fld.name,
+                icon: "🏷️",
+                action: function() { root.copyToClipboard(String(fld.value), true, fld.name) }
+              })
+            })(field)
+          }
+        }
+      }
+    }
+
+    return actions
   }
 
   function saveSettings(settings) {
@@ -273,14 +415,28 @@ Item {
     }
   }
 
+  // TOTP live refresh timer
+  Timer {
+    interval: 1000
+    running: root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp
+    repeat: true
+    onTriggered: {
+      if (root.currentTotp.ttl > 1) {
+        root.currentTotp = ({ code: root.currentTotp.code, ttl: root.currentTotp.ttl - 1, period: root.currentTotp.period })
+      } else {
+        root.updateTotpForSelected()
+      }
+    }
+  }
+
   FloatingWindow {
     id: panel
     title: "Bitwarden"
     visible: root.opened
     color: root.background
-    implicitWidth: 780
-    implicitHeight: 560
-    minimumSize: Qt.size(600, 440)
+    implicitWidth: 920
+    implicitHeight: 600
+    minimumSize: Qt.size(720, 480)
 
     FocusScope {
       id: focusRoot
@@ -289,8 +445,35 @@ Item {
 
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
+        if (root.showActionPalette) {
+          var actions = root.getAvailableActions(root.selectedItem)
+          if (event.key === Qt.Key_Escape) {
+            root.showActionPalette = false
+            event.accepted = true
+          } else if (event.key === Qt.Key_Down) {
+            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up) {
+            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
+            event.accepted = true
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
+              actions[root.actionPaletteIndex].action()
+              root.showActionPalette = false
+            }
+            event.accepted = true
+          }
+          return
+        }
+
         if (event.key === Qt.Key_Escape) {
           root.dismiss()
+          event.accepted = true
+        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
+          if (root.selectedItem) {
+            root.actionPaletteIndex = 0
+            root.showActionPalette = true
+          }
           event.accepted = true
         } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
           root.doLock()
@@ -298,6 +481,11 @@ Item {
         } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
           root.syncVault()
           event.accepted = true
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          if (root.effectiveView === "search" && root.selectedItem) {
+            root.executePrimaryAction(root.selectedItem)
+            event.accepted = true
+          }
         } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
           root.cycleCategory(true)
           event.accepted = true
@@ -362,6 +550,16 @@ Item {
 
           Item { Layout.fillWidth: true }
 
+          // Quick Action Palette button
+          Button {
+            visible: root.authState.status === "unlocked" && root.selectedItem !== null
+            text: "Actions (Ctrl+K)"
+            onClicked: {
+              root.actionPaletteIndex = 0
+              root.showActionPalette = true
+            }
+          }
+
           // Quick Action: Sync (if unlocked)
           Button {
             visible: root.authState.status === "unlocked"
@@ -386,21 +584,21 @@ Item {
           }
         }
 
-        // Error message banner
+        // Status / Error message banner
         Rectangle {
-          visible: root.errorMessage !== ""
+          visible: root.errorMessage !== "" || root.statusMessage !== ""
           Layout.fillWidth: true
-          implicitHeight: errorText.implicitHeight + 12
+          implicitHeight: bannerText.implicitHeight + 10
           radius: 6
-          color: Qt.rgba(0.9, 0.2, 0.2, 0.15)
-          border.color: Qt.rgba(0.9, 0.2, 0.2, 0.5)
+          color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.15) : Qt.rgba(0.2, 0.7, 0.9, 0.15)
+          border.color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.4) : Qt.rgba(0.2, 0.7, 0.9, 0.4)
 
           Text {
-            id: errorText
+            id: bannerText
             anchors.centerIn: parent
             width: parent.width - 24
-            text: root.errorMessage
-            color: "#f87171"
+            text: (root.errorMessage !== "") ? root.errorMessage : root.statusMessage
+            color: (root.errorMessage !== "") ? "#f87171" : root.accent
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
           }
@@ -693,18 +891,13 @@ Item {
               }
             }
             Item { Layout.fillWidth: true }
-            Text {
-              text: root.statusMessage
-              color: root.accent
-              font.pixelSize: Style.font.bodySmall
-            }
           }
 
           Item { Layout.fillHeight: true }
         }
 
         // ==========================================
-        // 4. VAULT SEARCH VIEW (Unlocked)
+        // 4. VAULT SEARCH & INSPECTOR VIEW (Raycast Split Layout)
         // ==========================================
         ColumnLayout {
           visible: root.effectiveView === "search"
@@ -717,11 +910,16 @@ Item {
             id: searchInput
             Layout.fillWidth: true
             Layout.preferredHeight: 42
-            placeholderText: "Search vault items (names, usernames, notes, cards, ssh keys)..."
+            placeholderText: "Search credentials (names, usernames, notes, cards, ssh)... (Enter: Copy, Ctrl+K: Actions)"
             font.pixelSize: Style.font.body + 2
             text: root.searchQuery
             onTextChanged: root.searchQuery = text
-            focus: root.effectiveView === "search"
+            onAccepted: {
+              if (root.selectedItem) {
+                root.executePrimaryAction(root.selectedItem)
+              }
+            }
+            focus: root.effectiveView === "search" && !root.showActionPalette
           }
 
           // Category Filter Chips / Tabs
@@ -769,95 +967,520 @@ Item {
             }
           }
 
-          // Items Result List
-          Rectangle {
+          // Split Content: Left (List) & Right (Details Inspector)
+          RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            radius: 8
-            color: root.selectedBackground
-            border.color: root.border
-            clip: true
+            spacing: 12
 
-            ListView {
-              id: itemsList
-              anchors.fill: parent
-              anchors.margins: 4
-              model: root.filteredItems
-              currentIndex: root.selectedIndex
+            // Left: Items Result List
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              Layout.preferredWidth: 380
+              radius: 8
+              color: root.selectedBackground
+              border.color: root.border
+              clip: true
 
-              delegate: Rectangle {
-                width: itemsList.width
-                height: 52
-                radius: 6
-                color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+              ListView {
+                id: itemsList
+                anchors.fill: parent
+                anchors.margins: 4
+                model: root.filteredItems
+                currentIndex: root.selectedIndex
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.leftMargin: 12
-                  anchors.rightMargin: 12
-                  spacing: 12
+                delegate: Rectangle {
+                  width: itemsList.width
+                  height: 52
+                  radius: 6
+                  color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
 
-                  Text {
-                    text: root.getItemIcon(modelData.type_name)
-                    font.pixelSize: 20
-                  }
+                  RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    spacing: 10
 
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 2
+                    Text {
+                      text: root.getItemIcon(modelData.type_name)
+                      font.pixelSize: 18
+                    }
 
-                    RowLayout {
-                      spacing: 6
-                      Text {
-                        text: modelData.name || "Untitled"
-                        color: root.foreground
-                        font.pixelSize: Style.font.body
-                        font.bold: true
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 2
+
+                      RowLayout {
+                        spacing: 6
+                        Text {
+                          text: modelData.name || "Untitled"
+                          color: root.foreground
+                          font.pixelSize: Style.font.body
+                          font.bold: true
+                        }
+                        Text {
+                          visible: modelData.favorite
+                          text: "★"
+                          color: "#fbbf24"
+                          font.pixelSize: Style.font.caption
+                        }
                       }
+
                       Text {
-                        visible: modelData.favorite
-                        text: "★"
-                        color: "#fbbf24"
-                        font.pixelSize: Style.font.caption
+                        text: modelData.sub_title || modelData.type_name
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.pixelSize: Style.font.bodySmall
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
                       }
                     }
 
+                    Rectangle {
+                      implicitWidth: catBadgeText.implicitWidth + 8
+                      implicitHeight: 18
+                      radius: 4
+                      color: Qt.rgba(1, 1, 1, 0.08)
+                      Text {
+                        id: catBadgeText
+                        anchors.centerIn: parent
+                        text: (modelData.type_name === "ssh_key") ? "SSH" : modelData.type_name.toUpperCase()
+                        color: Qt.darker(root.foreground, 1.3)
+                        font.pixelSize: Style.font.caption - 2
+                      }
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.selectedIndex = index
+                    onDoubleClicked: root.executePrimaryAction(modelData)
+                  }
+                }
+
+                Text {
+                  visible: root.filteredItems.length === 0 && !root.isBusy
+                  anchors.centerIn: parent
+                  text: root.rawVaultItems.length === 0 ? "Vault is empty. Click 'Sync' to load." : "No matching items."
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.pixelSize: Style.font.body
+                }
+              }
+            }
+
+            // Right: Details Inspector Pane
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              Layout.preferredWidth: 360
+              radius: 8
+              color: root.selectedBackground
+              border.color: root.border
+              clip: true
+
+              ScrollView {
+                anchors.fill: parent
+                anchors.margins: 14
+                contentWidth: width
+
+                ColumnLayout {
+                  width: parent.width
+                  spacing: 12
+
+                  // Header Info
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
                     Text {
-                      text: modelData.sub_title || modelData.type_name
-                      color: Qt.darker(root.foreground, 1.4)
-                      font.pixelSize: Style.font.bodySmall
-                      elide: Text.ElideRight
+                      text: root.selectedItem ? root.getItemIcon(root.selectedItem.type_name) : "🔒"
+                      font.pixelSize: 28
+                    }
+
+                    ColumnLayout {
                       Layout.fillWidth: true
+                      spacing: 2
+                      Text {
+                        text: root.selectedItem ? root.selectedItem.name : "Select an item"
+                        color: root.foreground
+                        font.pixelSize: Style.font.title
+                        font.bold: true
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                      }
+                      Text {
+                        text: root.selectedItem ? (root.selectedItem.type_name.toUpperCase() + (root.selectedItem.favorite ? " • Favorite" : "")) : ""
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.pixelSize: Style.font.caption
+                      }
                     }
                   }
 
                   Rectangle {
-                    implicitWidth: catBadgeText.implicitWidth + 8
-                    implicitHeight: 20
-                    radius: 4
-                    color: Qt.rgba(1, 1, 1, 0.08)
-                    Text {
-                      id: catBadgeText
-                      anchors.centerIn: parent
-                      text: (modelData.type_name === "ssh_key") ? "SSH KEY" : modelData.type_name.toUpperCase()
-                      color: Qt.darker(root.foreground, 1.3)
-                      font.pixelSize: Style.font.caption - 1
+                    Layout.fillWidth: true
+                    height: 1
+                    color: root.border
+                  }
+
+                  // Login Details
+                  ColumnLayout {
+                    visible: root.selectedItem && root.selectedItem.type_name === "login" && root.selectedItem.login !== null
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    // Username
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Username:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 70 }
+                      Text { text: (root.selectedItem && root.selectedItem.login && root.selectedItem.login.username) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true; elide: Text.ElideRight }
+                      Button {
+                        text: "Copy"
+                        visible: Boolean(root.selectedItem && root.selectedItem.login && root.selectedItem.login.username)
+                        onClicked: root.copyToClipboard(root.selectedItem.login.username, false, "username")
+                      }
                     }
+
+                    // Password
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Password:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 70 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.login && root.selectedItem.login.password) 
+                          ? (root.showPasswordRevealed ? root.selectedItem.login.password : "••••••••••••") 
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                      }
+                      Button {
+                        text: root.showPasswordRevealed ? "Hide" : "Reveal"
+                        visible: Boolean(root.selectedItem && root.selectedItem.login && root.selectedItem.login.password)
+                        onClicked: root.showPasswordRevealed = !root.showPasswordRevealed
+                      }
+                      Button {
+                        text: "Copy"
+                        visible: Boolean(root.selectedItem && root.selectedItem.login && root.selectedItem.login.password)
+                        onClicked: root.copyToClipboard(root.selectedItem.login.password, true, "password")
+                      }
+                    }
+
+                    // TOTP Code
+                    ColumnLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp)
+                      Layout.fillWidth: true
+                      spacing: 4
+
+                      RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "TOTP Code:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 70 }
+                        Text {
+                          text: root.currentTotp.code || "Generating..."
+                          color: root.accent
+                          font.pixelSize: Style.font.heading
+                          font.bold: true
+                          Layout.fillWidth: true
+                        }
+                        Text {
+                          text: root.currentTotp.ttl + "s"
+                          color: Qt.darker(root.foreground, 1.4)
+                          font.pixelSize: Style.font.caption
+                        }
+                        Button {
+                          text: "Copy"
+                          enabled: Boolean(root.currentTotp.code)
+                          onClicked: root.copyToClipboard(root.currentTotp.code, true, "TOTP code")
+                        }
+                      }
+
+                      // TTL Progress Bar
+                      Rectangle {
+                        Layout.fillWidth: true
+                        height: 3
+                        radius: 1.5
+                        color: Qt.rgba(1, 1, 1, 0.1)
+                        Rectangle {
+                          height: parent.height
+                          radius: parent.radius
+                          width: parent.width * (root.currentTotp.ttl / (root.currentTotp.period || 30))
+                          color: (root.currentTotp.ttl > 5) ? root.accent : "#f87171"
+                        }
+                      }
+                    }
+
+                    // URIs
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.login && root.selectedItem.login.uris && root.selectedItem.login.uris.length > 0)
+                      Layout.fillWidth: true
+                      Text { text: "URL:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 70 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.login && root.selectedItem.login.uris && root.selectedItem.login.uris[0]) ? root.selectedItem.login.uris[0].uri : ""
+                        color: root.accent
+                        font.pixelSize: Style.font.bodySmall
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                      }
+                      Button {
+                        text: "Open"
+                        onClicked: {
+                          if (root.selectedItem.login.uris[0].uri) Qt.openUrlExternally(root.selectedItem.login.uris[0].uri)
+                        }
+                      }
+                    }
+                  }
+
+                  // Card Details
+                  ColumnLayout {
+                    visible: root.selectedItem && root.selectedItem.type_name === "card" && root.selectedItem.card !== null
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Cardholder:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.card && root.selectedItem.card.cardholderName) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.card.cardholderName, false, "cardholder") }
+                    }
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Number:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.card && root.selectedItem.card.number)
+                          ? (root.showPasswordRevealed ? root.selectedItem.card.number : ("•••• •••• •••• " + (root.selectedItem.card.number.slice(-4) || "")))
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: root.showPasswordRevealed ? "Hide" : "Reveal"
+                        onClicked: root.showPasswordRevealed = !root.showPasswordRevealed
+                      }
+                      Button {
+                        text: "Copy"
+                        onClicked: root.copyToClipboard(root.selectedItem.card.number, true, "card number")
+                      }
+                    }
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Expires:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.card) ? (root.selectedItem.card.expMonth + "/" + root.selectedItem.card.expYear) : "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Text { text: "CVV:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall }
+                      Text { text: (root.selectedItem && root.selectedItem.card && root.selectedItem.card.code) ? "•••" : "—"; color: root.foreground; font.pixelSize: Style.font.body }
+                      Button {
+                        text: "Copy CVV"
+                        visible: Boolean(root.selectedItem && root.selectedItem.card && root.selectedItem.card.code)
+                        onClicked: root.copyToClipboard(root.selectedItem.card.code, true, "CVV")
+                      }
+                    }
+                  }
+
+                  // SSH Key Details
+                  ColumnLayout {
+                    visible: root.selectedItem && root.selectedItem.type_name === "ssh_key" && root.selectedItem.ssh_key !== null
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Key Type:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.ssh_key && root.selectedItem.ssh_key.key_type) || "SSH"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                    }
+
+                    // Public Key
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.ssh_key && root.selectedItem.ssh_key.public_key)
+                      Layout.fillWidth: true
+                      Text { text: "Public Key:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.ssh_key && root.selectedItem.ssh_key.public_key) ? (root.selectedItem.ssh_key.public_key.slice(0, 20) + "...") : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.bodySmall
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: "Copy Public"
+                        onClicked: root.copyToClipboard(root.selectedItem.ssh_key.public_key, false, "SSH public key")
+                      }
+                    }
+
+                    // Private Key
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.ssh_key && root.selectedItem.ssh_key.private_key)
+                      Layout.fillWidth: true
+                      Text { text: "Private Key:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text {
+                        text: root.showPrivateKeyRevealed ? "Private Key Loaded" : "••••••••••••"
+                        color: root.foreground
+                        font.pixelSize: Style.font.bodySmall
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: root.showPrivateKeyRevealed ? "Hide" : "Reveal"
+                        onClicked: root.showPrivateKeyRevealed = !root.showPrivateKeyRevealed
+                      }
+                      Button {
+                        text: "Copy Private"
+                        onClicked: root.copyToClipboard(root.selectedItem.ssh_key.private_key, true, "SSH private key")
+                      }
+                    }
+
+                    // Passphrase
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.ssh_key && root.selectedItem.ssh_key.passphrase)
+                      Layout.fillWidth: true
+                      Text { text: "Passphrase:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: "••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button {
+                        text: "Copy"
+                        onClicked: root.copyToClipboard(root.selectedItem.ssh_key.passphrase, true, "SSH passphrase")
+                      }
+                    }
+                  }
+
+                  // Notes section
+                  ColumnLayout {
+                    visible: Boolean(root.selectedItem && root.selectedItem.notes)
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text { text: "Notes:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall }
+                      Item { Layout.fillWidth: true }
+                      Button {
+                        text: "Copy Notes"
+                        onClicked: root.copyToClipboard(root.selectedItem.notes, false, "notes")
+                      }
+                    }
+
+                    Rectangle {
+                      Layout.fillWidth: true
+                      implicitHeight: Math.min(100, notesContentText.implicitHeight + 12)
+                      radius: 4
+                      color: Qt.rgba(0, 0, 0, 0.2)
+                      clip: true
+
+                      Text {
+                        id: notesContentText
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        text: root.selectedItem ? (root.selectedItem.notes || "") : ""
+                        color: root.foreground
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.Wrap
+                      }
+                    }
+                  }
+
+                  // Custom Fields section
+                  ColumnLayout {
+                    visible: Boolean(root.selectedItem && root.selectedItem.fields && root.selectedItem.fields.length > 0)
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Text { text: "Custom Fields:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall }
+
+                    Repeater {
+                      model: root.selectedItem ? (root.selectedItem.fields || []) : []
+                      delegate: RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Text { text: modelData.name + ":"; color: Qt.darker(root.foreground, 1.3); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80; elide: Text.ElideRight }
+                        Text { text: String(modelData.value || ""); color: root.foreground; font.pixelSize: Style.font.bodySmall; Layout.fillWidth: true; elide: Text.ElideRight }
+                        Button {
+                          text: "Copy"
+                          onClicked: root.copyToClipboard(String(modelData.value), true, modelData.name)
+                        }
+                      }
+                    }
+                  }
+
+                  Item { Layout.fillHeight: true }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ==========================================
+      // ACTION PALETTE MODAL (Ctrl+K)
+      // ==========================================
+      Rectangle {
+        visible: root.showActionPalette
+        anchors.fill: parent
+        color: Qt.rgba(0, 0, 0, 0.6)
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: 440
+          height: 340
+          radius: 10
+          color: root.background
+          border.color: root.border
+
+          ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 8
+
+            RowLayout {
+              Layout.fillWidth: true
+              Text {
+                text: "Actions for: " + (root.selectedItem ? root.selectedItem.name : "Item")
+                color: root.foreground
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+              Button {
+                text: "Esc"
+                onClicked: root.showActionPalette = false
+              }
+            }
+
+            Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
+
+            ListView {
+              id: actionsList
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              clip: true
+              model: root.getAvailableActions(root.selectedItem)
+              currentIndex: root.actionPaletteIndex
+
+              delegate: Rectangle {
+                width: actionsList.width
+                height: 40
+                radius: 6
+                color: (index === root.actionPaletteIndex) ? root.accent : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: 10
+                  anchors.rightMargin: 10
+                  spacing: 10
+
+                  Text { text: modelData.icon; font.pixelSize: 16 }
+                  Text {
+                    text: modelData.label
+                    color: (index === root.actionPaletteIndex) ? "#ffffff" : root.foreground
+                    font.pixelSize: Style.font.body
+                    Layout.fillWidth: true
                   }
                 }
 
                 MouseArea {
                   anchors.fill: parent
-                  onClicked: root.selectedIndex = index
+                  onClicked: {
+                    modelData.action()
+                    root.showActionPalette = false
+                  }
                 }
-              }
-
-              Text {
-                visible: root.filteredItems.length === 0 && !root.isBusy
-                anchors.centerIn: parent
-                text: root.rawVaultItems.length === 0 ? "Vault is empty or not synced. Click 'Sync' to load items." : "No matching items found."
-                color: Qt.darker(root.foreground, 1.4)
-                font.pixelSize: Style.font.body
               }
             }
           }
@@ -1051,6 +1674,27 @@ Item {
         } catch (e) {
           console.error("Failed to parse vault items:", e)
         }
+      }
+    }
+  }
+
+  Process {
+    id: clipCopyProc
+    command: []
+  }
+
+  Process {
+    id: totpGenProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var res = JSON.parse(text)
+          if (res && res.code) {
+            root.currentTotp = res
+          }
+        } catch (e) {}
       }
     }
   }
