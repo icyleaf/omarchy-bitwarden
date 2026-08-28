@@ -10,6 +10,13 @@ import qs.Ui
 Item {
   id: root
 
+  Component.onCompleted: {
+    root.refreshConfig()
+    root.refreshHealth()
+    root.refreshAuthStatus()
+    root.loadVaultItems()
+  }
+
   property var shell: null
   property var manifest: null
   property bool opened: false
@@ -37,7 +44,7 @@ Item {
   })
 
   property var authState: ({
-    status: "unauthenticated",
+    status: "unlocked",
     server_url: "",
     user_email: "",
     has_session: false
@@ -57,12 +64,14 @@ Item {
   property var currentTotp: ({ code: "", ttl: 30, period: 30 })
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
+  property var currentAvailableActions: []
 
   property string currentView: "auto"
   property string loginMethod: "password"
   property string statusMessage: ""
   property string errorMessage: ""
   property bool isBusy: false
+  property bool isLoadingVault: false
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -80,7 +89,7 @@ Item {
 
   readonly property string effectiveView: {
     if (currentView !== "auto") return currentView
-    if (authState.status === "unlocked") return "search"
+    if (authState.status === "unlocked" || (rawVaultItems && rawVaultItems.length > 0)) return "search"
     if (authState.status === "locked") return "unlock"
     return "login"
   }
@@ -93,9 +102,16 @@ Item {
     root.showActionPalette = false
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
+    root.searchQuery = ""
+    if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
+    if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
+    if (root.authState.status === "unlocked" || (root.rawVaultItems && root.rawVaultItems.length > 0)) {
+      if (!root.rawVaultItems || root.rawVaultItems.length === 0) root.loadVaultItems()
+      root.syncVault(true)
+    }
     Qt.callLater(function() {
       if (root.effectiveView === "search") searchInput.forceActiveFocus()
       else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
@@ -135,19 +151,22 @@ Item {
     authStatusProc.running = true
   }
 
-  function syncVault() {
-    root.isBusy = true
-    root.statusMessage = "Syncing vault with Bitwarden..."
+  function syncVault(isBackground) {
+    if (!isBackground) {
+      root.isBusy = true
+      root.statusMessage = "Syncing vault with Bitwarden..."
+    }
     vaultSyncProc.command = [root.helperPath, "vault", "sync"]
     vaultSyncProc.running = true
   }
 
   function loadVaultItems() {
+    root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
     vaultListProc.running = true
   }
 
-  function isFuzzyMatch(pattern, text) {
+  function isSubsequence(pattern, text) {
     if (!pattern) return true
     pattern = pattern.toLowerCase()
     text = text.toLowerCase()
@@ -173,46 +192,103 @@ Item {
       if (cat !== "all" && item.type_name !== cat) continue
 
       if (q === "") {
-        res.push(item)
+        res.push({ item: item, score: item.favorite ? 100 : 0 })
       } else {
         var words = q.split(/\s+/)
-        var searchText = (item.search_text || "").toLowerCase()
-        var match = true
+        var totalScore = item.favorite ? 100 : 0
+        var nameLower = (item.name || "").toLowerCase()
+        var subLower = (item.sub_title || "").toLowerCase()
+        var searchLower = (item.search_text || "").toLowerCase()
+        var notesLower = (item.notes || "").toLowerCase()
+
+        var allWordsMatched = true
         for (var w = 0; w < words.length; w++) {
-          if (words[w] && !root.isFuzzyMatch(words[w], searchText)) {
-            match = false
+          var word = words[w]
+          if (!word) continue
+          var wordMatched = false
+
+          if (nameLower === word) {
+            totalScore += 2000
+            wordMatched = true
+          } else if (nameLower.indexOf(word) === 0) {
+            totalScore += 1000
+            wordMatched = true
+          } else if (nameLower.indexOf(word) !== -1) {
+            totalScore += 500
+            wordMatched = true
+          } else if (subLower.indexOf(word) === 0) {
+            totalScore += 400
+            wordMatched = true
+          } else if (subLower.indexOf(word) !== -1) {
+            totalScore += 300
+            wordMatched = true
+          } else if (searchLower.indexOf(word) !== -1 || notesLower.indexOf(word) !== -1) {
+            totalScore += 100
+            wordMatched = true
+          } else if (root.isSubsequence(word, nameLower)) {
+            totalScore += 80
+            wordMatched = true
+          }
+
+          if (!wordMatched) {
+            allWordsMatched = false
             break
           }
         }
-        if (match) res.push(item)
+
+        if (allWordsMatched) {
+          res.push({ item: item, score: totalScore })
+        }
       }
     }
 
     res.sort(function(a, b) {
-      var ptsA = a.favorite ? 100 : 0
-      var ptsB = b.favorite ? 100 : 0
-      if (q !== "") {
-        var nameA = a.name.toLowerCase()
-        var nameB = b.name.toLowerCase()
-        if (nameA.indexOf(q) === 0) ptsA += 50
-        if (nameB.indexOf(q) === 0) ptsB += 50
-      }
-      return ptsB - ptsA
+      return b.score - a.score
     })
 
-    root.filteredItems = res
-    if (root.selectedIndex >= res.length) root.selectedIndex = Math.max(0, res.length - 1)
+    var out = []
+    for (var j = 0; j < res.length; j++) {
+      out.push(res[j].item)
+    }
+
+    root.filteredItems = out
+    root.selectedIndex = 0
+    if (typeof itemsList !== "undefined" && itemsList) {
+      itemsList.positionViewAtIndex(0, ListView.Beginning)
+    }
     root.onSelectedItemChanged()
   }
 
   onSearchQueryChanged: filterVaultItems()
   onActiveCategoryChanged: filterVaultItems()
-  onSelectedIndexChanged: onSelectedItemChanged()
+  onSelectedIndexChanged: {
+    if (typeof itemsList !== "undefined" && itemsList && itemsList.count > 0 && root.selectedIndex >= 0 && root.selectedIndex < itemsList.count) {
+      itemsList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+    }
+    root.onSelectedItemChanged()
+  }
 
-  function onSelectedItemChanged() {
+  function updateAvailableActions() {
+    root.currentAvailableActions = root.getAvailableActions(root.selectedItem)
+  }
+
+  onShowActionPaletteChanged: {
+    if (root.showActionPalette) {
+      root.actionPaletteIndex = 0
+      root.updateAvailableActions()
+      Qt.callLater(function() {
+        if (typeof actionPaletteFocusScope !== "undefined" && actionPaletteFocusScope) {
+          actionPaletteFocusScope.forceActiveFocus()
+        }
+      })
+    }
+  }
+
+  onSelectedItemChanged: {
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.updateTotpForSelected()
+    root.updateAvailableActions()
   }
 
   function updateTotpForSelected() {
@@ -289,11 +365,26 @@ Item {
     var actions = []
     
     if (item.type_name === "login" && item.login) {
-      if (item.login.password) actions.push({ label: "Copy Password", icon: "🔒", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
-      if (item.login.username) actions.push({ label: "Copy Username", icon: "👤", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
-      if (root.currentTotp.code) actions.push({ label: "Copy TOTP Code", icon: "⏱️", action: function() { root.copyToClipboard(root.currentTotp.code, true, "TOTP code") } })
+      if (item.login.password) {
+        actions.push({ label: "Copy Password", icon: "🔒", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
+      }
+      if (item.login.username) {
+        actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "👤", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
+      }
+      if ((item.login.totp) || (root.currentTotp && root.currentTotp.code)) {
+        var totpLabel = "Copy TOTP Code" + ((root.currentTotp && root.currentTotp.code) ? (" (" + root.currentTotp.code + ")") : "")
+        actions.push({
+          label: totpLabel,
+          icon: "⏱️",
+          action: function() {
+            if (root.currentTotp && root.currentTotp.code) {
+              root.copyToClipboard(root.currentTotp.code, true, "TOTP code")
+            }
+          }
+        })
+      }
       if (item.login.uris && item.login.uris.length > 0 && item.login.uris[0].uri) {
-        actions.push({ label: "Open URL", icon: "🌐", action: function() { Qt.openUrlExternally(item.login.uris[0].uri) } })
+        actions.push({ label: "Open URL (" + item.login.uris[0].uri + ")", icon: "🌐", action: function() { Qt.openUrlExternally(item.login.uris[0].uri) } })
       }
     } else if (item.type_name === "card" && item.card) {
       if (item.card.number) actions.push({ label: "Copy Card Number", icon: "💳", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
@@ -365,6 +456,12 @@ Item {
 
   function doLock() {
     root.isBusy = true
+    root.searchQuery = ""
+    if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
+    if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
+    if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
+    root.activeCategory = "all"
+    root.selectedIndex = 0
     root.statusMessage = "Locking vault..."
     authLockProc.command = [root.helperPath, "auth", "lock"]
     authLockProc.running = true
@@ -407,14 +504,79 @@ Item {
     return count
   }
 
-  function getItemIcon(typeName) {
-    switch(typeName) {
-      case "login": return "🔑"
-      case "card": return "💳"
-      case "identity": return "🪪"
-      case "note": return "📝"
-      case "ssh_key": return "🗝️"
-      default: return "🔒"
+  function extractDomain(uri) {
+    if (!uri) return ""
+    var str = String(uri).trim()
+    if (str.indexOf("://") !== -1) {
+      str = str.split("://")[1]
+    }
+    str = str.split("/")[0]
+    str = str.split("?")[0]
+    str = str.split("#")[0]
+    str = str.split(":")[0]
+    if (str.indexOf("@") !== -1) {
+      str = str.split("@")[1]
+    }
+    if (str.indexOf("www.") === 0) {
+      str = str.slice(4)
+    }
+    return str
+  }
+
+  function getFaviconUrl(item) {
+    if (item && item.type_name === "login" && item.login && item.login.uris && item.login.uris.length > 0 && item.login.uris[0].uri) {
+      var dom = root.extractDomain(item.login.uris[0].uri)
+      if (dom && dom.indexOf(".") !== -1 && dom !== "localhost") {
+        return "https://www.google.com/s2/favicons?domain=" + dom + "&sz=64"
+      }
+    }
+    return ""
+  }
+
+  function getItemIcon(item) {
+    if (!item) return "🌐"
+    var typeName = (typeof item === "string") ? item : (item.type_name || "login")
+    if (typeName === "card") {
+      var brand = ""
+      if (typeof item === "object" && item.card) {
+        brand = (item.card.brand ? String(item.card.brand).toLowerCase() : "")
+        if (!brand && item.card.number) {
+          var num = String(item.card.number).replace(/\s+/g, "")
+          if (num.indexOf("4") === 0) brand = "visa"
+          else if (num.match(/^5[1-5]/) || num.match(/^2[2-7]/)) brand = "mastercard"
+          else if (num.match(/^3[47]/)) brand = "amex"
+          else if (num.match(/^35/)) brand = "jcb"
+          else if (num.match(/^6(?:011|5)/)) brand = "discover"
+          else if (num.indexOf("62") === 0) brand = "unionpay"
+        }
+      }
+      if (brand.indexOf("visa") !== -1) return "💳 Visa"
+      if (brand.indexOf("master") !== -1 || brand === "mc") return "💳 MC"
+      if (brand.indexOf("amex") !== -1 || brand.indexOf("american") !== -1) return "💳 Amex"
+      if (brand.indexOf("jcb") !== -1) return "💳 JCB"
+      if (brand.indexOf("discover") !== -1) return "💳 Disc"
+      if (brand.indexOf("union") !== -1) return "💳 CUP"
+      return "💳"
+    } else if (typeName === "ssh_key") {
+      return "⚡"
+    } else if (typeName === "note") {
+      return "📄"
+    } else if (typeName === "identity") {
+      return "🪪"
+    }
+    return "🌐"
+  }
+
+    Timer {
+    id: statusMessageTimer
+    interval: 3000
+    repeat: false
+    onTriggered: root.statusMessage = ""
+  }
+
+  onStatusMessageChanged: {
+    if (root.statusMessage !== "") {
+      statusMessageTimer.restart()
     }
   }
 
@@ -472,6 +634,14 @@ Item {
       onActivated: root.syncVault()
     }
 
+        Shortcut {
+      sequence: "Ctrl+,"
+      enabled: root.opened
+      onActivated: {
+        root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
+      }
+    }
+
     Shortcut {
       sequence: "Escape"
       enabled: root.opened
@@ -493,7 +663,7 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
         if (root.showActionPalette) {
-          var actions = root.getAvailableActions(root.selectedItem)
+          var actions = root.currentAvailableActions || []
           if (event.key === Qt.Key_Escape) {
             root.showActionPalette = false
             event.accepted = true
@@ -619,7 +789,7 @@ Item {
           }
 
           Button {
-            text: root.effectiveView === "settings" ? "Back" : "Settings"
+            text: root.effectiveView === "settings" ? "Back" : "Settings (Ctrl+,)"
             onClicked: {
               root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
             }
@@ -1022,14 +1192,14 @@ Item {
               }
             }
             Keys.onDownPressed: function(event) {
-              if (root.filteredItems.length > 0) {
-                root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
+              if (root.filteredItems.length > 0 && root.selectedIndex < root.filteredItems.length - 1) {
+                root.selectedIndex += 1
                 event.accepted = true
               }
             }
             Keys.onUpPressed: function(event) {
-              if (root.filteredItems.length > 0) {
-                root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
+              if (root.filteredItems.length > 0 && root.selectedIndex > 0) {
+                root.selectedIndex -= 1
                 event.accepted = true
               }
             }
@@ -1085,13 +1255,13 @@ Item {
             Layout.fillHeight: true
             spacing: 12
 
-            Rectangle {
+            BorderSurface {
               Layout.fillWidth: true
               Layout.fillHeight: true
               Layout.preferredWidth: 380
-              radius: 8
-              color: root.selectedBackground
-              border.color: root.border
+              radius: Style.cornerRadius
+              color: Style.controlFill(false, false, root.foreground, root.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
               clip: true
 
               ListView {
@@ -1105,7 +1275,8 @@ Item {
                   width: itemsList.width
                   height: 52
                   radius: 6
-                  color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                  color: (index === root.selectedIndex) ? root.accent : "transparent"
+                  border.color: (index === root.selectedIndex) ? root.accent : "transparent"
 
                   RowLayout {
                     anchors.fill: parent
@@ -1113,9 +1284,28 @@ Item {
                     anchors.rightMargin: 10
                     spacing: 10
 
-                    Text {
-                      text: root.getItemIcon(modelData.type_name)
-                      font.pixelSize: 18
+                    Item {
+                      width: 22
+                      height: 22
+                      Layout.alignment: Qt.AlignVCenter
+
+                      Image {
+                        id: faviconImg
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectFit
+                        source: root.getFaviconUrl(modelData)
+                        visible: source !== "" && status === Image.Ready
+                        asynchronous: true
+                        smooth: true
+                      }
+
+                      Text {
+                        anchors.centerIn: parent
+                        visible: !faviconImg.visible
+                        text: root.getItemIcon(modelData)
+                        font.pixelSize: 16
+                        color: (index === root.selectedIndex) ? "#ffffff" : root.foreground
+                      }
                     }
 
                     ColumnLayout {
@@ -1126,21 +1316,21 @@ Item {
                         spacing: 6
                         Text {
                           text: modelData.name || "Untitled"
-                          color: root.foreground
+                          color: (index === root.selectedIndex) ? "#ffffff" : root.foreground
                           font.pixelSize: Style.font.body
                           font.bold: true
                         }
                         Text {
                           visible: modelData.favorite
                           text: "★"
-                          color: "#fbbf24"
+                          color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.9) : root.accent
                           font.pixelSize: Style.font.caption
                         }
                       }
 
                       Text {
                         text: modelData.sub_title || modelData.type_name
-                        color: Qt.darker(root.foreground, 1.4)
+                        color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.85) : Qt.darker(root.foreground, 1.4)
                         font.pixelSize: Style.font.bodySmall
                         elide: Text.ElideRight
                         Layout.fillWidth: true
@@ -1170,22 +1360,22 @@ Item {
                 }
 
                 Text {
-                  visible: root.filteredItems.length === 0 && !root.isBusy
+                  visible: root.filteredItems.length === 0
                   anchors.centerIn: parent
-                  text: root.rawVaultItems.length === 0 ? "Vault is empty. Click 'Sync' to load." : "No matching items."
+                  text: root.isLoadingVault ? "Loading vault items..." : (root.rawVaultItems.length === 0 ? "Vault is empty. Click 'Sync' to load." : "No matching items.")
                   color: Qt.darker(root.foreground, 1.4)
                   font.pixelSize: Style.font.body
                 }
               }
             }
 
-            Rectangle {
+            BorderSurface {
               Layout.fillWidth: true
               Layout.fillHeight: true
               Layout.preferredWidth: 360
-              radius: 8
-              color: root.selectedBackground
-              border.color: root.border
+              radius: Style.cornerRadius
+              color: Style.controlFill(false, false, root.foreground, root.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
               clip: true
 
               ScrollView {
@@ -1201,9 +1391,28 @@ Item {
                     Layout.fillWidth: true
                     spacing: 10
 
-                    Text {
-                      text: root.selectedItem ? root.getItemIcon(root.selectedItem.type_name) : "🔒"
-                      font.pixelSize: 28
+                    Item {
+                      width: 32
+                      height: 32
+                      Layout.alignment: Qt.AlignVCenter
+
+                      Image {
+                        id: inspFaviconImg
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectFit
+                        source: root.selectedItem ? root.getFaviconUrl(root.selectedItem) : ""
+                        visible: source !== "" && status === Image.Ready
+                        asynchronous: true
+                        smooth: true
+                      }
+
+                      Text {
+                        anchors.centerIn: parent
+                        visible: !inspFaviconImg.visible
+                        text: root.selectedItem ? root.getItemIcon(root.selectedItem) : "🌐"
+                        font.pixelSize: 24
+                        color: root.foreground
+                      }
                     }
 
                     ColumnLayout {
@@ -1543,16 +1752,20 @@ Item {
 
             Keys.priority: Keys.BeforeItem
             Keys.onPressed: function(event) {
-              var actions = root.getAvailableActions(root.selectedItem)
+              var actions = root.currentAvailableActions || []
               if (event.key === Qt.Key_Escape) {
                 root.showActionPalette = false
                 Qt.callLater(function() { searchInput.forceActiveFocus() })
                 event.accepted = true
               } else if (event.key === Qt.Key_Down) {
-                if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
+                if (actions.length > 0 && root.actionPaletteIndex < actions.length - 1) {
+                  root.actionPaletteIndex += 1
+                }
                 event.accepted = true
               } else if (event.key === Qt.Key_Up) {
-                if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
+                if (actions.length > 0 && root.actionPaletteIndex > 0) {
+                  root.actionPaletteIndex -= 1
+                }
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
@@ -1595,7 +1808,7 @@ Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                model: root.getAvailableActions(root.selectedItem)
+                model: root.currentAvailableActions
                 currentIndex: root.actionPaletteIndex
 
                 delegate: Rectangle {
@@ -1639,7 +1852,7 @@ Item {
                 }
 
                 Text {
-                  visible: count === 0
+                  visible: !root.currentAvailableActions || root.currentAvailableActions.length === 0
                   anchors.centerIn: parent
                   text: "No actions available for this item."
                   color: Qt.darker(root.foreground, 1.4)
@@ -1734,8 +1947,12 @@ Item {
           var data = JSON.parse(text)
           if (data.ok) {
             root.statusMessage = "Unlocked successfully."
+            root.searchQuery = ""
+            if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
+            if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
             root.refreshAuthStatus()
-            root.syncVault()
+            root.loadVaultItems()
+            root.syncVault(true)
           } else {
             root.errorMessage = data.error || "Unlock failed."
           }
@@ -1761,8 +1978,13 @@ Item {
           var data = JSON.parse(text)
           if (data.ok) {
             root.statusMessage = "Logged in successfully."
+            root.searchQuery = ""
+            if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
             root.refreshAuthStatus()
-            if (data.session) root.syncVault()
+            if (data.session) {
+              root.loadVaultItems()
+              root.syncVault(true)
+            }
           } else {
             root.errorMessage = data.error || "Login failed."
           }
@@ -1832,6 +2054,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
+          root.isLoadingVault = false
           var items = JSON.parse(text)
           root.rawVaultItems = items || []
           root.filterVaultItems()

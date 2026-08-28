@@ -45,31 +45,29 @@ class AuthManager:
         except Exception:
             return False
 
-    def get_status(self) -> AuthStatus:
+    def get_status(self, verify: bool = False) -> AuthStatus:
         session = self.keyring_mgr.get_session()
         try:
             res = subprocess.run(
                 [self.bw_path, "status"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
                 check=False,
             )
             if res.returncode == 0:
                 data = json.loads(res.stdout)
                 status_val = data.get("status", "unauthenticated")
-                
-                # Check session validity
                 if session and status_val != "unauthenticated":
-                    # Check if session is actually valid
-                    is_valid = self.verify_session(session)
-                    if is_valid:
-                        status_val = "unlocked"
+                    if verify:
+                        if not self.verify_session(session):
+                            self.keyring_mgr.clear_session()
+                            session = None
+                            status_val = "locked"
+                        else:
+                            status_val = "unlocked"
                     else:
-                        # Session expired; clear dead token from keyring
-                        self.keyring_mgr.clear_session()
-                        session = None
-                        status_val = "locked"
+                        status_val = "unlocked"
 
                 return AuthStatus(
                     status=status_val,
@@ -83,13 +81,15 @@ class AuthManager:
             pass
 
         return AuthStatus(
-            status="unauthenticated" if not session else "unlocked",
+            status="unlocked" if session else "unauthenticated",
             server_url=None,
             last_sync=None,
             user_email=None,
             user_id=None,
             has_session=bool(session),
         )
+
+
 
     def login_password(self, email: str, password: str, code: Optional[str] = None) -> AuthResult:
         cmd = [self.bw_path, "login", email, password, "--raw"]

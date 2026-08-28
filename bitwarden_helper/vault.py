@@ -281,33 +281,55 @@ class VaultManager:
         if cat in ("all", ""):
             cat = None
 
-        filtered: List[VaultItem] = []
+        def match_and_score(item: VaultItem) -> tuple[bool, int]:
+            if not q:
+                return True, (100 if item.favorite else 0)
+
+
+            query_words = q.split()
+            total_score = 100 if item.favorite else 0
+            name_lower = item.name.lower()
+            sub_lower = (item.sub_title or "").lower()
+            search_lower = (item.search_text or "").lower()
+            notes_lower = (item.notes or "").lower()
+
+            for w in query_words:
+                word_matched = False
+                if name_lower == w:
+                    total_score += 2000
+                    word_matched = True
+                elif name_lower.startswith(w):
+                    total_score += 1000
+                    word_matched = True
+                elif w in name_lower:
+                    total_score += 500
+                    word_matched = True
+                elif sub_lower.startswith(w):
+                    total_score += 400
+                    word_matched = True
+                elif w in sub_lower:
+                    total_score += 300
+                    word_matched = True
+                elif w in search_lower or w in notes_lower:
+                    total_score += 100
+                    word_matched = True
+                elif is_fuzzy_match(w, name_lower):
+                    total_score += 80
+                    word_matched = True
+
+                if not word_matched:
+                    return False, 0
+
+            return True, total_score
+
+        scored_items: List[tuple[VaultItem, int]] = []
         for item in items:
             if cat and item.type_name != cat:
                 continue
+            matched, pts = match_and_score(item)
+            if matched:
+                scored_items.append((item, pts))
 
-            if not q:
-                filtered.append(item)
-                continue
+        scored_items.sort(key=lambda pair: pair[1], reverse=True)
+        return [pair[0] for pair in scored_items]
 
-            query_words = q.split()
-            if all(is_fuzzy_match(word, item.search_text) for word in query_words):
-                filtered.append(item)
-
-        def score(item: VaultItem) -> int:
-            pts = 0
-            if item.favorite:
-                pts += 100
-            name_lower = item.name.lower()
-            if q:
-                if name_lower == q:
-                    pts += 1000
-                elif name_lower.startswith(q):
-                    pts += 500
-                elif q in name_lower:
-                    pts += 200
-                elif is_fuzzy_match(q, name_lower):
-                    pts += 50
-            return pts
-
-        return sorted(filtered, key=score, reverse=True)

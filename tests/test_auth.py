@@ -44,10 +44,11 @@ def test_auth_status_locked_with_expired_keyring_session():
             stderr=""
         )
         am = AuthManager(bw_path="bw")
-        st = am.get_status()
+        st = am.get_status(verify=True)
         assert st.status == "locked"
         assert st.has_session is False
         mock_clear.assert_called_once()
+
 
 def test_auth_login_password_success():
     with patch("subprocess.run") as mock_run, \
