@@ -91,3 +91,34 @@ def test_cli_hook_install(tmp_path: Path, capsys):
             data = json.loads(captured.out)
             assert data["ok"] is True
             mock_inst.assert_called_once()
+from bitwarden_helper.vault import VaultItem
+
+def test_cli_vault_sync(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.vault.VaultManager.sync", return_value=True):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "vault", "sync"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+
+def test_cli_vault_search(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    sample_item = VaultItem(
+        id="123",
+        name="GitHub",
+        type=1,
+        type_name="login",
+        sub_title="user1",
+        favorite=True,
+    )
+    with patch("bitwarden_helper.vault.VaultManager.fetch_items", return_value=[sample_item]), \
+         patch("bitwarden_helper.vault.VaultManager.search", return_value=[sample_item]):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "vault", "search", "--query", "git"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert len(data) == 1
+            assert data[0]["name"] == "GitHub"

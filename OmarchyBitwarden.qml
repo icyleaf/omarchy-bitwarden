@@ -43,6 +43,14 @@ Item {
     has_session: false
   })
 
+  // Vault Items & Search State
+  property var rawVaultItems: []
+  property var filteredItems: []
+  property string searchQuery: ""
+  property var categoryList: ["all", "login", "card", "identity", "note"]
+  property string activeCategory: "all"
+  property int selectedIndex: 0
+
   property string currentView: "auto" // "auto" | "settings" | "login" | "unlock" | "search"
   property string loginMethod: "password" // "password" | "apikey"
   property string statusMessage: ""
@@ -104,6 +112,90 @@ Item {
     authStatusProc.running = true
   }
 
+  function syncVault() {
+    root.isBusy = true
+    root.statusMessage = "Syncing vault with Bitwarden..."
+    vaultSyncProc.command = [root.helperPath, "vault", "sync"]
+    vaultSyncProc.running = true
+  }
+
+  function loadVaultItems() {
+    vaultListProc.command = [root.helperPath, "vault", "list"]
+    vaultListProc.running = true
+  }
+
+  function isFuzzyMatch(pattern, text) {
+    if (!pattern) return true
+    pattern = pattern.toLowerCase()
+    text = text.toLowerCase()
+    if (text.indexOf(pattern) !== -1) return true
+    var pIdx = 0
+    for (var i = 0; i < text.length; i++) {
+      if (text[i] === pattern[pIdx]) {
+        pIdx++
+        if (pIdx === pattern.length) return true
+      }
+    }
+    return false
+  }
+
+  function filterVaultItems() {
+    var q = (root.searchQuery || "").trim().toLowerCase()
+    var cat = root.activeCategory
+    var items = root.rawVaultItems || []
+
+    var res = []
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i]
+      if (cat !== "all" && item.type_name !== cat) continue
+
+      if (q === "") {
+        res.push(item)
+      } else {
+        var words = q.split(/\s+/)
+        var searchText = (item.search_text || "").toLowerCase()
+        var match = true
+        for (var w = 0; w < words.length; w++) {
+          if (words[w] && !root.isFuzzyMatch(words[w], searchText)) {
+            match = false
+            break
+          }
+        }
+        if (match) res.push(item)
+      }
+    }
+
+    // Sort: favorites first, then exact/prefix match
+    res.sort(function(a, b) {
+      var ptsA = a.favorite ? 100 : 0
+      var ptsB = b.favorite ? 100 : 0
+      if (q !== "") {
+        var nameA = a.name.toLowerCase()
+        var nameB = b.name.toLowerCase()
+        if (nameA.indexOf(q) === 0) ptsA += 50
+        if (nameB.indexOf(q) === 0) ptsB += 50
+      }
+      return ptsB - ptsA
+    })
+
+    root.filteredItems = res
+    if (root.selectedIndex >= res.length) root.selectedIndex = Math.max(0, res.length - 1)
+  }
+
+  onSearchQueryChanged: filterVaultItems()
+  onActiveCategoryChanged: filterVaultItems()
+
+  function cycleCategory(forward) {
+    var idx = root.categoryList.indexOf(root.activeCategory)
+    if (idx === -1) idx = 0
+    if (forward) {
+      idx = (idx + 1) % root.categoryList.length
+    } else {
+      idx = (idx - 1 + root.categoryList.length) % root.categoryList.length
+    }
+    root.activeCategory = root.categoryList[idx]
+  }
+
   function saveSettings(settings) {
     root.isBusy = true
     root.statusMessage = "Saving configuration..."
@@ -160,14 +252,34 @@ Item {
     authLogoutProc.running = true
   }
 
+  function getCategoryCount(cat) {
+    if (!root.rawVaultItems) return 0
+    if (cat === "all") return root.rawVaultItems.length
+    var count = 0
+    for (var i = 0; i < root.rawVaultItems.length; i++) {
+      if (root.rawVaultItems[i].type_name === cat) count++
+    }
+    return count
+  }
+
+  function getItemIcon(typeName) {
+    switch(typeName) {
+      case "login": return "🔑"
+      case "card": return "💳"
+      case "identity": return "🪪"
+      case "note": return "📝"
+      default: return "🔒"
+    }
+  }
+
   FloatingWindow {
     id: panel
     title: "Bitwarden"
     visible: root.opened
     color: root.background
-    implicitWidth: 720
-    implicitHeight: 520
-    minimumSize: Qt.size(540, 400)
+    implicitWidth: 780
+    implicitHeight: 560
+    minimumSize: Qt.size(600, 440)
 
     FocusScope {
       id: focusRoot
@@ -181,6 +293,25 @@ Item {
           event.accepted = true
         } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
           root.doLock()
+          event.accepted = true
+        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
+          root.syncVault()
+          event.accepted = true
+        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
+          root.cycleCategory(true)
+          event.accepted = true
+        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search") {
+          root.cycleCategory(false)
+          event.accepted = true
+        } else if (event.key === Qt.Key_Down) {
+          if (root.filteredItems.length > 0) {
+            root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
+          }
+          event.accepted = true
+        } else if (event.key === Qt.Key_Up) {
+          if (root.filteredItems.length > 0) {
+            root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
+          }
           event.accepted = true
         }
       }
@@ -229,6 +360,14 @@ Item {
           }
 
           Item { Layout.fillWidth: true }
+
+          // Quick Action: Sync (if unlocked)
+          Button {
+            visible: root.authState.status === "unlocked"
+            text: "Sync (Ctrl+R)"
+            enabled: !root.isBusy
+            onClicked: root.syncVault()
+          }
 
           // Quick Action: Lock (if unlocked)
           Button {
@@ -367,7 +506,6 @@ Item {
               }
             }
 
-            // Password Login Fields
             ColumnLayout {
               visible: root.loginMethod === "password"
               Layout.fillWidth: true
@@ -404,7 +542,6 @@ Item {
               }
             }
 
-            // API Key Login Fields
             ColumnLayout {
               visible: root.loginMethod === "apikey"
               Layout.fillWidth: true
@@ -572,32 +709,149 @@ Item {
           visible: root.effectiveView === "search"
           Layout.fillWidth: true
           Layout.fillHeight: true
-          spacing: 12
+          spacing: 10
 
+          // Search Input Bar
+          TextField {
+            id: searchInput
+            Layout.fillWidth: true
+            Layout.preferredHeight: 42
+            placeholderText: "Search vault items (names, usernames, notes, cards)..."
+            font.pixelSize: Style.font.body + 2
+            text: root.searchQuery
+            onTextChanged: root.searchQuery = text
+            focus: root.effectiveView === "search"
+          }
+
+          // Category Filter Chips / Tabs
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+
+            Button {
+              text: "All (" + root.getCategoryCount("all") + ")"
+              highlighted: root.activeCategory === "all"
+              onClicked: root.activeCategory = "all"
+            }
+            Button {
+              text: "Logins (" + root.getCategoryCount("login") + ")"
+              highlighted: root.activeCategory === "login"
+              onClicked: root.activeCategory = "login"
+            }
+            Button {
+              text: "Cards (" + root.getCategoryCount("card") + ")"
+              highlighted: root.activeCategory === "card"
+              onClicked: root.activeCategory = "card"
+            }
+            Button {
+              text: "Identities (" + root.getCategoryCount("identity") + ")"
+              highlighted: root.activeCategory === "identity"
+              onClicked: root.activeCategory = "identity"
+            }
+            Button {
+              text: "Notes (" + root.getCategoryCount("note") + ")"
+              highlighted: root.activeCategory === "note"
+              onClicked: root.activeCategory = "note"
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Text {
+              text: root.isBusy ? "Syncing..." : (root.filteredItems.length + " items")
+              color: Qt.darker(root.foreground, 1.4)
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          // Items Result List
           Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             radius: 8
             color: root.selectedBackground
             border.color: root.border
+            clip: true
 
-            ColumnLayout {
-              anchors.centerIn: parent
-              spacing: 10
+            ListView {
+              id: itemsList
+              anchors.fill: parent
+              anchors.margins: 4
+              model: root.filteredItems
+              currentIndex: root.selectedIndex
 
-              Text {
-                text: "Vault Unlocked & Ready"
-                color: root.foreground
-                font.pixelSize: Style.font.title
-                font.bold: true
-                Layout.alignment: Qt.AlignHCenter
+              delegate: Rectangle {
+                width: itemsList.width
+                height: 52
+                radius: 6
+                color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: 12
+                  anchors.rightMargin: 12
+                  spacing: 12
+
+                  Text {
+                    text: root.getItemIcon(modelData.type_name)
+                    font.pixelSize: 20
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+
+                    RowLayout {
+                      spacing: 6
+                      Text {
+                        text: modelData.name || "Untitled"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                      }
+                      Text {
+                        visible: modelData.favorite
+                        text: "★"
+                        color: "#fbbf24"
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Text {
+                      text: modelData.sub_title || modelData.type_name
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
+                  }
+
+                  Rectangle {
+                    implicitWidth: catBadgeText.implicitWidth + 8
+                    implicitHeight: 20
+                    radius: 4
+                    color: Qt.rgba(1, 1, 1, 0.08)
+                    Text {
+                      id: catBadgeText
+                      anchors.centerIn: parent
+                      text: modelData.type_name.toUpperCase()
+                      color: Qt.darker(root.foreground, 1.3)
+                      font.pixelSize: Style.font.caption - 1
+                    }
+                  }
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: root.selectedIndex = index
+                }
               }
 
               Text {
-                text: "Session active via Linux Keyring. Ready for Ticket 3 (Vault Sync & Search)."
-                color: Qt.darker(root.foreground, 1.3)
+                visible: root.filteredItems.length === 0 && !root.isBusy
+                anchors.centerIn: parent
+                text: root.rawVaultItems.length === 0 ? "Vault is empty or not synced. Click 'Sync' to load items." : "No matching items found."
+                color: Qt.darker(root.foreground, 1.4)
                 font.pixelSize: Style.font.body
-                Layout.alignment: Qt.AlignHCenter
               }
             }
           }
@@ -666,7 +920,11 @@ Item {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
+          var wasLocked = (root.authState.status !== "unlocked")
           root.authState = data
+          if (data.status === "unlocked" && wasLocked) {
+            root.syncVault()
+          }
         } catch (e) {}
       }
     }
@@ -684,6 +942,7 @@ Item {
           if (data.ok) {
             root.statusMessage = "Unlocked successfully."
             root.refreshAuthStatus()
+            root.syncVault()
           } else {
             root.errorMessage = data.error || "Unlock failed."
           }
@@ -710,6 +969,7 @@ Item {
           if (data.ok) {
             root.statusMessage = "Logged in successfully."
             root.refreshAuthStatus()
+            if (data.session) root.syncVault()
           } else {
             root.errorMessage = data.error || "Login failed."
           }
@@ -731,6 +991,8 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
+        root.rawVaultItems = []
+        root.filteredItems = []
         root.refreshAuthStatus()
       }
     }
@@ -746,7 +1008,43 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
+        root.rawVaultItems = []
+        root.filteredItems = []
         root.refreshAuthStatus()
+      }
+    }
+  }
+
+  Process {
+    id: vaultSyncProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        root.statusMessage = "Vault synchronized."
+        root.loadVaultItems()
+      }
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0) root.statusMessage = "Vault sync failed."
+    }
+  }
+
+  Process {
+    id: vaultListProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var items = JSON.parse(text)
+          root.rawVaultItems = items || []
+          root.filterVaultItems()
+        } catch (e) {
+          console.error("Failed to parse vault items:", e)
+        }
       }
     }
   }

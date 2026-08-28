@@ -10,6 +10,7 @@ from bitwarden_helper.config import ConfigManager, Config
 from bitwarden_helper.health import check_cli_health
 from bitwarden_helper.auth import AuthManager
 from bitwarden_helper.hook import install_lock_hook
+from bitwarden_helper.vault import VaultManager
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -61,6 +62,19 @@ def create_parser() -> argparse.ArgumentParser:
     hook_parser = subparsers.add_parser("hook", help="Manage system integration hooks")
     hook_sub = hook_parser.add_subparsers(dest="hook_action", required=True)
     hook_sub.add_parser("install", help="Install system-lock hook into Omarchy hooks directory")
+    
+    # vault command
+    vault_parser = subparsers.add_parser("vault", help="Vault sync and search operations")
+    vault_sub = vault_parser.add_subparsers(dest="vault_action", required=True)
+    
+    vault_sub.add_parser("sync", help="Sync vault from Bitwarden server")
+    
+    list_cmd = vault_sub.add_parser("list", help="List all vault items")
+    list_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note)")
+    
+    search_cmd = vault_sub.add_parser("search", help="Search vault items")
+    search_cmd.add_argument("--query", dest="query", default="", help="Search query keyword")
+    search_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note)")
     
     return parser
 
@@ -126,6 +140,25 @@ def main(args: Optional[List[str]] = None) -> int:
         if parsed.hook_action == "install":
             dest = install_lock_hook()
             print(json.dumps({"ok": True, "installed_path": str(dest)}, indent=2))
+            return 0
+
+    elif parsed.command == "vault":
+        bw_path = cfg.bw_path
+        vault_mgr = VaultManager(bw_path=bw_path)
+        
+        if parsed.vault_action == "sync":
+            ok = vault_mgr.sync()
+            print(json.dumps({"ok": ok}, indent=2))
+            return 0 if ok else 1
+        elif parsed.vault_action == "list":
+            items = vault_mgr.fetch_items()
+            filtered = vault_mgr.search(items, query="", category=parsed.category)
+            print(json.dumps([asdict(i) for i in filtered], indent=2))
+            return 0
+        elif parsed.vault_action == "search":
+            items = vault_mgr.fetch_items()
+            results = vault_mgr.search(items, query=parsed.query, category=parsed.category)
+            print(json.dumps([asdict(i) for i in results], indent=2))
             return 0
         
     return 0
