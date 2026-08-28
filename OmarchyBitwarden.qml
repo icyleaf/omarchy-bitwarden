@@ -67,6 +67,7 @@ Item {
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
   readonly property color border: Color.menu.border
+  readonly property color scrim: Color.menu.scrim
   readonly property color accent: Color.menu.selectedText
   readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property string fontFamily: Style.font.menuFamily
@@ -85,6 +86,18 @@ Item {
     return "login"
   }
 
+  // Dedicated Shell IPC Interface
+  IpcHandler {
+    target: "icyleaf.bitwarden"
+    function open(payloadJson: string): string { root.open(payloadJson); return "ok" }
+    function close(): string { root.dismiss(); return "ok" }
+    function toggle(payloadJson: string): string { root.toggle(); return "ok" }
+    function lock(): string { root.doLock(); return "ok" }
+    function sync(): string { root.syncVault(); return "ok" }
+    function state(): string { return root.opened ? "open" : "closed" }
+    function ping(): string { return "ok" }
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.errorMessage = ""
@@ -96,6 +109,11 @@ Item {
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
+    Qt.callLater(function() {
+      if (root.effectiveView === "search") searchInput.forceActiveFocus()
+      else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
+      else if (root.effectiveView === "login") inputLoginEmail.forceActiveFocus()
+    })
   }
 
   function close() {
@@ -429,684 +447,703 @@ Item {
     }
   }
 
-  FloatingWindow {
+  PanelWindow {
     id: panel
-    title: "Bitwarden"
     visible: root.opened
-    color: root.background
-    implicitWidth: 920
-    implicitHeight: 600
-    minimumSize: Qt.size(720, 480)
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "icyleaf.bitwarden"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
-    onVisibleChanged: {
-      if (visible) {
-        Qt.callLater(function() {
-          if (root.effectiveView === "search") searchInput.forceActiveFocus()
-          else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
-          else if (root.effectiveView === "login") inputLoginEmail.forceActiveFocus()
-        })
+    // Scrim Background
+    Rectangle {
+      anchors.fill: parent
+      color: root.scrim
+      opacity: root.opened ? 1 : 0
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.dismiss()
       }
     }
 
-    FocusScope {
-      id: focusRoot
-      anchors.fill: parent
-      focus: true
+    // Modal Card Window
+    Rectangle {
+      id: modalCard
+      anchors.centerIn: parent
+      width: Math.min(920, panel.width - 48)
+      height: Math.min(600, panel.height - 48)
+      radius: 12
+      color: root.background
+      border.color: root.border
+      clip: true
 
-      Keys.priority: Keys.BeforeItem
-      Keys.onPressed: function(event) {
-        if (root.showActionPalette) {
-          var actions = root.getAvailableActions(root.selectedItem)
-          if (event.key === Qt.Key_Escape) {
-            root.showActionPalette = false
-            event.accepted = true
-          } else if (event.key === Qt.Key_Down) {
-            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
-            event.accepted = true
-          } else if (event.key === Qt.Key_Up) {
-            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
-            event.accepted = true
-          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
-              actions[root.actionPaletteIndex].action()
-              root.showActionPalette = false
-            }
-            event.accepted = true
-          }
-          return
-        }
-
-        if (event.key === Qt.Key_Escape) {
-          root.dismiss()
-          event.accepted = true
-        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
-          if (root.selectedItem) {
-            root.actionPaletteIndex = 0
-            root.showActionPalette = true
-          }
-          event.accepted = true
-        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
-          root.doLock()
-          event.accepted = true
-        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
-          root.syncVault()
-          event.accepted = true
-        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-          if (root.effectiveView === "search" && root.selectedItem) {
-            root.executePrimaryAction(root.selectedItem)
-            event.accepted = true
-          }
-        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
-          root.cycleCategory(true)
-          event.accepted = true
-        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search") {
-          root.cycleCategory(false)
-          event.accepted = true
-        } else if (event.key === Qt.Key_Down) {
-          if (root.filteredItems.length > 0) {
-            root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
-          }
-          event.accepted = true
-        } else if (event.key === Qt.Key_Up) {
-          if (root.filteredItems.length > 0) {
-            root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
-          }
-          event.accepted = true
-        }
+      MouseArea {
+        anchors.fill: parent
+        // Prevent click-through to dismiss
       }
 
-      ColumnLayout {
+      FocusScope {
+        id: focusRoot
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 12
+        focus: true
 
-        // Top Navigation Bar
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: 8
-
-          Text {
-            text: "Bitwarden"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading + 2
-            font.bold: true
-          }
-
-          // Lock Status Badge
-          Rectangle {
-            implicitWidth: lockStatusRow.implicitWidth + 12
-            implicitHeight: 24
-            radius: 12
-            color: (root.authState.status === "unlocked") 
-              ? Qt.rgba(0.2, 0.8, 0.2, 0.15) 
-              : Qt.rgba(0.8, 0.6, 0.2, 0.15)
-            border.color: (root.authState.status === "unlocked")
-              ? Qt.rgba(0.2, 0.8, 0.2, 0.4)
-              : Qt.rgba(0.8, 0.6, 0.2, 0.4)
-
-            RowLayout {
-              id: lockStatusRow
-              anchors.centerIn: parent
-              spacing: 6
-              Text {
-                text: (root.authState.status === "unlocked") ? "Unlocked (Keyring)" : (root.authState.status === "locked" ? "Locked" : "Not Logged In")
-                color: root.foreground
-                font.pixelSize: Style.font.caption
-                font.bold: true
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+          if (root.showActionPalette) {
+            var actions = root.getAvailableActions(root.selectedItem)
+            if (event.key === Qt.Key_Escape) {
+              root.showActionPalette = false
+              event.accepted = true
+            } else if (event.key === Qt.Key_Down) {
+              if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
+              event.accepted = true
+            } else if (event.key === Qt.Key_Up) {
+              if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
+              event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
+                actions[root.actionPaletteIndex].action()
+                root.showActionPalette = false
               }
+              event.accepted = true
             }
+            return
           }
 
-          Item { Layout.fillWidth: true }
-
-          // Quick Action Palette button
-          Button {
-            visible: root.authState.status === "unlocked" && root.selectedItem !== null
-            text: "Actions (Ctrl+K)"
-            onClicked: {
+          if (event.key === Qt.Key_Escape) {
+            root.dismiss()
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
+            if (root.selectedItem) {
               root.actionPaletteIndex = 0
               root.showActionPalette = true
             }
-          }
-
-          // Quick Action: Sync (if unlocked)
-          Button {
-            visible: root.authState.status === "unlocked"
-            text: "Sync (Ctrl+R)"
-            enabled: !root.isBusy
-            onClicked: root.syncVault()
-          }
-
-          // Quick Action: Lock (if unlocked)
-          Button {
-            visible: root.authState.status === "unlocked"
-            text: "Lock (Ctrl+L)"
-            onClicked: root.doLock()
-          }
-
-          // View Toggle Button (Search / Settings)
-          Button {
-            text: root.effectiveView === "settings" ? "Back" : "Settings"
-            onClicked: {
-              root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
+            root.doLock()
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
+            root.syncVault()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (root.effectiveView === "search" && root.selectedItem) {
+              root.executePrimaryAction(root.selectedItem)
+              event.accepted = true
             }
+          } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
+            root.cycleCategory(true)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search") {
+            root.cycleCategory(false)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Down) {
+            if (root.filteredItems.length > 0) {
+              root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
+            }
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up) {
+            if (root.filteredItems.length > 0) {
+              root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
+            }
+            event.accepted = true
           }
         }
 
-        // Status / Error message banner
-        Rectangle {
-          visible: root.errorMessage !== "" || root.statusMessage !== ""
-          Layout.fillWidth: true
-          implicitHeight: bannerText.implicitHeight + 10
-          radius: 6
-          color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.15) : Qt.rgba(0.2, 0.7, 0.9, 0.15)
-          border.color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.4) : Qt.rgba(0.2, 0.7, 0.9, 0.4)
-
-          Text {
-            id: bannerText
-            anchors.centerIn: parent
-            width: parent.width - 24
-            text: (root.errorMessage !== "") ? root.errorMessage : root.statusMessage
-            color: (root.errorMessage !== "") ? "#f87171" : root.accent
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.Wrap
-          }
-        }
-
-        // ==========================================
-        // 1. UNLOCK VIEW
-        // ==========================================
         ColumnLayout {
-          visible: root.effectiveView === "unlock"
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 16
+          anchors.fill: parent
+          anchors.margins: 16
+          spacing: 12
 
-          Item { Layout.fillHeight: true }
-
-          ColumnLayout {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 380
-            spacing: 12
-
-            Text {
-              text: "Unlock Bitwarden Vault"
-              color: root.foreground
-              font.pixelSize: Style.font.heading
-              font.bold: true
-              Layout.alignment: Qt.AlignHCenter
-            }
-
-            Text {
-              text: root.authState.user_email ? ("Account: " + root.authState.user_email) : "Enter Master Password or PIN"
-              color: Qt.darker(root.foreground, 1.3)
-              font.pixelSize: Style.font.bodySmall
-              Layout.alignment: Qt.AlignHCenter
-            }
-
-            TextField {
-              id: inputUnlockPassword
-              Layout.fillWidth: true
-              echoMode: TextInput.Password
-              placeholderText: "Master Password / PIN"
-              font.pixelSize: Style.font.body
-              focus: root.effectiveView === "unlock"
-              onAccepted: root.doUnlock(text)
-            }
-
-            Button {
-              Layout.fillWidth: true
-              text: root.isBusy ? "Unlocking..." : "Unlock Vault"
-              highlighted: true
-              enabled: !root.isBusy && inputUnlockPassword.text.length > 0
-              onClicked: root.doUnlock(inputUnlockPassword.text)
-            }
-
-            RowLayout {
-              Layout.alignment: Qt.AlignHCenter
-              Button {
-                text: "Logout Account"
-                flat: true
-                onClicked: root.doLogout()
-              }
-            }
-          }
-
-          Item { Layout.fillHeight: true }
-        }
-
-        // ==========================================
-        // 2. LOGIN VIEW
-        // ==========================================
-        ColumnLayout {
-          visible: root.effectiveView === "login"
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 14
-
-          Item { Layout.fillHeight: true }
-
-          ColumnLayout {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 420
-            spacing: 12
-
-            Text {
-              text: "Log in to Bitwarden"
-              color: root.foreground
-              font.pixelSize: Style.font.heading
-              font.bold: true
-              Layout.alignment: Qt.AlignHCenter
-            }
-
-            RowLayout {
-              Layout.alignment: Qt.AlignHCenter
-              spacing: 8
-              Button {
-                text: "Master Password"
-                highlighted: root.loginMethod === "password"
-                onClicked: { root.loginMethod = "password" }
-              }
-              Button {
-                text: "API Key"
-                highlighted: root.loginMethod === "apikey"
-                onClicked: { root.loginMethod = "apikey" }
-              }
-            }
-
-            ColumnLayout {
-              visible: root.loginMethod === "password"
-              Layout.fillWidth: true
-              spacing: 8
-
-              TextField {
-                id: inputLoginEmail
-                Layout.fillWidth: true
-                placeholderText: "Email address"
-                font.pixelSize: Style.font.body
-                focus: root.effectiveView === "login"
-              }
-
-              TextField {
-                id: inputLoginPassword
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                placeholderText: "Master Password"
-                font.pixelSize: Style.font.body
-              }
-
-              TextField {
-                id: inputLogin2FA
-                Layout.fillWidth: true
-                placeholderText: "2FA Verification Code (optional)"
-                font.pixelSize: Style.font.body
-              }
-
-              Button {
-                Layout.fillWidth: true
-                text: root.isBusy ? "Logging in..." : "Log In"
-                highlighted: true
-                enabled: !root.isBusy && inputLoginEmail.text.length > 0 && inputLoginPassword.text.length > 0
-                onClicked: root.doLoginPassword(inputLoginEmail.text.trim(), inputLoginPassword.text, inputLogin2FA.text.trim())
-              }
-            }
-
-            ColumnLayout {
-              visible: root.loginMethod === "apikey"
-              Layout.fillWidth: true
-              spacing: 8
-
-              TextField {
-                id: inputClientId
-                Layout.fillWidth: true
-                placeholderText: "client_id (e.g. user.xxxxx)"
-                font.pixelSize: Style.font.body
-              }
-
-              TextField {
-                id: inputClientSecret
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                placeholderText: "client_secret"
-                font.pixelSize: Style.font.body
-              }
-
-              Button {
-                Layout.fillWidth: true
-                text: root.isBusy ? "Authenticating..." : "Log In with API Key"
-                highlighted: true
-                enabled: !root.isBusy && inputClientId.text.length > 0 && inputClientSecret.text.length > 0
-                onClicked: root.doLoginApiKey(inputClientId.text.trim(), inputClientSecret.text.trim())
-              }
-            }
-          }
-
-          Item { Layout.fillHeight: true }
-        }
-
-        // ==========================================
-        // 3. SETTINGS VIEW
-        // ==========================================
-        ColumnLayout {
-          visible: root.effectiveView === "settings"
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 14
-
-          Text {
-            text: "Configuration & CLI Health"
-            color: root.foreground
-            font.pixelSize: Style.font.title
-            font.bold: true
-          }
-
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 4
-            Text {
-              text: "Server URL (Bitwarden or Vaultwarden):"
-              color: root.foreground
-              font.pixelSize: Style.font.bodySmall
-            }
-            TextField {
-              id: inputServerUrl
-              Layout.fillWidth: true
-              text: root.config.server_url || "https://vault.bitwarden.com"
-              font.pixelSize: Style.font.body
-            }
-          }
-
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 4
-            RowLayout {
-              Layout.fillWidth: true
-              Text {
-                text: "Bitwarden CLI executable path:"
-                color: root.foreground
-                font.pixelSize: Style.font.bodySmall
-              }
-              Item { Layout.fillWidth: true }
-              Text {
-                text: root.cliHealth.executable_path ? ("Detected: " + root.cliHealth.executable_path) : "Not found in PATH"
-                color: root.cliHealth.ok ? "#4ade80" : Qt.darker(root.foreground, 1.4)
-                font.pixelSize: Style.font.caption
-              }
-            }
-            TextField {
-              id: inputBwPath
-              Layout.fillWidth: true
-              text: root.config.bw_path || "bw"
-              placeholderText: "bw (auto-detected from $PATH)"
-              font.pixelSize: Style.font.body
-            }
-          }
-
-          RowLayout {
-            Layout.fillWidth: true
-            spacing: 16
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 4
-              Text {
-                text: "Auto-lock Timeout (minutes):"
-                color: root.foreground
-                font.pixelSize: Style.font.bodySmall
-              }
-              TextField {
-                id: inputAutoLock
-                Layout.fillWidth: true
-                text: String(root.config.auto_lock_minutes ?? 15)
-                font.pixelSize: Style.font.body
-              }
-            }
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 4
-              Text {
-                text: "Clipboard Clear (seconds):"
-                color: root.foreground
-                font.pixelSize: Style.font.bodySmall
-              }
-              TextField {
-                id: inputClipClear
-                Layout.fillWidth: true
-                text: String(root.config.clipboard_clear_seconds ?? 30)
-                font.pixelSize: Style.font.body
-              }
-            }
-          }
-
+          // Top Navigation Bar
           RowLayout {
             Layout.fillWidth: true
             spacing: 8
-            Button {
-              text: "Test CLI Connection"
-              onClicked: root.refreshHealth()
-            }
-            Button {
-              text: "Save Configuration"
-              highlighted: true
-              onClicked: {
-                var autoLockVal = parseInt(inputAutoLock.text.trim())
-                var clipClearVal = parseInt(inputClipClear.text.trim())
-                root.saveSettings({
-                  server_url: inputServerUrl.text.trim(),
-                  bw_path: inputBwPath.text.trim(),
-                  auto_lock_minutes: isNaN(autoLockVal) ? 15 : autoLockVal,
-                  clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal
-                })
-              }
-            }
-            Item { Layout.fillWidth: true }
-          }
-
-          Item { Layout.fillHeight: true }
-        }
-
-        // ==========================================
-        // 4. VAULT SEARCH & INSPECTOR VIEW (Raycast Split Layout)
-        // ==========================================
-        ColumnLayout {
-          visible: root.effectiveView === "search"
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 10
-
-          // Search Input Bar
-          TextField {
-            id: searchInput
-            Layout.fillWidth: true
-            Layout.preferredHeight: 42
-            placeholderText: "Search credentials (names, usernames, notes, cards, ssh)... (Enter: Copy, Ctrl+K: Actions)"
-            font.pixelSize: Style.font.body + 2
-            text: root.searchQuery
-            onTextChanged: root.searchQuery = text
-            onAccepted: {
-              if (root.selectedItem) {
-                root.executePrimaryAction(root.selectedItem)
-              }
-            }
-            focus: root.effectiveView === "search" && !root.showActionPalette
-          }
-
-          // Category Filter Chips / Tabs
-          RowLayout {
-            Layout.fillWidth: true
-            spacing: 6
-
-            Button {
-              text: "All (" + root.getCategoryCount("all") + ")"
-              highlighted: root.activeCategory === "all"
-              onClicked: root.activeCategory = "all"
-            }
-            Button {
-              text: "Logins (" + root.getCategoryCount("login") + ")"
-              highlighted: root.activeCategory === "login"
-              onClicked: root.activeCategory = "login"
-            }
-            Button {
-              text: "Cards (" + root.getCategoryCount("card") + ")"
-              highlighted: root.activeCategory === "card"
-              onClicked: root.activeCategory = "card"
-            }
-            Button {
-              text: "Identities (" + root.getCategoryCount("identity") + ")"
-              highlighted: root.activeCategory === "identity"
-              onClicked: root.activeCategory = "identity"
-            }
-            Button {
-              text: "Notes (" + root.getCategoryCount("note") + ")"
-              highlighted: root.activeCategory === "note"
-              onClicked: root.activeCategory = "note"
-            }
-            Button {
-              text: "SSH Keys (" + root.getCategoryCount("ssh_key") + ")"
-              highlighted: root.activeCategory === "ssh_key"
-              onClicked: root.activeCategory = "ssh_key"
-            }
-
-            Item { Layout.fillWidth: true }
 
             Text {
-              text: root.isBusy ? "Syncing..." : (root.filteredItems.length + " items")
-              color: Qt.darker(root.foreground, 1.4)
-              font.pixelSize: Style.font.caption
+              text: "Bitwarden"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.heading + 2
+              font.bold: true
+            }
+
+            // Lock Status Badge
+            Rectangle {
+              implicitWidth: lockStatusRow.implicitWidth + 12
+              implicitHeight: 24
+              radius: 12
+              color: (root.authState.status === "unlocked") 
+                ? Qt.rgba(0.2, 0.8, 0.2, 0.15) 
+                : Qt.rgba(0.8, 0.6, 0.2, 0.15)
+              border.color: (root.authState.status === "unlocked")
+                ? Qt.rgba(0.2, 0.8, 0.2, 0.4)
+                : Qt.rgba(0.8, 0.6, 0.2, 0.4)
+
+              RowLayout {
+                id: lockStatusRow
+                anchors.centerIn: parent
+                spacing: 6
+                Text {
+                  text: (root.authState.status === "unlocked") ? "Unlocked (Keyring)" : (root.authState.status === "locked" ? "Locked" : "Not Logged In")
+                  color: root.foreground
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            // Quick Action Palette button
+            Button {
+              visible: root.authState.status === "unlocked" && root.selectedItem !== null
+              text: "Actions (Ctrl+K)"
+              onClicked: {
+                root.actionPaletteIndex = 0
+                root.showActionPalette = true
+              }
+            }
+
+            // Quick Action: Sync (if unlocked)
+            Button {
+              visible: root.authState.status === "unlocked"
+              text: "Sync (Ctrl+R)"
+              enabled: !root.isBusy
+              onClicked: root.syncVault()
+            }
+
+            // Quick Action: Lock (if unlocked)
+            Button {
+              visible: root.authState.status === "unlocked"
+              text: "Lock (Ctrl+L)"
+              onClicked: root.doLock()
+            }
+
+            // View Toggle Button (Search / Settings)
+            Button {
+              text: root.effectiveView === "settings" ? "Back" : "Settings"
+              onClicked: {
+                root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
+              }
             }
           }
 
-          // Split Content: Left (List) & Right (Details Inspector)
-          RowLayout {
+          // Status / Error message banner
+          Rectangle {
+            visible: root.errorMessage !== "" || root.statusMessage !== ""
+            Layout.fillWidth: true
+            implicitHeight: bannerText.implicitHeight + 10
+            radius: 6
+            color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.15) : Qt.rgba(0.2, 0.7, 0.9, 0.15)
+            border.color: (root.errorMessage !== "") ? Qt.rgba(0.9, 0.2, 0.2, 0.4) : Qt.rgba(0.2, 0.7, 0.9, 0.4)
+
+            Text {
+              id: bannerText
+              anchors.centerIn: parent
+              width: parent.width - 24
+              text: (root.errorMessage !== "") ? root.errorMessage : root.statusMessage
+              color: (root.errorMessage !== "") ? "#f87171" : root.accent
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+          }
+
+          // ==========================================
+          // 1. UNLOCK VIEW
+          // ==========================================
+          ColumnLayout {
+            visible: root.effectiveView === "unlock"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 12
+            spacing: 16
 
-            // Left: Items Result List
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.fillHeight: true
+            Item { Layout.fillHeight: true }
+
+            ColumnLayout {
+              Layout.alignment: Qt.AlignHCenter
               Layout.preferredWidth: 380
-              radius: 8
-              color: root.selectedBackground
-              border.color: root.border
-              clip: true
+              spacing: 12
 
-              ListView {
-                id: itemsList
-                anchors.fill: parent
-                anchors.margins: 4
-                model: root.filteredItems
-                currentIndex: root.selectedIndex
+              Text {
+                text: "Unlock Bitwarden Vault"
+                color: root.foreground
+                font.pixelSize: Style.font.heading
+                font.bold: true
+                Layout.alignment: Qt.AlignHCenter
+              }
 
-                delegate: Rectangle {
-                  width: itemsList.width
-                  height: 52
-                  radius: 6
-                  color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+              Text {
+                text: root.authState.user_email ? ("Account: " + root.authState.user_email) : "Enter Master Password or PIN"
+                color: Qt.darker(root.foreground, 1.3)
+                font.pixelSize: Style.font.bodySmall
+                Layout.alignment: Qt.AlignHCenter
+              }
 
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
-                    spacing: 10
+              TextField {
+                id: inputUnlockPassword
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                placeholderText: "Master Password / PIN"
+                font.pixelSize: Style.font.body
+                focus: root.effectiveView === "unlock"
+                onAccepted: root.doUnlock(text)
+              }
 
-                    Text {
-                      text: root.getItemIcon(modelData.type_name)
-                      font.pixelSize: 18
-                    }
+              Button {
+                Layout.fillWidth: true
+                text: root.isBusy ? "Unlocking..." : "Unlock Vault"
+                highlighted: true
+                enabled: !root.isBusy && inputUnlockPassword.text.length > 0
+                onClicked: root.doUnlock(inputUnlockPassword.text)
+              }
 
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 2
+              RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Button {
+                  text: "Logout Account"
+                  flat: true
+                  onClicked: root.doLogout()
+                }
+              }
+            }
 
-                      RowLayout {
-                        spacing: 6
-                        Text {
-                          text: modelData.name || "Untitled"
-                          color: root.foreground
-                          font.pixelSize: Style.font.body
-                          font.bold: true
-                        }
-                        Text {
-                          visible: modelData.favorite
-                          text: "★"
-                          color: "#fbbf24"
-                          font.pixelSize: Style.font.caption
-                        }
-                      }
+            Item { Layout.fillHeight: true }
+          }
 
-                      Text {
-                        text: modelData.sub_title || modelData.type_name
-                        color: Qt.darker(root.foreground, 1.4)
-                        font.pixelSize: Style.font.bodySmall
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                      }
-                    }
+          // ==========================================
+          // 2. LOGIN VIEW
+          // ==========================================
+          ColumnLayout {
+            visible: root.effectiveView === "login"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 14
 
-                    Rectangle {
-                      implicitWidth: catBadgeText.implicitWidth + 8
-                      implicitHeight: 18
-                      radius: 4
-                      color: Qt.rgba(1, 1, 1, 0.08)
-                      Text {
-                        id: catBadgeText
-                        anchors.centerIn: parent
-                        text: (modelData.type_name === "ssh_key") ? "SSH" : modelData.type_name.toUpperCase()
-                        color: Qt.darker(root.foreground, 1.3)
-                        font.pixelSize: Style.font.caption - 2
-                      }
-                    }
-                  }
+            Item { Layout.fillHeight: true }
 
-                  MouseArea {
-                    anchors.fill: parent
-                    onClicked: root.selectedIndex = index
-                    onDoubleClicked: root.executePrimaryAction(modelData)
-                  }
+            ColumnLayout {
+              Layout.alignment: Qt.AlignHCenter
+              Layout.preferredWidth: 420
+              spacing: 12
+
+              Text {
+                text: "Log in to Bitwarden"
+                color: root.foreground
+                font.pixelSize: Style.font.heading
+                font.bold: true
+                Layout.alignment: Qt.AlignHCenter
+              }
+
+              RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 8
+                Button {
+                  text: "Master Password"
+                  highlighted: root.loginMethod === "password"
+                  onClicked: { root.loginMethod = "password" }
+                }
+                Button {
+                  text: "API Key"
+                  highlighted: root.loginMethod === "apikey"
+                  onClicked: { root.loginMethod = "apikey" }
+                }
+              }
+
+              ColumnLayout {
+                visible: root.loginMethod === "password"
+                Layout.fillWidth: true
+                spacing: 8
+
+                TextField {
+                  id: inputLoginEmail
+                  Layout.fillWidth: true
+                  placeholderText: "Email address"
+                  font.pixelSize: Style.font.body
+                  focus: root.effectiveView === "login"
                 }
 
+                TextField {
+                  id: inputLoginPassword
+                  Layout.fillWidth: true
+                  echoMode: TextInput.Password
+                  placeholderText: "Master Password"
+                  font.pixelSize: Style.font.body
+                }
+
+                TextField {
+                  id: inputLogin2FA
+                  Layout.fillWidth: true
+                  placeholderText: "2FA Verification Code (optional)"
+                  font.pixelSize: Style.font.body
+                }
+
+                Button {
+                  Layout.fillWidth: true
+                  text: root.isBusy ? "Logging in..." : "Log In"
+                  highlighted: true
+                  enabled: !root.isBusy && inputLoginEmail.text.length > 0 && inputLoginPassword.text.length > 0
+                  onClicked: root.doLoginPassword(inputLoginEmail.text.trim(), inputLoginPassword.text, inputLogin2FA.text.trim())
+                }
+              }
+
+              ColumnLayout {
+                visible: root.loginMethod === "apikey"
+                Layout.fillWidth: true
+                spacing: 8
+
+                TextField {
+                  id: inputClientId
+                  Layout.fillWidth: true
+                  placeholderText: "client_id (e.g. user.xxxxx)"
+                  font.pixelSize: Style.font.body
+                }
+
+                TextField {
+                  id: inputClientSecret
+                  Layout.fillWidth: true
+                  echoMode: TextInput.Password
+                  placeholderText: "client_secret"
+                  font.pixelSize: Style.font.body
+                }
+
+                Button {
+                  Layout.fillWidth: true
+                  text: root.isBusy ? "Authenticating..." : "Log In with API Key"
+                  highlighted: true
+                  enabled: !root.isBusy && inputClientId.text.length > 0 && inputClientSecret.text.length > 0
+                  onClicked: root.doLoginApiKey(inputClientId.text.trim(), inputClientSecret.text.trim())
+                }
+              }
+            }
+
+            Item { Layout.fillHeight: true }
+          }
+
+          // ==========================================
+          // 3. SETTINGS VIEW
+          // ==========================================
+          ColumnLayout {
+            visible: root.effectiveView === "settings"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 14
+
+            Text {
+              text: "Configuration & CLI Health"
+              color: root.foreground
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 4
+              Text {
+                text: "Server URL (Bitwarden or Vaultwarden):"
+                color: root.foreground
+                font.pixelSize: Style.font.bodySmall
+              }
+              TextField {
+                id: inputServerUrl
+                Layout.fillWidth: true
+                text: root.config.server_url || "https://vault.bitwarden.com"
+                font.pixelSize: Style.font.body
+              }
+            }
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 4
+              RowLayout {
+                Layout.fillWidth: true
                 Text {
-                  visible: root.filteredItems.length === 0 && !root.isBusy
-                  anchors.centerIn: parent
-                  text: root.rawVaultItems.length === 0 ? "Vault is empty. Click 'Sync' to load." : "No matching items."
-                  color: Qt.darker(root.foreground, 1.4)
+                  text: "Bitwarden CLI executable path:"
+                  color: root.foreground
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                  text: root.cliHealth.executable_path ? ("Detected: " + root.cliHealth.executable_path) : "Not found in PATH"
+                  color: root.cliHealth.ok ? "#4ade80" : Qt.darker(root.foreground, 1.4)
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              TextField {
+                id: inputBwPath
+                Layout.fillWidth: true
+                text: root.config.bw_path || "bw"
+                placeholderText: "bw (auto-detected from $PATH)"
+                font.pixelSize: Style.font.body
+              }
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 16
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                Text {
+                  text: "Auto-lock Timeout (minutes):"
+                  color: root.foreground
+                  font.pixelSize: Style.font.bodySmall
+                }
+                TextField {
+                  id: inputAutoLock
+                  Layout.fillWidth: true
+                  text: String(root.config.auto_lock_minutes ?? 15)
+                  font.pixelSize: Style.font.body
+                }
+              }
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                Text {
+                  text: "Clipboard Clear (seconds):"
+                  color: root.foreground
+                  font.pixelSize: Style.font.bodySmall
+                }
+                TextField {
+                  id: inputClipClear
+                  Layout.fillWidth: true
+                  text: String(root.config.clipboard_clear_seconds ?? 30)
                   font.pixelSize: Style.font.body
                 }
               }
             }
 
-            // Right: Details Inspector Pane
-            Rectangle {
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+              Button {
+                text: "Test CLI Connection"
+                onClicked: root.refreshHealth()
+              }
+              Button {
+                text: "Save Configuration"
+                highlighted: true
+                onClicked: {
+                  var autoLockVal = parseInt(inputAutoLock.text.trim())
+                  var clipClearVal = parseInt(inputClipClear.text.trim())
+                  root.saveSettings({
+                    server_url: inputServerUrl.text.trim(),
+                    bw_path: inputBwPath.text.trim(),
+                    auto_lock_minutes: isNaN(autoLockVal) ? 15 : autoLockVal,
+                    clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal
+                  })
+                }
+              }
+              Item { Layout.fillWidth: true }
+            }
+
+            Item { Layout.fillHeight: true }
+          }
+
+          // ==========================================
+          // 4. VAULT SEARCH & INSPECTOR VIEW (Raycast Split Layout)
+          // ==========================================
+          ColumnLayout {
+            visible: root.effectiveView === "search"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 10
+
+            // Search Input Bar
+            TextField {
+              id: searchInput
+              Layout.fillWidth: true
+              Layout.preferredHeight: 42
+              placeholderText: "Search credentials (names, usernames, notes, cards, ssh)... (Enter: Copy, Ctrl+K: Actions)"
+              font.pixelSize: Style.font.body + 2
+              text: root.searchQuery
+              onTextChanged: root.searchQuery = text
+              onAccepted: {
+                if (root.selectedItem) {
+                  root.executePrimaryAction(root.selectedItem)
+                }
+              }
+              focus: root.effectiveView === "search" && !root.showActionPalette
+            }
+
+            // Category Filter Chips / Tabs
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 6
+
+              Button {
+                text: "All (" + root.getCategoryCount("all") + ")"
+                highlighted: root.activeCategory === "all"
+                onClicked: root.activeCategory = "all"
+              }
+              Button {
+                text: "Logins (" + root.getCategoryCount("login") + ")"
+                highlighted: root.activeCategory === "login"
+                onClicked: root.activeCategory = "login"
+              }
+              Button {
+                text: "Cards (" + root.getCategoryCount("card") + ")"
+                highlighted: root.activeCategory === "card"
+                onClicked: root.activeCategory = "card"
+              }
+              Button {
+                text: "Identities (" + root.getCategoryCount("identity") + ")"
+                highlighted: root.activeCategory === "identity"
+                onClicked: root.activeCategory = "identity"
+              }
+              Button {
+                text: "Notes (" + root.getCategoryCount("note") + ")"
+                highlighted: root.activeCategory === "note"
+                onClicked: root.activeCategory = "note"
+              }
+              Button {
+                text: "SSH Keys (" + root.getCategoryCount("ssh_key") + ")"
+                highlighted: root.activeCategory === "ssh_key"
+                onClicked: root.activeCategory = "ssh_key"
+              }
+
+              Item { Layout.fillWidth: true }
+
+              Text {
+                text: root.isBusy ? "Syncing..." : (root.filteredItems.length + " items")
+                color: Qt.darker(root.foreground, 1.4)
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // Split Content: Left (List) & Right (Details Inspector)
+            RowLayout {
               Layout.fillWidth: true
               Layout.fillHeight: true
-              Layout.preferredWidth: 360
-              radius: 8
-              color: root.selectedBackground
-              border.color: root.border
-              clip: true
+              spacing: 12
 
-              ScrollView {
-                anchors.fill: parent
-                anchors.margins: 14
-                contentWidth: width
+              // Left: Items Result List
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: 380
+                radius: 8
+                color: root.selectedBackground
+                border.color: root.border
+                clip: true
 
-                ColumnLayout {
-                  width: parent.width
-                  spacing: 12
+                ListView {
+                  id: itemsList
+                  anchors.fill: parent
+                  anchors.margins: 4
+                  model: root.filteredItems
+                  currentIndex: root.selectedIndex
 
-                  // Header Info
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
+                  delegate: Rectangle {
+                    width: itemsList.width
+                    height: 52
+                    radius: 6
+                    color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
 
-                    Text {
-                      text: root.selectedItem ? root.getItemIcon(root.selectedItem.type_name) : "🔒"
-                      font.pixelSize: 28
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.leftMargin: 10
+                      anchors.rightMargin: 10
+                      spacing: 10
+
+                      Text {
+                        text: root.getItemIcon(modelData.type_name)
+                        font.pixelSize: 18
+                      }
+
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        RowLayout {
+                          spacing: 6
+                          Text {
+                            text: modelData.name || "Untitled"
+                            color: root.foreground
+                            font.pixelSize: Style.font.body
+                            font.bold: true
+                          }
+                          Text {
+                            visible: modelData.favorite
+                            text: "★"
+                            color: "#fbbf24"
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          text: modelData.sub_title || modelData.type_name
+                          color: Qt.darker(root.foreground, 1.4)
+                          font.pixelSize: Style.font.bodySmall
+                          elide: Text.ElideRight
+                          Layout.fillWidth: true
+                        }
+                      }
+
+                      Rectangle {
+                        implicitWidth: catBadgeText.implicitWidth + 8
+                        implicitHeight: 18
+                        radius: 4
+                        color: Qt.rgba(1, 1, 1, 0.08)
+                        Text {
+                          id: catBadgeText
+                          anchors.centerIn: parent
+                          text: (modelData.type_name === "ssh_key") ? "SSH" : modelData.type_name.toUpperCase()
+                          color: Qt.darker(root.foreground, 1.3)
+                          font.pixelSize: Style.font.caption - 2
+                        }
+                      }
                     }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      onClicked: root.selectedIndex = index
+                      onDoubleClicked: root.executePrimaryAction(modelData)
+                    }
+                  }
+
+                  Text {
+                    visible: root.filteredItems.length === 0 && !root.isBusy
+                    anchors.centerIn: parent
+                    text: root.rawVaultItems.length === 0 ? "Vault is empty. Click 'Sync' to load." : "No matching items."
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.pixelSize: Style.font.body
+                  }
+                }
+              }
+
+              // Right: Details Inspector Pane
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: 360
+                radius: 8
+                color: root.selectedBackground
+                border.color: root.border
+                clip: true
+
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: 14
+                  contentWidth: width
+
+                  ColumnLayout {
+                    width: parent.width
+                    spacing: 12
+
+                    // Header Info
+                    RowLayout {
+                      Layout.fillWidth: true
+                      spacing: 10
+
+                      Text {
+                        text: root.selectedItem ? root.getItemIcon(root.selectedItem.type_name) : "🔒"
+                        font.pixelSize: 28
+                      }
 
                     ColumnLayout {
                       Layout.fillWidth: true
@@ -1416,81 +1453,82 @@ Item {
           }
         }
       }
+    }
+  }
 
-      // ==========================================
-      // ACTION PALETTE MODAL (Ctrl+K)
-      // ==========================================
+    // ==========================================
+    // ACTION PALETTE MODAL (Ctrl+K)
+    // ==========================================
+    Rectangle {
+      visible: root.showActionPalette
+      anchors.fill: parent
+      color: Qt.rgba(0, 0, 0, 0.6)
+
       Rectangle {
-        visible: root.showActionPalette
-        anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.6)
+        anchors.centerIn: parent
+        width: 440
+        height: 340
+        radius: 10
+        color: root.background
+        border.color: root.border
 
-        Rectangle {
-          anchors.centerIn: parent
-          width: 440
-          height: 340
-          radius: 10
-          color: root.background
-          border.color: root.border
+        ColumnLayout {
+          anchors.fill: parent
+          anchors.margins: 14
+          spacing: 8
 
-          ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 14
-            spacing: 8
-
-            RowLayout {
+          RowLayout {
+            Layout.fillWidth: true
+            Text {
+              text: "Actions for: " + (root.selectedItem ? root.selectedItem.name : "Item")
+              color: root.foreground
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
               Layout.fillWidth: true
-              Text {
-                text: "Actions for: " + (root.selectedItem ? root.selectedItem.name : "Item")
-                color: root.foreground
-                font.pixelSize: Style.font.title
-                font.bold: true
-                elide: Text.ElideRight
-                Layout.fillWidth: true
-              }
-              Button {
-                text: "Esc"
-                onClicked: root.showActionPalette = false
-              }
             }
+            Button {
+              text: "Esc"
+              onClicked: root.showActionPalette = false
+            }
+          }
 
-            Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
+          Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
 
-            ListView {
-              id: actionsList
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              clip: true
-              model: root.getAvailableActions(root.selectedItem)
-              currentIndex: root.actionPaletteIndex
+          ListView {
+            id: actionsList
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: root.getAvailableActions(root.selectedItem)
+            currentIndex: root.actionPaletteIndex
 
-              delegate: Rectangle {
-                width: actionsList.width
-                height: 40
-                radius: 6
-                color: (index === root.actionPaletteIndex) ? root.accent : "transparent"
+            delegate: Rectangle {
+              width: actionsList.width
+              height: 40
+              radius: 6
+              color: (index === root.actionPaletteIndex) ? root.accent : "transparent"
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.leftMargin: 10
-                  anchors.rightMargin: 10
-                  spacing: 10
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                spacing: 10
 
-                  Text { text: modelData.icon; font.pixelSize: 16 }
-                  Text {
-                    text: modelData.label
-                    color: (index === root.actionPaletteIndex) ? "#ffffff" : root.foreground
-                    font.pixelSize: Style.font.body
-                    Layout.fillWidth: true
-                  }
+                Text { text: modelData.icon; font.pixelSize: 16 }
+                Text {
+                  text: modelData.label
+                  color: (index === root.actionPaletteIndex) ? "#ffffff" : root.foreground
+                  font.pixelSize: Style.font.body
+                  Layout.fillWidth: true
                 }
+              }
 
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: {
-                    modelData.action()
-                    root.showActionPalette = false
-                  }
+              MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                  modelData.action()
+                  root.showActionPalette = false
                 }
               }
             }
