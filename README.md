@@ -8,6 +8,8 @@ Native, high-performance Bitwarden and Vaultwarden credential manager overlay fo
 
 Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantaneous keyboard-driven vault access, secure Keyring session persistence, live TOTP generation, heuristic SSH key detection, and ephemeral clipboard protection.
 
+![Preview](preview.png)
+
 ---
 
 ## ✨ Features
@@ -26,16 +28,16 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 
 ## ⌨️ Keyboard Shortcuts
 
-| Shortcut | Description |
-| :--- | :--- |
-| <kbd>Enter</kbd> | Copy primary credential (Password / Card Number / Public Key) |
-| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, etc.) |
-| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open / Toggle Settings configuration view |
-| <kbd>Ctrl</kbd> + <kbd>L</kbd> | Manually lock the vault immediately |
-| <kbd>Ctrl</kbd> + <kbd>R</kbd> | Trigger manual vault sync with Bitwarden server |
-| <kbd>↓</kbd> / <kbd>↑</kbd> | Navigate item list or action options (stops at boundaries) |
-| <kbd>Tab</kbd> | Switch category filters (All, Logins, Cards, Identities, Notes, SSH Keys) |
-| <kbd>Esc</kbd> | Dismiss Action Palette, Settings, or hide the overlay |
+| Shortcut                       | Description                                                               |
+| :----------------------------- | :------------------------------------------------------------------------ |
+| <kbd>Enter</kbd>               | Copy primary credential (Password / Card Number / Public Key)             |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, etc.)                      |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open / Toggle Settings configuration view                                 |
+| <kbd>Ctrl</kbd> + <kbd>L</kbd> | Manually lock the vault immediately                                       |
+| <kbd>Ctrl</kbd> + <kbd>R</kbd> | Trigger manual vault sync with Bitwarden server                           |
+| <kbd>↓</kbd> / <kbd>↑</kbd>    | Navigate item list or action options (stops at boundaries)                |
+| <kbd>Tab</kbd>                 | Switch category filters (All, Logins, Cards, Identities, Notes, SSH Keys) |
+| <kbd>Esc</kbd>                 | Dismiss Action Palette, Settings, or hide the overlay                     |
 
 ---
 
@@ -53,16 +55,19 @@ Ensure the following tools are available on your system:
 ## 🚀 Installation & Setup
 
 1. **Clone or Link to Omarchy Plugins Directory**:
+
    ```bash
    git clone https://github.com/icyleaf/omarchy-bitwarden.git ~/.config/omarchy/plugins/icyleaf.bitwarden
    ```
 
 2. **Reload Omarchy Shell Plugins**:
+
    ```bash
    omarchy-shell shell rescanPlugins
    ```
 
 3. **Toggle Overlay**:
+
    ```bash
    omarchy-shell shell toggle icyleaf.bitwarden
    ```
