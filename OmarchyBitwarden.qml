@@ -450,6 +450,41 @@ Item {
       }
     }
 
+        Shortcut {
+      sequence: "Ctrl+K"
+      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null
+      onActivated: {
+        root.actionPaletteIndex = 0
+        root.showActionPalette = true
+        Qt.callLater(function() { actionPaletteFocusScope.forceActiveFocus() })
+      }
+    }
+
+    Shortcut {
+      sequence: "Ctrl+L"
+      enabled: root.opened && root.authState.status === "unlocked"
+      onActivated: root.doLock()
+    }
+
+    Shortcut {
+      sequence: "Ctrl+R"
+      enabled: root.opened && root.authState.status === "unlocked" && !root.isBusy
+      onActivated: root.syncVault()
+    }
+
+    Shortcut {
+      sequence: "Escape"
+      enabled: root.opened
+      onActivated: {
+        if (root.showActionPalette) {
+          root.showActionPalette = false
+          Qt.callLater(function() { searchInput.forceActiveFocus() })
+        } else {
+          root.dismiss()
+        }
+      }
+    }
+
     FocusScope {
       id: focusRoot
       anchors.fill: parent
@@ -986,6 +1021,18 @@ Item {
                 root.executePrimaryAction(root.selectedItem)
               }
             }
+            Keys.onDownPressed: function(event) {
+              if (root.filteredItems.length > 0) {
+                root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
+                event.accepted = true
+              }
+            }
+            Keys.onUpPressed: function(event) {
+              if (root.filteredItems.length > 0) {
+                root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
+                event.accepted = true
+              }
+            }
             focus: root.effectiveView === "search" && !root.showActionPalette
           }
 
@@ -1462,76 +1509,141 @@ Item {
 
       // Action Palette Modal (Ctrl+K)
       Rectangle {
+        id: actionPaletteOverlay
+        z: 100
         visible: root.showActionPalette
         anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.6)
+        color: Qt.rgba(0, 0, 0, 0.65)
+
+        MouseArea {
+          anchors.fill: parent
+          onClicked: {
+            root.showActionPalette = false
+            Qt.callLater(function() { searchInput.forceActiveFocus() })
+          }
+        }
 
         Rectangle {
           anchors.centerIn: parent
-          width: 440
-          height: 340
+          width: Math.min(480, parent.width - 40)
+          height: Math.min(360, parent.height - 40)
           radius: 10
           color: root.background
           border.color: root.border
+          clip: true
 
-          ColumnLayout {
+          MouseArea {
             anchors.fill: parent
-            anchors.margins: 14
-            spacing: 8
+          }
 
-            RowLayout {
-              Layout.fillWidth: true
-              Text {
-                text: "Actions for: " + (root.selectedItem ? root.selectedItem.name : "Item")
-                color: root.foreground
-                font.pixelSize: Style.font.title
-                font.bold: true
-                elide: Text.ElideRight
-                Layout.fillWidth: true
-              }
-              Button {
-                text: "Esc"
-                onClicked: root.showActionPalette = false
+          FocusScope {
+            id: actionPaletteFocusScope
+            anchors.fill: parent
+            focus: root.showActionPalette
+
+            Keys.priority: Keys.BeforeItem
+            Keys.onPressed: function(event) {
+              var actions = root.getAvailableActions(root.selectedItem)
+              if (event.key === Qt.Key_Escape) {
+                root.showActionPalette = false
+                Qt.callLater(function() { searchInput.forceActiveFocus() })
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down) {
+                if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
+                event.accepted = true
+              } else if (event.key === Qt.Key_Up) {
+                if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
+                  actions[root.actionPaletteIndex].action()
+                  root.showActionPalette = false
+                  Qt.callLater(function() { searchInput.forceActiveFocus() })
+                }
+                event.accepted = true
               }
             }
 
-            Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
+            ColumnLayout {
+              anchors.fill: parent
+              anchors.margins: 14
+              spacing: 8
 
-            ListView {
-              id: actionsList
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              clip: true
-              model: root.getAvailableActions(root.selectedItem)
-              currentIndex: root.actionPaletteIndex
+              RowLayout {
+                Layout.fillWidth: true
+                Text {
+                  text: "Actions: " + (root.selectedItem ? root.selectedItem.name : "Item")
+                  color: root.foreground
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
+                }
+                Button {
+                  text: "Esc"
+                  onClicked: {
+                    root.showActionPalette = false
+                    Qt.callLater(function() { searchInput.forceActiveFocus() })
+                  }
+                }
+              }
 
-              delegate: Rectangle {
-                width: actionsList.width
-                height: 40
-                radius: 6
-                color: (index === root.actionPaletteIndex) ? root.accent : "transparent"
+              Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.leftMargin: 10
-                  anchors.rightMargin: 10
-                  spacing: 10
+              ListView {
+                id: actionsList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: root.getAvailableActions(root.selectedItem)
+                currentIndex: root.actionPaletteIndex
 
-                  Text { text: modelData.icon; font.pixelSize: 16 }
-                  Text {
-                    text: modelData.label
-                    color: (index === root.actionPaletteIndex) ? "#ffffff" : root.foreground
-                    font.pixelSize: Style.font.body
-                    Layout.fillWidth: true
+                delegate: Rectangle {
+                  width: actionsList.width
+                  height: 42
+                  radius: 6
+                  color: (index === root.actionPaletteIndex) ? root.accent : "transparent"
+
+                  RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 10
+
+                    Text { text: modelData.icon; font.pixelSize: 18 }
+                    Text {
+                      text: modelData.label
+                      color: (index === root.actionPaletteIndex) ? "#ffffff" : root.foreground
+                      font.pixelSize: Style.font.body
+                      font.bold: index === root.actionPaletteIndex
+                      Layout.fillWidth: true
+                    }
+                    Text {
+                      text: index === 0 ? "(Primary / Enter)" : ""
+                      color: (index === root.actionPaletteIndex) ? Qt.rgba(1, 1, 1, 0.7) : Qt.darker(root.foreground, 1.4)
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onEntered: root.actionPaletteIndex = index
+                    onClicked: {
+                      modelData.action()
+                      root.showActionPalette = false
+                      Qt.callLater(function() { searchInput.forceActiveFocus() })
+                    }
                   }
                 }
 
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: {
-                    modelData.action()
-                    root.showActionPalette = false
-                  }
+                Text {
+                  visible: count === 0
+                  anchors.centerIn: parent
+                  text: "No actions available for this item."
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.pixelSize: Style.font.body
                 }
               }
             }
