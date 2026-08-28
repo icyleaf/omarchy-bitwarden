@@ -639,6 +639,34 @@ Item {
               Layout.alignment: Qt.AlignHCenter
             }
 
+            Rectangle {
+              Layout.alignment: Qt.AlignHCenter
+              implicitWidth: unlockServerBadgeRow.implicitWidth + 16
+              implicitHeight: 26
+              radius: 13
+              color: Qt.rgba(1, 1, 1, 0.07)
+              border.color: Qt.rgba(1, 1, 1, 0.15)
+
+              RowLayout {
+                id: unlockServerBadgeRow
+                anchors.centerIn: parent
+                spacing: 6
+
+                Text {
+                  text: "🌐 Server:"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  text: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "https://vault.bitwarden.com"
+                  color: root.accent
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+            }
+
             TextField {
               id: inputUnlockPassword
               Layout.fillWidth: true
@@ -689,6 +717,48 @@ Item {
               font.pixelSize: Style.font.heading
               font.bold: true
               Layout.alignment: Qt.AlignHCenter
+            }
+
+            Rectangle {
+              Layout.alignment: Qt.AlignHCenter
+              implicitWidth: loginServerBadgeRow.implicitWidth + 16
+              implicitHeight: 26
+              radius: 13
+              color: Qt.rgba(1, 1, 1, 0.07)
+              border.color: Qt.rgba(1, 1, 1, 0.15)
+
+              RowLayout {
+                id: loginServerBadgeRow
+                anchors.centerIn: parent
+                spacing: 6
+
+                Text {
+                  text: "🌐 Server:"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  text: (root.config && root.config.server_url) ? root.config.server_url : "https://vault.bitwarden.com"
+                  color: root.accent
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Text {
+                  text: "(Change in Settings)"
+                  color: Qt.darker(root.foreground, 1.3)
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.currentView = "settings"
+                }
+              }
             }
 
             RowLayout {
