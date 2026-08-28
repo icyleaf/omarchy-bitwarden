@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from bitwarden_helper.cli import main
+from bitwarden_helper.auth import AuthStatus, AuthResult
 
 def test_cli_config_get(tmp_path: Path, capsys):
     config_file = tmp_path / "config.json"
@@ -46,3 +47,47 @@ def test_cli_health(tmp_path: Path, capsys):
             assert data["installed"] is True
             assert data["ok"] is True
             assert data["version"] == "2026.2.0"
+
+def test_cli_auth_status(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.get_status", return_value=AuthStatus(status="locked", user_email="a@b.com", has_session=False)):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "status"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["status"] == "locked"
+            assert data["user_email"] == "a@b.com"
+
+def test_cli_auth_unlock(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.unlock", return_value=AuthResult(ok=True, session="token_123")):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "unlock", "--password", "pwd"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            assert data["session"] == "token_123"
+
+def test_cli_auth_lock(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.lock", return_value=AuthResult(ok=True, status="locked")):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "lock"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            assert data["status"] == "locked"
+
+def test_cli_hook_install(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.cli.install_lock_hook", return_value=Path("/tmp/hook.sh")) as mock_inst:
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "hook", "install"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_inst.assert_called_once()

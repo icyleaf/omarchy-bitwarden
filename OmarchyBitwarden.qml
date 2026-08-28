@@ -36,8 +36,17 @@ Item {
     error: null
   })
 
-  property string currentView: "search" // "search" | "settings"
+  property var authState: ({
+    status: "unauthenticated", // "unauthenticated" | "locked" | "unlocked"
+    server_url: "",
+    user_email: "",
+    has_session: false
+  })
+
+  property string currentView: "auto" // "auto" | "settings" | "login" | "unlock" | "search"
+  property string loginMethod: "password" // "password" | "apikey"
   property string statusMessage: ""
+  property string errorMessage: ""
   property bool isBusy: false
 
   readonly property color background: Color.menu.background
@@ -47,10 +56,21 @@ Item {
   readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property string fontFamily: Style.font.menuFamily
 
+  readonly property string effectiveView: {
+    if (currentView !== "auto") return currentView
+    if (authState.status === "unlocked") return "search"
+    if (authState.status === "locked") return "unlock"
+    return "login"
+  }
+
   function open(payloadJson) {
     root.opened = true
+    root.errorMessage = ""
+    root.statusMessage = ""
+    root.currentView = "auto"
     root.refreshHealth()
     root.refreshConfig()
+    root.refreshAuthStatus()
   }
 
   function close() {
@@ -79,6 +99,11 @@ Item {
     healthProc.running = true
   }
 
+  function refreshAuthStatus() {
+    authStatusProc.command = [root.helperPath, "auth", "status"]
+    authStatusProc.running = true
+  }
+
   function saveSettings(settings) {
     root.isBusy = true
     root.statusMessage = "Saving configuration..."
@@ -90,6 +115,49 @@ Item {
     
     configSetProc.command = cmd
     configSetProc.running = true
+  }
+
+  function doUnlock(password) {
+    if (!password) return
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Unlocking vault..."
+    authUnlockProc.command = [root.helperPath, "auth", "unlock", "--password", password]
+    authUnlockProc.running = true
+  }
+
+  function doLock() {
+    root.isBusy = true
+    root.statusMessage = "Locking vault..."
+    authLockProc.command = [root.helperPath, "auth", "lock"]
+    authLockProc.running = true
+  }
+
+  function doLoginPassword(email, password, code) {
+    if (!email || !password) return
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Logging in to Bitwarden..."
+    var cmd = [root.helperPath, "auth", "login-password", "--email", email, "--password", password]
+    if (code) cmd.push("--code", code)
+    authLoginProc.command = cmd
+    authLoginProc.running = true
+  }
+
+  function doLoginApiKey(clientId, clientSecret) {
+    if (!clientId || !clientSecret) return
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Authenticating with API Key..."
+    authLoginProc.command = [root.helperPath, "auth", "login-apikey", "--client-id", clientId, "--client-secret", clientSecret]
+    authLoginProc.running = true
+  }
+
+  function doLogout() {
+    root.isBusy = true
+    root.statusMessage = "Logging out..."
+    authLogoutProc.command = [root.helperPath, "auth", "logout"]
+    authLogoutProc.running = true
   }
 
   FloatingWindow {
@@ -110,6 +178,9 @@ Item {
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) {
           root.dismiss()
+          event.accepted = true
+        } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
+          root.doLock()
           event.accepted = true
         }
       }
@@ -132,46 +203,246 @@ Item {
             font.bold: true
           }
 
-          Item { Layout.fillWidth: true }
-
-          // Health Status Badge
+          // Lock Status Badge
           Rectangle {
-            implicitWidth: statusRow.implicitWidth + 12
-            implicitHeight: 26
-            radius: 13
-            color: root.cliHealth.ok ? Qt.rgba(0.2, 0.8, 0.2, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.15)
-            border.color: root.cliHealth.ok ? Qt.rgba(0.2, 0.8, 0.2, 0.4) : Qt.rgba(0.9, 0.2, 0.2, 0.4)
+            implicitWidth: lockStatusRow.implicitWidth + 12
+            implicitHeight: 24
+            radius: 12
+            color: (root.authState.status === "unlocked") 
+              ? Qt.rgba(0.2, 0.8, 0.2, 0.15) 
+              : Qt.rgba(0.8, 0.6, 0.2, 0.15)
+            border.color: (root.authState.status === "unlocked")
+              ? Qt.rgba(0.2, 0.8, 0.2, 0.4)
+              : Qt.rgba(0.8, 0.6, 0.2, 0.4)
 
             RowLayout {
-              id: statusRow
+              id: lockStatusRow
               anchors.centerIn: parent
               spacing: 6
-              Rectangle {
-                width: 8
-                height: 8
-                radius: 4
-                color: root.cliHealth.ok ? "#4ade80" : "#f87171"
-              }
               Text {
-                text: root.cliHealth.ok ? ("CLI v" + (root.cliHealth.version || "ok")) : "CLI Missing"
+                text: (root.authState.status === "unlocked") ? "Unlocked (Keyring)" : (root.authState.status === "locked" ? "Locked" : "Not Logged In")
                 color: root.foreground
                 font.pixelSize: Style.font.caption
+                font.bold: true
               }
             }
+          }
+
+          Item { Layout.fillWidth: true }
+
+          // Quick Action: Lock (if unlocked)
+          Button {
+            visible: root.authState.status === "unlocked"
+            text: "Lock (Ctrl+L)"
+            onClicked: root.doLock()
           }
 
           // View Toggle Button (Search / Settings)
           Button {
-            text: root.currentView === "settings" ? "Back to Search" : "Settings"
+            text: root.effectiveView === "settings" ? "Back" : "Settings"
             onClicked: {
-              root.currentView = (root.currentView === "settings") ? "search" : "settings"
+              root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
             }
           }
         }
 
-        // Settings View
+        // Error message banner
+        Rectangle {
+          visible: root.errorMessage !== ""
+          Layout.fillWidth: true
+          implicitHeight: errorText.implicitHeight + 12
+          radius: 6
+          color: Qt.rgba(0.9, 0.2, 0.2, 0.15)
+          border.color: Qt.rgba(0.9, 0.2, 0.2, 0.5)
+
+          Text {
+            id: errorText
+            anchors.centerIn: parent
+            width: parent.width - 24
+            text: root.errorMessage
+            color: "#f87171"
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+          }
+        }
+
+        // ==========================================
+        // 1. UNLOCK VIEW
+        // ==========================================
         ColumnLayout {
-          visible: root.currentView === "settings"
+          visible: root.effectiveView === "unlock"
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: 16
+
+          Item { Layout.fillHeight: true }
+
+          ColumnLayout {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 380
+            spacing: 12
+
+            Text {
+              text: "Unlock Bitwarden Vault"
+              color: root.foreground
+              font.pixelSize: Style.font.heading
+              font.bold: true
+              Layout.alignment: Qt.AlignHCenter
+            }
+
+            Text {
+              text: root.authState.user_email ? ("Account: " + root.authState.user_email) : "Enter Master Password or PIN"
+              color: Qt.darker(root.foreground, 1.3)
+              font.pixelSize: Style.font.bodySmall
+              Layout.alignment: Qt.AlignHCenter
+            }
+
+            TextField {
+              id: inputUnlockPassword
+              Layout.fillWidth: true
+              echoMode: TextInput.Password
+              placeholderText: "Master Password / PIN"
+              font.pixelSize: Style.font.body
+              focus: true
+              onAccepted: root.doUnlock(text)
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: root.isBusy ? "Unlocking..." : "Unlock Vault"
+              highlighted: true
+              enabled: !root.isBusy && inputUnlockPassword.text.length > 0
+              onClicked: root.doUnlock(inputUnlockPassword.text)
+            }
+
+            RowLayout {
+              Layout.alignment: Qt.AlignHCenter
+              Button {
+                text: "Logout Account"
+                flat: true
+                onClicked: root.doLogout()
+              }
+            }
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+
+        // ==========================================
+        // 2. LOGIN VIEW
+        // ==========================================
+        ColumnLayout {
+          visible: root.effectiveView === "login"
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: 14
+
+          Item { Layout.fillHeight: true }
+
+          ColumnLayout {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 420
+            spacing: 12
+
+            Text {
+              text: "Log in to Bitwarden"
+              color: root.foreground
+              font.pixelSize: Style.font.heading
+              font.bold: true
+              Layout.alignment: Qt.AlignHCenter
+            }
+
+            RowLayout {
+              Layout.alignment: Qt.AlignHCenter
+              spacing: 8
+              Button {
+                text: "Master Password"
+                highlighted: root.loginMethod === "password"
+                onClicked: { root.loginMethod = "password" }
+              }
+              Button {
+                text: "API Key"
+                highlighted: root.loginMethod === "apikey"
+                onClicked: { root.loginMethod = "apikey" }
+              }
+            }
+
+            // Password Login Fields
+            ColumnLayout {
+              visible: root.loginMethod === "password"
+              Layout.fillWidth: true
+              spacing: 8
+
+              TextField {
+                id: inputLoginEmail
+                Layout.fillWidth: true
+                placeholderText: "Email address"
+                font.pixelSize: Style.font.body
+              }
+
+              TextField {
+                id: inputLoginPassword
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                placeholderText: "Master Password"
+                font.pixelSize: Style.font.body
+              }
+
+              TextField {
+                id: inputLogin2FA
+                Layout.fillWidth: true
+                placeholderText: "2FA Verification Code (optional)"
+                font.pixelSize: Style.font.body
+              }
+
+              Button {
+                Layout.fillWidth: true
+                text: root.isBusy ? "Logging in..." : "Log In"
+                highlighted: true
+                enabled: !root.isBusy && inputLoginEmail.text.length > 0 && inputLoginPassword.text.length > 0
+                onClicked: root.doLoginPassword(inputLoginEmail.text.trim(), inputLoginPassword.text, inputLogin2FA.text.trim())
+              }
+            }
+
+            // API Key Login Fields
+            ColumnLayout {
+              visible: root.loginMethod === "apikey"
+              Layout.fillWidth: true
+              spacing: 8
+
+              TextField {
+                id: inputClientId
+                Layout.fillWidth: true
+                placeholderText: "client_id (e.g. user.xxxxx)"
+                font.pixelSize: Style.font.body
+              }
+
+              TextField {
+                id: inputClientSecret
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                placeholderText: "client_secret"
+                font.pixelSize: Style.font.body
+              }
+
+              Button {
+                Layout.fillWidth: true
+                text: root.isBusy ? "Authenticating..." : "Log In with API Key"
+                highlighted: true
+                enabled: !root.isBusy && inputClientId.text.length > 0 && inputClientSecret.text.length > 0
+                onClicked: root.doLoginApiKey(inputClientId.text.trim(), inputClientSecret.text.trim())
+              }
+            }
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+
+        // ==========================================
+        // 3. SETTINGS VIEW
+        // ==========================================
+        ColumnLayout {
+          visible: root.effectiveView === "settings"
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: 14
@@ -183,7 +454,6 @@ Item {
             font.bold: true
           }
 
-          // Server URL setting
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 4
@@ -200,7 +470,6 @@ Item {
             }
           }
 
-          // CLI Path setting
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 4
@@ -227,7 +496,6 @@ Item {
             }
           }
 
-          // Auto-lock & Clipboard Timeouts
           RowLayout {
             Layout.fillWidth: true
             spacing: 16
@@ -265,7 +533,6 @@ Item {
             }
           }
 
-          // Action Buttons
           RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -298,9 +565,11 @@ Item {
           Item { Layout.fillHeight: true }
         }
 
-        // Placeholder Search View (to be extended in Tickets 2-5)
+        // ==========================================
+        // 4. VAULT SEARCH VIEW (Unlocked)
+        // ==========================================
         ColumnLayout {
-          visible: root.currentView !== "settings"
+          visible: root.effectiveView === "search"
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: 12
@@ -317,7 +586,7 @@ Item {
               spacing: 10
 
               Text {
-                text: root.cliHealth.ok ? "Bitwarden Plugin Ready" : "Bitwarden CLI Not Detected"
+                text: "Vault Unlocked & Ready"
                 color: root.foreground
                 font.pixelSize: Style.font.title
                 font.bold: true
@@ -325,9 +594,7 @@ Item {
               }
 
               Text {
-                text: root.cliHealth.ok 
-                  ? ("Connected to: " + (root.config.server_url || "https://vault.bitwarden.com"))
-                  : "Please click Settings above to configure bitwarden-cli path."
+                text: "Session active via Linux Keyring. Ready for Ticket 3 (Vault Sync & Search)."
                 color: Qt.darker(root.foreground, 1.3)
                 font.pixelSize: Style.font.body
                 Layout.alignment: Qt.AlignHCenter
@@ -349,9 +616,7 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
-        } catch (e) {
-          console.error("Failed to parse config get response:", e)
-        }
+        } catch (e) {}
       }
     }
   }
@@ -375,9 +640,7 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0) {
-        root.statusMessage = "Error saving configuration."
-      }
+      if (code !== 0) root.statusMessage = "Error saving configuration."
     }
   }
 
@@ -390,9 +653,100 @@ Item {
         try {
           var data = JSON.parse(text)
           root.cliHealth = data
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: authStatusProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          root.authState = data
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: authUnlockProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            root.statusMessage = "Unlocked successfully."
+            root.refreshAuthStatus()
+          } else {
+            root.errorMessage = data.error || "Unlock failed."
+          }
         } catch (e) {
-          console.error("Failed to parse health response:", e)
+          root.errorMessage = "Failed to parse unlock response."
         }
+      }
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) root.errorMessage = "Unlock command failed."
+    }
+  }
+
+  Process {
+    id: authLoginProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            root.statusMessage = "Logged in successfully."
+            root.refreshAuthStatus()
+          } else {
+            root.errorMessage = data.error || "Login failed."
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to parse login response."
+        }
+      }
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) root.errorMessage = "Login command failed."
+    }
+  }
+
+  Process {
+    id: authLockProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        root.refreshAuthStatus()
+      }
+    }
+    onExited: function(code) {
+      root.isBusy = false
+    }
+  }
+
+  Process {
+    id: authLogoutProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        root.refreshAuthStatus()
       }
     }
   }
