@@ -438,6 +438,16 @@ Item {
     implicitHeight: 600
     minimumSize: Qt.size(720, 480)
 
+    onVisibleChanged: {
+      if (visible) {
+        Qt.callLater(function() {
+          if (root.effectiveView === "search") searchInput.forceActiveFocus()
+          else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
+          else if (root.effectiveView === "login") inputLoginEmail.forceActiveFocus()
+        })
+      }
+    }
+
     FocusScope {
       id: focusRoot
       anchors.fill: parent
@@ -641,7 +651,7 @@ Item {
               echoMode: TextInput.Password
               placeholderText: "Master Password / PIN"
               font.pixelSize: Style.font.body
-              focus: true
+              focus: root.effectiveView === "unlock"
               onAccepted: root.doUnlock(text)
             }
 
@@ -715,6 +725,7 @@ Item {
                 Layout.fillWidth: true
                 placeholderText: "Email address"
                 font.pixelSize: Style.font.body
+                focus: root.effectiveView === "login"
               }
 
               TextField {
