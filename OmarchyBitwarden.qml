@@ -47,7 +47,7 @@ Item {
   property var rawVaultItems: []
   property var filteredItems: []
   property string searchQuery: ""
-  property var categoryList: ["all", "login", "card", "identity", "note"]
+  property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
   property int selectedIndex: 0
 
@@ -268,6 +268,7 @@ Item {
       case "card": return "💳"
       case "identity": return "🪪"
       case "note": return "📝"
+      case "ssh_key": return "🗝️"
       default: return "🔒"
     }
   }
@@ -716,7 +717,7 @@ Item {
             id: searchInput
             Layout.fillWidth: true
             Layout.preferredHeight: 42
-            placeholderText: "Search vault items (names, usernames, notes, cards)..."
+            placeholderText: "Search vault items (names, usernames, notes, cards, ssh keys)..."
             font.pixelSize: Style.font.body + 2
             text: root.searchQuery
             onTextChanged: root.searchQuery = text
@@ -752,6 +753,11 @@ Item {
               text: "Notes (" + root.getCategoryCount("note") + ")"
               highlighted: root.activeCategory === "note"
               onClicked: root.activeCategory = "note"
+            }
+            Button {
+              text: "SSH Keys (" + root.getCategoryCount("ssh_key") + ")"
+              highlighted: root.activeCategory === "ssh_key"
+              onClicked: root.activeCategory = "ssh_key"
             }
 
             Item { Layout.fillWidth: true }
@@ -833,7 +839,7 @@ Item {
                     Text {
                       id: catBadgeText
                       anchors.centerIn: parent
-                      text: modelData.type_name.toUpperCase()
+                      text: (modelData.type_name === "ssh_key") ? "SSH KEY" : modelData.type_name.toUpperCase()
                       color: Qt.darker(root.foreground, 1.3)
                       font.pixelSize: Style.font.caption - 1
                     }

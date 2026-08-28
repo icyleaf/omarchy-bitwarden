@@ -70,11 +70,11 @@ def create_parser() -> argparse.ArgumentParser:
     vault_sub.add_parser("sync", help="Sync vault from Bitwarden server")
     
     list_cmd = vault_sub.add_parser("list", help="List all vault items")
-    list_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note)")
+    list_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note, ssh_key)")
     
     search_cmd = vault_sub.add_parser("search", help="Search vault items")
     search_cmd.add_argument("--query", dest="query", default="", help="Search query keyword")
-    search_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note)")
+    search_cmd.add_argument("--filter", dest="category", help="Filter by category (login, card, identity, note, ssh_key)")
     
     return parser
 

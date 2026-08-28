@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict, field
 import json
+import re
 import subprocess
 from typing import Optional, List, Dict, Any
 
@@ -11,6 +12,7 @@ TYPE_MAP = {
     2: "note",
     3: "card",
     4: "identity",
+    5: "ssh_key",
 }
 
 @dataclass
@@ -25,6 +27,7 @@ class VaultItem:
     login: Optional[Dict[str, Any]] = None
     card: Optional[Dict[str, Any]] = None
     identity: Optional[Dict[str, Any]] = None
+    ssh_key: Optional[Dict[str, Any]] = None
     fields: List[Dict[str, Any]] = field(default_factory=list)
     search_text: str = ""
 
@@ -45,6 +48,84 @@ def is_fuzzy_match(pattern: str, text: str) -> bool:
             if p_idx == p_len:
                 return True
     return False
+
+def detect_ssh_key_metadata(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    notes = raw.get("notes") or ""
+    fields = raw.get("fields") or []
+    
+    private_key: Optional[str] = None
+    public_key: Optional[str] = None
+    passphrase: Optional[str] = None
+    key_type: str = "SSH"
+
+    # Extract private key block from notes if present
+    priv_block_match = re.search(r"(-----BEGIN (?:[A-Z0-9_ -]+ )?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z0-9_ -]+ )?PRIVATE KEY-----)", notes)
+    if priv_block_match:
+        private_key = priv_block_match.group(1).strip()
+        if "BEGIN OPENSSH PRIVATE KEY" in private_key:
+            key_type = "ED25519" if "ssh-ed25519" in private_key else "OPENSSH"
+        elif "BEGIN RSA PRIVATE KEY" in private_key:
+            key_type = "RSA"
+        elif "BEGIN EC PRIVATE KEY" in private_key:
+            key_type = "ECDSA"
+        elif "BEGIN DSA PRIVATE KEY" in private_key:
+            key_type = "DSA"
+        elif "BEGIN PRIVATE KEY" in private_key:
+            key_type = "PKCS8"
+
+    # Extract public key line from notes
+    pub_match = re.search(r"((?:ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-[a-z0-9]+)\s+[A-Za-z0-9+/=.]+(?:\s+.*)?)", notes)
+    if pub_match:
+        public_key = pub_match.group(1).strip()
+        if "ssh-ed25519" in public_key:
+            key_type = "ED25519"
+        elif "ssh-rsa" in public_key:
+            key_type = "RSA"
+        elif "ecdsa-sha2" in public_key:
+            key_type = "ECDSA"
+        elif "ssh-dss" in public_key:
+            key_type = "DSA"
+
+    # Search in custom fields
+    for f in fields:
+        fname = (f.get("name") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        fval = str(f.get("value") or "").strip()
+        
+        if fname in ("private_key", "privatekey", "ssh_private_key", "id_rsa", "id_ed25519") or "-----BEGIN " in fval:
+            if "-----BEGIN " in fval:
+                private_key = fval
+                if "RSA" in fval:
+                    key_type = "RSA"
+                elif "OPENSSH" in fval:
+                    key_type = "OPENSSH" if "ed25519" not in fval else "ED25519"
+                elif "EC" in fval:
+                    key_type = "ECDSA"
+                elif "DSA" in fval:
+                    key_type = "DSA"
+                elif "PRIVATE KEY" in fval:
+                    key_type = "PKCS8"
+            elif not private_key:
+                private_key = fval
+        elif fname in ("public_key", "publickey", "ssh_public_key", "ssh_key") or fval.startswith(("ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-")):
+            public_key = fval
+            if "ssh-ed25519" in fval:
+                key_type = "ED25519"
+            elif "ssh-rsa" in fval:
+                key_type = "RSA"
+            elif "ecdsa" in fval:
+                key_type = "ECDSA"
+        elif fname in ("passphrase", "pass_phrase", "key_passphrase", "ssh_passphrase"):
+            passphrase = fval
+
+    if private_key or public_key:
+        return {
+            "is_ssh_key": True,
+            "key_type": key_type,
+            "private_key": private_key,
+            "public_key": public_key,
+            "passphrase": passphrase,
+        }
+    return None
 
 class VaultManager:
     def __init__(self, bw_path: str = "bw", keyring_mgr: Optional[KeyringManager] = None):
@@ -93,12 +174,37 @@ class VaultManager:
         parsed_items: List[VaultItem] = []
         for raw in raw_items:
             item_type = raw.get("type", 1)
-            type_name = TYPE_MAP.get(item_type, "login")
             name = raw.get("name", "Untitled")
             notes = raw.get("notes") or ""
             favorite = bool(raw.get("favorite", False))
             fields = raw.get("fields") or []
-            
+
+            # Check for SSH Key heuristics
+            ssh_meta = detect_ssh_key_metadata(raw)
+            if ssh_meta:
+                type_name = "ssh_key"
+                sub_title = f"SSH Key ({ssh_meta['key_type']})"
+                search_tokens = [name.lower(), "ssh", "ssh key", ssh_meta["key_type"].lower()]
+                if ssh_meta["public_key"]:
+                    search_tokens.append(ssh_meta["public_key"].lower())
+                search_text = " ".join(t for t in search_tokens if t)
+                parsed_items.append(
+                    VaultItem(
+                        id=raw.get("id", ""),
+                        name=name,
+                        type=item_type,
+                        type_name=type_name,
+                        sub_title=sub_title,
+                        notes=notes,
+                        favorite=favorite,
+                        ssh_key=ssh_meta,
+                        fields=fields,
+                        search_text=search_text,
+                    )
+                )
+                continue
+
+            type_name = TYPE_MAP.get(item_type, "login")
             sub_title, search_tokens = self._extract_metadata(item_type, raw, name, notes, fields)
             search_text = " ".join(t for t in search_tokens if t)
 
@@ -184,7 +290,6 @@ class VaultManager:
                 filtered.append(item)
                 continue
 
-            # Query matching: check if all query tokens fuzzy match the item's search text
             query_words = q.split()
             if all(is_fuzzy_match(word, item.search_text) for word in query_words):
                 filtered.append(item)
