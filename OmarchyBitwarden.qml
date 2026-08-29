@@ -628,24 +628,7 @@ Item {
     return "🌐"
   }
 
-  property int loadingDotCount: 1
   property bool isAuthTransitionBusy: root.isBusy && (root.effectiveView === "login" || root.effectiveView === "unlock" || root.statusMessage.indexOf("Locking") !== -1 || root.statusMessage.indexOf("Logging out") !== -1 || root.statusMessage.indexOf("Logging in") !== -1 || root.statusMessage.indexOf("Unlocking") !== -1 || root.statusMessage.indexOf("Authenticating") !== -1)
-
-  Timer {
-    id: loadingDotTimer
-    interval: 350
-    repeat: true
-    running: root.isAuthTransitionBusy
-    onTriggered: {
-      root.loadingDotCount = (root.loadingDotCount % 3) + 1
-    }
-  }
-
-  function getLoadingDots() {
-    if (root.loadingDotCount === 1) return "."
-    if (root.loadingDotCount === 2) return ".."
-    return "..."
-  }
 
   Timer {
     id: statusMessageTimer
@@ -920,41 +903,41 @@ onVisibleChanged: {
         }
 
         // 0. AUTH / BUSY LOADING VIEW
-        ColumnLayout {
+        Item {
           visible: root.isAuthTransitionBusy
           Layout.fillWidth: true
           Layout.fillHeight: true
-          spacing: 16
-
-          Item { Layout.fillHeight: true }
 
           ColumnLayout {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 380
+            anchors.centerIn: parent
+            width: Math.min(parent.width, 420)
             spacing: 14
 
             Text {
               text: {
-                var base = "Loading"
-                if (root.statusMessage.indexOf("Logging in") !== -1) base = "Logging in"
-                else if (root.statusMessage.indexOf("Unlocking") !== -1) base = "Unlocking"
-                else if (root.statusMessage.indexOf("Locking") !== -1) base = "Locking vault"
-                else if (root.statusMessage.indexOf("Logging out") !== -1) base = "Logging out"
-                else if (root.statusMessage.indexOf("Authenticating") !== -1) base = "Authenticating"
-                else if (root.statusMessage) base = root.statusMessage.replace(/\.+$/, "")
-                return base + root.getLoadingDots()
+                if (root.statusMessage.indexOf("Logging in") !== -1) return "Logging in..."
+                if (root.statusMessage.indexOf("Unlocking") !== -1) return "Unlocking vault..."
+                if (root.statusMessage.indexOf("Locking") !== -1) return "Locking vault..."
+                if (root.statusMessage.indexOf("Logging out") !== -1) return "Logging out..."
+                if (root.statusMessage.indexOf("Authenticating") !== -1) return "Authenticating..."
+                if (root.statusMessage) return root.statusMessage
+                return "Loading..."
               }
               color: root.foreground
               font.pixelSize: Style.font.heading + 4
               font.bold: true
+              horizontalAlignment: Text.AlignHCenter
               Layout.alignment: Qt.AlignHCenter
+              Layout.fillWidth: true
             }
 
             Text {
               text: "Please wait a moment..."
               color: Qt.darker(root.foreground, 1.4)
               font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignHCenter
               Layout.alignment: Qt.AlignHCenter
+              Layout.fillWidth: true
             }
 
             Rectangle {
@@ -984,8 +967,6 @@ onVisibleChanged: {
               }
             }
           }
-
-          Item { Layout.fillHeight: true }
         }
 
         // 1. UNLOCK VIEW
@@ -2252,7 +2233,6 @@ onVisibleChanged: {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.isBusy = false
         try {
           var data = JSON.parse(text)
           if (data.ok) {
@@ -2260,6 +2240,12 @@ onVisibleChanged: {
             root.searchQuery = ""
             if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
             if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
+            root.authState = ({
+              status: "unlocked",
+              server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
+              user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
+              has_session: true
+            })
             root.refreshAuthStatus()
             if (data.session) {
               root.loadVaultItems()
@@ -2271,6 +2257,7 @@ onVisibleChanged: {
         } catch (e) {
           root.errorMessage = "Failed to parse unlock response."
         }
+        root.isBusy = false
       }
     }
     onExited: function(code) {
@@ -2293,7 +2280,6 @@ onVisibleChanged: {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.isBusy = false
         try {
           var data = JSON.parse(text)
           if (data.ok) {
@@ -2314,6 +2300,12 @@ onVisibleChanged: {
             if (typeof inputLogin2FA !== "undefined" && inputLogin2FA) inputLogin2FA.text = ""
             if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
 
+            root.authState = ({
+              status: data.status || "unlocked",
+              server_url: (root.config && root.config.server_url) || "",
+              user_email: (typeof inputLoginEmail !== "undefined" && inputLoginEmail) ? inputLoginEmail.text.trim() : "",
+              has_session: Boolean(data.session)
+            })
             root.refreshAuthStatus()
             if (data.session) {
               root.loadVaultItems()
@@ -2334,6 +2326,7 @@ onVisibleChanged: {
         } catch (e) {
           root.errorMessage = "Failed to parse login response."
         }
+        root.isBusy = false
       }
     }
     onExited: function(code) {
@@ -2348,10 +2341,16 @@ onVisibleChanged: {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.isBusy = false
+        root.authState = ({
+          status: "locked",
+          server_url: (root.authState && root.authState.server_url) || "",
+          user_email: (root.authState && root.authState.user_email) || "",
+          has_session: false
+        })
         root.rawVaultItems = []
         root.filteredItems = []
         root.refreshAuthStatus()
+        root.isBusy = false
       }
     }
     onExited: function(code) {
@@ -2365,11 +2364,20 @@ onVisibleChanged: {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.isBusy = false
+        root.authState = ({
+          status: "unauthenticated",
+          server_url: "",
+          user_email: "",
+          has_session: false
+        })
         root.rawVaultItems = []
         root.filteredItems = []
         root.refreshAuthStatus()
+        root.isBusy = false
       }
+    }
+    onExited: function(code) {
+      root.isBusy = false
     }
   }
 
