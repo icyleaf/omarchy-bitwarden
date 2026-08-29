@@ -75,8 +75,8 @@ def create_parser() -> argparse.ArgumentParser:
     login_api.add_argument("--client-id", required=True, help="Bitwarden Client ID")
     login_api.add_argument("--client-secret", help="Bitwarden Client Secret (optional flag, stdin preferred)")
     
-    unlock_cmd = auth_sub.add_parser("unlock", help="Unlock vault with master password or PIN")
-    unlock_cmd.add_argument("--password", help="Master password or PIN (optional flag, stdin preferred)")
+    unlock_cmd = auth_sub.add_parser("unlock", help="Unlock vault with master password")
+    unlock_cmd.add_argument("--password", help="Master password (optional flag, stdin preferred)")
     
     auth_sub.add_parser("lock", help="Lock vault and clear session")
     auth_sub.add_parser("logout", help="Logout from Bitwarden account")

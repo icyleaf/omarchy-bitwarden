@@ -1014,7 +1014,7 @@ onVisibleChanged: {
             }
 
             Text {
-              text: root.authState.user_email ? ("Account: " + root.authState.user_email) : "Enter Master Password or PIN"
+              text: root.authState.user_email ? ("Account: " + root.authState.user_email) : "Enter Master Password"
               color: Qt.darker(root.foreground, 1.3)
               font.pixelSize: Style.font.bodySmall
               Layout.alignment: Qt.AlignHCenter
@@ -1052,7 +1052,7 @@ onVisibleChanged: {
               id: inputUnlockPassword
               Layout.fillWidth: true
               echoMode: TextInput.Password
-              placeholderText: "Master Password / PIN"
+              placeholderText: "Master Password"
               font.pixelSize: Style.font.body
               focus: root.effectiveView === "unlock"
               onAccepted: root.doUnlock(text)

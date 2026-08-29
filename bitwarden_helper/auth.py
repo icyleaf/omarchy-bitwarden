@@ -17,7 +17,7 @@ def sanitize_auth_error(err_str: Optional[str]) -> str:
     if "invalid" in lower and ("password" in lower or "username" in lower or "email" in lower):
         return "Invalid username, email, or master password."
     if "decryption" in lower or "not the expected type" in lower:
-        return "Decryption failed. Incorrect master password or PIN."
+        return "Decryption failed. Incorrect master password."
     if "two-step" in lower or "two-factor" in lower or "code" in lower:
         return "Two-factor authentication required or invalid code."
     if "already logged in" in lower:
