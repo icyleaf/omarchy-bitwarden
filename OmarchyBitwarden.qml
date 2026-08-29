@@ -628,7 +628,26 @@ Item {
     return "🌐"
   }
 
-    Timer {
+  property int loadingDotCount: 1
+  property bool isAuthTransitionBusy: root.isBusy && (root.effectiveView === "login" || root.effectiveView === "unlock" || root.statusMessage.indexOf("Locking") !== -1 || root.statusMessage.indexOf("Logging out") !== -1 || root.statusMessage.indexOf("Logging in") !== -1 || root.statusMessage.indexOf("Unlocking") !== -1 || root.statusMessage.indexOf("Authenticating") !== -1)
+
+  Timer {
+    id: loadingDotTimer
+    interval: 350
+    repeat: true
+    running: root.isAuthTransitionBusy
+    onTriggered: {
+      root.loadingDotCount = (root.loadingDotCount % 3) + 1
+    }
+  }
+
+  function getLoadingDots() {
+    if (root.loadingDotCount === 1) return "."
+    if (root.loadingDotCount === 2) return ".."
+    return "..."
+  }
+
+  Timer {
     id: statusMessageTimer
     interval: 3000
     repeat: false
@@ -636,7 +655,13 @@ Item {
   }
 
   onStatusMessageChanged: {
-    if (root.statusMessage !== "") {
+    if (root.statusMessage !== "" && !root.isAuthTransitionBusy) {
+      statusMessageTimer.restart()
+    }
+  }
+
+  onIsBusyChanged: {
+    if (!root.isBusy && root.statusMessage !== "") {
       statusMessageTimer.restart()
     }
   }
@@ -876,7 +901,7 @@ onVisibleChanged: {
         }
 
         Rectangle {
-          visible: root.errorMessage !== "" || root.statusMessage !== ""
+          visible: (root.errorMessage !== "") || (!root.isAuthTransitionBusy && root.statusMessage !== "")
           Layout.fillWidth: true
           implicitHeight: bannerText.implicitHeight + 10
           radius: 6
@@ -894,9 +919,78 @@ onVisibleChanged: {
           }
         }
 
+        // 0. AUTH / BUSY LOADING VIEW
+        ColumnLayout {
+          visible: root.isAuthTransitionBusy
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: 16
+
+          Item { Layout.fillHeight: true }
+
+          ColumnLayout {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 380
+            spacing: 14
+
+            Text {
+              text: {
+                var base = "Loading"
+                if (root.statusMessage.indexOf("Logging in") !== -1) base = "Logging in"
+                else if (root.statusMessage.indexOf("Unlocking") !== -1) base = "Unlocking"
+                else if (root.statusMessage.indexOf("Locking") !== -1) base = "Locking vault"
+                else if (root.statusMessage.indexOf("Logging out") !== -1) base = "Logging out"
+                else if (root.statusMessage.indexOf("Authenticating") !== -1) base = "Authenticating"
+                else if (root.statusMessage) base = root.statusMessage.replace(/\.+$/, "")
+                return base + root.getLoadingDots()
+              }
+              color: root.foreground
+              font.pixelSize: Style.font.heading + 4
+              font.bold: true
+              Layout.alignment: Qt.AlignHCenter
+            }
+
+            Text {
+              text: "Please wait a moment..."
+              color: Qt.darker(root.foreground, 1.4)
+              font.pixelSize: Style.font.bodySmall
+              Layout.alignment: Qt.AlignHCenter
+            }
+
+            Rectangle {
+              Layout.alignment: Qt.AlignHCenter
+              implicitWidth: loadingServerBadgeRow.implicitWidth + 16
+              implicitHeight: 26
+              radius: 13
+              color: Qt.rgba(1, 1, 1, 0.07)
+              border.color: Qt.rgba(1, 1, 1, 0.15)
+
+              RowLayout {
+                id: loadingServerBadgeRow
+                anchors.centerIn: parent
+                spacing: 6
+
+                Text {
+                  text: "🌐"
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  text: (root.config && root.config.server_url) ? root.config.server_url : "https://vault.bitwarden.com"
+                  color: root.accent
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+            }
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+
         // 1. UNLOCK VIEW
         ColumnLayout {
-          visible: root.effectiveView === "unlock"
+          visible: !root.isAuthTransitionBusy && root.effectiveView === "unlock"
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: 16
@@ -983,7 +1077,7 @@ onVisibleChanged: {
 
         // 2. LOGIN VIEW
         ColumnLayout {
-          visible: root.effectiveView === "login"
+          visible: !root.isAuthTransitionBusy && root.effectiveView === "login"
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: 14
@@ -1353,7 +1447,7 @@ onVisibleChanged: {
 
         // 4. VAULT SEARCH & INSPECTOR VIEW
         ColumnLayout {
-          visible: root.effectiveView === "search"
+          visible: !root.isAuthTransitionBusy && root.effectiveView === "search"
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: 10
