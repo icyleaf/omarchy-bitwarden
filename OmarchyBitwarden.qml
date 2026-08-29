@@ -796,7 +796,7 @@ onVisibleChanged: {
           root.dismiss()
           event.accepted = true
         } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
-          if (root.selectedItem) {
+          if (root.effectiveView === "search" && root.selectedItem) {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
           }
@@ -876,7 +876,7 @@ onVisibleChanged: {
           Item { Layout.fillWidth: true }
 
           Button {
-            visible: root.authState.status === "unlocked" && root.selectedItem !== null
+            visible: root.effectiveView === "search" && root.authState.status === "unlocked" && root.selectedItem !== null
             text: "Actions (Ctrl+K)"
             onClicked: {
               root.actionPaletteIndex = 0
@@ -885,14 +885,14 @@ onVisibleChanged: {
           }
 
           Button {
-            visible: root.authState.status === "unlocked"
+            visible: root.effectiveView === "search" && root.authState.status === "unlocked"
             text: "Sync (Ctrl+R)"
             enabled: !root.isBusy
             onClicked: root.syncVault()
           }
 
           Button {
-            visible: root.authState.status === "unlocked"
+            visible: root.effectiveView === "search" && root.authState.status === "unlocked"
             text: "Lock (Ctrl+L)"
             onClicked: root.doLock()
           }
