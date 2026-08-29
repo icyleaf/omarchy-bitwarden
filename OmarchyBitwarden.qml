@@ -94,7 +94,7 @@ Item {
 
   readonly property string effectiveView: {
     if (currentView !== "auto") return currentView
-    if (authState.status === "unlocked" || (rawVaultItems && rawVaultItems.length > 0)) return "search"
+    if (authState.status === "unlocked") return "search"
     if (authState.status === "locked") return "unlock"
     return "login"
   }
@@ -113,7 +113,7 @@ Item {
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
-    if (root.authState.status === "unlocked" || (root.rawVaultItems && root.rawVaultItems.length > 0)) {
+    if (root.authState.status === "unlocked") {
       if (!root.rawVaultItems || root.rawVaultItems.length === 0) root.loadVaultItems()
       root.syncVault(true)
     }
@@ -513,13 +513,21 @@ Item {
   }
 
   function doLock() {
-    root.isBusy = true
+    root.authState = ({
+      status: "locked",
+      server_url: (root.authState && root.authState.server_url) || "",
+      user_email: (root.authState && root.authState.user_email) || "",
+      has_session: false
+    })
+    root.rawVaultItems = []
+    root.filteredItems = []
     root.searchQuery = ""
     if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
     if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
     if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
     root.activeCategory = "all"
     root.selectedIndex = 0
+    root.isBusy = true
     root.statusMessage = "Locking vault..."
     authLockProc.command = [root.helperPath, "auth", "lock"]
     authLockProc.running = true
@@ -548,6 +556,20 @@ Item {
   }
 
   function doLogout() {
+    root.authState = ({
+      status: "unauthenticated",
+      server_url: "",
+      user_email: "",
+      has_session: false
+    })
+    root.rawVaultItems = []
+    root.filteredItems = []
+    root.searchQuery = ""
+    if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
+    if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
+    if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
+    root.activeCategory = "all"
+    root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Logging out..."
     authLogoutProc.command = [root.helperPath, "auth", "logout"]
