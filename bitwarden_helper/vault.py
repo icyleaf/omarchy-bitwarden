@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict, field
 import json
+import os
 import re
 import subprocess
 from typing import Optional, List, Dict, Any
@@ -128,22 +129,30 @@ def detect_ssh_key_metadata(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 class VaultManager:
-    def __init__(self, bw_path: str = "bw", keyring_mgr: Optional[KeyringManager] = None):
+    def __init__(self, bw_path: str = "bw", keyring_mgr: Optional[KeyringManager] = None, max_output_bytes: int = 10 * 1024 * 1024):
         self.bw_path = resolve_executable(bw_path) or bw_path
         self.keyring_mgr = keyring_mgr or KeyringManager()
+        self.max_output_bytes = max_output_bytes
 
     def _get_active_session(self, session: Optional[str] = None) -> Optional[str]:
         return session or self.keyring_mgr.get_session()
+
+    def _safe_env(self, session_key: str) -> Dict[str, str]:
+        env = os.environ.copy()
+        env["BW_SESSION"] = session_key
+        return env
 
     def sync(self, session: Optional[str] = None) -> bool:
         session_key = self._get_active_session(session)
         if not session_key:
             return False
         try:
+            # Pass session key strictly via isolated child env, never in argv
             res = subprocess.run(
-                [self.bw_path, "sync", "--session", session_key],
+                [self.bw_path, "sync"],
                 capture_output=True,
                 text=True,
+                env=self._safe_env(session_key),
                 timeout=20,
                 check=False,
             )
@@ -156,15 +165,19 @@ class VaultManager:
         if not session_key:
             return []
         try:
+            # Pass session key strictly via isolated child env, never in argv
             res = subprocess.run(
-                [self.bw_path, "list", "items", "--session", session_key],
+                [self.bw_path, "list", "items"],
                 capture_output=True,
                 text=True,
+                env=self._safe_env(session_key),
                 timeout=25,
                 check=False,
             )
             if res.returncode == 0 and res.stdout.strip():
-                raw_items = json.loads(res.stdout)
+                # Enforce bounded stream parsing before json.loads
+                raw_text = res.stdout[:self.max_output_bytes]
+                raw_items = json.loads(raw_text)
                 return self.parse_raw_items(raw_items)
             return []
         except Exception:

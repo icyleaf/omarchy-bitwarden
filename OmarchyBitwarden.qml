@@ -32,7 +32,8 @@ Item {
     server_url: "https://vault.bitwarden.com",
     bw_path: "bw",
     auto_lock_minutes: 15,
-    clipboard_clear_seconds: 30
+    clipboard_clear_seconds: 30,
+    max_output_mb: 10
   })
 
   property var cliHealth: ({
@@ -294,7 +295,8 @@ Item {
   function updateTotpForSelected() {
     var item = root.selectedItem
     if (item && item.login && item.login.totp) {
-      totpGenProc.command = [root.helperPath, "totp", "generate", "--secret", item.login.totp]
+      totpGenProc.secret = item.login.totp
+      totpGenProc.command = [root.helperPath, "totp", "generate"]
       totpGenProc.running = true
     } else {
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
@@ -314,10 +316,11 @@ Item {
 
   function copyToClipboard(text, isSensitive, label) {
     if (!text) return
-    var cmd = [root.helperPath, "clipboard", "copy", "--text", text]
+    var cmd = [root.helperPath, "clipboard", "copy"]
     if (isSensitive) {
       cmd.push("--sensitive")
     }
+    clipCopyProc.secret = text
     clipCopyProc.command = cmd
     clipCopyProc.running = true
     root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? " (clears in 30s)" : "") + "."
@@ -440,6 +443,7 @@ Item {
     if (settings.bw_path !== undefined) cmd.push("--bw-path", settings.bw_path)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
+    if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
     
     configSetProc.command = cmd
     configSetProc.running = true
@@ -450,7 +454,8 @@ Item {
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Unlocking vault..."
-    authUnlockProc.command = [root.helperPath, "auth", "unlock", "--password", password]
+    authUnlockProc.secret = password
+    authUnlockProc.command = [root.helperPath, "auth", "unlock"]
     authUnlockProc.running = true
   }
 
@@ -472,8 +477,9 @@ Item {
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Logging in to Bitwarden..."
-    var cmd = [root.helperPath, "auth", "login-password", "--email", email, "--password", password]
+    var cmd = [root.helperPath, "auth", "login-password", "--email", email]
     if (code) cmd.push("--code", code)
+    authLoginProc.secret = password
     authLoginProc.command = cmd
     authLoginProc.running = true
   }
@@ -483,7 +489,8 @@ Item {
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Authenticating with API Key..."
-    authLoginProc.command = [root.helperPath, "auth", "login-apikey", "--client-id", clientId, "--client-secret", clientSecret]
+    authLoginProc.secret = clientSecret
+    authLoginProc.command = [root.helperPath, "auth", "login-apikey", "--client-id", clientId]
     authLoginProc.running = true
   }
 
@@ -1142,6 +1149,22 @@ Item {
                 font.pixelSize: Style.font.body
               }
             }
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 4
+              Text {
+                text: "Max Vault Payload Bound (MB):"
+                color: root.foreground
+                font.pixelSize: Style.font.bodySmall
+              }
+              TextField {
+                id: inputMaxOutputMb
+                Layout.fillWidth: true
+                text: String(root.config.max_output_mb ?? 10)
+                font.pixelSize: Style.font.body
+              }
+            }
           }
 
           RowLayout {
@@ -1157,11 +1180,13 @@ Item {
               onClicked: {
                 var autoLockVal = parseInt(inputAutoLock.text.trim())
                 var clipClearVal = parseInt(inputClipClear.text.trim())
+                var maxOutputVal = parseInt(inputMaxOutputMb.text.trim())
                 root.saveSettings({
                   server_url: inputServerUrl.text.trim(),
                   bw_path: inputBwPath.text.trim(),
                   auto_lock_minutes: isNaN(autoLockVal) ? 15 : autoLockVal,
-                  clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal
+                  clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal,
+                  max_output_mb: isNaN(maxOutputVal) ? 10 : maxOutputVal
                 })
               }
             }
@@ -1938,6 +1963,14 @@ Item {
 
   Process {
     id: authUnlockProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
@@ -1969,6 +2002,14 @@ Item {
 
   Process {
     id: authLoginProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
@@ -2067,11 +2108,27 @@ Item {
 
   Process {
     id: clipCopyProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
     command: []
   }
 
   Process {
     id: totpGenProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
     command: []
     stdout: StdioCollector {
       waitForEnd: true

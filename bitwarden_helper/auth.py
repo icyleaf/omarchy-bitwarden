@@ -1,11 +1,36 @@
 from dataclasses import dataclass, asdict
 import json
 import os
+import re
 import subprocess
 from typing import Optional, Dict, Any
 
 from bitwarden_helper.keyring import KeyringManager
 from bitwarden_helper.health import resolve_executable
+
+MAX_AUTH_OUTPUT_BYTES = 5 * 1024 * 1024  # 5MB safe bound for auth responses
+
+def sanitize_auth_error(err_str: Optional[str]) -> str:
+    if not err_str:
+        return "Authentication operation failed."
+    lower = err_str.lower()
+    if "invalid" in lower and ("password" in lower or "username" in lower or "email" in lower):
+        return "Invalid username, email, or master password."
+    if "decryption" in lower or "not the expected type" in lower:
+        return "Decryption failed. Incorrect master password or PIN."
+    if "two-step" in lower or "two-factor" in lower or "code" in lower:
+        return "Two-factor authentication required or invalid code."
+    if "already logged in" in lower:
+        return "Already logged in."
+    if "network" in lower or "failed to fetch" in lower or "econnrefused" in lower or "timeout" in lower:
+        return "Network error: unable to reach Bitwarden server."
+    if "vault is locked" in lower:
+        return "Vault is locked."
+    
+    first_line = err_str.strip().split("\n")[0]
+    # Redact long hashes, hex, base64 tokens, or file paths
+    redacted = re.sub(r"[A-Za-z0-9+/=_-]{20,}", "[REDACTED]", first_line)
+    return redacted[:120].strip()
 
 @dataclass
 class AuthStatus:
@@ -24,23 +49,32 @@ class AuthResult:
     error: Optional[str] = None
 
 class AuthManager:
-    def __init__(self, bw_path: str = "bw", keyring_mgr: Optional[KeyringManager] = None):
+    def __init__(self, bw_path: str = "bw", keyring_mgr: Optional[KeyringManager] = None, max_output_bytes: int = MAX_AUTH_OUTPUT_BYTES):
         self.bw_path = resolve_executable(bw_path) or bw_path
         self.keyring_mgr = keyring_mgr or KeyringManager()
+        self.max_output_bytes = max_output_bytes
+
+    def _safe_env(self, session: Optional[str] = None, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        env = os.environ.copy()
+        if session:
+            env["BW_SESSION"] = session
+        if extra:
+            env.update(extra)
+        return env
 
     def verify_session(self, session_token: str) -> bool:
         if not session_token:
             return False
         try:
-            # Quick check with session token
+            # Session token passed via isolated child env, never in argv
             res = subprocess.run(
-                [self.bw_path, "sync", "--session", session_token],
+                [self.bw_path, "sync"],
                 capture_output=True,
                 text=True,
+                env=self._safe_env(session=session_token),
                 timeout=10,
                 check=False,
             )
-            # If session is invalid/expired, bw returns non-zero
             return res.returncode == 0
         except Exception:
             return False
@@ -55,8 +89,9 @@ class AuthManager:
                 timeout=5,
                 check=False,
             )
-            if res.returncode == 0:
-                data = json.loads(res.stdout)
+            if res.returncode == 0 and res.stdout:
+                out = res.stdout[:self.max_output_bytes]
+                data = json.loads(out)
                 status_val = data.get("status", "unauthenticated")
                 if session and status_val != "unauthenticated":
                     if verify:
@@ -89,70 +124,74 @@ class AuthManager:
             has_session=bool(session),
         )
 
-
-
     def login_password(self, email: str, password: str, code: Optional[str] = None) -> AuthResult:
-        cmd = [self.bw_path, "login", email, password, "--raw"]
+        cmd = [self.bw_path, "login", email, "--passwordfile", "/proc/self/fd/0", "--raw"]
         if code:
             cmd.extend(["--code", code])
         try:
             res = subprocess.run(
                 cmd,
+                input=password + "\n",
                 capture_output=True,
                 text=True,
                 timeout=25,
                 check=False,
             )
             if res.returncode == 0:
-                session = res.stdout.strip()
+                session = res.stdout.strip()[:self.max_output_bytes]
                 if session:
                     self.keyring_mgr.store_session(session)
                 return AuthResult(ok=True, status="unlocked", session=session, error=None)
             else:
-                err = res.stderr.strip() or res.stdout.strip() or f"Login failed with code {res.returncode}"
+                raw_err = res.stderr.strip() or res.stdout.strip()
+                err = sanitize_auth_error(raw_err)
                 return AuthResult(ok=False, status="unauthenticated", session=None, error=err)
         except Exception as e:
-            return AuthResult(ok=False, status="unauthenticated", session=None, error=str(e))
+            return AuthResult(ok=False, status="unauthenticated", session=None, error=sanitize_auth_error(str(e)))
 
     def login_apikey(self, client_id: str, client_secret: str) -> AuthResult:
-        env = os.environ.copy()
-        env["BW_CLIENTID"] = client_id
-        env["BW_CLIENTSECRET"] = client_secret
+        extra_env = {
+            "BW_CLIENTID": client_id,
+            "BW_CLIENTSECRET": client_secret,
+        }
         try:
             res = subprocess.run(
                 [self.bw_path, "login", "--apikey"],
                 capture_output=True,
                 text=True,
-                env=env,
+                env=self._safe_env(extra=extra_env),
                 timeout=25,
                 check=False,
             )
             if res.returncode == 0:
                 return AuthResult(ok=True, status="locked", session=None, error=None)
             else:
-                err = res.stderr.strip() or res.stdout.strip() or "API Key login failed."
+                raw_err = res.stderr.strip() or res.stdout.strip()
+                err = sanitize_auth_error(raw_err)
                 return AuthResult(ok=False, status="unauthenticated", session=None, error=err)
         except Exception as e:
-            return AuthResult(ok=False, status="unauthenticated", session=None, error=str(e))
+            return AuthResult(ok=False, status="unauthenticated", session=None, error=sanitize_auth_error(str(e)))
 
     def unlock(self, password: str) -> AuthResult:
         try:
             res = subprocess.run(
-                [self.bw_path, "unlock", password, "--raw"],
+                [self.bw_path, "unlock", "--passwordfile", "/proc/self/fd/0", "--raw"],
+                input=password + "\n",
                 capture_output=True,
                 text=True,
                 timeout=15,
                 check=False,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                session = res.stdout.strip()
+            session = res.stdout.strip()[:self.max_output_bytes]
+            if res.returncode == 0 and session:
                 self.keyring_mgr.store_session(session)
                 return AuthResult(ok=True, status="unlocked", session=session, error=None)
             else:
-                err = res.stderr.strip() or "Invalid password / unlock failed."
+                raw_err = res.stderr.strip() or res.stdout.strip()
+                err = sanitize_auth_error(raw_err)
                 return AuthResult(ok=False, status="locked", session=None, error=err)
         except Exception as e:
-            return AuthResult(ok=False, status="locked", session=None, error=str(e))
+            return AuthResult(ok=False, status="locked", session=None, error=sanitize_auth_error(str(e)))
 
     def lock(self) -> AuthResult:
         self.keyring_mgr.clear_session()

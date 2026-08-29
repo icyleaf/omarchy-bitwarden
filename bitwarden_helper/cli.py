@@ -14,6 +14,24 @@ from bitwarden_helper.vault import VaultManager
 from bitwarden_helper.clipboard import ClipboardManager
 from bitwarden_helper.totp import generate_totp
 
+def read_secret_stdin(explicit_arg: Optional[str] = None) -> str:
+    if explicit_arg is not None:
+        return explicit_arg
+    if not sys.stdin.isatty():
+        try:
+            line = sys.stdin.readline()
+            if isinstance(line, str) and line != "":
+                return line.rstrip("\r\n")
+            val = sys.stdin.read()
+            if isinstance(val, str) and val != "":
+                return val.rstrip("\r\n")
+        except Exception:
+            return ""
+    return ""
+
+
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bitwarden-helper",
@@ -34,6 +52,7 @@ def create_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("--bw-path", dest="bw_path", help="Path to bitwarden-cli binary")
     set_parser.add_argument("--auto-lock", dest="auto_lock_minutes", type=int, help="Auto lock timeout (minutes)")
     set_parser.add_argument("--clipboard-clear", dest="clipboard_clear_seconds", type=int, help="Clipboard clear timeout (seconds)")
+    set_parser.add_argument("--max-output-mb", dest="max_output_mb", type=int, help="Maximum vault payload bound (MB)")
     
     # health command
     health_parser = subparsers.add_parser("health", help="Check CLI health and installation")
@@ -47,15 +66,15 @@ def create_parser() -> argparse.ArgumentParser:
     
     login_pwd = auth_sub.add_parser("login-password", help="Login using Master Password")
     login_pwd.add_argument("--email", required=True, help="Bitwarden account email")
-    login_pwd.add_argument("--password", required=True, help="Bitwarden master password")
+    login_pwd.add_argument("--password", help="Bitwarden master password (optional flag, stdin preferred)")
     login_pwd.add_argument("--code", help="Two-factor authentication code (optional)")
     
     login_api = auth_sub.add_parser("login-apikey", help="Login using API Key")
     login_api.add_argument("--client-id", required=True, help="Bitwarden Client ID")
-    login_api.add_argument("--client-secret", required=True, help="Bitwarden Client Secret")
+    login_api.add_argument("--client-secret", help="Bitwarden Client Secret (optional flag, stdin preferred)")
     
     unlock_cmd = auth_sub.add_parser("unlock", help="Unlock vault with master password or PIN")
-    unlock_cmd.add_argument("--password", required=True, help="Master password or PIN")
+    unlock_cmd.add_argument("--password", help="Master password or PIN (optional flag, stdin preferred)")
     
     auth_sub.add_parser("lock", help="Lock vault and clear session")
     auth_sub.add_parser("logout", help="Logout from Bitwarden account")
@@ -83,7 +102,7 @@ def create_parser() -> argparse.ArgumentParser:
     clip_sub = clip_parser.add_subparsers(dest="clip_action", required=True)
     
     copy_cmd = clip_sub.add_parser("copy", help="Copy text to clipboard")
-    copy_cmd.add_argument("--text", required=True, help="Text to copy")
+    copy_cmd.add_argument("--text", help="Text to copy (optional flag, stdin preferred)")
     copy_cmd.add_argument("--sensitive", action="store_true", help="Mark payload as sensitive for auto-clear")
     copy_cmd.add_argument("--timeout", type=int, default=None, help="Auto-clear timeout in seconds")
     
@@ -94,7 +113,7 @@ def create_parser() -> argparse.ArgumentParser:
     totp_sub = totp_parser.add_subparsers(dest="totp_action", required=True)
     
     gen_cmd = totp_sub.add_parser("generate", help="Generate TOTP code from secret or otpauth URI")
-    gen_cmd.add_argument("--secret", required=True, help="Base32 secret or otpauth:// URI")
+    gen_cmd.add_argument("--secret", help="Base32 secret or otpauth:// URI (optional flag, stdin preferred)")
     
     return parser
 
@@ -105,6 +124,7 @@ def main(args: Optional[List[str]] = None) -> int:
     config_path = Path(parsed.config_path) if parsed.config_path else None
     config_mgr = ConfigManager(config_path=config_path)
     cfg = config_mgr.load()
+    max_output_bytes = cfg.max_output_mb * 1024 * 1024
     
     if parsed.command == "config":
         if parsed.config_action == "get":
@@ -116,6 +136,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 bw_path=parsed.bw_path,
                 auto_lock_minutes=parsed.auto_lock_minutes,
                 clipboard_clear_seconds=parsed.clipboard_clear_seconds,
+                max_output_mb=parsed.max_output_mb,
             )
             config_mgr.save(cfg)
             print(json.dumps(asdict(cfg), indent=2))
@@ -129,22 +150,25 @@ def main(args: Optional[List[str]] = None) -> int:
 
     elif parsed.command == "auth":
         bw_path = cfg.bw_path
-        auth_mgr = AuthManager(bw_path=bw_path)
+        auth_mgr = AuthManager(bw_path=bw_path, max_output_bytes=max_output_bytes)
         
         if parsed.auth_action == "status":
             st = auth_mgr.get_status()
             print(json.dumps(asdict(st), indent=2))
             return 0
         elif parsed.auth_action == "login-password":
-            res = auth_mgr.login_password(parsed.email, parsed.password, parsed.code)
+            password = read_secret_stdin(getattr(parsed, "password", None))
+            res = auth_mgr.login_password(parsed.email, password, parsed.code)
             print(json.dumps(asdict(res), indent=2))
             return 0 if res.ok else 1
         elif parsed.auth_action == "login-apikey":
-            res = auth_mgr.login_apikey(parsed.client_id, parsed.client_secret)
+            client_secret = read_secret_stdin(getattr(parsed, "client_secret", None))
+            res = auth_mgr.login_apikey(parsed.client_id, client_secret)
             print(json.dumps(asdict(res), indent=2))
             return 0 if res.ok else 1
         elif parsed.auth_action == "unlock":
-            res = auth_mgr.unlock(parsed.password)
+            password = read_secret_stdin(getattr(parsed, "password", None))
+            res = auth_mgr.unlock(password)
             print(json.dumps(asdict(res), indent=2))
             return 0 if res.ok else 1
         elif parsed.auth_action == "lock":
@@ -164,7 +188,7 @@ def main(args: Optional[List[str]] = None) -> int:
 
     elif parsed.command == "vault":
         bw_path = cfg.bw_path
-        vault_mgr = VaultManager(bw_path=bw_path)
+        vault_mgr = VaultManager(bw_path=bw_path, max_output_bytes=max_output_bytes)
         
         if parsed.vault_action == "sync":
             ok = vault_mgr.sync()
@@ -184,8 +208,9 @@ def main(args: Optional[List[str]] = None) -> int:
     elif parsed.command == "clipboard":
         clip_mgr = ClipboardManager()
         if parsed.clip_action == "copy":
+            text = read_secret_stdin(getattr(parsed, "text", None))
             timeout = parsed.timeout if parsed.timeout is not None else cfg.clipboard_clear_seconds
-            ok = clip_mgr.copy(parsed.text, sensitive=parsed.sensitive, timeout_seconds=timeout)
+            ok = clip_mgr.copy(text, sensitive=parsed.sensitive, timeout_seconds=timeout)
             print(json.dumps({"ok": ok}, indent=2))
             return 0 if ok else 1
         elif parsed.clip_action == "clear":
@@ -195,7 +220,8 @@ def main(args: Optional[List[str]] = None) -> int:
 
     elif parsed.command == "totp":
         if parsed.totp_action == "generate":
-            totp_res = generate_totp(parsed.secret)
+            secret = read_secret_stdin(getattr(parsed, "secret", None))
+            totp_res = generate_totp(secret)
             if totp_res:
                 print(json.dumps(totp_res, indent=2))
                 return 0

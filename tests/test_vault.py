@@ -142,5 +142,19 @@ def test_vault_sync_execution():
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args
         assert "sync" in args[0]
-        assert "--session" in args[0]
-        assert "test_session_123" in args[0]
+        assert "--session" not in args[0]
+        assert "test_session_123" not in args[0]
+        assert kwargs.get("env", {}).get("BW_SESSION") == "test_session_123"
+
+def test_vault_fetch_items_env_isolation():
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='[{"id": "item1", "name": "Item 1", "type": 1}]', stderr="")
+        vm = VaultManager(bw_path="bw", max_output_bytes=1024)
+        items = vm.fetch_items(session="secret_vault_session")
+        assert len(items) == 1
+        assert items[0].id == "item1"
+        args, kwargs = mock_run.call_args
+        assert "list" in args[0] and "items" in args[0]
+        assert "--session" not in args[0]
+        assert "secret_vault_session" not in args[0]
+        assert kwargs.get("env", {}).get("BW_SESSION") == "secret_vault_session"

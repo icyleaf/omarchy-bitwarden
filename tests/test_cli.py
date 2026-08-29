@@ -144,3 +144,60 @@ def test_cli_totp_generate(tmp_path: Path, capsys):
             data = json.loads(captured.out)
             assert data["code"] == "123456"
             assert data["ttl"] == 15
+
+def test_cli_auth_unlock_stdin(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.unlock", return_value=AuthResult(ok=True, session="token_via_stdin")) as mock_unlock, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.readline", return_value="secret_master_password\n"), \
+         patch("sys.stdin.read", return_value="secret_master_password\n"):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "unlock"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_unlock.assert_called_once_with("secret_master_password")
+
+def test_cli_clipboard_copy_stdin(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.cli.ClipboardManager.copy", return_value=True) as mock_copy, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.readline", return_value="my_sensitive_password\n"), \
+         patch("sys.stdin.read", return_value="my_sensitive_password"):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "clipboard", "copy", "--sensitive"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_copy.assert_called_once_with("my_sensitive_password", sensitive=True, timeout_seconds=30)
+
+def test_cli_totp_generate_stdin(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.cli.generate_totp", return_value={"code": "654321", "ttl": 28, "period": 30}) as mock_gen, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.readline", return_value="HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ\n"), \
+         patch("sys.stdin.read", return_value="HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ\n"):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "totp", "generate"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["code"] == "654321"
+            mock_gen.assert_called_once_with("HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ")
+
+
+def test_cli_config_set_max_output(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("sys.argv", [
+        "bitwarden-helper",
+        "--config", str(config_file),
+        "config", "set",
+        "--max-output-mb", "25"
+    ]):
+        exit_code = main()
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["max_output_mb"] == 25

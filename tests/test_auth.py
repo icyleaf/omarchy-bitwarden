@@ -63,6 +63,11 @@ def test_auth_login_password_success():
         assert res.ok is True
         assert res.session == "valid_session_token_123"
         mock_store.assert_called_once_with("valid_session_token_123")
+        args, kwargs = mock_run.call_args
+        assert "--passwordfile" in args[0]
+        assert "/proc/self/fd/0" in args[0]
+        assert "mypassword" not in args[0]
+        assert kwargs.get("input") == "mypassword\n"
 
 def test_auth_login_password_failure():
     with patch("subprocess.run") as mock_run:
@@ -74,7 +79,7 @@ def test_auth_login_password_failure():
         am = AuthManager(bw_path="bw")
         res = am.login_password("test@test.com", "wrongpassword")
         assert res.ok is False
-        assert "Invalid master password" in res.error
+        assert "Invalid" in res.error and "master password" in res.error
 
 def test_auth_login_apikey_success():
     with patch("subprocess.run") as mock_run:
@@ -104,6 +109,11 @@ def test_auth_unlock_success():
         assert res.ok is True
         assert res.session == "raw_session_token_xyz"
         mock_store.assert_called_once_with("raw_session_token_xyz")
+        args, kwargs = mock_run.call_args
+        assert "--passwordfile" in args[0]
+        assert "/proc/self/fd/0" in args[0]
+        assert "mypassword" not in args[0]
+        assert kwargs.get("input") == "mypassword\n"
 
 def test_auth_lock():
     with patch("subprocess.run") as mock_run, \
@@ -114,3 +124,16 @@ def test_auth_lock():
         assert res.ok is True
         assert res.status == "locked"
         mock_clear.assert_called_once()
+
+def test_auth_error_sanitization():
+    from bitwarden_helper.auth import sanitize_auth_error
+    # Secret tokens in stderr should be redacted
+    err_with_secret = "Failed to unlock vault with secret 238947293847293847293847293847 and token"
+    sanitized = sanitize_auth_error(err_with_secret)
+    assert "238947293847293847293847293847" not in sanitized
+    assert "[REDACTED]" in sanitized
+
+    # Standard patterns
+    assert "Invalid username" in sanitize_auth_error("Invalid master password provided for user")
+    assert "Decryption failed" in sanitize_auth_error("The decryption operation failed")
+    assert "Two-factor authentication" in sanitize_auth_error("Two-step login code invalid")

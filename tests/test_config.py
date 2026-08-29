@@ -13,6 +13,7 @@ def test_default_config(tmp_path: Path):
     assert cfg.bw_path == "bw"
     assert cfg.auto_lock_minutes == 15
     assert cfg.clipboard_clear_seconds == 30
+    assert cfg.max_output_mb == 10
 
 def test_custom_config_save_and_load(tmp_path: Path):
     config_file = tmp_path / "config.json"
@@ -23,6 +24,7 @@ def test_custom_config_save_and_load(tmp_path: Path):
         bw_path="/usr/local/bin/bw",
         auto_lock_minutes=30,
         clipboard_clear_seconds=45,
+        max_output_mb=50,
     )
     mgr.save(custom_cfg)
     
@@ -32,6 +34,7 @@ def test_custom_config_save_and_load(tmp_path: Path):
     assert loaded_cfg.bw_path == "/usr/local/bin/bw"
     assert loaded_cfg.auto_lock_minutes == 30
     assert loaded_cfg.clipboard_clear_seconds == 45
+    assert loaded_cfg.max_output_mb == 50
 
 def test_partial_config_fallback(tmp_path: Path):
     config_file = tmp_path / "config.json"
@@ -42,3 +45,4 @@ def test_partial_config_fallback(tmp_path: Path):
     assert cfg.server_url == "https://vaultwarden.local"
     assert cfg.bw_path == "bw"
     assert cfg.auto_lock_minutes == 15
+    assert cfg.max_output_mb == 10

@@ -8,6 +8,7 @@ DEFAULT_SERVER_URL = "https://vault.bitwarden.com"
 DEFAULT_BW_PATH = "bw"
 DEFAULT_AUTO_LOCK_MINUTES = 15
 DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30
+DEFAULT_MAX_OUTPUT_MB = 10
 
 @dataclass
 class Config:
@@ -15,6 +16,7 @@ class Config:
     bw_path: str = DEFAULT_BW_PATH
     auto_lock_minutes: int = DEFAULT_AUTO_LOCK_MINUTES
     clipboard_clear_seconds: int = DEFAULT_CLIPBOARD_CLEAR_SECONDS
+    max_output_mb: int = DEFAULT_MAX_OUTPUT_MB
 
     def update(self, **kwargs: Any) -> "Config":
         for key, value in kwargs.items():
@@ -42,6 +44,7 @@ class ConfigManager:
                 bw_path=data.get("bw_path", DEFAULT_BW_PATH),
                 auto_lock_minutes=int(data.get("auto_lock_minutes", DEFAULT_AUTO_LOCK_MINUTES)),
                 clipboard_clear_seconds=int(data.get("clipboard_clear_seconds", DEFAULT_CLIPBOARD_CLEAR_SECONDS)),
+                max_output_mb=int(data.get("max_output_mb", DEFAULT_MAX_OUTPUT_MB)),
             )
         except Exception:
             return Config()
