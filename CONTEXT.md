@@ -26,14 +26,15 @@
   - **Identity**: Personal identification records (Name, Address, Phone, Email, SSN).
   - **Secure Note**: Encrypted text notes or documentation.
   - **SSH Key**: Private and public key pairs (identified by PEM headers or custom fields `private_key`/`public_key`/`passphrase`).
+  - **Attachments**: Encrypted binary or text files associated with an item, supporting in-app discovery, quick preview via `xdg-open`, and direct download with desktop notification routing.
 - **Vault Index**: An in-memory, fast-searchable structured cache of vault items updated upon `bw sync` or vault unlock.
 
 ### Interaction & UI Paradigms
 - **Overlay Window**: Main search launcher modal summoned by global shortcut (`Super+Shift+B` or user-defined).
 - **Category Tabs**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
-- **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, and custom fields.
-- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password, Copy Username, Copy TOTP, Copy Public/Private Key, Lock Vault, Sync).
-- **Config & Settings View**: Allows user configuration of `server_url`, `bw_path`, `auto_lock_minutes`, `clipboard_clear_seconds`, and `max_output_mb`.
+- **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, and attachments.
+- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password, Copy Username, Copy TOTP, Copy Public/Private Key, View/Download Attachments, Lock Vault, Sync).
+- **Config & Settings View**: Allows user configuration of `server_url`, `bw_path`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, and `max_output_mb`.
 
 ## Boundaries & Non-Goals
 - **Non-Goals**: Full vault creation/editing/management (e.g. creating folders, generating complex cryptographic policies is handled via official Bitwarden apps/CLI). Focus is on lightning-fast retrieval, search, copying, and secure autofill in the Omarchy desktop.

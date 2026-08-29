@@ -158,3 +158,30 @@ def test_vault_fetch_items_env_isolation():
         assert "--session" not in args[0]
         assert "secret_vault_session" not in args[0]
         assert kwargs.get("env", {}).get("BW_SESSION") == "secret_vault_session"
+
+def test_parse_raw_items_with_attachments():
+    raw = [
+        {
+            "id": "item-att",
+            "name": "Secret Server",
+            "type": 1,
+            "attachments": [
+                {
+                    "id": "att-1",
+                    "fileName": "server-config.yaml",
+                    "size": "2048",
+                    "sizeName": "2.00 KB"
+                }
+            ]
+        }
+    ]
+    vm = VaultManager(bw_path="bw")
+    items = vm.parse_raw_items(raw)
+    assert len(items) == 1
+    assert len(items[0].attachments) == 1
+    assert items[0].attachments[0]["fileName"] == "server-config.yaml"
+    # Search by attachment filename
+    results = vm.search(items, query="config.yaml")
+    assert len(results) == 1
+    assert results[0].id == "item-att"
+

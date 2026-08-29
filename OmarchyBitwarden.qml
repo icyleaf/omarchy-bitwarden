@@ -70,6 +70,8 @@ Item {
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
   property var currentAvailableActions: []
+  property var activeAttachmentPreview: null
+  property string loadingAttachmentId: ""
 
   property string currentView: "auto"
   property string loginMethod: "password"
@@ -107,6 +109,8 @@ Item {
     root.showActionPalette = false
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
+    root.activeAttachmentPreview = null
+    root.loadingAttachmentId = ""
     root.searchQuery = ""
     if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
     if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
@@ -341,6 +345,8 @@ Item {
   onSelectedItemChanged: {
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
+    root.activeAttachmentPreview = null
+    root.loadingAttachmentId = ""
     root.updateTotpForSelected()
     root.updateAvailableActions()
   }
@@ -485,7 +491,61 @@ Item {
       }
     }
 
+    if (item.attachments && item.attachments.length > 0) {
+      for (var a = 0; a < item.attachments.length; a++) {
+        var att = item.attachments[a]
+        if (att && att.fileName) {
+          (function(currAtt) {
+            actions.push({
+              label: "View Attachment: " + currAtt.fileName,
+              icon: "👁️",
+              action: function() { root.viewAttachment(item, currAtt) }
+            })
+            actions.push({
+              label: "Download Attachment: " + currAtt.fileName,
+              icon: "💾",
+              action: function() { root.downloadAttachment(item, currAtt) }
+            })
+          })(att)
+        }
+      }
+    }
+
     return actions
+  }
+
+  function viewAttachment(item, att) {
+    if (!item || !att) return
+    root.loadingAttachmentId = (att.id || att.fileName || "loading")
+    attachmentProc.activeAttachmentId = att.id || ""
+    attachmentProc.command = [
+      root.helperPath,
+      "attachment",
+      "download",
+      "--item-id", item.id,
+      "--attachment-id", att.id,
+      "--filename", att.fileName || "attachment",
+      "--preview"
+    ]
+    attachmentProc.running = true
+  }
+
+  function downloadAttachment(item, att) {
+    if (!item || !att) return
+    root.statusMessage = "Downloading attachment " + (att.fileName || "") + "..."
+    var cmd = [
+      root.helperPath,
+      "attachment",
+      "download",
+      "--item-id", item.id,
+      "--attachment-id", att.id,
+      "--filename", att.fileName || "attachment"
+    ]
+    if (root.config && root.config.download_dir) {
+      cmd.push("--output-dir", root.config.download_dir)
+    }
+    attachmentProc.command = cmd
+    attachmentProc.running = true
   }
 
   function saveSettings(settings) {
@@ -494,6 +554,7 @@ Item {
     var cmd = [root.helperPath, "config", "set"]
     if (settings.server_url !== undefined) cmd.push("--server-url", settings.server_url)
     if (settings.bw_path !== undefined) cmd.push("--bw-path", settings.bw_path)
+    if (settings.download_dir !== undefined) cmd.push("--download-dir", settings.download_dir)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
@@ -648,6 +709,26 @@ Item {
       return "🪪"
     }
     return "🌐"
+  }
+
+  function getAttachmentIcon(filename) {
+    if (!filename) return "📎"
+    var ext = String(filename).split('.').pop().toLowerCase()
+    if (ext === "pdf" || ext === "doc" || ext === "docx" || ext === "txt" || ext === "md" || ext === "rtf") return "📄"
+    if (ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "gif" || ext === "svg" || ext === "webp") return "🖼️"
+    if (ext === "zip" || ext === "tar" || ext === "gz" || ext === "7z" || ext === "rar") return "📦"
+    if (ext === "pem" || ext === "key" || ext === "pub" || ext === "crt" || ext === "cer") return "🗝️"
+    if (ext === "mp3" || ext === "wav" || ext === "flac" || ext === "ogg") return "🎵"
+    if (ext === "mp4" || ext === "mkv" || ext === "webm" || ext === "mov") return "🎬"
+    return "📎"
+  }
+
+  function formatFileSize(bytes) {
+    if (!bytes || isNaN(bytes)) return ""
+    var b = parseInt(bytes)
+    if (b < 1024) return b + " B"
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB"
+    return (b / (1024 * 1024)).toFixed(2) + " MB"
   }
 
   property bool isAuthTransitionBusy: root.isBusy && (root.effectiveView === "login" || root.effectiveView === "unlock" || root.statusMessage.indexOf("Locking") !== -1 || root.statusMessage.indexOf("Logging out") !== -1 || root.statusMessage.indexOf("Logging in") !== -1 || root.statusMessage.indexOf("Unlocking") !== -1 || root.statusMessage.indexOf("Authenticating") !== -1)
@@ -1419,6 +1500,23 @@ onVisibleChanged: {
             }
           }
 
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            Text {
+              text: "Default Download Directory:"
+              color: root.foreground
+              font.pixelSize: Style.font.bodySmall
+            }
+            TextField {
+              id: inputDownloadDir
+              Layout.fillWidth: true
+              text: (root.config && root.config.download_dir) ? root.config.download_dir : "~/Downloads"
+              placeholderText: "~/Downloads"
+              font.pixelSize: Style.font.body
+            }
+          }
+
           RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -1436,6 +1534,7 @@ onVisibleChanged: {
                 root.saveSettings({
                   server_url: inputServerUrl.text.trim(),
                   bw_path: inputBwPath.text.trim(),
+                  download_dir: inputDownloadDir.text.trim(),
                   auto_lock_minutes: isNaN(autoLockVal) ? 15 : autoLockVal,
                   clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal,
                   max_output_mb: isNaN(maxOutputVal) ? 10 : maxOutputVal
@@ -1627,6 +1726,12 @@ onVisibleChanged: {
                           color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.9) : root.accent
                           font.pixelSize: Style.font.caption
                         }
+                        Text {
+                          visible: Boolean(modelData.attachments && modelData.attachments.length > 0)
+                          text: "📎"
+                          color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.9) : Qt.darker(root.foreground, 1.4)
+                          font.pixelSize: Style.font.caption
+                        }
                       }
 
                       Text {
@@ -1687,6 +1792,7 @@ onVisibleChanged: {
               clip: true
 
               ScrollView {
+                visible: root.activeAttachmentPreview === null
                 anchors.fill: parent
                 anchors.margins: 14
                 contentWidth: width
@@ -2047,6 +2153,267 @@ onVisibleChanged: {
                         Button {
                           text: "Copy"
                           onClicked: root.copyToClipboard(String(modelData.value), true, modelData.name)
+                        }
+                      }
+                    }
+                  }
+
+                  // Attachments section
+                  ColumnLayout {
+                    visible: Boolean(root.selectedItem && root.selectedItem.attachments && root.selectedItem.attachments.length > 0)
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      Text {
+                        text: "Attachments (" + (root.selectedItem && root.selectedItem.attachments ? root.selectedItem.attachments.length : 0) + "):"
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                      }
+                    }
+
+                    Repeater {
+                      model: root.selectedItem ? (root.selectedItem.attachments || []) : []
+                      delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 46
+                        radius: 6
+                        color: Qt.rgba(1, 1, 1, 0.05)
+                        border.color: Qt.rgba(1, 1, 1, 0.1)
+
+                        RowLayout {
+                          anchors.fill: parent
+                          anchors.leftMargin: 8
+                          anchors.rightMargin: 8
+                          spacing: 8
+
+                          Text {
+                            text: root.getAttachmentIcon(modelData.fileName)
+                            font.pixelSize: 18
+                          }
+
+                          ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+
+                            Text {
+                              text: modelData.fileName || "Attachment"
+                              color: root.foreground
+                              font.pixelSize: Style.font.bodySmall
+                              font.bold: true
+                              elide: Text.ElideMiddle
+                              Layout.fillWidth: true
+                            }
+
+                            Text {
+                              text: modelData.sizeName || root.formatFileSize(modelData.size)
+                              color: Qt.darker(root.foreground, 1.4)
+                              font.pixelSize: Style.font.caption
+                            }
+                          }
+
+                          Button {
+                            text: (root.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "Loading..." : "View"
+                            enabled: root.loadingAttachmentId !== (modelData.id || modelData.fileName)
+                            onClicked: root.viewAttachment(root.selectedItem, modelData)
+                          }
+
+                          Button {
+                            text: "Download"
+                            enabled: root.loadingAttachmentId !== (modelData.id || modelData.fileName)
+                            onClicked: root.downloadAttachment(root.selectedItem, modelData)
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                  Item { Layout.fillHeight: true }
+                }
+              }
+
+              // Attachment In-Overlay Preview View
+              ColumnLayout {
+                visible: root.activeAttachmentPreview !== null
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 10
+
+                // Top navigation bar for preview
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 8
+
+                  Button {
+                    text: "← Back"
+                    onClicked: root.activeAttachmentPreview = null
+                  }
+
+                  Text {
+                    text: root.getAttachmentIcon(root.activeAttachmentPreview ? root.activeAttachmentPreview.filename : "")
+                    font.pixelSize: 18
+                  }
+
+                  Text {
+                    text: root.activeAttachmentPreview ? (root.activeAttachmentPreview.filename || "Attachment") : ""
+                    color: root.foreground
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    elide: Text.ElideMiddle
+                    Layout.fillWidth: true
+                  }
+
+                  Button {
+                    text: "Open App"
+                    onClicked: {
+                      if (root.activeAttachmentPreview && root.activeAttachmentPreview.path) {
+                        Qt.openUrlExternally("file://" + root.activeAttachmentPreview.path)
+                      }
+                    }
+                  }
+
+                  Button {
+                    text: "Download"
+                    onClicked: {
+                      if (root.selectedItem && root.activeAttachmentPreview) {
+                        root.downloadAttachment(root.selectedItem, {
+                          id: root.activeAttachmentPreview.attachment_id || "",
+                          fileName: root.activeAttachmentPreview.filename
+                        })
+                      }
+                    }
+                  }
+                }
+
+                // Divider
+                Rectangle {
+                  Layout.fillWidth: true
+                  height: 1
+                  color: Qt.rgba(1, 1, 1, 0.1)
+                }
+
+                // Preview Content
+                // 1. Image Preview
+                Item {
+                  visible: Boolean(root.activeAttachmentPreview && root.activeAttachmentPreview.is_image)
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+
+                  Image {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    fillMode: Image.PreserveAspectFit
+                    source: (root.activeAttachmentPreview && root.activeAttachmentPreview.is_image) ? ("file://" + root.activeAttachmentPreview.path) : ""
+                    smooth: true
+                    asynchronous: true
+                  }
+                }
+
+                // 2. Text / Code Preview
+                ColumnLayout {
+                  visible: Boolean(root.activeAttachmentPreview && !root.activeAttachmentPreview.is_image && root.activeAttachmentPreview.is_text)
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  spacing: 6
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                      text: "Text Content Preview:"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.pixelSize: Style.font.caption
+                    }
+                    Item { Layout.fillWidth: true }
+                    Button {
+                      text: "Copy Content"
+                      onClicked: {
+                        if (root.activeAttachmentPreview && root.activeAttachmentPreview.text_content) {
+                          root.copyToClipboard(root.activeAttachmentPreview.text_content, false, "attachment text")
+                        }
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 6
+                    color: Qt.rgba(0, 0, 0, 0.3)
+                    border.color: Qt.rgba(1, 1, 1, 0.1)
+                    clip: true
+
+                    ScrollView {
+                      anchors.fill: parent
+                      anchors.margins: 8
+                      contentWidth: width
+                      clip: true
+
+                      Text {
+                        width: parent.width
+                        text: (root.activeAttachmentPreview && root.activeAttachmentPreview.text_content) ? root.activeAttachmentPreview.text_content : ""
+                        color: root.foreground
+                        font.family: "monospace"
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WrapAnywhere
+                      }
+                    }
+                  }
+                }
+
+                // 3. Binary / Unpreviewable File Card
+                ColumnLayout {
+                  visible: Boolean(root.activeAttachmentPreview && !root.activeAttachmentPreview.is_image && !root.activeAttachmentPreview.is_text)
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  spacing: 12
+
+                  Item { Layout.fillHeight: true }
+
+                  Text {
+                    text: root.getAttachmentIcon(root.activeAttachmentPreview ? root.activeAttachmentPreview.filename : "")
+                    font.pixelSize: 48
+                    Layout.alignment: Qt.AlignHCenter
+                  }
+
+                  Text {
+                    text: root.activeAttachmentPreview ? root.activeAttachmentPreview.filename : ""
+                    color: root.foreground
+                    font.pixelSize: Style.font.bodyLarge
+                    font.bold: true
+                    Layout.alignment: Qt.AlignHCenter
+                  }
+
+                  Text {
+                    text: root.activeAttachmentPreview ? (root.formatFileSize(root.activeAttachmentPreview.size) || "File ready") : ""
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.pixelSize: Style.font.bodySmall
+                    Layout.alignment: Qt.AlignHCenter
+                  }
+
+                  RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: 10
+
+                    Button {
+                      text: "Open with Default App"
+                      selected: true
+                      onClicked: {
+                        if (root.activeAttachmentPreview && root.activeAttachmentPreview.path) {
+                          Qt.openUrlExternally("file://" + root.activeAttachmentPreview.path)
+                        }
+                      }
+                    }
+
+                    Button {
+                      text: "Save to Downloads"
+                      onClicked: {
+                        if (root.selectedItem && root.activeAttachmentPreview) {
+                          root.downloadAttachment(root.selectedItem, {
+                            id: root.activeAttachmentPreview.attachment_id || "",
+                            fileName: root.activeAttachmentPreview.filename
+                          })
                         }
                       }
                     }
@@ -2543,6 +2910,39 @@ onVisibleChanged: {
           }
         } catch (e) {}
       }
+    }
+  }
+
+  Process {
+    id: attachmentProc
+    property string activeAttachmentId: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.loadingAttachmentId = ""
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            if (data.action === "preview") {
+              data.attachment_id = attachmentProc.activeAttachmentId
+              root.activeAttachmentPreview = data
+            } else if (data.action === "view") {
+              root.statusMessage = "Opened " + (data.filename || "attachment") + "."
+            } else {
+              root.statusMessage = "Saved " + (data.filename || "attachment") + " to " + (data.path || "Downloads")
+            }
+          } else {
+            root.errorMessage = data.error || "Failed to process attachment."
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to parse attachment response."
+        }
+      }
+    }
+    onExited: function(code) {
+      root.loadingAttachmentId = ""
+      if (code !== 0 && !root.errorMessage) root.errorMessage = "Attachment command failed."
     }
   }
 }

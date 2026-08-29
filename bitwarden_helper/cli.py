@@ -50,6 +50,7 @@ def create_parser() -> argparse.ArgumentParser:
     set_parser = config_sub.add_parser("set", help="Set configuration options")
     set_parser.add_argument("--server-url", dest="server_url", help="Bitwarden server URL")
     set_parser.add_argument("--bw-path", dest="bw_path", help="Path to bitwarden-cli binary")
+    set_parser.add_argument("--download-dir", dest="download_dir", help="Default download directory path")
     set_parser.add_argument("--auto-lock", dest="auto_lock_minutes", type=int, help="Auto lock timeout (minutes)")
     set_parser.add_argument("--clipboard-clear", dest="clipboard_clear_seconds", type=int, help="Clipboard clear timeout (seconds)")
     set_parser.add_argument("--max-output-mb", dest="max_output_mb", type=int, help="Maximum vault payload bound (MB)")
@@ -116,6 +117,18 @@ def create_parser() -> argparse.ArgumentParser:
     
     gen_cmd = totp_sub.add_parser("generate", help="Generate TOTP code from secret or otpauth URI")
     gen_cmd.add_argument("--secret", help="Base32 secret or otpauth:// URI (optional flag, stdin preferred)")
+    
+    # attachment command
+    att_parser = subparsers.add_parser("attachment", help="Manage vault item attachments")
+    att_sub = att_parser.add_subparsers(dest="att_action", required=True)
+    
+    att_dl = att_sub.add_parser("download", help="Download or view an attachment")
+    att_dl.add_argument("--item-id", required=True, help="Vault item ID")
+    att_dl.add_argument("--attachment-id", required=True, help="Attachment ID")
+    att_dl.add_argument("--filename", required=True, help="Attachment filename")
+    att_dl.add_argument("--output-dir", help="Destination output directory (optional)")
+    att_dl.add_argument("--open", action="store_true", help="Open attachment in default application (view mode)")
+    att_dl.add_argument("--preview", action="store_true", help="Download to temporary cache for in-overlay inspector preview")
     
     return parser
 
@@ -232,6 +245,21 @@ def main(args: Optional[List[str]] = None) -> int:
             else:
                 print(json.dumps({"error": "Invalid TOTP secret"}, indent=2))
                 return 1
+
+    elif parsed.command == "attachment":
+        from bitwarden_helper.attachment import get_attachment
+        if parsed.att_action == "download":
+            res = get_attachment(
+                item_id=parsed.item_id,
+                attachment_id=parsed.attachment_id,
+                filename=parsed.filename,
+                output_dir=getattr(parsed, "output_dir", None),
+                open_file=getattr(parsed, "open", False),
+                preview=getattr(parsed, "preview", False),
+                bw_path=cfg.bw_path,
+            )
+            print(json.dumps(res, indent=2))
+            return 0 if res.get("ok") else 1
         
     return 0
 

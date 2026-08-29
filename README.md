@@ -93,13 +93,14 @@ omarchy-bitwarden/
 │   ├── auth.py                  # Authentication, login & unlock logic
 │   ├── keyring.py               # FreeDesktop Secret Service Keyring integration
 │   ├── vault.py                 # Vault parsing, scoring & heuristic classification
+│   ├── attachment.py           # Vault item attachment downloading and previewing
 │   ├── ssh.py                   # SSH key header pattern analysis
 │   ├── totp.py                  # RFC 6238 TOTP computation
 │   ├── clipboard.py             # Wayland ephemeral clipboard timer
 │   ├── config.py                # User configuration persistence
 │   ├── health.py                # CLI dependencies health checker
 │   └── hook.py                  # Omarchy screen-lock auto-lock hook
-└── tests/                       # Automated pytest test suites (59 test cases)
+└── tests/                       # Automated pytest test suites (67 test cases)
 ```
 
 ---

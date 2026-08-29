@@ -30,6 +30,7 @@ class VaultItem:
     identity: Optional[Dict[str, Any]] = None
     ssh_key: Optional[Dict[str, Any]] = None
     fields: List[Dict[str, Any]] = field(default_factory=list)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
     search_text: str = ""
 
 def is_fuzzy_match(pattern: str, text: str) -> bool:
@@ -191,6 +192,7 @@ class VaultManager:
             notes = raw.get("notes") or ""
             favorite = bool(raw.get("favorite", False))
             fields = raw.get("fields") or []
+            attachments = raw.get("attachments") or []
 
             # Check for SSH Key heuristics
             ssh_meta = detect_ssh_key_metadata(raw)
@@ -200,6 +202,9 @@ class VaultManager:
                 search_tokens = [name.lower(), "ssh", "ssh key", ssh_meta["key_type"].lower()]
                 if ssh_meta["public_key"]:
                     search_tokens.append(ssh_meta["public_key"].lower())
+                for att in attachments:
+                    if att.get("fileName"):
+                        search_tokens.append(att["fileName"].lower())
                 search_text = " ".join(t for t in search_tokens if t)
                 parsed_items.append(
                     VaultItem(
@@ -212,6 +217,7 @@ class VaultManager:
                         favorite=favorite,
                         ssh_key=ssh_meta,
                         fields=fields,
+                        attachments=attachments,
                         search_text=search_text,
                     )
                 )
@@ -219,6 +225,9 @@ class VaultManager:
 
             type_name = TYPE_MAP.get(item_type, "login")
             sub_title, search_tokens = self._extract_metadata(item_type, raw, name, notes, fields)
+            for att in attachments:
+                if att.get("fileName"):
+                    search_tokens.append(att["fileName"].lower())
             search_text = " ".join(t for t in search_tokens if t)
 
             parsed_items.append(
@@ -234,6 +243,7 @@ class VaultManager:
                     card=raw.get("card"),
                     identity=raw.get("identity"),
                     fields=fields,
+                    attachments=attachments,
                     search_text=search_text,
                 )
             )

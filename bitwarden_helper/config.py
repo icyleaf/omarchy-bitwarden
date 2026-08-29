@@ -9,6 +9,7 @@ DEFAULT_BW_PATH = "bw"
 DEFAULT_AUTO_LOCK_MINUTES = 15
 DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30
 DEFAULT_MAX_OUTPUT_MB = 10
+DEFAULT_DOWNLOAD_DIR = "~/Downloads"
 DEFAULT_EMAIL = ""
 DEFAULT_REMEMBER_EMAIL = True
 
@@ -16,6 +17,7 @@ DEFAULT_REMEMBER_EMAIL = True
 class Config:
     server_url: str = DEFAULT_SERVER_URL
     bw_path: str = DEFAULT_BW_PATH
+    download_dir: str = DEFAULT_DOWNLOAD_DIR
     auto_lock_minutes: int = DEFAULT_AUTO_LOCK_MINUTES
     clipboard_clear_seconds: int = DEFAULT_CLIPBOARD_CLEAR_SECONDS
     max_output_mb: int = DEFAULT_MAX_OUTPUT_MB
@@ -49,6 +51,7 @@ class ConfigManager:
             return Config(
                 server_url=data.get("server_url", DEFAULT_SERVER_URL),
                 bw_path=data.get("bw_path", DEFAULT_BW_PATH),
+                download_dir=str(data.get("download_dir", DEFAULT_DOWNLOAD_DIR)),
                 auto_lock_minutes=int(data.get("auto_lock_minutes", DEFAULT_AUTO_LOCK_MINUTES)),
                 clipboard_clear_seconds=int(data.get("clipboard_clear_seconds", DEFAULT_CLIPBOARD_CLEAR_SECONDS)),
                 max_output_mb=int(data.get("max_output_mb", DEFAULT_MAX_OUTPUT_MB)),
