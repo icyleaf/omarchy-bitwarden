@@ -593,29 +593,30 @@ Item {
     return ""
   }
 
+  function getCardBrand(item) {
+    if (!item) return ""
+    var typeName = (typeof item === "string") ? item : (item.type_name || "")
+    if (typeName !== "card") return ""
+    var brand = ""
+    if (typeof item === "object" && item.card) {
+      brand = (item.card.brand ? String(item.card.brand) : "")
+      if (!brand && item.card.number) {
+        var num = String(item.card.number).replace(/\s+/g, "")
+        if (num.indexOf("4") === 0) brand = "Visa"
+        else if (num.match(/^5[1-5]/) || num.match(/^2[2-7]/)) brand = "Mastercard"
+        else if (num.match(/^3[47]/)) brand = "Amex"
+        else if (num.match(/^35/)) brand = "JCB"
+        else if (num.match(/^6(?:011|5)/)) brand = "Discover"
+        else if (num.indexOf("62") === 0) brand = "UnionPay"
+      }
+    }
+    return brand
+  }
+
   function getItemIcon(item) {
     if (!item) return "🌐"
     var typeName = (typeof item === "string") ? item : (item.type_name || "login")
     if (typeName === "card") {
-      var brand = ""
-      if (typeof item === "object" && item.card) {
-        brand = (item.card.brand ? String(item.card.brand).toLowerCase() : "")
-        if (!brand && item.card.number) {
-          var num = String(item.card.number).replace(/\s+/g, "")
-          if (num.indexOf("4") === 0) brand = "visa"
-          else if (num.match(/^5[1-5]/) || num.match(/^2[2-7]/)) brand = "mastercard"
-          else if (num.match(/^3[47]/)) brand = "amex"
-          else if (num.match(/^35/)) brand = "jcb"
-          else if (num.match(/^6(?:011|5)/)) brand = "discover"
-          else if (num.indexOf("62") === 0) brand = "unionpay"
-        }
-      }
-      if (brand.indexOf("visa") !== -1) return "💳 Visa"
-      if (brand.indexOf("master") !== -1 || brand === "mc") return "💳 MC"
-      if (brand.indexOf("amex") !== -1 || brand.indexOf("american") !== -1) return "💳 Amex"
-      if (brand.indexOf("jcb") !== -1) return "💳 JCB"
-      if (brand.indexOf("discover") !== -1) return "💳 Disc"
-      if (brand.indexOf("union") !== -1) return "💳 CUP"
       return "💳"
     } else if (typeName === "ssh_key") {
       return "⚡"
@@ -1524,7 +1525,14 @@ onVisibleChanged: {
                       Text {
                         id: catBadgeText
                         anchors.centerIn: parent
-                        text: (modelData.type_name === "ssh_key") ? "SSH" : modelData.type_name.toUpperCase()
+                        text: {
+                          if (modelData.type_name === "ssh_key") return "SSH"
+                          if (modelData.type_name === "card") {
+                            var b = root.getCardBrand(modelData)
+                            return b ? b.toUpperCase() : "CARD"
+                          }
+                          return modelData.type_name.toUpperCase()
+                        }
                         color: Qt.darker(root.foreground, 1.3)
                         font.pixelSize: Style.font.caption - 2
                       }
@@ -1567,8 +1575,8 @@ onVisibleChanged: {
                   spacing: 12
 
                   RowLayout {
-                    Layout.fillWidth: true
                     spacing: 10
+                    Layout.fillWidth: true
 
                     Item {
                       width: 32
@@ -1606,7 +1614,19 @@ onVisibleChanged: {
                         Layout.fillWidth: true
                       }
                       Text {
-                        text: root.selectedItem ? (root.selectedItem.type_name.toUpperCase() + (root.selectedItem.favorite ? " • Favorite" : "")) : ""
+                        text: {
+                          if (!root.selectedItem) return ""
+                          var cat = root.selectedItem.type_name
+                          if (cat === "card") {
+                            var b = root.getCardBrand(root.selectedItem)
+                            cat = b ? (b.toUpperCase() + " CARD") : "CARD"
+                          } else if (cat === "ssh_key") {
+                            cat = "SSH KEY"
+                          } else {
+                            cat = cat.toUpperCase()
+                          }
+                          return cat + (root.selectedItem.favorite ? " • Favorite" : "")
+                        }
                         color: Qt.darker(root.foreground, 1.4)
                         font.pixelSize: Style.font.caption
                       }
