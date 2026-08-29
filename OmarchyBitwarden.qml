@@ -1547,6 +1547,28 @@ onVisibleChanged: {
                 anchors.margins: 4
                 model: root.filteredItems
                 currentIndex: root.selectedIndex
+                clip: true
+
+                ScrollBar.vertical: ScrollBar {
+                  id: itemsListVScroll
+                  policy: ScrollBar.AsNeeded
+                  active: itemsList.moving || itemsList.flicking || itemsListVScroll.hovered
+                  width: 6
+
+                  contentItem: Rectangle {
+                    implicitWidth: 6
+                    radius: 3
+                    color: itemsListVScroll.pressed ? root.accent : (itemsListVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
+                    Behavior on color {
+                      ColorAnimation { duration: 150 }
+                    }
+                  }
+
+                  background: Rectangle {
+                    implicitWidth: 6
+                    color: "transparent"
+                  }
+                }
 
                 delegate: Rectangle {
                   width: itemsList.width
@@ -1666,6 +1688,28 @@ onVisibleChanged: {
                 anchors.fill: parent
                 anchors.margins: 14
                 contentWidth: width
+                clip: true
+
+                ScrollBar.vertical: ScrollBar {
+                  id: inspVScroll
+                  policy: ScrollBar.AsNeeded
+                  active: inspVScroll.hovered || inspVScroll.pressed
+                  width: 6
+
+                  contentItem: Rectangle {
+                    implicitWidth: 6
+                    radius: 3
+                    color: inspVScroll.pressed ? root.accent : (inspVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
+                    Behavior on color {
+                      ColorAnimation { duration: 150 }
+                    }
+                  }
+
+                  background: Rectangle {
+                    implicitWidth: 6
+                    color: "transparent"
+                  }
+                }
 
                 ColumnLayout {
                   width: parent.width
@@ -2106,6 +2150,27 @@ onVisibleChanged: {
                 clip: true
                 model: root.currentAvailableActions
                 currentIndex: root.actionPaletteIndex
+
+                ScrollBar.vertical: ScrollBar {
+                  id: actionsListVScroll
+                  policy: ScrollBar.AsNeeded
+                  active: actionsList.moving || actionsList.flicking || actionsListVScroll.hovered
+                  width: 6
+
+                  contentItem: Rectangle {
+                    implicitWidth: 6
+                    radius: 3
+                    color: actionsListVScroll.pressed ? root.accent : (actionsListVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
+                    Behavior on color {
+                      ColorAnimation { duration: 150 }
+                    }
+                  }
+
+                  background: Rectangle {
+                    implicitWidth: 6
+                    color: "transparent"
+                  }
+                }
 
                 delegate: Rectangle {
                   width: actionsList.width
