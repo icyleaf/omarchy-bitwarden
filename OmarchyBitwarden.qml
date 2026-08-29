@@ -1552,10 +1552,12 @@ onVisibleChanged: {
                 ScrollBar.vertical: ScrollBar {
                   id: itemsListVScroll
                   policy: ScrollBar.AsNeeded
-                  active: itemsList.moving || itemsList.flicking || itemsListVScroll.hovered
+                  visible: size < 1.0
+                  active: visible && (itemsList.moving || itemsList.flicking || itemsListVScroll.hovered)
                   width: 6
 
                   contentItem: Rectangle {
+                    visible: itemsListVScroll.size < 1.0
                     implicitWidth: 6
                     radius: 3
                     color: itemsListVScroll.pressed ? root.accent : (itemsListVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
@@ -1693,10 +1695,12 @@ onVisibleChanged: {
                 ScrollBar.vertical: ScrollBar {
                   id: inspVScroll
                   policy: ScrollBar.AsNeeded
-                  active: inspVScroll.hovered || inspVScroll.pressed
+                  visible: size < 1.0
+                  active: visible && (inspVScroll.hovered || inspVScroll.pressed)
                   width: 6
 
                   contentItem: Rectangle {
+                    visible: inspVScroll.size < 1.0
                     implicitWidth: 6
                     radius: 3
                     color: inspVScroll.pressed ? root.accent : (inspVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
@@ -2154,10 +2158,12 @@ onVisibleChanged: {
                 ScrollBar.vertical: ScrollBar {
                   id: actionsListVScroll
                   policy: ScrollBar.AsNeeded
-                  active: actionsList.moving || actionsList.flicking || actionsListVScroll.hovered
+                  visible: size < 1.0
+                  active: visible && (actionsList.moving || actionsList.flicking || actionsListVScroll.hovered)
                   width: 6
 
                   contentItem: Rectangle {
+                    visible: actionsListVScroll.size < 1.0
                     implicitWidth: 6
                     radius: 3
                     color: actionsListVScroll.pressed ? root.accent : (actionsListVScroll.hovered ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.7) : Qt.rgba(1, 1, 1, 0.3))
