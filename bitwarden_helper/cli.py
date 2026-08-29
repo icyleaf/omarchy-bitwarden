@@ -53,6 +53,8 @@ def create_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("--auto-lock", dest="auto_lock_minutes", type=int, help="Auto lock timeout (minutes)")
     set_parser.add_argument("--clipboard-clear", dest="clipboard_clear_seconds", type=int, help="Clipboard clear timeout (seconds)")
     set_parser.add_argument("--max-output-mb", dest="max_output_mb", type=int, help="Maximum vault payload bound (MB)")
+    set_parser.add_argument("--email", dest="email", help="Remembered account email")
+    set_parser.add_argument("--remember-email", dest="remember_email", type=lambda v: str(v).lower() in ("true", "1", "yes"), help="Remember email flag (true/false)")
     
     # health command
     health_parser = subparsers.add_parser("health", help="Check CLI health and installation")
@@ -137,6 +139,8 @@ def main(args: Optional[List[str]] = None) -> int:
                 auto_lock_minutes=parsed.auto_lock_minutes,
                 clipboard_clear_seconds=parsed.clipboard_clear_seconds,
                 max_output_mb=parsed.max_output_mb,
+                email=parsed.email,
+                remember_email=parsed.remember_email,
             )
             config_mgr.save(cfg)
             print(json.dumps(asdict(cfg), indent=2))

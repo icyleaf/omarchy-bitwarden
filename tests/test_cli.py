@@ -201,3 +201,19 @@ def test_cli_config_set_max_output(tmp_path: Path, capsys):
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data["max_output_mb"] == 25
+
+def test_cli_config_set_email(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("sys.argv", [
+        "bitwarden-helper",
+        "--config", str(config_file),
+        "config", "set",
+        "--email", "bob@example.com",
+        "--remember-email", "false"
+    ]):
+        exit_code = main()
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["email"] == "bob@example.com"
+        assert data["remember_email"] is False

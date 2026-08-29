@@ -33,8 +33,12 @@ Item {
     bw_path: "bw",
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
-    max_output_mb: 10
+    max_output_mb: 10,
+    email: "",
+    remember_email: true
   })
+  property bool rememberEmailChecked: true
+  property bool show2FAField: false
 
   property var cliHealth: ({
     installed: false,
@@ -116,7 +120,13 @@ Item {
     Qt.callLater(function() {
       if (root.effectiveView === "search") searchInput.forceActiveFocus()
       else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
-      else if (root.effectiveView === "login") inputLoginEmail.forceActiveFocus()
+      else if (root.effectiveView === "login") {
+        if (typeof inputLoginEmail !== "undefined" && inputLoginEmail && inputLoginEmail.text.trim().length > 0) {
+          if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.forceActiveFocus()
+        } else {
+          if (typeof inputLoginEmail !== "undefined" && inputLoginEmail) inputLoginEmail.forceActiveFocus()
+        }
+      }
     })
   }
 
@@ -140,6 +150,49 @@ Item {
   function refreshConfig() {
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
+  }
+
+  function updateConfig(options) {
+    var cmd = [root.helperPath, "config", "set"]
+    if (options.server_url !== undefined) cmd.push("--server-url", options.server_url)
+    if (options.bw_path !== undefined) cmd.push("--bw-path", options.bw_path)
+    if (options.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(options.auto_lock_minutes))
+    if (options.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(options.clipboard_clear_seconds))
+    if (options.max_output_mb !== undefined) cmd.push("--max-output-mb", String(options.max_output_mb))
+    if (options.email !== undefined) cmd.push("--email", options.email)
+    if (options.remember_email !== undefined) cmd.push("--remember-email", options.remember_email ? "true" : "false")
+    configSetProc.command = cmd
+    configSetProc.running = true
+  }
+
+  function submitLoginForm() {
+    if (root.isBusy) return
+    if (root.loginMethod === "password") {
+      var email = (typeof inputLoginEmail !== "undefined" && inputLoginEmail) ? inputLoginEmail.text.trim() : ""
+      var password = (typeof inputLoginPassword !== "undefined" && inputLoginPassword) ? inputLoginPassword.text : ""
+      var code = (root.show2FAField && typeof inputLogin2FA !== "undefined" && inputLogin2FA) ? inputLogin2FA.text.trim() : ""
+      if (!email) {
+        if (typeof inputLoginEmail !== "undefined" && inputLoginEmail) inputLoginEmail.forceActiveFocus()
+        return
+      }
+      if (!password) {
+        if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.forceActiveFocus()
+        return
+      }
+      root.doLoginPassword(email, password, code)
+    } else if (root.loginMethod === "apikey") {
+      var clientId = (typeof inputClientId !== "undefined" && inputClientId) ? inputClientId.text.trim() : ""
+      var clientSecret = (typeof inputClientSecret !== "undefined" && inputClientSecret) ? inputClientSecret.text.trim() : ""
+      if (!clientId) {
+        if (typeof inputClientId !== "undefined" && inputClientId) inputClientId.forceActiveFocus()
+        return
+      }
+      if (!clientSecret) {
+        if (typeof inputClientSecret !== "undefined" && inputClientSecret) inputClientSecret.forceActiveFocus()
+        return
+      }
+      root.doLoginApiKey(clientId, clientSecret)
+    }
   }
 
   function refreshHealth() {
@@ -609,17 +662,35 @@ Item {
     implicitHeight: 600
     minimumSize: Qt.size(720, 480)
 
-    onVisibleChanged: {
+onVisibleChanged: {
       if (visible) {
         Qt.callLater(function() {
           if (root.effectiveView === "search") searchInput.forceActiveFocus()
           else if (root.effectiveView === "unlock") inputUnlockPassword.forceActiveFocus()
-          else if (root.effectiveView === "login") inputLoginEmail.forceActiveFocus()
+          else if (root.effectiveView === "login") {
+            if (typeof inputLoginEmail !== "undefined" && inputLoginEmail && inputLoginEmail.text.trim().length > 0) {
+              if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.forceActiveFocus()
+            } else {
+              if (typeof inputLoginEmail !== "undefined" && inputLoginEmail) inputLoginEmail.forceActiveFocus()
+            }
+          }
         })
       }
     }
 
-        Shortcut {
+    Shortcut {
+      sequence: "Ctrl+Return"
+      enabled: root.opened && root.effectiveView === "login" && !root.isBusy
+      onActivated: root.submitLoginForm()
+    }
+
+    Shortcut {
+      sequence: "Ctrl+Enter"
+      enabled: root.opened && root.effectiveView === "login" && !root.isBusy
+      onActivated: root.submitLoginForm()
+    }
+
+    Shortcut {
       sequence: "Ctrl+K"
       enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null
       onActivated: {
@@ -997,8 +1068,23 @@ Item {
                 id: inputLoginEmail
                 Layout.fillWidth: true
                 placeholderText: "Email address"
+                text: (root.config && root.config.remember_email && root.config.email) ? root.config.email : ""
                 font.pixelSize: Style.font.body
-                focus: root.effectiveView === "login"
+                focus: root.effectiveView === "login" && (!root.config || !root.config.remember_email || !root.config.email)
+                Keys.onReturnPressed: (event) => {
+                  if (event.modifiers & Qt.ControlModifier) {
+                    root.submitLoginForm()
+                  } else {
+                    inputLoginPassword.forceActiveFocus()
+                  }
+                }
+                Keys.onEnterPressed: (event) => {
+                  if (event.modifiers & Qt.ControlModifier) {
+                    root.submitLoginForm()
+                  } else {
+                    inputLoginPassword.forceActiveFocus()
+                  }
+                }
               }
 
               TextField {
@@ -1007,21 +1093,73 @@ Item {
                 echoMode: TextInput.Password
                 placeholderText: "Master Password"
                 font.pixelSize: Style.font.body
+                focus: root.effectiveView === "login" && (root.config && root.config.remember_email && root.config.email && root.config.email.length > 0)
+                Keys.onReturnPressed: (event) => { root.submitLoginForm() }
+                Keys.onEnterPressed: (event) => { root.submitLoginForm() }
               }
 
               TextField {
                 id: inputLogin2FA
+                visible: root.show2FAField
                 Layout.fillWidth: true
-                placeholderText: "2FA Verification Code (optional)"
+                placeholderText: "2FA Verification Code (from Authenticator)"
                 font.pixelSize: Style.font.body
+                Keys.onReturnPressed: (event) => { root.submitLoginForm() }
+                Keys.onEnterPressed: (event) => { root.submitLoginForm() }
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                MouseArea {
+                  id: rememberEmailArea
+                  Layout.preferredHeight: 22
+                  Layout.fillWidth: true
+                  cursorShape: Qt.PointingHandCursor
+                  hoverEnabled: true
+                  onClicked: {
+                    root.rememberEmailChecked = !root.rememberEmailChecked
+                  }
+
+                  RowLayout {
+                    anchors.fill: parent
+                    spacing: 8
+
+                    Rectangle {
+                      width: 16
+                      height: 16
+                      radius: 3
+                      color: root.rememberEmailChecked ? root.accent : "transparent"
+                      border.color: root.rememberEmailChecked ? root.accent : (rememberEmailArea.containsMouse ? root.foreground : Qt.rgba(1, 1, 1, 0.2))
+                      border.width: 1
+
+                      Text {
+                        anchors.centerIn: parent
+                        text: "✓"
+                        color: root.background
+                        font.pixelSize: 11
+                        font.bold: true
+                        visible: root.rememberEmailChecked
+                      }
+                    }
+
+                    Text {
+                      text: "Remember email"
+                      color: rememberEmailArea.containsMouse ? root.foreground : Qt.darker(root.foreground, 1.3)
+                      font.pixelSize: Style.font.bodySmall
+                      Layout.fillWidth: true
+                    }
+                  }
+                }
               }
 
               Button {
                 Layout.fillWidth: true
-                text: root.isBusy ? "Logging in..." : "Log In"
+                text: root.isBusy ? "Logging in..." : (root.show2FAField ? "Verify 2FA & Log In" : "Log In")
                 selected: true
                 enabled: !root.isBusy && inputLoginEmail.text.length > 0 && inputLoginPassword.text.length > 0
-                onClicked: root.doLoginPassword(inputLoginEmail.text.trim(), inputLoginPassword.text, inputLogin2FA.text.trim())
+                onClicked: root.submitLoginForm()
               }
             }
 
@@ -1035,6 +1173,20 @@ Item {
                 Layout.fillWidth: true
                 placeholderText: "client_id (e.g. user.xxxxx)"
                 font.pixelSize: Style.font.body
+                Keys.onReturnPressed: (event) => {
+                  if (event.modifiers & Qt.ControlModifier) {
+                    root.submitLoginForm()
+                  } else {
+                    inputClientSecret.forceActiveFocus()
+                  }
+                }
+                Keys.onEnterPressed: (event) => {
+                  if (event.modifiers & Qt.ControlModifier) {
+                    root.submitLoginForm()
+                  } else {
+                    inputClientSecret.forceActiveFocus()
+                  }
+                }
               }
 
               TextField {
@@ -1043,6 +1195,8 @@ Item {
                 echoMode: TextInput.Password
                 placeholderText: "client_secret"
                 font.pixelSize: Style.font.body
+                Keys.onReturnPressed: (event) => { root.submitLoginForm() }
+                Keys.onEnterPressed: (event) => { root.submitLoginForm() }
               }
 
               Button {
@@ -1050,7 +1204,7 @@ Item {
                 text: root.isBusy ? "Authenticating..." : "Log In with API Key"
                 selected: true
                 enabled: !root.isBusy && inputClientId.text.length > 0 && inputClientSecret.text.length > 0
-                onClicked: root.doLoginApiKey(inputClientId.text.trim(), inputClientSecret.text.trim())
+                onClicked: root.submitLoginForm()
               }
             }
           }
@@ -1901,6 +2055,14 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
+          if (data.remember_email !== undefined) {
+            root.rememberEmailChecked = (data.remember_email !== false)
+          }
+          if (data.email && root.rememberEmailChecked) {
+            if (typeof inputLoginEmail !== "undefined" && inputLoginEmail && !inputLoginEmail.text) {
+              inputLoginEmail.text = data.email
+            }
+          }
         } catch (e) {}
       }
     }
@@ -1954,7 +2116,8 @@ Item {
           var wasLocked = (root.authState.status !== "unlocked")
           root.authState = data
           if (data.status === "unlocked" && wasLocked) {
-            root.syncVault()
+            root.loadVaultItems()
+            root.syncVault(true)
           }
         } catch (e) {}
       }
@@ -1979,13 +2142,15 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
-            root.statusMessage = "Unlocked successfully."
+            root.statusMessage = "Vault unlocked successfully."
             root.searchQuery = ""
             if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
             if (typeof inputUnlockPassword !== "undefined" && inputUnlockPassword) inputUnlockPassword.text = ""
             root.refreshAuthStatus()
-            root.loadVaultItems()
-            root.syncVault(true)
+            if (data.session) {
+              root.loadVaultItems()
+              root.syncVault(true)
+            }
           } else {
             root.errorMessage = data.error || "Unlock failed."
           }
@@ -2021,6 +2186,20 @@ Item {
             root.statusMessage = "Logged in successfully."
             root.searchQuery = ""
             if (typeof searchInput !== "undefined" && searchInput) searchInput.text = ""
+
+            // Save or clear remembered email in config
+            if (root.loginMethod === "password" && typeof inputLoginEmail !== "undefined" && inputLoginEmail) {
+              var emailToSave = root.rememberEmailChecked ? inputLoginEmail.text.trim() : ""
+              root.updateConfig({
+                email: emailToSave,
+                remember_email: root.rememberEmailChecked
+              })
+            }
+
+            root.show2FAField = false
+            if (typeof inputLogin2FA !== "undefined" && inputLogin2FA) inputLogin2FA.text = ""
+            if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
+
             root.refreshAuthStatus()
             if (data.session) {
               root.loadVaultItems()
@@ -2028,6 +2207,15 @@ Item {
             }
           } else {
             root.errorMessage = data.error || "Login failed."
+            var errLower = (data.error || "").toLowerCase()
+            if (errLower.indexOf("two-step") !== -1 || errLower.indexOf("two-factor") !== -1 || errLower.indexOf("code") !== -1) {
+              root.show2FAField = true
+              Qt.callLater(function() {
+                if (typeof inputLogin2FA !== "undefined" && inputLogin2FA) {
+                  inputLogin2FA.forceActiveFocus()
+                }
+              })
+            }
           }
         } catch (e) {
           root.errorMessage = "Failed to parse login response."

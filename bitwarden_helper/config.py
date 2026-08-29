@@ -9,6 +9,8 @@ DEFAULT_BW_PATH = "bw"
 DEFAULT_AUTO_LOCK_MINUTES = 15
 DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30
 DEFAULT_MAX_OUTPUT_MB = 10
+DEFAULT_EMAIL = ""
+DEFAULT_REMEMBER_EMAIL = True
 
 @dataclass
 class Config:
@@ -17,12 +19,17 @@ class Config:
     auto_lock_minutes: int = DEFAULT_AUTO_LOCK_MINUTES
     clipboard_clear_seconds: int = DEFAULT_CLIPBOARD_CLEAR_SECONDS
     max_output_mb: int = DEFAULT_MAX_OUTPUT_MB
+    email: str = DEFAULT_EMAIL
+    remember_email: bool = DEFAULT_REMEMBER_EMAIL
 
     def update(self, **kwargs: Any) -> "Config":
         for key, value in kwargs.items():
             if value is not None and hasattr(self, key):
                 field_type = type(getattr(self, key))
-                setattr(self, key, field_type(value))
+                if field_type is bool:
+                    setattr(self, key, bool(value))
+                else:
+                    setattr(self, key, field_type(value))
         return self
 
 class ConfigManager:
@@ -45,6 +52,8 @@ class ConfigManager:
                 auto_lock_minutes=int(data.get("auto_lock_minutes", DEFAULT_AUTO_LOCK_MINUTES)),
                 clipboard_clear_seconds=int(data.get("clipboard_clear_seconds", DEFAULT_CLIPBOARD_CLEAR_SECONDS)),
                 max_output_mb=int(data.get("max_output_mb", DEFAULT_MAX_OUTPUT_MB)),
+                email=str(data.get("email", DEFAULT_EMAIL)),
+                remember_email=bool(data.get("remember_email", DEFAULT_REMEMBER_EMAIL)),
             )
         except Exception:
             return Config()
@@ -53,3 +62,4 @@ class ConfigManager:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(asdict(config), f, indent=2)
+
