@@ -72,10 +72,11 @@ Ensure the following tools are available on your system:
    omarchy-shell shell toggle icyleaf.bitwarden
    ```
 
-4. **Bind a Global Hotkey** (e.g. in Hyprland or Sway config):
-   ```ini
-   # ~/.config/hypr/hyprland.conf
-   bind = SUPER, B, exec, omarchy-shell shell toggle icyleaf.bitwarden
+4. **Bind a Global Hotkey** (in `~/.config/hypr/bindings.lua`):
+
+   ```lua
+   -- ~/.config/hypr/bindings.lua
+   o.bind("SUPER + slash", "Bitwarden Vault", "omarchy-shell shell toggle icyleaf.bitwarden")
    ```
 
 ---
@@ -98,7 +99,7 @@ omarchy-bitwarden/
 │   ├── config.py                # User configuration persistence
 │   ├── health.py                # CLI dependencies health checker
 │   └── hook.py                  # Omarchy screen-lock auto-lock hook
-└── tests/                       # Automated pytest test suites (51 test cases)
+└── tests/                       # Automated pytest test suites (59 test cases)
 ```
 
 ---
