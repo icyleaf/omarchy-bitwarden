@@ -42,7 +42,7 @@
   - **Identity**: Personal identification records (Title, Full Name, Username, Email, Phone, Company, Address, SSN, Passport, License).
   - **Secure Note**: Encrypted text notes or documentation with dedicated category classification.
   - **SSH Key**: Private and public key pairs (heuristically identified by PEM headers or custom fields `private_key`/`public_key`/`passphrase`).
-  - **Attachments**: Encrypted binary or text files associated with an item. Downloads resolve signed URLs, decrypt AES-256-CBC binary blobs using resolved `attachment.key` or `cipher_key`, and support both in-overlay popup previews (images and text) and external default app viewing via `xdg-open` (see `docs/adr/0002-vault-item-attachments-lifecycle.md`).
+  - **Attachments**: Encrypted binary or text files associated with an item. Downloads resolve signed URLs, decrypt Bitwarden `EncArrayBuffer` binary blobs (`[encType][IV][MAC][Ciphertext]`) via AES-256-CBC using resolved `attachment.key` or `cipher_key`, and support both in-overlay popup previews (images and text) and external default app viewing via `xdg-open` (see `docs/adr/0002-vault-item-attachments-lifecycle.md`).
 - **Vault Index**: An in-memory, fast-searchable structured cache of vault items updated upon `sync` or vault unlock.
 
 ### Interaction & UI Paradigms
