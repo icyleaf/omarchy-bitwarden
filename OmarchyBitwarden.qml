@@ -1464,8 +1464,10 @@ onVisibleChanged: {
               }
               Item { Layout.fillWidth: true }
               Text {
-                text: "omawarden v" + (root.cliHealth.version || "0.1.0") + " (Native Rust)"
-                color: "#818cf8"
+                text: root.cliHealth.installed
+                  ? ("omawarden v" + (root.cliHealth.version || "unknown") + " (Native Rust)")
+                  : "omawarden (Not Found)"
+                color: root.cliHealth.installed ? "#818cf8" : "#f87171"
                 font.pixelSize: Style.font.caption
                 font.bold: true
               }
@@ -1477,15 +1479,18 @@ onVisibleChanged: {
                 spacing: 4
                 Rectangle {
                   width: 8; height: 8; radius: 4
-                  color: root.cliHealth.server_reachable ? "#4ade80" : "#f87171"
+                  color: (root.cliHealth.installed && root.cliHealth.server_reachable) ? "#4ade80" : "#f87171"
                 }
                 Text {
-                  text: root.cliHealth.server_reachable ? "Server Reachable" : "Server Offline"
-                  color: root.cliHealth.server_reachable ? "#4ade80" : "#f87171"
+                  text: !root.cliHealth.installed
+                    ? "CLI Missing"
+                    : (root.cliHealth.server_reachable ? "Server Reachable" : "Server Offline")
+                  color: (root.cliHealth.installed && root.cliHealth.server_reachable) ? "#4ade80" : "#f87171"
                   font.pixelSize: Style.font.caption
                 }
               }
               RowLayout {
+                visible: root.cliHealth.installed
                 spacing: 4
                 Rectangle {
                   width: 8; height: 8; radius: 4
@@ -1498,6 +1503,7 @@ onVisibleChanged: {
                 }
               }
               RowLayout {
+                visible: root.cliHealth.installed
                 spacing: 4
                 Rectangle {
                   width: 8; height: 8; radius: 4
