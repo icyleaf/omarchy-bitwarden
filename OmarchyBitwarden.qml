@@ -3232,6 +3232,14 @@ Item {
 
   Process {
     id: totpGenProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
