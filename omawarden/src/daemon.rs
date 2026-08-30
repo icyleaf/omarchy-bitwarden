@@ -25,8 +25,14 @@ pub fn get_socket_path() -> PathBuf {
 }
 
 pub fn ensure_daemon_running() {
-    if send_daemon_request(&json!({ "action": "ping" })).is_some() {
-        return;
+    if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
+        let running_commit = resp.get("commit").and_then(|v| v.as_str()).unwrap_or("");
+        if running_commit == env!("GIT_HASH") {
+            return;
+        }
+        // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
+        let _ = send_daemon_request(&json!({ "action": "stop" }));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     if let Ok(exe_path) = env::current_exe() {
@@ -266,7 +272,17 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
     let response = match action {
-        "ping" => json!({ "ok": true, "pong": true }),
+        "ping" => json!({
+            "ok": true,
+            "pong": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "commit": env!("GIT_HASH"),
+        }),
+        "stop" => {
+            let _ = writeln!(stream, "{}", json!({ "ok": true }));
+            let _ = stream.flush();
+            std::process::exit(0);
+        }
         "status" => {
             let is_unlocked = state.is_unlocked.read().map(|g| *g).unwrap_or(false);
             let fresh_storage = state.storage_mgr.load();
