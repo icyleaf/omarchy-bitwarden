@@ -38,21 +38,20 @@ Rectangle {
     id: paletteBox
     anchors.centerIn: parent
     width: Math.min(parent.width - 64, 480)
-    height: Math.min(parent.height - 64, 380)
+    height: Math.min(parent.height - 64, 360)
     radius: 8
     color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
-    border.color: Qt.rgba(1, 1, 1, 0.15)
+    border.color: paletteRoot.borderColor
     border.width: 1
 
     MouseArea {
       anchors.fill: parent
-      // prevent clicks inside box from bubbling to background dismiss
     }
 
     ColumnLayout {
       anchors.fill: parent
-      anchors.margins: 14
-      spacing: 10
+      anchors.margins: 12
+      spacing: 8
 
       // Header Search Bar
       RowLayout {
@@ -61,21 +60,28 @@ Rectangle {
 
         Text { text: "⚡"; font.pixelSize: 13 }
 
-        TextInput {
-          id: paletteFilterInput
+        Item {
           Layout.fillWidth: true
-          color: paletteRoot.foreground
-          font.pixelSize: 12
-          selectByMouse: true
-          clip: true
-          text: paletteRoot.actionFilterQuery
-          onTextChanged: {
-            paletteRoot.actionFilterQuery = text
-            paletteRoot.selectedIndex = 0
+          Layout.preferredHeight: 28
+
+          TextInput {
+            id: paletteFilterInput
+            anchors.fill: parent
+            verticalAlignment: TextInput.AlignVCenter
+            color: paletteRoot.foreground
+            font.pixelSize: 12
+            selectByMouse: true
+            clip: true
+            text: paletteRoot.actionFilterQuery
+            onTextChanged: {
+              paletteRoot.actionFilterQuery = text
+              paletteRoot.selectedIndex = 0
+            }
           }
 
           Text {
             anchors.fill: parent
+            verticalAlignment: Text.AlignVCenter
             text: "Type an action name..."
             color: Qt.darker(paletteRoot.foreground, 1.8)
             font.pixelSize: 12
@@ -106,7 +112,7 @@ Rectangle {
           id: actionDelegate
           property bool isSelected: index === paletteRoot.selectedIndex
           width: paletteListView.width
-          height: 36
+          height: 34
           radius: 5
           color: isSelected ? Qt.rgba(paletteRoot.accent.r, paletteRoot.accent.g, paletteRoot.accent.b, 0.25) : (actionMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
           border.color: isSelected ? paletteRoot.accent : "transparent"
@@ -137,8 +143,8 @@ Rectangle {
               implicitHeight: 18
               implicitWidth: scText.implicitWidth + 8
               radius: 3
-              color: Qt.rgba(1, 1, 1, 0.08)
-              border.color: Qt.rgba(1, 1, 1, 0.15)
+              color: Qt.rgba(0, 0, 0, 0.2)
+              border.color: paletteRoot.borderColor
               border.width: 1
 
               Text {

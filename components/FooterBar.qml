@@ -18,7 +18,7 @@ Rectangle {
   signal lockTriggered()
   signal settingsTriggered()
 
-  height: 34
+  height: 32
   Layout.fillWidth: true
   color: Qt.rgba(0, 0, 0, 0.2)
   border.color: footerRoot.borderColor
@@ -29,7 +29,7 @@ Rectangle {
     anchors.fill: parent
     anchors.leftMargin: 10
     anchors.rightMargin: 10
-    spacing: 8
+    spacing: 6
 
     // 1. Bottom Left: Actions, Sync, Lock, Settings
     RowLayout {
@@ -41,8 +41,8 @@ Rectangle {
         implicitHeight: 22
         implicitWidth: actionsBtnRow.implicitWidth + 12
         radius: 4
-        color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.15)
+        border.color: footerRoot.borderColor
         border.width: 1
 
         RowLayout {
@@ -67,8 +67,8 @@ Rectangle {
         implicitHeight: 22
         implicitWidth: syncBtnRow.implicitWidth + 12
         radius: 4
-        color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.15)
+        border.color: footerRoot.borderColor
         border.width: 1
 
         RowLayout {
@@ -93,8 +93,8 @@ Rectangle {
         implicitHeight: 22
         implicitWidth: lockBtnRow.implicitWidth + 12
         radius: 4
-        color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.15)
+        border.color: footerRoot.borderColor
         border.width: 1
 
         RowLayout {
@@ -119,8 +119,8 @@ Rectangle {
         implicitHeight: 22
         implicitWidth: settingsBtnRow.implicitWidth + 12
         radius: 4
-        color: settingsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: settingsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.15)
+        border.color: footerRoot.borderColor
         border.width: 1
 
         RowLayout {
@@ -152,7 +152,9 @@ Rectangle {
         implicitHeight: 18
         implicitWidth: overlayVerText.implicitWidth + 8
         radius: 3
-        color: Qt.rgba(0.5, 0.5, 0.5, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.15)
+        border.color: footerRoot.borderColor
+        border.width: 1
 
         Text {
           id: overlayVerText
@@ -174,7 +176,9 @@ Rectangle {
         implicitHeight: 18
         implicitWidth: backendVerText.implicitWidth + 8
         radius: 3
-        color: Qt.rgba(0.23, 0.51, 0.96, 0.15)
+        color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.15)
+        border.color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.3)
+        border.width: 1
 
         Text {
           id: backendVerText

@@ -266,6 +266,34 @@ impl BitwardenApiClient {
         }
     }
 
+    pub fn refresh_token_grant(&self, refresh_token: &str) -> Result<TokenResponse, ApiError> {
+        let identity_url = format!("{}/identity/connect/token", self.server_url);
+        let fallback_url = format!("{}/connect/token", self.server_url);
+
+        let mut form_params = HashMap::new();
+        form_params.insert("grant_type", "refresh_token".to_string());
+        form_params.insert("client_id", "web".to_string());
+        form_params.insert("refresh_token", refresh_token.to_string());
+
+        let mut resp = self.client.post(&identity_url).form(&form_params).send();
+        if let Ok(ref r) = resp {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = self.client.post(&fallback_url).form(&form_params).send();
+            }
+        }
+
+        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let status = resp.status();
+        let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
+
+        if status.is_success() {
+            serde_json::from_str::<TokenResponse>(&body_text)
+                .map_err(|e| ApiError::Json(e.to_string()))
+        } else {
+            Err(ApiError::AuthFailed(format!("Refresh token failed: HTTP {}", status)))
+        }
+    }
+
     pub fn sync_vault(&self, access_token: &str) -> Result<SyncResponse, ApiError> {
         let url = format!("{}/api/sync", self.server_url);
         let resp = self

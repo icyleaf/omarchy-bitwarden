@@ -13,25 +13,25 @@ Item {
 
   ColumnLayout {
     anchors.fill: parent
-    anchors.margins: 24
-    spacing: 16
+    anchors.margins: 20
+    spacing: 14
 
     // Header Hero
     RowLayout {
       spacing: 12
 
       Rectangle {
-        width: 42
-        height: 42
+        width: 38
+        height: 38
         radius: 8
-        color: Qt.rgba(emptyInspectorRoot.accent.r, emptyInspectorRoot.accent.g, emptyInspectorRoot.accent.b, 0.2)
+        color: Qt.rgba(emptyInspectorRoot.accent.r, emptyInspectorRoot.accent.g, emptyInspectorRoot.accent.b, 0.15)
         border.color: Qt.rgba(emptyInspectorRoot.accent.r, emptyInspectorRoot.accent.g, emptyInspectorRoot.accent.b, 0.4)
         border.width: 1
 
         Text {
           anchors.centerIn: parent
           text: "🛡️"
-          font.pixelSize: 22
+          font.pixelSize: 20
         }
       }
 
@@ -40,7 +40,7 @@ Item {
         Text {
           text: "Bitwarden Vault"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 14
+          font.pixelSize: 13
           font.weight: Font.DemiBold
         }
         Text {
@@ -68,8 +68,8 @@ Item {
 
     GridLayout {
       columns: 2
-      rowSpacing: 10
-      columnSpacing: 16
+      rowSpacing: 8
+      columnSpacing: 14
       Layout.fillWidth: true
 
       // Enter
@@ -77,8 +77,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k1.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k1
@@ -101,8 +101,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k2.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k2
@@ -125,8 +125,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k3.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k3
@@ -149,8 +149,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k4.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k4
@@ -173,8 +173,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k5.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k5
@@ -197,8 +197,8 @@ Item {
         implicitHeight: 22
         implicitWidth: k6.implicitWidth + 12
         radius: 4
-        color: Qt.rgba(1, 1, 1, 0.08)
-        border.color: Qt.rgba(1, 1, 1, 0.15)
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
           id: k6
@@ -222,9 +222,9 @@ Item {
     // Footer Hint
     Rectangle {
       Layout.fillWidth: true
-      implicitHeight: 28
+      implicitHeight: 26
       radius: 4
-      color: Qt.rgba(1, 1, 1, 0.04)
+      color: Qt.rgba(0, 0, 0, 0.15)
       border.color: emptyInspectorRoot.borderColor
       border.width: 1
 

@@ -82,6 +82,7 @@ Item {
   property string errorMessage: ""
   property bool isBusy: false
   property bool isLoadingVault: false
+  property bool lastSyncWasManual: false
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -185,6 +186,7 @@ Item {
   }
 
   function syncVault(isBackground) {
+    root.lastSyncWasManual = !isBackground
     if (!isBackground) {
       root.isBusy = true
       root.statusMessage = "Syncing vault with Bitwarden..."
@@ -1279,13 +1281,17 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
-        root.statusMessage = "Vault synchronized."
+        if (root.lastSyncWasManual) {
+          root.statusMessage = "Vault synchronized."
+        }
         root.loadVaultItems()
       }
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0) root.statusMessage = "Vault sync failed."
+      if (code !== 0 && root.lastSyncWasManual) {
+        root.errorMessage = "Vault sync failed."
+      }
     }
   }
 

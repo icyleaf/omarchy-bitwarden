@@ -166,9 +166,31 @@ impl DaemonState {
             .ok_or_else(|| "Session token missing. Please log in.".to_string())?;
 
         let client = BitwardenApiClient::new(&storage.server_url);
-        let sync_resp = client
-            .sync_vault(token)
-            .map_err(|e| format!("Sync failed: {}", e))?;
+        let sync_resp_res = client.sync_vault(token);
+
+        let sync_resp = match sync_resp_res {
+            Ok(resp) => resp,
+            Err(crate::api::ApiError::Http(ref msg)) if msg.contains("401") => {
+                if let Some(ref ref_tok) = storage.refresh_token {
+                    if let Ok(tok_resp) = client.refresh_token_grant(ref_tok) {
+                        let mut updated_tok = storage.clone();
+                        updated_tok.access_token = Some(tok_resp.access_token.clone());
+                        if let Some(new_ref) = tok_resp.refresh_token {
+                            updated_tok.refresh_token = Some(new_ref);
+                        }
+                        let _ = self.storage_mgr.save(&updated_tok);
+                        client
+                            .sync_vault(&tok_resp.access_token)
+                            .map_err(|e| format!("Sync failed: {}", e))?
+                    } else {
+                        return Err("Session expired. Please log in again.".to_string());
+                    }
+                } else {
+                    return Err("Session expired. Please log in again.".to_string());
+                }
+            }
+            Err(e) => return Err(format!("Sync failed: {}", e)),
+        };
 
         let count = sync_resp.ciphers.len();
         let mut updated = storage.clone();

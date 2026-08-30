@@ -74,7 +74,7 @@ ScrollView {
           implicitWidth: backBtnRow.implicitWidth + 10
           radius: 4
           color: backMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-          border.color: Qt.rgba(1, 1, 1, 0.15)
+          border.color: inspectorRoot.borderColor
           border.width: 1
 
           RowLayout {
@@ -112,7 +112,7 @@ ScrollView {
           implicitWidth: openExtText.implicitWidth + 10
           radius: 4
           color: openExtMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
-          border.color: Qt.rgba(1, 1, 1, 0.15)
+          border.color: inspectorRoot.borderColor
           border.width: 1
 
           Text {

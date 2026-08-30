@@ -18,13 +18,13 @@ ColumnLayout {
   signal categorySelected(string category)
   signal clearSearchRequested()
 
-  spacing: 8
+  spacing: 6
   Layout.fillWidth: true
 
   // 1. Search Box Bar
   Rectangle {
     Layout.fillWidth: true
-    height: 40
+    height: 34
     radius: 6
     color: Qt.rgba(0, 0, 0, 0.25)
     border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
@@ -32,31 +32,39 @@ ColumnLayout {
 
     RowLayout {
       anchors.fill: parent
-      anchors.leftMargin: 12
-      anchors.rightMargin: 12
-      spacing: 8
+      anchors.leftMargin: 10
+      anchors.rightMargin: 10
+      spacing: 6
 
       Text {
         text: "🔍"
-        font.pixelSize: 13
+        font.pixelSize: 12
         color: Qt.darker(searchHeaderRoot.foreground, 1.4)
+        Layout.alignment: Qt.AlignVCenter
       }
 
-      TextInput {
-        id: searchInputField
+      Item {
         Layout.fillWidth: true
-        color: searchHeaderRoot.foreground
-        font.pixelSize: 13
-        selectByMouse: true
-        clip: true
-        activeFocusOnTab: true
+        Layout.fillHeight: true
+
+        TextInput {
+          id: searchInputField
+          anchors.fill: parent
+          verticalAlignment: TextInput.AlignVCenter
+          color: searchHeaderRoot.foreground
+          font.pixelSize: 12
+          selectByMouse: true
+          clip: true
+          activeFocusOnTab: true
+        }
 
         Text {
           anchors.fill: parent
+          verticalAlignment: Text.AlignVCenter
           text: "Search Bitwarden vault (names, usernames, notes, tags)..."
           color: Qt.darker(searchHeaderRoot.foreground, 2.0)
-          font.pixelSize: 13
-          visible: !searchInputField.text && !searchInputField.activeFocus
+          font.pixelSize: 12
+          visible: !searchInputField.text
         }
       }
 
@@ -65,7 +73,9 @@ ColumnLayout {
         visible: Boolean(searchInputField.text)
         text: "✕"
         color: clearMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.5)
-        font.pixelSize: 12
+        font.pixelSize: 11
+        Layout.alignment: Qt.AlignVCenter
+
         MouseArea {
           id: clearMouse
           anchors.fill: parent
