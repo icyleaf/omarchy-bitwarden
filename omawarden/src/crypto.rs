@@ -378,9 +378,57 @@ pub fn decrypt_aes_cbc_bytes(
 pub fn parse_rsa_private_key_der(der_bytes: &[u8]) -> Result<rsa::RsaPrivateKey, CryptoError> {
     use rsa::pkcs1::DecodeRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
-    rsa::RsaPrivateKey::from_pkcs8_der(der_bytes)
-        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_der(der_bytes))
-        .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid RSA private key DER: {}", e)))
+
+    if let Ok(key) = rsa::RsaPrivateKey::from_pkcs8_der(der_bytes) {
+        return Ok(key);
+    }
+    if let Ok(key) = rsa::RsaPrivateKey::from_pkcs1_der(der_bytes) {
+        return Ok(key);
+    }
+
+    // Try decoding if der_bytes is UTF-8 text (Base64 string or PEM formatted)
+    if let Ok(text) = std::str::from_utf8(der_bytes) {
+        let text_clean = text.trim();
+        // 1. Try raw Base64 decode
+        if let Ok(decoded_b64) = BASE64.decode(text_clean) {
+            if let Ok(key) = rsa::RsaPrivateKey::from_pkcs8_der(&decoded_b64) {
+                return Ok(key);
+            }
+            if let Ok(key) = rsa::RsaPrivateKey::from_pkcs1_der(&decoded_b64) {
+                return Ok(key);
+            }
+        }
+        // 2. Try PEM decode
+        if let Ok(key) = rsa::RsaPrivateKey::from_pkcs8_pem(text_clean) {
+            return Ok(key);
+        }
+        if let Ok(key) = rsa::RsaPrivateKey::from_pkcs1_pem(text_clean) {
+            return Ok(key);
+        }
+    }
+
+    Err(CryptoError::DecryptionFailed(
+        "Invalid RSA private key (failed PKCS#8/PKCS#1 DER/Base64/PEM parsing)".to_string(),
+    ))
+}
+
+pub fn parse_symmetric_key_from_decrypted_bytes(bytes: &[u8]) -> Option<SymmetricCryptoKey> {
+    if bytes.len() == 32 || bytes.len() == 64 {
+        if let Ok(k) = SymmetricCryptoKey::from_raw_bytes(bytes) {
+            return Some(k);
+        }
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let text_clean = text.trim();
+        if let Ok(decoded) = BASE64.decode(text_clean) {
+            if decoded.len() == 32 || decoded.len() == 64 {
+                if let Ok(k) = SymmetricCryptoKey::from_raw_bytes(&decoded) {
+                    return Some(k);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

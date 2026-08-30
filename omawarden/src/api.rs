@@ -361,7 +361,9 @@ pub fn decrypt_sync_ciphers_with_context(
                         _ => None,
                     };
                     if let Some(key_bytes) = raw_key {
-                        if let Ok(sym_key) = SymmetricCryptoKey::from_raw_bytes(&key_bytes) {
+                        if let Some(sym_key) =
+                            crate::crypto::parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                        {
                             org_keys.insert(org_id.to_string(), sym_key);
                         }
                     }
@@ -433,7 +435,9 @@ pub fn decrypt_sync_ciphers_with_context(
                     .decrypt(base_key)
                     .or_else(|_| parsed_k.decrypt(user_key));
                 if let Ok(raw_k_bytes) = raw_k {
-                    if let Ok(k) = SymmetricCryptoKey::from_raw_bytes(&raw_k_bytes) {
+                    if let Some(k) =
+                        crate::crypto::parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
+                    {
                         cipher_key = k;
                     }
                 }
