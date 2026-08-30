@@ -18,6 +18,10 @@ The Omarchy Bitwarden plugin needs to provide instantaneous, secure, and keyboar
 3. **SSH Key Detection Heuristics**:
    - Automatically detect SSH keys by inspecting PEM headers (`-----BEGIN ... PRIVATE KEY-----`) and dedicated custom fields (`private_key`, `public_key`), elevating them to top-level SSH Key search items with dedicated copy actions.
 
+4. **Protected Stdin Credential Seam**:
+   - Strictly prohibit passing passwords, 2FA codes, API client secrets, or sensitive tokens via process arguments (`argv`) or child process environment dictionaries (`os.environ`).
+   - Deliver all authentication payloads from QML to the helper, and from the helper to `bw` CLI, exclusively via standard input descriptor streams (`/proc/self/fd/0` and stdin pipes) supporting multiline and JSON structured payloads.
+
 ## Consequences
-- **Positive**: Blazing fast search response times (0ms UI latency), robust security with zero plaintext disk leakage of session tokens, clean separation of UI and cryptographic operations.
+- **Positive**: Blazing fast search response times (0ms UI latency), robust security with zero plaintext disk leakage of session tokens, clean separation of UI and cryptographic operations, and hardened process-isolation that eliminates local `/proc/$PID/cmdline` and `/proc/$PID/environ` credential inspection by non-root processes.
 - **Trade-off**: Requires `bw` CLI and a FreeDesktop Secret Service daemon (standard on Omarchy/Arch desktops via `gnome-keyring` or `keepassxc`).
