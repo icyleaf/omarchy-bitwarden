@@ -1,7 +1,7 @@
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
+pub use base64::engine::general_purpose::STANDARD as BASE64;
+pub use base64::Engine;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hkdf::Hkdf;
@@ -441,6 +441,51 @@ pub fn parse_symmetric_key_from_decrypted_bytes(bytes: &[u8]) -> Option<Symmetri
     None
 }
 
+pub fn decrypt_attachment_blob(
+    blob: &[u8],
+    key: &SymmetricCryptoKey,
+) -> Result<Vec<u8>, CryptoError> {
+    if blob.len() < 16 {
+        return Ok(blob.to_vec());
+    }
+
+    let iv = &blob[0..16];
+    let ciphertext_and_mac = &blob[16..];
+
+    // Case 1: blob has HMAC appended (last 32 bytes)
+    if ciphertext_and_mac.len() > 32 {
+        let ct_len = ciphertext_and_mac.len() - 32;
+        let ct = &ciphertext_and_mac[..ct_len];
+        let mac = &ciphertext_and_mac[ct_len..];
+
+        // If MAC key is present, verify MAC
+        if let Some(mac_key) = key.mac_key.as_ref() {
+            if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                hmac.update(iv);
+                hmac.update(ct);
+                let calculated_mac = hmac.finalize().into_bytes();
+                if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                    if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                        return Ok(decrypted);
+                    }
+                }
+            }
+        }
+
+        // Try decrypting without MAC verification (or if HMAC was optional)
+        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+            return Ok(decrypted);
+        }
+    }
+
+    // Case 2: blob has no HMAC appended (entire slice is ciphertext)
+    if let Ok(decrypted) = decrypt_aes_cbc_bytes(ciphertext_and_mac, iv, &key.enc_key) {
+        return Ok(decrypted);
+    }
+
+    Ok(blob.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,4 +576,32 @@ fn test_node_hkdf_match() {
 
     assert_eq!(hex_enc1, node_enc_hex);
     assert_eq!(hex_mac1, node_mac_hex);
+}
+
+#[test]
+fn test_decrypt_attachment_blob() {
+    use cbc::cipher::BlockEncryptMut;
+
+    let raw_key = [42u8; 64];
+    let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+    let iv = [9u8; 16];
+    let plaintext = b"JFIF JPEG Image Content Data";
+
+    // Encrypt AES-256-CBC
+    let cipher = cbc::Encryptor::<aes::Aes256>::new((&key.enc_key).into(), (&iv).into());
+    let mut buf = vec![0u8; plaintext.len() + 16];
+    buf[..plaintext.len()].copy_from_slice(plaintext);
+    let ciphertext = cipher
+        .encrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf, plaintext.len())
+        .unwrap()
+        .to_vec();
+
+    // Form blob: [16 bytes IV][ciphertext]
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&iv);
+    blob.extend_from_slice(&ciphertext);
+
+    let decrypted = decrypt_attachment_blob(&blob, &key).unwrap();
+    assert_eq!(decrypted, plaintext);
 }

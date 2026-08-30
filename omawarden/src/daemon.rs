@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::api::BitwardenApiClient;
+use crate::crypto::{Engine, BASE64};
 use crate::storage::{StorageManager, VaultStorage};
 use crate::vault::{VaultItem, VaultManager};
 
@@ -207,6 +208,113 @@ impl DaemonState {
 
         Ok(count)
     }
+
+    pub fn resolve_attachment_key(
+        &self,
+        item_id: &str,
+        attachment_id: &str,
+    ) -> Option<crate::crypto::SymmetricCryptoKey> {
+        let user_key_guard = self.user_key.read().ok()?;
+        let user_key = user_key_guard.as_ref()?;
+        let storage_guard = self.storage.read().ok()?;
+
+        // 1. Resolve user RSA private key if available
+        let rsa_priv_key = if let Some(ref enc_priv) = storage_guard.enc_private_key {
+            if let Ok(enc_priv_str) = crate::crypto::EncString::parse(enc_priv) {
+                if let Ok(der_bytes) = enc_priv_str.decrypt(user_key) {
+                    crate::crypto::parse_rsa_private_key_der(&der_bytes).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 2. Find cipher in storage
+        let cipher = storage_guard
+            .ciphers
+            .iter()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))?;
+
+        // 3. Resolve base key (Org key or user_key)
+        let org_id_opt = cipher.get("organizationId").and_then(|v| v.as_str());
+        let mut base_key = user_key.clone();
+        if let Some(oid) = org_id_opt {
+            if let Some(org) = storage_guard
+                .organizations
+                .iter()
+                .find(|o| o.get("id").and_then(|v| v.as_str()) == Some(oid))
+            {
+                if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
+                    if let Ok(enc_str) = crate::crypto::EncString::parse(org_key_enc) {
+                        let raw_key = match enc_str.enc_type {
+                            3..=6 => {
+                                if let Some(ref rsa) = rsa_priv_key {
+                                    enc_str.decrypt_rsa(rsa).ok()
+                                } else {
+                                    None
+                                }
+                            }
+                            0..=2 => enc_str.decrypt(user_key).ok(),
+                            _ => None,
+                        };
+                        if let Some(key_bytes) = raw_key {
+                            if let Some(sym_key) =
+                                crate::crypto::parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                            {
+                                base_key = sym_key;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Resolve cipher_key
+        let mut cipher_key = base_key.clone();
+        if let Some(enc_key_str) = cipher.get("key").and_then(|v| v.as_str()) {
+            if let Ok(parsed_k) = crate::crypto::EncString::parse(enc_key_str) {
+                let raw_k = parsed_k
+                    .decrypt(&base_key)
+                    .or_else(|_| parsed_k.decrypt(user_key));
+                if let Ok(raw_k_bytes) = raw_k {
+                    if let Some(k) =
+                        crate::crypto::parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
+                    {
+                        cipher_key = k;
+                    }
+                }
+            }
+        }
+
+        // 5. Resolve attachment_key
+        if let Some(attachments) = cipher.get("attachments").and_then(|v| v.as_array()) {
+            if let Some(att) = attachments
+                .iter()
+                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(attachment_id))
+            {
+                if let Some(att_key_enc) = att.get("key").and_then(|v| v.as_str()) {
+                    if let Ok(parsed_k) = crate::crypto::EncString::parse(att_key_enc) {
+                        let raw_k = parsed_k
+                            .decrypt(&cipher_key)
+                            .or_else(|_| parsed_k.decrypt(user_key));
+                        if let Ok(raw_k_bytes) = raw_k {
+                            if let Some(k) = crate::crypto::parse_symmetric_key_from_decrypted_bytes(
+                                &raw_k_bytes,
+                            ) {
+                                return Some(k);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(cipher_key)
+    }
 }
 
 pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
@@ -332,6 +440,26 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 let vault_mgr = VaultManager::new("", None, None);
                 let results = vault_mgr.search(&items, query, category);
                 json!(results)
+            }
+        }
+        "get_attachment_key" => {
+            let item_id = req.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+            let attachment_id = req
+                .get("attachment_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if let Some(key) = state.resolve_attachment_key(item_id, attachment_id) {
+                let mut raw = Vec::new();
+                raw.extend_from_slice(&key.enc_key);
+                if let Some(mac_k) = key.mac_key {
+                    raw.extend_from_slice(&mac_k);
+                }
+                json!({
+                    "ok": true,
+                    "key_b64": BASE64.encode(&raw)
+                })
+            } else {
+                json!({ "ok": false, "error": "Unable to resolve attachment key (vault locked or missing item)" })
             }
         }
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),

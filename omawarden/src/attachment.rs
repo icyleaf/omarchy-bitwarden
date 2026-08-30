@@ -6,6 +6,7 @@ use std::process::Command;
 use std::thread;
 
 use crate::config::ConfigManager;
+use crate::crypto::{Engine, BASE64};
 use crate::keyring::KeyringManager;
 use crate::storage::StorageManager;
 
@@ -243,22 +244,33 @@ pub fn get_attachment(
         }
     };
 
-    // Attempt decryption if bytes are encrypted EncString (starts with 2. or 0.) or raw AES-CBC
-    if let Ok(str_val) = std::str::from_utf8(&bytes) {
-        if (str_val.starts_with("2.") || str_val.starts_with("0."))
-            && crate::crypto::EncString::parse(str_val).is_ok()
-        {
-            if let Some(cipher) = storage
-                .ciphers
-                .iter()
-                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))
-            {
-                if let Some(enc_k_str) = cipher.get("key").and_then(|v| v.as_str()) {
-                    let _ = crate::crypto::EncString::parse(enc_k_str);
+    // Resolve attachment key and decrypt binary attachment blob
+    let att_key: Option<crate::crypto::SymmetricCryptoKey> = {
+        crate::daemon::ensure_daemon_running();
+        if let Some(resp) = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "get_attachment_key",
+            "item_id": item_id,
+            "attachment_id": attachment_id
+        })) {
+            if let Some(key_b64) = resp.get("key_b64").and_then(|v| v.as_str()) {
+                if let Ok(key_bytes) = BASE64.decode(key_b64) {
+                    crate::crypto::parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
         }
-    }
+    };
+
+    let bytes = if let Some(ref k) = att_key {
+        crate::crypto::decrypt_attachment_blob(&bytes, k).unwrap_or(bytes)
+    } else {
+        bytes
+    };
 
     if let Err(e) = fs::write(&dest_path, &bytes) {
         return AttachmentResponse {
