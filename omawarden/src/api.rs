@@ -302,13 +302,23 @@ pub fn decrypt_cipher_string(
 }
 
 pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) -> Vec<VaultItem> {
-    let mut items: Vec<VaultItem> = Vec::new();
+    let mut items = Vec::new();
 
     for c in ciphers {
+        // Filter out soft-deleted items (items in Trash / Recycle Bin)
+        let is_deleted = c
+            .get("deletedDate")
+            .or_else(|| c.get("DeletedDate"))
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if is_deleted {
+            continue;
+        }
+
         let id = c
             .get("id")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .unwrap_or_default()
             .to_string();
         let item_type = c.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
         let favorite = c.get("favorite").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -887,5 +897,30 @@ mod tests {
             items[2].notes.as_deref(),
             Some("Mnemonic: alpha beta gamma delta")
         );
+    }
+
+    #[test]
+    fn test_filter_soft_deleted_ciphers() {
+        let raw_user_key = [9u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "active-1",
+                "type": 4,
+                "deletedDate": null,
+                "name": encrypt_test_string("Active Identity", &user_key),
+            }),
+            json!({
+                "id": "deleted-1",
+                "type": 4,
+                "deletedDate": "2024-01-01T00:00:00Z",
+                "name": encrypt_test_string("Deleted Identity in Trash", &user_key),
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "active-1");
     }
 }
