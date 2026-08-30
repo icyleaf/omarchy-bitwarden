@@ -445,42 +445,94 @@ pub fn decrypt_attachment_blob(
     blob: &[u8],
     key: &SymmetricCryptoKey,
 ) -> Result<Vec<u8>, CryptoError> {
-    if blob.len() < 16 {
-        return Ok(blob.to_vec());
+    if blob.is_empty() {
+        return Ok(Vec::new());
     }
 
-    let iv = &blob[0..16];
-    let ciphertext_and_mac = &blob[16..];
+    // Standard Bitwarden EncArrayBuffer format:
+    // Format 1: [1 byte encType == 2][16 bytes IV][32 bytes MAC][Ciphertext]
+    if blob.len() >= 49 && blob[0] == 2 {
+        let iv = &blob[1..17];
+        let mac = &blob[17..49];
+        let ct = &blob[49..];
 
-    // Case 1: blob has HMAC appended (last 32 bytes)
-    if ciphertext_and_mac.len() > 32 {
-        let ct_len = ciphertext_and_mac.len() - 32;
-        let ct = &ciphertext_and_mac[..ct_len];
-        let mac = &ciphertext_and_mac[ct_len..];
-
-        // If MAC key is present, verify MAC
-        if let Some(mac_key) = key.mac_key.as_ref() {
-            if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
-                hmac.update(iv);
-                hmac.update(ct);
-                let calculated_mac = hmac.finalize().into_bytes();
-                if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
-                    if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                        return Ok(decrypted);
+        if ct.len().is_multiple_of(16) {
+            if let Some(mac_key) = key.mac_key.as_ref() {
+                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                    hmac.update(iv);
+                    hmac.update(ct);
+                    let calculated_mac = hmac.finalize().into_bytes();
+                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                            return Ok(decrypted);
+                        }
                     }
                 }
             }
-        }
 
-        // Try decrypting without MAC verification (or if HMAC was optional)
-        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-            return Ok(decrypted);
+            // If MAC key not present or verification bypassed, attempt AES decrypt
+            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                return Ok(decrypted);
+            }
         }
     }
 
-    // Case 2: blob has no HMAC appended (entire slice is ciphertext)
-    if let Ok(decrypted) = decrypt_aes_cbc_bytes(ciphertext_and_mac, iv, &key.enc_key) {
-        return Ok(decrypted);
+    // Format 2: [1 byte encType == 0][16 bytes IV][Ciphertext]
+    if blob.len() >= 17 && blob[0] == 0 {
+        let iv = &blob[1..17];
+        let ct = &blob[17..];
+        if ct.len().is_multiple_of(16) {
+            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                return Ok(decrypted);
+            }
+        }
+    }
+
+    // Format 3: [16 bytes IV][32 bytes MAC][Ciphertext] (no leading encType byte)
+    if blob.len() >= 48 {
+        let iv = &blob[0..16];
+        let mac = &blob[16..48];
+        let ct = &blob[48..];
+        if ct.len().is_multiple_of(16) {
+            if let Some(mac_key) = key.mac_key.as_ref() {
+                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                    hmac.update(iv);
+                    hmac.update(ct);
+                    let calculated_mac = hmac.finalize().into_bytes();
+                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                            return Ok(decrypted);
+                        }
+                    }
+                }
+            }
+            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                return Ok(decrypted);
+            }
+        }
+    }
+
+    // Format 4: [16 bytes IV][Ciphertext][32 bytes MAC] (trailing MAC)
+    if blob.len() >= 48 {
+        let iv = &blob[0..16];
+        let ct_len = blob.len() - 48;
+        if ct_len.is_multiple_of(16) {
+            let ct = &blob[16..16 + ct_len];
+            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                return Ok(decrypted);
+            }
+        }
+    }
+
+    // Format 5: [16 bytes IV][Ciphertext]
+    if blob.len() >= 16 {
+        let iv = &blob[0..16];
+        let ct = &blob[16..];
+        if ct.len().is_multiple_of(16) {
+            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                return Ok(decrypted);
+            }
+        }
     }
 
     Ok(blob.to_vec())
@@ -597,11 +649,26 @@ fn test_decrypt_attachment_blob() {
         .unwrap()
         .to_vec();
 
-    // Form blob: [16 bytes IV][ciphertext]
+    // Test Standard Bitwarden EncArrayBuffer Format 1: [encType=2][IV][MAC][Ciphertext]
+    let mut hmac = HmacSha256::new_from_slice(key.mac_key.as_ref().unwrap()).unwrap();
+    hmac.update(&iv);
+    hmac.update(&ciphertext);
+    let mac = hmac.finalize().into_bytes();
+
+    let mut bitwarden_blob = Vec::new();
+    bitwarden_blob.push(2u8);
+    bitwarden_blob.extend_from_slice(&iv);
+    bitwarden_blob.extend_from_slice(&mac);
+    bitwarden_blob.extend_from_slice(&ciphertext);
+
+    let decrypted1 = decrypt_attachment_blob(&bitwarden_blob, &key).unwrap();
+    assert_eq!(decrypted1, plaintext);
+
+    // Test Format 5: [16 bytes IV][ciphertext]
     let mut blob = Vec::new();
     blob.extend_from_slice(&iv);
     blob.extend_from_slice(&ciphertext);
 
-    let decrypted = decrypt_attachment_blob(&blob, &key).unwrap();
-    assert_eq!(decrypted, plaintext);
+    let decrypted2 = decrypt_attachment_blob(&blob, &key).unwrap();
+    assert_eq!(decrypted2, plaintext);
 }

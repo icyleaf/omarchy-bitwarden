@@ -267,9 +267,37 @@ pub fn get_attachment(
     };
 
     let bytes = if let Some(ref k) = att_key {
-        crate::crypto::decrypt_attachment_blob(&bytes, k).unwrap_or(bytes)
+        match crate::crypto::decrypt_attachment_blob(&bytes, k) {
+            Ok(decrypted) => decrypted,
+            Err(e) => {
+                return AttachmentResponse {
+                    ok: false,
+                    error: Some(format!("Failed to decrypt attachment: {:?}", e)),
+                    path: None,
+                    filename: None,
+                    action: None,
+                    is_image: None,
+                    is_text: None,
+                    text_content: None,
+                    size: None,
+                };
+            }
+        }
     } else {
-        bytes
+        return AttachmentResponse {
+            ok: false,
+            error: Some(
+                "Vault is locked or decryption key is unavailable. Please unlock your vault first."
+                    .to_string(),
+            ),
+            path: None,
+            filename: None,
+            action: None,
+            is_image: None,
+            is_text: None,
+            text_content: None,
+            size: None,
+        };
     };
 
     if let Err(e) = fs::write(&dest_path, &bytes) {
