@@ -182,6 +182,13 @@ impl AuthManager {
         // Pull initial sync
         if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
             storage.ciphers = sync_data.ciphers;
+            storage.folders = sync_data.folders;
+            storage.collections = sync_data.collections;
+            if let Some(ref prof) = sync_data.profile {
+                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                    storage.organizations = orgs.clone();
+                }
+            }
             storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
         }
 
@@ -231,6 +238,13 @@ impl AuthManager {
         // Pull initial sync
         if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
             storage.ciphers = sync_data.ciphers;
+            storage.folders = sync_data.folders;
+            storage.collections = sync_data.collections;
+            if let Some(ref prof) = sync_data.profile {
+                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                    storage.organizations = orgs.clone();
+                }
+            }
             storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
         }
 

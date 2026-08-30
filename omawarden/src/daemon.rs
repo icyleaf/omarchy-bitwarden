@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::api::{decrypt_sync_ciphers, BitwardenApiClient};
+use crate::api::BitwardenApiClient;
 use crate::storage::{StorageManager, VaultStorage};
 use crate::vault::{VaultItem, VaultManager};
 
@@ -125,7 +125,13 @@ impl DaemonState {
             .unlock_user_key(password, &fresh_storage)
             .map_err(|e| format!("Unlock failed: {:?}", e))?;
 
-        let items = decrypt_sync_ciphers(&fresh_storage.ciphers, &user_key);
+        let items = crate::api::decrypt_sync_ciphers_with_context(
+            &fresh_storage.ciphers,
+            &fresh_storage.folders,
+            &fresh_storage.organizations,
+            &user_key,
+            fresh_storage.enc_private_key.as_deref(),
+        );
         let count = items.len();
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
@@ -160,6 +166,13 @@ impl DaemonState {
         let count = sync_resp.ciphers.len();
         let mut updated = storage.clone();
         updated.ciphers = sync_resp.ciphers;
+        updated.folders = sync_resp.folders;
+        updated.collections = sync_resp.collections;
+        if let Some(ref prof) = sync_resp.profile {
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                updated.organizations = orgs.clone();
+            }
+        }
         updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
         self.storage_mgr
@@ -169,7 +182,13 @@ impl DaemonState {
         // Re-decrypt all items in memory if unlocked
         if let Ok(key_guard) = self.user_key.read() {
             if let Some(user_key) = key_guard.as_ref() {
-                let items = decrypt_sync_ciphers(&updated.ciphers, user_key);
+                let items = crate::api::decrypt_sync_ciphers_with_context(
+                    &updated.ciphers,
+                    &updated.folders,
+                    &updated.organizations,
+                    user_key,
+                    updated.enc_private_key.as_deref(),
+                );
                 if let Ok(mut dec_items) = self.decrypted_items.write() {
                     *dec_items = items;
                 }

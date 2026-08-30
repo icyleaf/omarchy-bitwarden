@@ -1,9 +1,17 @@
 [tools]
 rust = "latest"
 
+[tasks.cli]
+description = "Run the CLI"
+run = "./target/release/omawarden"
+
 [tasks.build]
 description = "Build the CLI"
 run = "cargo build"
+
+[tasks.dev-cli]
+description = "Run the CLI in development mode"
+run = "cargo run --"
 
 [tasks.build-release]
 description = "Build the CLI in release mode"

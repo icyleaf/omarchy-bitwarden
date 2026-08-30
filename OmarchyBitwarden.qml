@@ -543,6 +543,22 @@ Item {
       }
     }
 
+    if (item.folder_name) {
+      actions.push({
+        label: "Copy Folder (" + item.folder_name + ")",
+        icon: "📁",
+        action: function() { root.copyToClipboard(item.folder_name, false, "folder name") }
+      })
+    }
+
+    if (item.organization_name) {
+      actions.push({
+        label: "Copy Organization (" + item.organization_name + ")",
+        icon: "🏢",
+        action: function() { root.copyToClipboard(item.organization_name, false, "organization name") }
+      })
+    }
+
     // Global utility & vault control actions
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "📋", action: function() { root.copyToClipboard(item.name, false, "item name") } })
     actions.push({ label: "Sync Vault Now", icon: "🔄", action: function() { root.syncVault(false) } })
@@ -1797,24 +1813,61 @@ onVisibleChanged: {
                       }
                     }
 
-                    Rectangle {
-                      implicitWidth: catBadgeText.implicitWidth + 8
-                      implicitHeight: 18
-                      radius: 4
-                      color: Qt.rgba(1, 1, 1, 0.08)
-                      Text {
-                        id: catBadgeText
-                        anchors.centerIn: parent
-                        text: {
-                          if (modelData.type_name === "ssh_key") return "SSH"
-                          if (modelData.type_name === "card") {
-                            var b = root.getCardBrand(modelData)
-                            return b ? b.toUpperCase() : "CARD"
-                          }
-                          return modelData.type_name.toUpperCase()
+                    RowLayout {
+                      spacing: 4
+                      Layout.alignment: Qt.AlignVCenter
+
+                      Rectangle {
+                        visible: Boolean(modelData.organization_name)
+                        implicitWidth: orgBadgeText.implicitWidth + 8
+                        implicitHeight: 18
+                        radius: 4
+                        color: (index === root.selectedIndex) ? Qt.rgba(0.2, 0.4, 0.9, 0.4) : Qt.rgba(0.2, 0.4, 0.9, 0.18)
+                        Text {
+                          id: orgBadgeText
+                          anchors.centerIn: parent
+                          text: "🏢 " + (modelData.organization_name || "Org")
+                          color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.95) : Qt.rgba(0.4, 0.7, 1.0, 0.95)
+                          font.pixelSize: Style.font.caption - 2
+                          elide: Text.ElideRight
                         }
-                        color: Qt.darker(root.foreground, 1.3)
-                        font.pixelSize: Style.font.caption - 2
+                      }
+
+                      Rectangle {
+                        visible: Boolean(modelData.folder_name)
+                        implicitWidth: folderBadgeText.implicitWidth + 8
+                        implicitHeight: 18
+                        radius: 4
+                        color: Qt.rgba(1, 1, 1, 0.08)
+                        Text {
+                          id: folderBadgeText
+                          anchors.centerIn: parent
+                          text: "📁 " + (modelData.folder_name || "")
+                          color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.95) : Qt.darker(root.foreground, 1.3)
+                          font.pixelSize: Style.font.caption - 2
+                          elide: Text.ElideRight
+                        }
+                      }
+
+                      Rectangle {
+                        implicitWidth: catBadgeText.implicitWidth + 8
+                        implicitHeight: 18
+                        radius: 4
+                        color: Qt.rgba(1, 1, 1, 0.08)
+                        Text {
+                          id: catBadgeText
+                          anchors.centerIn: parent
+                          text: {
+                            if (modelData.type_name === "ssh_key") return "SSH"
+                            if (modelData.type_name === "card") {
+                              var b = root.getCardBrand(modelData)
+                              return b ? b.toUpperCase() : "CARD"
+                            }
+                            return modelData.type_name.toUpperCase()
+                          }
+                          color: (index === root.selectedIndex) ? Qt.rgba(1, 1, 1, 0.95) : Qt.darker(root.foreground, 1.3)
+                          font.pixelSize: Style.font.caption - 2
+                        }
                       }
                     }
                   }
@@ -1930,7 +1983,11 @@ onVisibleChanged: {
                           } else {
                             cat = cat.toUpperCase()
                           }
-                          return cat + (root.selectedItem.favorite ? " • Favorite" : "")
+                          var parts = [cat]
+                          if (root.selectedItem.organization_name) parts.push("🏢 " + root.selectedItem.organization_name)
+                          if (root.selectedItem.folder_name) parts.push("📁 " + root.selectedItem.folder_name)
+                          if (root.selectedItem.favorite) parts.push("★ Favorite")
+                          return parts.join(" • ")
                         }
                         color: Qt.darker(root.foreground, 1.4)
                         font.pixelSize: Style.font.caption
@@ -2297,6 +2354,35 @@ onVisibleChanged: {
                       Button {
                         text: "Copy"
                         onClicked: root.copyToClipboard(root.selectedItem.ssh_key.passphrase, true, "SSH passphrase")
+                      }
+                    }
+                  }
+
+                  // Folder & Organization metadata section
+                  ColumnLayout {
+                    visible: Boolean(root.selectedItem && (root.selectedItem.organization_name || root.selectedItem.folder_name))
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.organization_name)
+                      Layout.fillWidth: true
+                      Text { text: "Organization:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 85 }
+                      Text { text: (root.selectedItem && root.selectedItem.organization_name) || "—"; color: root.foreground; font.pixelSize: Style.font.bodySmall; Layout.fillWidth: true }
+                      Button {
+                        text: "Copy"
+                        onClicked: root.copyToClipboard(root.selectedItem.organization_name, false, "organization name")
+                      }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.folder_name)
+                      Layout.fillWidth: true
+                      Text { text: "Folder:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 85 }
+                      Text { text: (root.selectedItem && root.selectedItem.folder_name) || "—"; color: root.foreground; font.pixelSize: Style.font.bodySmall; Layout.fillWidth: true }
+                      Button {
+                        text: "Copy"
+                        onClicked: root.copyToClipboard(root.selectedItem.folder_name, false, "folder name")
                       }
                     }
                   }

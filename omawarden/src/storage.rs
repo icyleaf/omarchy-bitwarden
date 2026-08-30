@@ -22,6 +22,12 @@ pub struct VaultStorage {
     pub enc_user_key: Option<String>,
     pub enc_private_key: Option<String>,
     pub last_sync: Option<String>,
+    #[serde(default)]
+    pub folders: Vec<Value>,
+    #[serde(default)]
+    pub organizations: Vec<Value>,
+    #[serde(default)]
+    pub collections: Vec<Value>,
     pub ciphers: Vec<Value>,
 }
 

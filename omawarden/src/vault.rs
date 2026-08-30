@@ -26,6 +26,16 @@ pub struct VaultItem {
     pub notes: Option<String>,
     pub favorite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<Value>,
@@ -277,6 +287,23 @@ impl VaultManager {
                 .unwrap_or("")
                 .to_string();
 
+            let folder_id = raw
+                .get("folderId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let organization_id = raw
+                .get("organizationId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let collection_ids = raw
+                .get("collectionIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                });
+
             if let Some(ssh_meta) = detect_ssh_key_metadata(raw) {
                 let type_name = "ssh_key".to_string();
                 let sub_title = format!("SSH Key ({})", ssh_meta.key_type);
@@ -308,6 +335,11 @@ impl VaultManager {
                     sub_title,
                     notes,
                     favorite,
+                    folder_id,
+                    folder_name: None,
+                    organization_id,
+                    organization_name: None,
+                    collection_ids,
                     login: None,
                     card: None,
                     identity: None,
@@ -356,9 +388,26 @@ impl VaultManager {
                 sub_title,
                 notes,
                 favorite,
-                login: raw.get("login").cloned(),
-                card: raw.get("card").cloned(),
-                identity: raw.get("identity").cloned(),
+                folder_id,
+                folder_name: None,
+                organization_id,
+                organization_name: None,
+                collection_ids,
+                login: if item_type == 1 {
+                    raw.get("login").cloned()
+                } else {
+                    None
+                },
+                card: if item_type == 3 {
+                    raw.get("card").cloned()
+                } else {
+                    None
+                },
+                identity: if item_type == 4 {
+                    raw.get("identity").cloned()
+                } else {
+                    None
+                },
                 ssh_key: None,
                 fields,
                 attachments,

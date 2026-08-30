@@ -302,6 +302,74 @@ pub fn decrypt_cipher_string(
 }
 
 pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) -> Vec<VaultItem> {
+    decrypt_sync_ciphers_with_context(ciphers, &[], &[], user_key, None)
+}
+
+pub fn decrypt_sync_ciphers_with_context(
+    ciphers: &[Value],
+    folders: &[Value],
+    organizations: &[Value],
+    user_key: &SymmetricCryptoKey,
+    enc_private_key: Option<&str>,
+) -> Vec<VaultItem> {
+    use std::collections::HashMap;
+
+    // 1. Decrypt Folders
+    let mut folder_map: HashMap<String, String> = HashMap::new();
+    for f in folders {
+        if let Some(fid) = f.get("id").and_then(|v| v.as_str()) {
+            let fname = decrypt_cipher_string(f.get("name").and_then(|v| v.as_str()), user_key)
+                .unwrap_or_else(|| "Folder".to_string());
+            folder_map.insert(fid.to_string(), fname);
+        }
+    }
+
+    // 2. Decrypt User RSA Private Key
+    let rsa_priv_key: Option<rsa::RsaPrivateKey> = if let Some(enc_priv) = enc_private_key {
+        if let Ok(enc_priv_str) = EncString::parse(enc_priv) {
+            if let Ok(der_bytes) = enc_priv_str.decrypt(user_key) {
+                crate::crypto::parse_rsa_private_key_der(&der_bytes).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 3. Decrypt Organization Keys & Names
+    let mut org_keys: HashMap<String, SymmetricCryptoKey> = HashMap::new();
+    let mut org_names: HashMap<String, String> = HashMap::new();
+    for org in organizations {
+        if let Some(org_id) = org.get("id").and_then(|v| v.as_str()) {
+            if let Some(org_name) = org.get("name").and_then(|v| v.as_str()) {
+                org_names.insert(org_id.to_string(), org_name.to_string());
+            }
+            if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
+                if let Ok(enc_str) = EncString::parse(org_key_enc) {
+                    let raw_key = match enc_str.enc_type {
+                        3 | 4 => {
+                            if let Some(ref rsa) = rsa_priv_key {
+                                enc_str.decrypt_rsa(rsa).ok()
+                            } else {
+                                None
+                            }
+                        }
+                        0 | 2 => enc_str.decrypt(user_key).ok(),
+                        _ => None,
+                    };
+                    if let Some(key_bytes) = raw_key {
+                        if let Ok(sym_key) = SymmetricCryptoKey::from_raw_bytes(&key_bytes) {
+                            org_keys.insert(org_id.to_string(), sym_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut items = Vec::new();
 
     for c in ciphers {
@@ -323,12 +391,49 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
         let item_type = c.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
         let favorite = c.get("favorite").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        // Determine item key: if cipher has an encrypted key, decrypt it using user_key
-        let mut cipher_key = user_key.clone();
+        // Folder metadata
+        let folder_id = c
+            .get("folderId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let folder_name = folder_id
+            .as_ref()
+            .and_then(|fid| folder_map.get(fid).cloned());
+
+        // Organization metadata & key resolution
+        let org_id_opt = c
+            .get("organizationId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let org_name_opt = org_id_opt
+            .as_ref()
+            .and_then(|oid| org_names.get(oid).cloned());
+
+        let collection_ids = c
+            .get("collectionIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            });
+
+        // Determine base key for this cipher: org_key if org-owned, else user_key
+        let base_key = if let Some(ref oid) = org_id_opt {
+            org_keys.get(oid).unwrap_or(user_key)
+        } else {
+            user_key
+        };
+
+        // Determine item key: if cipher has an encrypted key, decrypt it using base_key or user_key
+        let mut cipher_key = base_key.clone();
         if let Some(enc_key_str) = c.get("key").and_then(|v| v.as_str()) {
             if let Ok(parsed_k) = EncString::parse(enc_key_str) {
-                if let Ok(raw_k) = parsed_k.decrypt(user_key) {
-                    if let Ok(k) = SymmetricCryptoKey::from_raw_bytes(&raw_k) {
+                let raw_k = parsed_k
+                    .decrypt(base_key)
+                    .or_else(|_| parsed_k.decrypt(user_key));
+                if let Ok(raw_k_bytes) = raw_k {
+                    if let Ok(k) = SymmetricCryptoKey::from_raw_bytes(&raw_k_bytes) {
                         cipher_key = k;
                     }
                 }
@@ -611,6 +716,11 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
                 sub_title,
                 notes,
                 favorite,
+                folder_id,
+                folder_name,
+                organization_id: org_id_opt,
+                organization_name: org_name_opt,
+                collection_ids,
                 login: None,
                 card: None,
                 identity: None,
@@ -770,6 +880,12 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
                 search_tokens.push(fn_str.to_lowercase());
             }
         }
+        if let Some(ref fn_name) = folder_name {
+            search_tokens.push(fn_name.to_lowercase());
+        }
+        if let Some(ref on_name) = org_name_opt {
+            search_tokens.push(on_name.to_lowercase());
+        }
 
         let search_text = search_tokens.join(" ");
 
@@ -781,6 +897,11 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
             sub_title,
             notes,
             favorite,
+            folder_id,
+            folder_name,
+            organization_id: org_id_opt,
+            organization_name: org_name_opt,
+            collection_ids,
             login: if item_type == 1 { login_val } else { None },
             card: if item_type == 3 { card_val } else { None },
             identity: if item_type == 4 { identity_val } else { None },
@@ -978,5 +1099,76 @@ mod tests {
         let items = decrypt_sync_ciphers(&ciphers, &user_key);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "active-1");
+    }
+
+    #[test]
+    fn test_decrypt_sync_ciphers_with_folders() {
+        let raw_user_key = [10u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let folders = vec![json!({
+            "id": "folder-123",
+            "name": encrypt_test_string("Work Projects", &user_key),
+        })];
+
+        let ciphers = vec![json!({
+            "id": "cipher-f1",
+            "type": 1,
+            "folderId": "folder-123",
+            "name": encrypt_test_string("Company Jira", &user_key),
+            "login": {
+                "username": encrypt_test_string("worker1", &user_key),
+                "password": encrypt_test_string("pass123", &user_key),
+                "uris": []
+            }
+        })];
+
+        let items = decrypt_sync_ciphers_with_context(&ciphers, &folders, &[], &user_key, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].folder_id.as_deref(), Some("folder-123"));
+        assert_eq!(items[0].folder_name.as_deref(), Some("Work Projects"));
+        assert!(items[0].search_text.contains("work projects"));
+    }
+
+    #[test]
+    fn test_decrypt_organization_ciphers() {
+        let raw_user_key = [11u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let raw_org_key = [12u8; 64];
+        let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+
+        // Encrypt org key with user_key (CipherType 2: AES-CBC)
+        let enc_org_key =
+            encrypt_test_string(std::str::from_utf8(&raw_org_key).unwrap_or(""), &user_key);
+
+        let organizations = vec![json!({
+            "id": "org-789",
+            "name": "Acme Global",
+            "key": format!("2.{}", &enc_org_key[2..]),
+        })];
+
+        // Organization cipher encrypted with org_key
+        let ciphers = vec![json!({
+            "id": "org-cipher-1",
+            "type": 4,
+            "organizationId": "org-789",
+            "name": encrypt_test_string("Corporate Identity", &org_key),
+            "identity": {
+                "firstName": encrypt_test_string("Bob", &org_key),
+                "lastName": encrypt_test_string("Acme", &org_key),
+                "company": encrypt_test_string("Acme Global Inc", &org_key),
+            }
+        })];
+
+        let items =
+            decrypt_sync_ciphers_with_context(&ciphers, &[], &organizations, &user_key, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Corporate Identity");
+        assert_eq!(items[0].organization_id.as_deref(), Some("org-789"));
+        assert_eq!(items[0].organization_name.as_deref(), Some("Acme Global"));
+        assert_eq!(items[0].sub_title, "Bob Acme");
+        assert!(items[0].identity.is_some());
+        assert!(items[0].search_text.contains("acme global"));
     }
 }

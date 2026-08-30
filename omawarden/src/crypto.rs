@@ -239,8 +239,17 @@ impl EncString {
             .map_err(|_| CryptoError::InvalidEncString(raw.to_string()))?;
 
         let parts: Vec<&str> = rest.split('|').collect();
-        if parts.len() < 2 {
-            return Err(CryptoError::InvalidEncString(raw.to_string()));
+        if parts.len() == 1 {
+            // RSA or direct ciphertext
+            let ciphertext = BASE64
+                .decode(parts[0])
+                .map_err(|_| CryptoError::InvalidEncString(raw.to_string()))?;
+            return Ok(Self {
+                enc_type,
+                iv: Vec::new(),
+                ciphertext,
+                mac: None,
+            });
         }
 
         let iv = BASE64
@@ -266,6 +275,24 @@ impl EncString {
             ciphertext,
             mac,
         })
+    }
+
+    pub fn decrypt_rsa(&self, rsa_key: &rsa::RsaPrivateKey) -> Result<Vec<u8>, CryptoError> {
+        match self.enc_type {
+            3 => {
+                let padding = rsa::Oaep::new::<sha1::Sha1>();
+                rsa_key
+                    .decrypt(padding, &self.ciphertext)
+                    .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
+            }
+            4 => {
+                let padding = rsa::Oaep::new::<Sha256>();
+                rsa_key
+                    .decrypt(padding, &self.ciphertext)
+                    .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
+            }
+            _ => Err(CryptoError::UnsupportedCipherType(self.enc_type)),
+        }
     }
 
     pub fn decrypt(&self, key: &SymmetricCryptoKey) -> Result<Vec<u8>, CryptoError> {
@@ -346,6 +373,14 @@ pub fn decrypt_aes_cbc_bytes(
         .decrypt_padded_mut::<Pkcs7>(&mut buf)
         .map_err(|e| CryptoError::DecryptionFailed(format!("{:?}", e)))?;
     Ok(slice.to_vec())
+}
+
+pub fn parse_rsa_private_key_der(der_bytes: &[u8]) -> Result<rsa::RsaPrivateKey, CryptoError> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    rsa::RsaPrivateKey::from_pkcs8_der(der_bytes)
+        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_der(der_bytes))
+        .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid RSA private key DER: {}", e)))
 }
 
 #[cfg(test)]
