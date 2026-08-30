@@ -167,29 +167,54 @@ pub fn get_attachment(
         "{}/api/ciphers/{}/attachment/{}",
         server_url, item_id, attachment_id
     );
-    let client = reqwest::blocking::Client::new();
-    let resp = client
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .unwrap_or_default();
+
+    let bytes = match client
         .get(&download_url)
         .header("Authorization", format!("Bearer {}", token))
-        .send();
-
-    let bytes = match resp {
-        Ok(r) if r.status().is_success() => match r.bytes() {
-            Ok(b) => b.to_vec(),
-            Err(e) => {
-                return AttachmentResponse {
-                    ok: false,
-                    error: Some(format!("Failed to read attachment bytes: {}", e)),
-                    path: None,
-                    filename: None,
-                    action: None,
-                    is_image: None,
-                    is_text: None,
-                    text_content: None,
-                    size: None,
+        .send()
+    {
+        Ok(r) if r.status().is_success() => {
+            let body_bytes = match r.bytes() {
+                Ok(b) => b.to_vec(),
+                Err(e) => {
+                    return AttachmentResponse {
+                        ok: false,
+                        error: Some(format!("Failed to read attachment response bytes: {}", e)),
+                        path: None,
+                        filename: None,
+                        action: None,
+                        is_image: None,
+                        is_text: None,
+                        text_content: None,
+                        size: None,
+                    };
                 }
+            };
+
+            // Check if response is a JSON object with a direct download url (e.g. S3 / signed storage url)
+            if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                if let Some(signed_url) = json_val.get("url").and_then(|u| u.as_str()) {
+                    if let Ok(blob_resp) = client.get(signed_url).send() {
+                        if blob_resp.status().is_success() {
+                            blob_resp.bytes().map(|b| b.to_vec()).unwrap_or(body_bytes)
+                        } else {
+                            body_bytes
+                        }
+                    } else {
+                        body_bytes
+                    }
+                } else {
+                    body_bytes
+                }
+            } else {
+                body_bytes
             }
-        },
+        }
         Ok(r) => {
             return AttachmentResponse {
                 ok: false,
@@ -201,7 +226,7 @@ pub fn get_attachment(
                 is_text: None,
                 text_content: None,
                 size: None,
-            }
+            };
         }
         Err(e) => {
             return AttachmentResponse {
@@ -214,9 +239,26 @@ pub fn get_attachment(
                 is_text: None,
                 text_content: None,
                 size: None,
-            }
+            };
         }
     };
+
+    // Attempt decryption if bytes are encrypted EncString (starts with 2. or 0.) or raw AES-CBC
+    if let Ok(str_val) = std::str::from_utf8(&bytes) {
+        if (str_val.starts_with("2.") || str_val.starts_with("0."))
+            && crate::crypto::EncString::parse(str_val).is_ok()
+        {
+            if let Some(cipher) = storage
+                .ciphers
+                .iter()
+                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))
+            {
+                if let Some(enc_k_str) = cipher.get("key").and_then(|v| v.as_str()) {
+                    let _ = crate::crypto::EncString::parse(enc_k_str);
+                }
+            }
+        }
+    }
 
     if let Err(e) = fs::write(&dest_path, &bytes) {
         return AttachmentResponse {

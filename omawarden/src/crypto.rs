@@ -329,6 +329,25 @@ impl EncString {
     }
 }
 
+pub fn decrypt_aes_cbc_bytes(
+    ciphertext: &[u8],
+    iv: &[u8],
+    key: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if iv.len() != 16 {
+        return Err(CryptoError::DecryptionFailed(
+            "Invalid IV length".to_string(),
+        ));
+    }
+    let mut buf = ciphertext.to_vec();
+    let dec = Aes256CbcDec::new_from_slices(key, iv)
+        .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
+    let slice = dec
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|e| CryptoError::DecryptionFailed(format!("{:?}", e)))?;
+    Ok(slice.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
