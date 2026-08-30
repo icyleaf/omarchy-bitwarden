@@ -76,6 +76,7 @@ pub struct DaemonState {
     pub storage_mgr: StorageManager,
     pub storage: RwLock<VaultStorage>,
     pub decrypted_items: RwLock<Vec<VaultItem>>,
+    pub user_key: RwLock<Option<crate::crypto::SymmetricCryptoKey>>,
     pub is_unlocked: RwLock<bool>,
     pub last_activity: Mutex<Instant>,
     pub auto_lock_duration: Duration,
@@ -88,6 +89,7 @@ impl DaemonState {
             storage_mgr,
             storage: RwLock::new(storage),
             decrypted_items: RwLock::new(Vec::new()),
+            user_key: RwLock::new(None),
             is_unlocked: RwLock::new(false),
             last_activity: Mutex::new(Instant::now()),
             auto_lock_duration: Duration::from_secs(auto_lock_minutes * 60),
@@ -107,6 +109,9 @@ impl DaemonState {
         if let Ok(mut items) = self.decrypted_items.write() {
             items.clear();
         }
+        if let Ok(mut key) = self.user_key.write() {
+            *key = None;
+        }
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -125,6 +130,9 @@ impl DaemonState {
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
             *dec_items = items;
+        }
+        if let Ok(mut key) = self.user_key.write() {
+            *key = Some(user_key);
         }
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = true;
@@ -157,6 +165,16 @@ impl DaemonState {
         self.storage_mgr
             .save(&updated)
             .map_err(|e| format!("Failed to save storage: {}", e))?;
+
+        // Re-decrypt all items in memory if unlocked
+        if let Ok(key_guard) = self.user_key.read() {
+            if let Some(user_key) = key_guard.as_ref() {
+                let items = decrypt_sync_ciphers(&updated.ciphers, user_key);
+                if let Ok(mut dec_items) = self.decrypted_items.write() {
+                    *dec_items = items;
+                }
+            }
+        }
 
         if let Ok(mut st) = self.storage.write() {
             *st = updated;

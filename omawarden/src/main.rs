@@ -417,8 +417,11 @@ fn main() -> ExitCode {
             let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
             match action {
                 VaultAction::Sync => {
-                    let _ = send_daemon_request(&json!({ "action": "sync" }));
-                    let ok = vault_mgr.sync(None);
+                    omawarden::daemon::ensure_daemon_running();
+                    let resp = send_daemon_request(&json!({ "action": "sync" }));
+                    let ok = resp.as_ref().and_then(|v| v.get("ok")).and_then(|v| v.as_bool()).unwrap_or_else(|| {
+                        vault_mgr.sync(None)
+                    });
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap());
                     if ok {
                         ExitCode::SUCCESS
