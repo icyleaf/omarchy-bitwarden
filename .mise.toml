@@ -1,0 +1,33 @@
+[tools]
+rust = "latest"
+
+[tasks.cli]
+description = "Run the CLI"
+run = "./target/release/omawarden"
+
+[tasks.build]
+description = "Build the CLI"
+run = "cargo build"
+
+[tasks.dev-cli]
+description = "Run the CLI in development mode"
+run = "cargo run --"
+
+[tasks.build-release]
+description = "Build the CLI in release mode"
+run = "cargo build --release"
+
+[tasks.dev-update-omarchy-plugin]
+description = "Update the Omarchy plugin in development mode"
+run = "cd ~/.config/omarchy/plugins/icyleaf.bitwarden && git pull"
+
+[tasks.dev-restart-omarchy]
+description = "Restart the Omarchy plugin in development mode"
+run = "omarchy-restart-shell"
+
+[tasks.dev-deploy]
+description = "Deploy the CLI in development mode"
+depends = ["build-release", "dev-update-omarchy-plugin"]
+depends_post = ["dev-restart-omarchy"]
+run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f target/release/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
+

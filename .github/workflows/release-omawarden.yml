@@ -1,0 +1,101 @@
+name: Release Omawarden CLI
+
+on:
+  push:
+    tags:
+      - 'omawarden-*'
+      - 'omawarden-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tool (if needed)
+        if: matrix.use_cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package artifact
+        id: package
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME}"
+          VERSION="${RAW_TAG#omawarden-}"
+          ARCHIVE_NAME="omawarden-${VERSION}-${{ matrix.target }}"
+          DIST_DIR="dist/${ARCHIVE_NAME}"
+          mkdir -p "${DIST_DIR}"
+          cp "target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
+          cp LICENSE README.md "${DIST_DIR}/"
+          
+          cd dist
+          tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+          cp "${ARCHIVE_NAME}.tar.gz" "omawarden-${{ matrix.target }}.tar.gz"
+          sha256sum "omawarden-${{ matrix.target }}.tar.gz" > "omawarden-${{ matrix.target }}.tar.gz.sha256"
+          cd ..
+
+          echo "archive_path=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
+          echo "sha256_path=dist/${ARCHIVE_NAME}.tar.gz.sha256" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact to job
+        uses: actions/upload-artifact@v4
+        with:
+          name: omawarden-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    name: Publish Omawarden Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "omawarden ${{ github.ref_name }}"
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
