@@ -445,20 +445,44 @@ Item {
           }
         })
       }
-      if (item.login.uris && item.login.uris.length > 0 && item.login.uris[0].uri) {
-        actions.push({ label: "Open URL (" + item.login.uris[0].uri + ")", icon: "🌐", action: function() { Qt.openUrlExternally(item.login.uris[0].uri) } })
+      if (item.login.uris && item.login.uris.length > 0) {
+        for (var u = 0; u < item.login.uris.length; u++) {
+          var uriObj = item.login.uris[u]
+          if (uriObj && uriObj.uri) {
+            (function(targetUri) {
+              actions.push({
+                label: "Open URL (" + targetUri + ")",
+                icon: "🌐",
+                action: function() { Qt.openUrlExternally(targetUri) }
+              })
+            })(uriObj.uri)
+          }
+        }
       }
     } else if (item.type_name === "card" && item.card) {
       if (item.card.number) actions.push({ label: "Copy Card Number", icon: "💳", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
       if (item.card.code) actions.push({ label: "Copy Security Code (CVV)", icon: "🔢", action: function() { root.copyToClipboard(item.card.code, true, "CVV") } })
       if (item.card.cardholderName) actions.push({ label: "Copy Cardholder Name", icon: "👤", action: function() { root.copyToClipboard(item.card.cardholderName, false, "cardholder") } })
+      if (item.card.expMonth && item.card.expYear) {
+        var expStr = item.card.expMonth + "/" + item.card.expYear
+        actions.push({ label: "Copy Expiration (" + expStr + ")", icon: "📅", action: function() { root.copyToClipboard(expStr, false, "expiration") } })
+      }
     } else if (item.type_name === "ssh_key" && item.ssh_key) {
       if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "🔑", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
       if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "🗝️", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
       if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "🔒", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
     } else if (item.type_name === "identity" && item.identity) {
-      if (item.identity.email) actions.push({ label: "Copy Email", icon: "✉️", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
-      if (item.identity.phone) actions.push({ label: "Copy Phone", icon: "📞", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
+      var idFullName = ((item.identity.firstName || "") + " " + (item.identity.lastName || "")).trim()
+      if (idFullName) actions.push({ label: "Copy Full Name (" + idFullName + ")", icon: "👤", action: function() { root.copyToClipboard(idFullName, false, "full name") } })
+      if (item.identity.username) actions.push({ label: "Copy Username (" + item.identity.username + ")", icon: "🏷️", action: function() { root.copyToClipboard(item.identity.username, false, "username") } })
+      if (item.identity.email) actions.push({ label: "Copy Email (" + item.identity.email + ")", icon: "✉️", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
+      if (item.identity.phone) actions.push({ label: "Copy Phone (" + item.identity.phone + ")", icon: "📞", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
+      if (item.identity.company) actions.push({ label: "Copy Company (" + item.identity.company + ")", icon: "🏢", action: function() { root.copyToClipboard(item.identity.company, false, "company") } })
+      var addrStr = [item.identity.address1, item.identity.city, item.identity.state, item.identity.postalCode, item.identity.country].filter(Boolean).join(", ")
+      if (addrStr) actions.push({ label: "Copy Address (" + addrStr + ")", icon: "📍", action: function() { root.copyToClipboard(addrStr, false, "address") } })
+      if (item.identity.ssn) actions.push({ label: "Copy SSN", icon: "🔢", action: function() { root.copyToClipboard(item.identity.ssn, true, "SSN") } })
+      if (item.identity.passportNumber) actions.push({ label: "Copy Passport Number", icon: "🛂", action: function() { root.copyToClipboard(item.identity.passportNumber, true, "passport") } })
+      if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "🪪", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
     }
 
     if (item.notes) {
@@ -510,6 +534,11 @@ Item {
         }
       }
     }
+
+    // Global utility & vault control actions
+    actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "📋", action: function() { root.copyToClipboard(item.name, false, "item name") } })
+    actions.push({ label: "Sync Vault Now", icon: "🔄", action: function() { root.syncVault(false) } })
+    actions.push({ label: "Lock Vault", icon: "🔒", action: function() { root.lockVault() } })
 
     return actions
   }
