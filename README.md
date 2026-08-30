@@ -15,10 +15,13 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 ## Features
 
 - **Instant Overlay & Zero Latency**: In-memory caching and non-blocking background sync allow opening and searching your entire vault in milliseconds.
-- **Pure Rust Native Engine (`omawarden`)**: 100% standalone execution with native cryptographic decryption (PBKDF2, Argon2id, AES-256-CBC, HMAC-SHA256), direct REST/OAuth2 API client, and optional resident memory daemon.
+- **Pure Rust Native Engine (`omawarden`)**: 100% standalone execution with native cryptographic decryption (PBKDF2, Argon2id, AES-256-CBC, HMAC-SHA256, RSA-OAEP-SHA1), direct REST/OAuth2 API client, and resident memory daemon.
+- **Organizations & Collections**: Full decryption of organization-owned credentials using RSA-OAEP-SHA1 organization key unwrapping, displaying `[🏢 Org Name]` badges and collection affiliations.
+- **Folders & Soft-Delete Filtering**: Displays `[📁 Folder Name]` badges for categorized entries and automatically skips soft-deleted items (Recycle Bin).
+- **Encrypted Binary Attachment Previews**: Downloads and decrypts AES-256-CBC binary attachments locally, providing instant in-overlay previews for images (JPEG, PNG, GIF, WebP, SVG) and text files, plus external viewing with `xdg-open`.
 - **Secure Keyring Session Lifecycle**: Decrypted session tokens are stored securely in FreeDesktop Secret Service (`secret-tool` / D-Bus). Auto-locks upon screen lock hooks or idle timeouts without storing cleartext master passwords.
 - **Multi-Tier High-Precision Fuzzy Search**: Sub-millisecond ranking algorithm prioritizing exact matches, prefixes, substrings, and acronym subsequences across item names, usernames, notes, and custom fields.
-- **Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>)**: Fast keyboard palette to copy usernames, passwords, TOTP codes, card CVVs, SSH keys, PINs, or launch website URLs.
+- **Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>)**: Fast keyboard palette to copy usernames, passwords, TOTP codes, card CVVs, SSH keys, PINs, organization/folder names, or launch website URLs.
 - **Live Real-time TOTP Token Engine**: Automatic TOTP countdown timer and live 6-digit one-time password generation.
 - **Website Favicons & Card Brands**: Asynchronously fetches crisp website favicons for login entries and automatically recognizes payment card brands (Visa, Mastercard, Amex, JCB, UnionPay, Discover).
 - **Heuristic SSH Key Management**: Automatically detects SSH private/public key pairs and passphrases in notes or custom fields, exposing them under a dedicated SSH category filter.
@@ -32,7 +35,7 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 | Shortcut                       | Description                                                               |
 | :----------------------------- | :------------------------------------------------------------------------ |
 | <kbd>Enter</kbd>               | Copy primary credential (Password / Card Number / Public Key)             |
-| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, etc.)                      |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, Org Name, etc.)            |
 | <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open / Toggle Settings configuration view                                 |
 | <kbd>Ctrl</kbd> + <kbd>L</kbd> | Manually lock the vault immediately                                       |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd> | Trigger manual vault sync with Bitwarden server                           |
@@ -112,66 +115,69 @@ flowchart TD
     subgraph Frontend["QML Overlay (Omarchy Shell)"]
         UI_Pwd["Master Password"]
         UI_2FA["2FA Code"]
-        UI_API["API Secret"]
+        UI_API["API Client Secret"]
         UI_TOTP["TOTP Seed"]
         UI_Clip["Clipboard Text"]
     end
 
-    subgraph Pipe1["Protected Stdin Pipe (/proc/self/fd/0)"]
-        P1["Single-Use Stream\nZero-Argv • Immediate Flush"]
+    subgraph Seam["Protected Input Seam"]
+        P_Stdin["Protected Stdin Pipe (/proc/self/fd/0)\nZero-Argv • Immediate Memory Flush"]
+        P_Sock["0600 Unix Domain Socket (/run/user/UID/omawarden.sock)\nPeer UID Verification"]
     end
 
-    subgraph Helper["Python Security Bridge (bitwarden-helper)"]
-        CLI_Auth["AuthManager (auth.py)"]
-        CLI_Totp["Local RFC 6238 TOTP Engine"]
-        CLI_Keyring["FreeDesktop Secret Service (Keyring)"]
-        CLI_Clip["Ephemeral Clipboard Manager"]
+    subgraph Engine["Pure Rust Engine (omawarden)"]
+        direction TB
+        Daemon["Resident In-Memory Daemon\nZeroized Memory on Drop (zeroize)"]
+        Crypto["Native Cryptography Engine\nPBKDF2 • Argon2id • AES-256-CBC • RSA-OAEP-SHA1"]
+        REST["Direct Bitwarden REST/OAuth2 Client"]
+        Keyring["FreeDesktop Secret Service (Keyring)"]
+        Clipboard["Ephemeral Wayland Clipboard (wl-copy)"]
     end
 
-    subgraph Pipe2["Subprocess Stdin Pipe (/proc/self/fd/0)"]
-        P2["bw --passwordfile /proc/self/fd/0\nbw login --apikey (stdin stream)"]
-    end
+    UI_Pwd -->|Protected Stdin| P_Stdin
+    UI_2FA -->|Protected Stdin| P_Stdin
+    UI_API -->|Protected Stdin| P_Stdin
+    UI_TOTP -->|Protected Stdin| P_Stdin
+    UI_Clip -->|Protected Stdin| P_Stdin
 
-    subgraph Subprocesses["Child Subprocesses"]
-        BW["Bitwarden CLI (bw)"]
-        WL["wl-copy (Ephemeral)"]
-    end
+    P_Stdin --> Engine
+    P_Sock <-->|IPC Queries| Daemon
 
-    UI_Pwd -->|Protected Stdin| P1
-    UI_2FA -->|Protected Stdin| P1
-    UI_API -->|Protected Stdin| P1
-    UI_TOTP -->|Protected Stdin| P1
-    UI_Clip -->|Protected Stdin| P1
-
-    P1 --> Helper
-    CLI_Auth -->|Protected Stdin Pipe| P2
-    CLI_Auth <-->|Encrypted D-Bus Session| CLI_Keyring
-    CLI_Clip -->|Protected Stdin Pipe| WL
-    P2 --> BW
+    Daemon <--> Crypto
+    Daemon <--> REST
+    Daemon <--> Keyring
+    Daemon --> Clipboard
 ```
 
 ### Key Security Guarantees:
 
 1. **Zero Command-Line (`argv`) Credential Leakage**:
    - Master passwords, client secrets, 2FA codes, TOTP seeds, and clipboard text are **never passed as command-line arguments**.
-   - On Linux, `/proc/<pid>/cmdline` is accessible to other processes. By delivering all sensitive data exclusively through **protected stdin file descriptor pipes (`/proc/self/fd/0`)**, command line inspection reveals zero sensitive metadata.
+   - On Linux, `/proc/<pid>/cmdline` is readable by other processes under the same user. By delivering all sensitive data exclusively through **protected stdin streams** or **0600 Unix domain sockets**, command line inspection reveals zero sensitive credentials.
 
 2. **Zero Process Environment (`env`) Secret Spillage**:
-   - API client secrets and passwords are never exported into system environment variables or child `env` maps.
-   - Interactive prompt streams feed secrets directly into `bw login` without setting `BW_CLIENTSECRET` or `BW_PASSWORD`.
+   - API client secrets, passwords, and live session tokens are never exported to process environment variables (`/proc/<pid>/environ`).
+   - Authentication streams directly negotiate OAuth2 and vault unlock without leaving trace variables in the process environment.
 
-3. **Native FreeDesktop Secret Service Keyring Lifecycle**:
-   - Decrypted vault session tokens (`BW_SESSION`) are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via standard D-Bus Secret Service protocols.
-   - **No cleartext master passwords or vault decryption keys are ever written to disk or plain configuration files**.
+3. **Strict Owner-Only File & Socket Permissions (`0600`)**:
+   - Vault cache file (`~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`) and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
+
+4. **Deterministic Zero-Memory Destruction (`zeroize`)**:
+   - All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate hashes implement `zeroize::ZeroizeOnDrop` to overwrite volatile memory with zeros upon drop.
+   - When the vault is locked, all decrypted items and keys are immediately purged from daemon memory.
+
+5. **Native FreeDesktop Secret Service Keyring Lifecycle**:
+   - Encrypted session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols.
+   - **No cleartext master passwords are ever written to disk**.
    - Immediate session destruction: Clicking **Lock** (<kbd>Ctrl</kbd>+<kbd>L</kbd>), triggering system screen-lock hooks (`hyprlock`/`swaylock`), or reaching idle timeout instantly clears the session key from Keyring and purges decrypted vault items from memory.
 
-4. **Ephemeral Clipboard Auto-Clearing (30s TTL)**:
+6. **Ephemeral Clipboard Auto-Clearing (30s TTL)**:
    - When copying passwords, TOTP codes, card CVVs, or SSH private keys, sensitive values are piped directly to `wl-copy` without entering shell logs.
    - A dedicated timer daemon automatically clears the Wayland clipboard after 30 seconds (configurable in Settings) to eliminate lingering exposure.
 
-5. **Local-First In-Memory Computation**:
-   - Vault search indexing, fuzzy ranking, SSH key header heuristic classification, and RFC 6238 TOTP countdown calculations are executed **100% locally in memory**.
-   - No analytics, telemetry, or external network requests are made outside of direct communication with your configured Bitwarden server.
+7. **Zero External Runtime Dependencies**:
+   - 100% pure Rust binary. No external Node.js, Python, or official `bw` CLI binary is required at runtime.
+   - Built-in Git commit SHA handshake (`GIT_HASH`) automatically detects binary updates and restarts resident daemons seamlessly.
 
 ---
 
@@ -189,15 +195,15 @@ omarchy-bitwarden/
     └── src/
         ├── main.rs              # CLI entry point, clap command handlers & stdin bridge
         ├── daemon.rs            # Background resident Unix socket daemon & cache
-        ├── api.rs               # Direct REST/OAuth2 Bitwarden client
+        ├── api.rs               # Direct REST/OAuth2 Bitwarden client & multi-org decryption
         ├── auth.rs              # Authentication, login & unlock lifecycle
-        ├── crypto.rs            # PBKDF2, Argon2id, AES-256-CBC, HMAC crypto engine
-        ├── storage.rs           # Encrypted vault cache persistence (data.json)
+        ├── crypto.rs            # PBKDF2, Argon2id, AES-256-CBC, RSA-OAEP-SHA1 crypto engine
+        ├── storage.rs           # Encrypted vault cache persistence (0600 data.json)
         ├── keyring.rs           # FreeDesktop Secret Service Keyring integration
         ├── vault.rs             # In-memory vault parsing, fuzzy scoring & SSH detection
         ├── totp.rs              # RFC 6238 TOTP computation & multi-algorithm engine
         ├── clipboard.rs         # Ephemeral Wayland clipboard manager
-        ├── attachment.rs        # Attachment streaming & preview handling
+        ├── attachment.rs        # Attachment streaming, decryption & preview handling
         ├── health.rs            # Diagnostic health checker
         ├── hook.rs              # Screen-lock auto-lock hook installer
         └── config.rs            # Configuration management (config.json)
