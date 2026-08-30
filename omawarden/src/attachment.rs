@@ -313,3 +313,124 @@ pub fn get_attachment(
         size: Some(file_size),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_missing_ids() {
+        let res = get_attachment("", "att1", "file.txt", None, false, false, Some("tok"), None, false);
+        assert!(!res.ok);
+        assert_eq!(res.error.unwrap(), "Item ID and Attachment ID are required.");
+
+        let res2 = get_attachment("item1", "", "file.txt", None, false, false, Some("tok"), None, false);
+        assert!(!res2.ok);
+        assert_eq!(res2.error.unwrap(), "Item ID and Attachment ID are required.");
+    }
+
+    #[test]
+    fn test_mock_download_text_attachment() {
+        let dir = tempdir().unwrap();
+        let out_dir = dir.path().join("downloads");
+        let bw_script = dir.path().join("mock-bw");
+
+        // Mock bw that writes text content to destination file
+        let script = r#"#!/bin/sh
+# Arguments: get attachment <id> --itemid <itemid> --output <path>
+out_path="$7"
+echo "This is sample attachment content" > "$out_path"
+exit 0
+"#;
+        fs::write(&bw_script, script).unwrap();
+        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bw_script, perms).unwrap();
+
+        let res = get_attachment(
+            "item_123",
+            "att_456",
+            "notes.md",
+            Some(out_dir.to_str().unwrap()),
+            false,
+            false,
+            Some("valid_session_token"),
+            Some(bw_script.to_str().unwrap()),
+            false,
+        );
+
+        assert!(res.ok);
+        assert_eq!(res.filename.unwrap(), "notes.md");
+        assert_eq!(res.action.unwrap(), "download");
+        assert_eq!(res.is_text, Some(true));
+        assert_eq!(res.is_image, Some(false));
+        assert!(res.text_content.unwrap().contains("This is sample attachment content"));
+    }
+
+    #[test]
+    fn test_mock_preview_image_attachment() {
+        let dir = tempdir().unwrap();
+        let bw_script = dir.path().join("mock-bw");
+
+        let script = r#"#!/bin/sh
+out_path="$7"
+echo -n "GIF89a" > "$out_path"
+exit 0
+"#;
+        fs::write(&bw_script, script).unwrap();
+        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bw_script, perms).unwrap();
+
+        let res = get_attachment(
+            "item_abc",
+            "att_xyz",
+            "photo.gif",
+            None,
+            false,
+            true, // preview mode
+            Some("valid_session_token"),
+            Some(bw_script.to_str().unwrap()),
+            false,
+        );
+
+        assert!(res.ok);
+        assert_eq!(res.filename.unwrap(), "photo.gif");
+        assert_eq!(res.action.unwrap(), "preview");
+        assert_eq!(res.is_image, Some(true));
+        assert_eq!(res.is_text, Some(false));
+        assert!(res.path.unwrap().contains("/tmp/omarchy-bitwarden/attachments/item_abc"));
+    }
+
+    #[test]
+    fn test_mock_failed_download() {
+        let dir = tempdir().unwrap();
+        let bw_script = dir.path().join("mock-bw");
+
+        let script = r#"#!/bin/sh
+echo "Attachment not found on server" >&2
+exit 1
+"#;
+        fs::write(&bw_script, script).unwrap();
+        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bw_script, perms).unwrap();
+
+        let res = get_attachment(
+            "item_abc",
+            "att_xyz",
+            "photo.png",
+            None,
+            false,
+            false,
+            Some("valid_session_token"),
+            Some(bw_script.to_str().unwrap()),
+            false,
+        );
+
+        assert!(!res.ok);
+        assert_eq!(res.error.unwrap(), "Attachment not found on server.");
+    }
+}
