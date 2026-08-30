@@ -590,7 +590,7 @@ impl VaultManager {
             }
         }
 
-        scored_items.sort_by(|a, b| b.1.cmp(&a.1));
+        scored_items.sort_by_key(|a| std::cmp::Reverse(a.1));
         scored_items
             .into_iter()
             .map(|(item, _)| item.clone())
