@@ -570,3 +570,122 @@ impl VaultManager {
         scored_items.into_iter().map(|(item, _)| item.clone()).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_fuzzy_match() {
+        assert!(is_fuzzy_match("", "anything"));
+        assert!(is_fuzzy_match("git", "github"));
+        assert!(is_fuzzy_match("gh", "github"));
+        assert!(is_fuzzy_match("gthb", "github"));
+        assert!(!is_fuzzy_match("xyz", "github"));
+    }
+
+    #[test]
+    fn test_ssh_heuristics_rsa_in_notes() {
+        let raw = json!({
+            "name": "Server Key",
+            "notes": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\nssh-rsa AAAAB3NzaC1yc2E... user@host"
+        });
+        let meta = detect_ssh_key_metadata(&raw).unwrap();
+        assert!(meta.is_ssh_key);
+        assert_eq!(meta.key_type, "RSA");
+        assert!(meta.private_key.unwrap().contains("BEGIN RSA PRIVATE KEY"));
+        assert!(meta.public_key.unwrap().starts_with("ssh-rsa"));
+    }
+
+    #[test]
+    fn test_ssh_heuristics_ed25519_openssh() {
+        let raw = json!({
+            "name": "Dev Ed25519 Key",
+            "notes": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA...ssh-ed25519\n-----END OPENSSH PRIVATE KEY-----\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host"
+        });
+        let meta = detect_ssh_key_metadata(&raw).unwrap();
+        assert!(meta.is_ssh_key);
+        assert_eq!(meta.key_type, "ED25519");
+        assert!(meta.private_key.is_some());
+        assert_eq!(meta.public_key.unwrap(), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host");
+    }
+
+    #[test]
+    fn test_ssh_heuristics_custom_fields() {
+        let raw = json!({
+            "name": "Custom SSH Item",
+            "notes": "Some regular notes",
+            "fields": [
+                { "name": "private_key", "value": "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEI...\n-----END EC PRIVATE KEY-----" },
+                { "name": "public_key", "value": "ecdsa-sha2-nistp256 AAAAE2VjZHNh... user@host" },
+                { "name": "passphrase", "value": "secret_passphrase_123" }
+            ]
+        });
+        let meta = detect_ssh_key_metadata(&raw).unwrap();
+        assert!(meta.is_ssh_key);
+        assert_eq!(meta.key_type, "ECDSA");
+        assert!(meta.private_key.unwrap().contains("BEGIN EC PRIVATE KEY"));
+        assert!(meta.public_key.unwrap().starts_with("ecdsa-sha2-nistp256"));
+        assert_eq!(meta.passphrase.unwrap(), "secret_passphrase_123");
+    }
+
+    #[test]
+    fn test_parse_and_search_categories() {
+        let raw_items = vec![
+            json!({
+                "id": "1",
+                "name": "GitHub",
+                "type": 1,
+                "login": {
+                    "username": "octocat",
+                    "uris": [{ "uri": "https://github.com" }]
+                },
+                "favorite": true
+            }),
+            json!({
+                "id": "2",
+                "name": "Bank Card",
+                "type": 3,
+                "card": {
+                    "brand": "Visa",
+                    "number": "4111222233334444"
+                }
+            }),
+            json!({
+                "id": "3",
+                "name": "Server Access",
+                "type": 2,
+                "notes": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+            })
+        ];
+
+        let vault_mgr = VaultManager::new("bw", None, None);
+        let items = vault_mgr.parse_raw_items(&raw_items);
+        assert_eq!(items.len(), 3);
+
+        assert_eq!(items[0].type_name, "login");
+        assert_eq!(items[0].sub_title, "octocat");
+
+        assert_eq!(items[1].type_name, "card");
+        assert_eq!(items[1].sub_title, "Visa •••• 4444");
+
+        assert_eq!(items[2].type_name, "ssh_key");
+        assert!(items[2].sub_title.contains("SSH Key"));
+
+        // Search query "github"
+        let search_gh = vault_mgr.search(&items, "github", None);
+        assert_eq!(search_gh.len(), 1);
+        assert_eq!(search_gh[0].id, "1");
+
+        // Filter by category "card"
+        let search_card = vault_mgr.search(&items, "", Some("card"));
+        assert_eq!(search_card.len(), 1);
+        assert_eq!(search_card[0].id, "2");
+
+        // Filter by category "ssh_key"
+        let search_ssh = vault_mgr.search(&items, "", Some("ssh_key"));
+        assert_eq!(search_ssh.len(), 1);
+        assert_eq!(search_ssh[0].id, "3");
+    }
+}
