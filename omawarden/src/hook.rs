@@ -94,3 +94,31 @@ pub fn install_lock_hook(
 
     Ok(hook_file)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_get_lock_hook_script() {
+        let script = get_lock_hook_script("/usr/local/bin/omawarden");
+        assert!(script.starts_with("#!/usr/bin/env bash"));
+        assert!(script.contains("/usr/local/bin/omawarden auth lock"));
+    }
+
+    #[test]
+    fn test_install_lock_hook() {
+        let dir = tempdir().unwrap();
+        let hook_file = install_lock_hook(Some("/usr/bin/omawarden"), Some(dir.path())).unwrap();
+
+        assert!(hook_file.exists());
+        assert_eq!(hook_file.file_name().unwrap(), "99-bitwarden-lock.sh");
+
+        let perms = fs::metadata(&hook_file).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o755);
+
+        let content = fs::read_to_string(&hook_file).unwrap();
+        assert!(content.contains("/usr/bin/omawarden auth lock"));
+    }
+}
