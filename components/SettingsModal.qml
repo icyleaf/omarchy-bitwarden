@@ -9,6 +9,10 @@ Item {
   property var cliHealth: ({})
   property bool isDownloadingCli: false
   property bool isBusy: false
+  property bool updateAvailable: false
+  property string latestVersion: ""
+  property bool isCheckingUpdate: false
+  property string updateCheckStatus: ""
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -16,6 +20,7 @@ Item {
   signal saveRequested(var newSettings)
   signal closeRequested()
   signal refreshHealthRequested()
+  signal checkUpdateRequested()
   signal downloadCliRequested()
 
   ScrollView {
@@ -76,11 +81,111 @@ Item {
           Layout.fillWidth: true
           Text { text: "ENGINE STATUS & DIAGNOSTICS"; color: Qt.darker(settingsRoot.foreground, 1.8); font.pixelSize: 10; font.weight: Font.DemiBold }
           Item { Layout.fillWidth: true }
+
+          // Check Update Button
           Rectangle {
-            implicitHeight: 20; implicitWidth: refHText.implicitWidth + 8; radius: 3; color: Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+            implicitHeight: 20
+            implicitWidth: chkUpText.implicitWidth + 10
+            radius: 3
+            color: Qt.rgba(0, 0, 0, 0.2)
+            border.color: settingsRoot.borderColor
+            border.width: 1
+
+            Text {
+              id: chkUpText
+              anchors.centerIn: parent
+              text: settingsRoot.isCheckingUpdate ? "Checking..." : "Check Update"
+              color: settingsRoot.accent
+              font.pixelSize: 10
+            }
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              enabled: !settingsRoot.isCheckingUpdate
+              onClicked: settingsRoot.checkUpdateRequested()
+            }
+          }
+
+          // Refresh Button
+          Rectangle {
+            implicitHeight: 20
+            implicitWidth: refHText.implicitWidth + 8
+            radius: 3
+            color: Qt.rgba(0, 0, 0, 0.2)
+            border.color: settingsRoot.borderColor
+            border.width: 1
+
             Text { id: refHText; anchors.centerIn: parent; text: "Refresh"; color: settingsRoot.accent; font.pixelSize: 10 }
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.refreshHealthRequested() }
           }
+        }
+
+        // Update Available Banner & Action
+        Rectangle {
+          visible: settingsRoot.updateAvailable && Boolean(settingsRoot.latestVersion)
+          Layout.fillWidth: true
+          implicitHeight: updateRow.implicitHeight + 16
+          radius: 5
+          color: Qt.rgba(0.2, 0.8, 0.4, 0.12)
+          border.color: "#4ade80"
+          border.width: 1
+
+          RowLayout {
+            id: updateRow
+            anchors.fill: parent
+            anchors.margins: 8
+            spacing: 8
+
+            Text { text: "✨"; font.pixelSize: 14 }
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text {
+                text: "New omawarden engine available: v" + settingsRoot.latestVersion
+                color: "#4ade80"
+                font.pixelSize: 11
+                font.weight: Font.DemiBold
+              }
+              Text {
+                text: "Current installed version: " + (settingsRoot.cliHealth.version || "unknown")
+                color: Qt.darker(settingsRoot.foreground, 1.6)
+                font.pixelSize: 10
+              }
+            }
+
+            Rectangle {
+              implicitHeight: 26
+              implicitWidth: upBtnText.implicitWidth + 14
+              radius: 4
+              color: "#22c55e"
+
+              Text {
+                id: upBtnText
+                anchors.centerIn: parent
+                text: settingsRoot.isDownloadingCli ? "Updating..." : ("Update to v" + settingsRoot.latestVersion)
+                color: "#ffffff"
+                font.pixelSize: 10
+                font.weight: Font.Medium
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                enabled: !settingsRoot.isDownloadingCli
+                onClicked: settingsRoot.downloadCliRequested()
+              }
+            }
+          }
+        }
+
+        // Update Check Status Feedback (when manually checked and up-to-date or error)
+        Text {
+          visible: !settingsRoot.updateAvailable && Boolean(settingsRoot.updateCheckStatus)
+          text: settingsRoot.updateCheckStatus
+          color: Qt.darker(settingsRoot.foreground, 1.6)
+          font.pixelSize: 10
+          font.weight: Font.Medium
         }
 
         RowLayout {

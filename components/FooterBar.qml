@@ -7,6 +7,10 @@ Rectangle {
 
   property string overlayVersion: ""
   property string backendVersion: ""
+  property bool isEngineInstalled: true
+  property bool isDownloadingCli: false
+  property bool updateAvailable: false
+  property string latestVersion: ""
   property bool isUnlocked: true
   property bool isBusy: false
   property color background: "transparent"
@@ -18,6 +22,7 @@ Rectangle {
   signal syncTriggered()
   signal lockTriggered()
   signal settingsTriggered()
+  signal downloadCliTriggered()
 
   height: 30
   Layout.fillWidth: true
@@ -190,9 +195,92 @@ Rectangle {
 
     Item { Layout.fillWidth: true }
 
-    // 3. Bottom Right: Plain, uncolored version info
+    // 3. Bottom Right: Plain version info + Engine Download / Update badges
     RowLayout {
       spacing: 6
+
+      // Downloading Engine Indicator
+      Rectangle {
+        visible: footerRoot.isDownloadingCli
+        implicitHeight: 18
+        implicitWidth: dlProgRow.implicitWidth + 10
+        radius: 4
+        color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.15)
+        border.color: footerRoot.accent
+        border.width: 1
+
+        RowLayout {
+          id: dlProgRow
+          anchors.centerIn: parent
+          spacing: 3
+          Text {
+            text: "⏳ Downloading Engine..."
+            color: footerRoot.accent
+            font.pixelSize: 10
+            font.weight: Font.Medium
+          }
+        }
+      }
+
+      // Download Engine Button (When missing/not installed)
+      Rectangle {
+        visible: !footerRoot.isEngineInstalled && !footerRoot.isDownloadingCli
+        implicitHeight: 18
+        implicitWidth: dlBadgeRow.implicitWidth + 10
+        radius: 4
+        color: Qt.rgba(0.9, 0.2, 0.2, 0.15)
+        border.color: "#f87171"
+        border.width: 1
+
+        RowLayout {
+          id: dlBadgeRow
+          anchors.centerIn: parent
+          spacing: 3
+          Text {
+            text: "📥 Download Engine"
+            color: "#f87171"
+            font.pixelSize: 10
+            font.weight: Font.DemiBold
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          hoverEnabled: true
+          onClicked: footerRoot.downloadCliTriggered()
+        }
+      }
+
+      // Update Available Badge
+      Rectangle {
+        visible: footerRoot.isEngineInstalled && footerRoot.updateAvailable && Boolean(footerRoot.latestVersion)
+        implicitHeight: 18
+        implicitWidth: updateBadgeRow.implicitWidth + 10
+        radius: 4
+        color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
+        border.color: "#4ade80"
+        border.width: 1
+
+        RowLayout {
+          id: updateBadgeRow
+          anchors.centerIn: parent
+          spacing: 3
+          Text {
+            text: "✨ v" + footerRoot.latestVersion + " Available"
+            color: "#4ade80"
+            font.pixelSize: 10
+            font.weight: Font.Medium
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          hoverEnabled: true
+          onClicked: footerRoot.settingsTriggered()
+        }
+      }
 
       Text {
         text: "Overlay " + footerRoot.overlayVersion

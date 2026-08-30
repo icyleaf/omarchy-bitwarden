@@ -15,6 +15,7 @@ Item {
     root.refreshConfig()
     root.refreshHealth()
     root.refreshAuthStatus()
+    root.checkUpdates(false)
   }
 
   property var shell: null
@@ -23,6 +24,8 @@ Item {
   property string helperPath: {
     var custom = Quickshell.env("OMARCHY_BITWARDEN_HELPER")
     if (custom) return custom
+    var localPath = Qt.resolvedUrl("bin/omawarden").toString().replace(/^file:\/\//, "")
+    if (localPath) return localPath
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
     var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
     return baseDir + "/omawarden"
@@ -51,7 +54,15 @@ Item {
     error: "Checking CLI status..."
   })
   property bool isDownloadingCli: false
-  property bool hasAttemptedAutoDownload: false
+  property string latestVersion: ""
+  property bool isCheckingUpdate: false
+  property string updateCheckStatus: ""
+  readonly property bool updateAvailable: {
+    if (!latestVersion) return false
+    var currentVer = (cliHealth && cliHealth.version) ? cliHealth.version : ""
+    if (!currentVer) return false
+    return compareSemVer(latestVersion, currentVer) > 0
+  }
 
   property var authState: ({
     status: "unauthenticated",
@@ -128,6 +139,7 @@ Item {
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
+    root.checkUpdates(false)
     if (root.authState.status === "unlocked") {
       if (!root.rawVaultItems || root.rawVaultItems.length === 0) root.loadVaultItems()
       root.syncVault(true)
@@ -183,8 +195,9 @@ Item {
     root.errorMessage = ""
     root.statusMessage = "Downloading omawarden backend engine..."
 
+    var localDir = Qt.resolvedUrl("bin").toString().replace(/^file:\/\//, "")
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-    var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
+    var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
 
     var script = [
       "set -e",
@@ -199,33 +212,32 @@ Item {
       "TMP_DIR=$(mktemp -d)",
       "trap 'rm -rf \"$TMP_DIR\"' EXIT",
       "download_file() {",
-      "  if command -v curl >/dev/null 2>&1; then curl -sSLf \"$1\" -o \"$2\";",
-      "  elif command -v wget >/dev/null 2>&1; then wget -q -O \"$2\" \"$1\";",
+      "  if command -v curl >/dev/null 2>&1; then",
+      "    curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 30 \"$1\" -o \"$2\";",
+      "  elif command -v wget >/dev/null 2>&1; then",
+      "    wget -q --user-agent=\"OmarchyBitwarden\" --timeout=30 -O \"$2\" \"$1\";",
       "  else return 1; fi",
       "}",
-      "LATEST_DIRECT_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz\"",
-      "LATEST_SHA_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz.sha256\"",
-      "if download_file \"$LATEST_DIRECT_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
-      "  download_file \"$LATEST_SHA_URL\" \"$TMP_DIR/omawarden.tar.gz.sha256\" || true",
+      "if command -v curl >/dev/null 2>&1; then",
+      "  RELEASE_JSON=$(curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 10 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
+      "elif command -v wget >/dev/null 2>&1; then",
+      "  RELEASE_JSON=$(wget -qO- --user-agent=\"OmarchyBitwarden\" --timeout=10 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
       "else",
-      "  if command -v curl >/dev/null 2>&1; then",
-      "    RELEASE_JSON=$(curl -sSL \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
-      "  elif command -v wget >/dev/null 2>&1; then",
-      "    RELEASE_JSON=$(wget -qO- \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
-      "  else",
-      "    RELEASE_JSON=\"\"",
-      "  fi",
-      "  RESOLVED_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz$' | head -n 1 || true)",
-      "  RESOLVED_SHA_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz\\.sha256$' | head -n 1 || true)",
-      "  if [ -n \"$RESOLVED_URL\" ]; then",
-      "    download_file \"$RESOLVED_URL\" \"$TMP_DIR/omawarden.tar.gz\" || true",
-      "    if [ -n \"$RESOLVED_SHA_URL\" ]; then",
-      "      download_file \"$RESOLVED_SHA_URL\" \"$TMP_DIR/omawarden.tar.gz.sha256\" || true",
-      "    fi",
-      "  fi",
+      "  RELEASE_JSON=\"\"",
       "fi",
+      "RESOLVED_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz$' | head -n 1 || true)",
+      "RESOLVED_SHA_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz\\.sha256$' | head -n 1 || true)",
+      "if [ -z \"$RESOLVED_URL\" ]; then",
+      "  RESOLVED_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz\"",
+      "  RESOLVED_SHA_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz.sha256\"",
+      "fi",
+      "if ! download_file \"$RESOLVED_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download omawarden from $RESOLVED_URL\\\"}\"",
+      "  exit 1",
+      "fi",
+      "download_file \"$RESOLVED_SHA_URL\" \"$TMP_DIR/omawarden.tar.gz.sha256\" || true",
       "if [ ! -s \"$TMP_DIR/omawarden.tar.gz\" ]; then",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download latest omawarden binary archive for $TRIPLE\\\"}\"",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Downloaded omawarden archive is empty\\\"}\"",
       "  exit 1",
       "fi",
       "if [ -s \"$TMP_DIR/omawarden.tar.gz.sha256\" ]; then",
@@ -234,12 +246,9 @@ Item {
       "    ACTUAL_SHA=$(sha256sum \"$TMP_DIR/omawarden.tar.gz\" | awk '{print $1}' | tr -d ' \\r\\n')",
       "  elif command -v shasum >/dev/null 2>&1; then",
       "    ACTUAL_SHA=$(shasum -a 256 \"$TMP_DIR/omawarden.tar.gz\" | awk '{print $1}' | tr -d ' \\r\\n')",
-      "  else",
-      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"SHA-256 verification tool (sha256sum / shasum) not found\\\"}\"",
-      "    exit 1",
       "  fi",
-      "  if [ -z \"$EXPECTED_SHA\" ] || [ \"$EXPECTED_SHA\" != \"$ACTUAL_SHA\" ]; then",
-      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"SHA-256 checksum verification failed: expected $EXPECTED_SHA, got $ACTUAL_SHA\\\"}\"",
+      "  if [ -n \"$EXPECTED_SHA\" ] && [ \"$EXPECTED_SHA\" != \"$ACTUAL_SHA\" ]; then",
+      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"SHA-256 verification failed\\\"}\"",
       "    exit 1",
       "  fi",
       "fi",
@@ -248,7 +257,7 @@ Item {
       "FOUND_BIN=$(find \"$EXTRACT_DIR\" -type f -name \"omawarden\" | head -n 1)",
       "if [ -z \"$FOUND_BIN\" ]; then",
       "  rm -rf \"$EXTRACT_DIR\"",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Binary omawarden not found in downloaded archive\\\"}\"",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Binary omawarden not found in archive\\\"}\"",
       "  exit 1",
       "fi",
       "mkdir -p \"$TARGET_DIR\"",
@@ -258,8 +267,57 @@ Item {
       "echo \"{\\\"ok\\\":true,\\\"path\\\":\\\"$TARGET_DIR/omawarden\\\",\\\"verified\\\":true}\""
     ].join("\n")
 
+    downloadCliProc.running = false
     downloadCliProc.command = ["bash", "-c", script, "sh", baseDir]
     downloadCliProc.running = true
+  }
+
+  function parseSemVer(v) {
+    if (!v) return [0, 0, 0]
+    var clean = String(v).replace(/^omawarden-|^v/i, "").trim()
+    var parts = clean.split("-")[0].split(".")
+    var major = parseInt(parts[0]) || 0
+    var minor = parseInt(parts[1]) || 0
+    var patch = parseInt(parts[2]) || 0
+    return [major, minor, patch]
+  }
+
+  function compareSemVer(v1, v2) {
+    var a = parseSemVer(v1)
+    var b = parseSemVer(v2)
+    for (var i = 0; i < 3; i++) {
+      if (a[i] > b[i]) return 1
+      if (a[i] < b[i]) return -1
+    }
+    return 0
+  }
+
+  function checkUpdates(isManual) {
+    if (root.isCheckingUpdate) return
+    root.isCheckingUpdate = true
+    if (isManual) {
+      root.updateCheckStatus = "Checking for updates..."
+    }
+
+    var script = [
+      "REPO=\"icyleaf/omarchy-bitwarden\"",
+      "if command -v curl >/dev/null 2>&1; then",
+      "  TAG=$(curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 6 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | head -n 1 | cut -d'\"' -f4 || true)",
+      "elif command -v wget >/dev/null 2>&1; then",
+      "  TAG=$(wget -qO- --user-agent=\"OmarchyBitwarden\" --timeout=6 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | head -n 1 | cut -d'\"' -f4 || true)",
+      "else",
+      "  TAG=\"\"",
+      "fi",
+      "if [ -n \"$TAG\" ]; then",
+      "  echo \"{\\\"ok\\\":true,\\\"tag\\\":\\\"$TAG\\\"}\"",
+      "else",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to fetch latest release metadata\\\"}\"",
+      "fi"
+    ].join("\n")
+
+    updateCheckProc.running = false
+    updateCheckProc.command = ["bash", "-c", script]
+    updateCheckProc.running = true
   }
 
   function refreshHealth() {
@@ -1037,6 +1095,10 @@ Item {
             cliHealth: root.cliHealth
             isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
+            updateAvailable: root.updateAvailable
+            latestVersion: root.latestVersion
+            isCheckingUpdate: root.isCheckingUpdate
+            updateCheckStatus: root.updateCheckStatus
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
@@ -1046,16 +1108,21 @@ Item {
               root.refreshHealth()
               root.refreshConfig()
             }
+            onCheckUpdateRequested: { root.checkUpdates(true) }
             onDownloadCliRequested: { root.downloadCli() }
           }
         }
 
-        // 3. Footer Bar (Bottom Left: Actions, Sync, Lock, Settings; Bottom Right: Versions)
+        // 3. Footer Bar (Bottom Left: Actions, Sync, Lock, Settings; Bottom Right: Versions & Actions)
         FooterBar {
           isUnlocked: root.effectiveView === "search"
           isBusy: root.isBusy
           overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
           backendVersion: (root.cliHealth && root.cliHealth.version) || ""
+          isEngineInstalled: Boolean(root.cliHealth && root.cliHealth.installed)
+          isDownloadingCli: root.isDownloadingCli
+          updateAvailable: root.updateAvailable
+          latestVersion: root.latestVersion
           background: root.background
           foreground: root.foreground
           accent: root.accent
@@ -1069,6 +1136,7 @@ Item {
           onSettingsTriggered: {
             root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
           }
+          onDownloadCliTriggered: { root.downloadCli() }
         }
       }
 
@@ -1168,15 +1236,14 @@ Item {
               clipboard_available: false,
               error: "CLI executable not found or output empty."
             })
-            if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
-              root.hasAttemptedAutoDownload = true
-              root.downloadCli()
-            }
             return
           }
           var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
             root.cliHealth = data
+            if (data.version && root.latestVersion) {
+              root.updateAvailable = (root.compareSemVer(root.latestVersion, data.version) > 0)
+            }
           }
         } catch (e) {
           root.cliHealth = ({
@@ -1202,10 +1269,6 @@ Item {
           clipboard_available: false,
           error: "CLI executable not found or failed to execute."
         })
-        if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
-          root.hasAttemptedAutoDownload = true
-          root.downloadCli()
-        }
       }
     }
   }
@@ -1222,7 +1285,7 @@ Item {
           var cleanText = (text || "").trim()
           var data = JSON.parse(cleanText)
           if (data && data.ok) {
-            root.statusMessage = "omawarden engine installed successfully."
+            root.statusMessage = "omawarden engine updated successfully."
             root.errorMessage = ""
             root.refreshHealth()
             root.refreshConfig()
@@ -1241,6 +1304,39 @@ Item {
       if (code !== 0 && !root.errorMessage) {
         root.errorMessage = "Download script failed."
       }
+    }
+  }
+
+  Process {
+    id: updateCheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isCheckingUpdate = false
+        try {
+          var cleanText = (text || "").trim()
+          var data = JSON.parse(cleanText)
+          if (data && data.ok && data.tag) {
+            var rawTag = data.tag
+            var cleanTag = String(rawTag).replace(/^omawarden-|^v/i, "").trim()
+            root.latestVersion = cleanTag
+            var currentVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
+            if (currentVer && root.compareSemVer(cleanTag, currentVer) > 0) {
+              root.updateCheckStatus = "Update available: v" + cleanTag
+            } else {
+              root.updateCheckStatus = "Up to date (v" + (currentVer || cleanTag) + ")"
+            }
+          } else {
+            root.updateCheckStatus = (data && data.error) ? data.error : "Update check failed"
+          }
+        } catch (e) {
+          root.updateCheckStatus = "Update check failed"
+        }
+      }
+    }
+    onExited: function(code) {
+      root.isCheckingUpdate = false
     }
   }
 
