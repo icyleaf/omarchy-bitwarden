@@ -190,7 +190,7 @@ Rectangle {
       spacing: 6
 
       Text {
-        text: "Overlay " + (footerRoot.overlayVersion || "v0.4.0")
+        text: "Overlay " + footerRoot.overlayVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
         font.pixelSize: 10
       }
@@ -202,7 +202,7 @@ Rectangle {
       }
 
       Text {
-        text: "Backend " + (footerRoot.backendVersion || "omawarden v0.1.0")
+        text: "Backend " + footerRoot.backendVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
         font.pixelSize: 10
       }

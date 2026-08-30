@@ -1031,8 +1031,8 @@ Item {
         FooterBar {
           isUnlocked: root.effectiveView === "search"
           isBusy: root.isBusy
-          overlayVersion: (root.manifest && root.manifest.version) ? ("v" + root.manifest.version) : "v0.4.0"
-          backendVersion: (root.cliHealth && root.cliHealth.version) || "omawarden v0.1.0"
+          overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
+          backendVersion: (root.cliHealth && root.cliHealth.version) || ""
           background: root.background
           foreground: root.foreground
           accent: root.accent
