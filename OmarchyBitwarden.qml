@@ -1245,20 +1245,6 @@ onVisibleChanged: {
                   font.pixelSize: Style.font.caption
                   font.bold: true
                 }
-
-                Text {
-                  text: "(Change in Settings)"
-                  color: Qt.darker(root.foreground, 1.3)
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  root.currentView = "settings"
-                }
               }
             }
 
@@ -1437,29 +1423,6 @@ onVisibleChanged: {
           Layout.fillHeight: true
           spacing: 14
 
-          Text {
-            text: "Configuration & CLI Health"
-            color: root.foreground
-            font.pixelSize: Style.font.title
-            font.bold: true
-          }
-
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 4
-            Text {
-              text: "Server URL (Bitwarden or Vaultwarden):"
-              color: root.foreground
-              font.pixelSize: Style.font.bodySmall
-            }
-            TextField {
-              id: inputServerUrl
-              Layout.fillWidth: true
-              text: root.config.server_url || "https://vault.bitwarden.com"
-              font.pixelSize: Style.font.body
-            }
-          }
-
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 6
@@ -1524,6 +1487,22 @@ onVisibleChanged: {
                 }
               }
               Item { Layout.fillWidth: true }
+            }
+          }
+
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            Text {
+              text: "Server URL (Bitwarden or Vaultwarden):"
+              color: root.foreground
+              font.pixelSize: Style.font.bodySmall
+            }
+            TextField {
+              id: inputServerUrl
+              Layout.fillWidth: true
+              text: root.config.server_url || "https://vault.bitwarden.com"
+              font.pixelSize: Style.font.body
             }
           }
 
@@ -1600,10 +1579,6 @@ onVisibleChanged: {
           RowLayout {
             Layout.fillWidth: true
             spacing: 8
-            Button {
-              text: "Test System Health"
-              onClicked: root.refreshHealth()
-            }
             Button {
               text: "Save Configuration"
               selected: true
