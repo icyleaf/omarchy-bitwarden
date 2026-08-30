@@ -40,13 +40,13 @@ Item {
   property bool show2FAField: false
 
   property var cliHealth: ({
-    installed: true,
-    ok: true,
-    version: "0.1.0",
-    server_reachable: true,
-    keyring_available: true,
-    clipboard_available: true,
-    error: null
+    installed: false,
+    ok: false,
+    version: "",
+    server_reachable: false,
+    keyring_available: false,
+    clipboard_available: false,
+    error: "Checking CLI status..."
   })
 
   property var authState: ({
@@ -2866,8 +2866,33 @@ onVisibleChanged: {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
-          root.cliHealth = data
-        } catch (e) {}
+          if (data && typeof data === "object") {
+            root.cliHealth = data
+          }
+        } catch (e) {
+          root.cliHealth = ({
+            installed: false,
+            ok: false,
+            version: "",
+            server_reachable: false,
+            keyring_available: false,
+            clipboard_available: false,
+            error: "Failed to parse CLI health output."
+          })
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.cliHealth = ({
+          installed: false,
+          ok: false,
+          version: "",
+          server_reachable: false,
+          keyring_available: false,
+          clipboard_available: false,
+          error: "CLI executable not found or failed to execute."
+        })
       }
     }
   }
