@@ -3,14 +3,17 @@ use omawarden::attachment::get_attachment;
 use omawarden::auth::AuthManager;
 use omawarden::clipboard::ClipboardManager;
 use omawarden::config::ConfigManager;
+use omawarden::daemon::{run_daemon_server, send_daemon_request, DaemonState};
 use omawarden::health::check_cli_health;
 use omawarden::hook::install_lock_hook;
+use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "omawarden", about = "High-performance helper CLI and daemon for Omarchy Bitwarden Plugin")]
@@ -63,6 +66,11 @@ enum Commands {
     Attachment {
         #[command(subcommand)]
         action: AttachmentAction,
+    },
+    #[command(about = "Run omawarden background daemon")]
+    Daemon {
+        #[arg(long, default_value = "15")]
+        auto_lock: u64,
     },
 }
 
@@ -254,6 +262,18 @@ fn main() -> ExitCode {
     let max_output_bytes = (cfg.max_output_mb * 1024 * 1024) as usize;
 
     match cli.command {
+        Commands::Daemon { auto_lock } => {
+            let storage_mgr = StorageManager::default();
+            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock));
+            println!("Starting omawarden daemon (auto_lock: {}m)...", auto_lock);
+            if let Err(e) = run_daemon_server(state) {
+                eprintln!("Daemon server error: {}", e);
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+
         Commands::Config { action } => match action {
             ConfigAction::Get => {
                 println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
@@ -315,6 +335,10 @@ fn main() -> ExitCode {
             let auth_mgr = AuthManager::new(&cfg.bw_path, None, Some(max_output_bytes));
             match action {
                 AuthAction::Status => {
+                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "status" })) {
+                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                        return ExitCode::SUCCESS;
+                    }
                     let st = auth_mgr.get_status(false);
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
@@ -349,6 +373,14 @@ fn main() -> ExitCode {
                 }
                 AuthAction::Unlock { password } => {
                     let pwd = read_secret_stdin(password);
+                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "unlock", "password": pwd })) {
+                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                        return if daemon_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        };
+                    }
                     let res = auth_mgr.unlock(&pwd);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
@@ -358,11 +390,13 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::Lock => {
+                    let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.lock();
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     ExitCode::SUCCESS
                 }
                 AuthAction::Logout => {
+                    let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.logout();
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     ExitCode::SUCCESS
@@ -395,6 +429,7 @@ fn main() -> ExitCode {
             let vault_mgr = VaultManager::new(&cfg.bw_path, None, Some(max_output_bytes));
             match action {
                 VaultAction::Sync => {
+                    let _ = send_daemon_request(&json!({ "action": "sync" }));
                     let ok = vault_mgr.sync(None);
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap());
                     if ok {
@@ -404,12 +439,28 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
+                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" })) {
+                        if let Some(arr) = daemon_resp.as_array() {
+                            if !arr.is_empty() {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
                     let items = vault_mgr.fetch_items(None);
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
+                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "search", "query": query, "category": category })) {
+                        if let Some(arr) = daemon_resp.as_array() {
+                            if !arr.is_empty() {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
                     let items = vault_mgr.fetch_items(None);
                     let results = vault_mgr.search(&items, &query, category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());

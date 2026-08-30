@@ -1,9 +1,13 @@
+pub mod api;
 pub mod attachment;
 pub mod auth;
 pub mod clipboard;
 pub mod config;
+pub mod crypto;
+pub mod daemon;
 pub mod health;
 pub mod hook;
 pub mod keyring;
+pub mod storage;
 pub mod totp;
 pub mod vault;
