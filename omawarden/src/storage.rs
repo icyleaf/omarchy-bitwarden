@@ -25,6 +25,7 @@ pub struct VaultStorage {
     pub ciphers: Vec<Value>,
 }
 
+#[derive(Debug, Clone)]
 pub struct StorageManager {
     pub file_path: PathBuf,
 }
@@ -93,9 +94,9 @@ impl StorageManager {
             storage.kdf_parallelism,
         )?;
 
-        let master_symmetric_key = SymmetricCryptoKey::from_master_key(&master_key);
         let parsed_enc_key = EncString::parse(enc_user_key)?;
-        let decrypted_raw_user_key = parsed_enc_key.decrypt(&master_symmetric_key)?;
+        let decrypted_raw_user_key =
+            SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)?;
 
         SymmetricCryptoKey::from_raw_bytes(&decrypted_raw_user_key)
     }

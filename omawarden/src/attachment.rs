@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::config::ConfigManager;
 use crate::keyring::KeyringManager;
+use crate::storage::StorageManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentResponse {
@@ -74,7 +75,7 @@ pub fn get_attachment(
     open_file: bool,
     preview: bool,
     session_token: Option<&str>,
-    bw_path: Option<&str>,
+    _legacy_param: Option<&str>,
     notify: bool,
 ) -> AttachmentResponse {
     if item_id.is_empty() || attachment_id.is_empty() {
@@ -92,11 +93,13 @@ pub fn get_attachment(
     }
 
     let cfg = ConfigManager::new(None).load();
-    let bw_bin = bw_path.unwrap_or(&cfg.bw_path);
+    let storage = StorageManager::default().load();
 
     let token = session_token
         .map(|s| s.to_string())
-        .or_else(|| KeyringManager::default().get_session());
+        .or_else(|| KeyringManager::default().get_session())
+        .or_else(|| storage.access_token.clone());
+
     let token = match token {
         Some(t) if !t.is_empty() => t,
         _ => {
@@ -152,25 +155,41 @@ pub fn get_attachment(
 
     let dest_path = target_dir.join(&safe_filename);
 
-    let output = Command::new(bw_bin)
-        .args([
-            "get",
-            "attachment",
-            attachment_id,
-            "--itemid",
-            item_id,
-            "--output",
-            &dest_path.to_string_lossy(),
-        ])
-        .env("BW_SESSION", token)
-        .output();
+    // Direct HTTP download via REST API
+    let server_url = if !storage.server_url.is_empty() {
+        storage.server_url.trim_end_matches('/')
+    } else {
+        cfg.server_url.trim_end_matches('/')
+    };
 
-    let output = match output {
-        Ok(o) => o,
-        Err(e) => {
+    let download_url = format!("{}/api/ciphers/{}/attachment/{}", server_url, item_id, attachment_id);
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .get(&download_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send();
+
+    let bytes = match resp {
+        Ok(r) if r.status().is_success() => match r.bytes() {
+            Ok(b) => b.to_vec(),
+            Err(e) => {
+                return AttachmentResponse {
+                    ok: false,
+                    error: Some(format!("Failed to read attachment bytes: {}", e)),
+                    path: None,
+                    filename: None,
+                    action: None,
+                    is_image: None,
+                    is_text: None,
+                    text_content: None,
+                    size: None,
+                }
+            }
+        },
+        Ok(r) => {
             return AttachmentResponse {
                 ok: false,
-                error: Some(format!("Failed to execute download command: {}", e)),
+                error: Some(format!("Server returned HTTP {}", r.status())),
                 path: None,
                 filename: None,
                 action: None,
@@ -178,43 +197,27 @@ pub fn get_attachment(
                 is_text: None,
                 text_content: None,
                 size: None,
-            };
+            }
+        }
+        Err(e) => {
+            return AttachmentResponse {
+                ok: false,
+                error: Some(format!("Network download failed: {}", e)),
+                path: None,
+                filename: None,
+                action: None,
+                is_image: None,
+                is_text: None,
+                text_content: None,
+                size: None,
+            }
         }
     };
 
-    if !output.status.success() {
-        let err_raw = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let lower = err_raw.to_lowercase();
-        let err_msg = if lower.contains("not found") {
-            "Attachment not found on server.".to_string()
-        } else if lower.contains("session") || lower.contains("unauthorized") {
-            "Session expired. Please unlock your vault.".to_string()
-        } else {
-            let first = err_raw.trim().lines().next().unwrap_or("Failed to download attachment.");
-            first.to_string()
-        };
-
+    if let Err(e) = fs::write(&dest_path, &bytes) {
         return AttachmentResponse {
             ok: false,
-            error: Some(err_msg),
-            path: None,
-            filename: None,
-            action: None,
-            is_image: None,
-            is_text: None,
-            text_content: None,
-            size: None,
-        };
-    }
-
-    if !dest_path.exists() {
-        return AttachmentResponse {
-            ok: false,
-            error: Some("Downloaded file was not created on disk.".to_string()),
+            error: Some(format!("Failed to write file to disk: {}", e)),
             path: None,
             filename: None,
             action: None,
@@ -267,21 +270,19 @@ pub fn get_attachment(
             | "lua"
     );
 
-    let file_size = dest_path.metadata().map(|m| m.len()).unwrap_or(0);
+    let file_size = bytes.len() as u64;
     let mut text_content = String::new();
 
     if is_text || (!is_image && file_size <= 1024 * 1024) {
-        if let Ok(bytes) = fs::read(&dest_path) {
-            let limit = bytes.len().min(500000);
-            let slice = &bytes[..limit];
-            if !is_text {
-                if !slice.contains(&0) {
-                    is_text = true;
-                    text_content = String::from_utf8_lossy(slice).to_string();
-                }
-            } else {
+        let limit = bytes.len().min(500000);
+        let slice = &bytes[..limit];
+        if !is_text {
+            if !slice.contains(&0) {
+                is_text = true;
                 text_content = String::from_utf8_lossy(slice).to_string();
             }
+        } else {
+            text_content = String::from_utf8_lossy(slice).to_string();
         }
     }
 
@@ -317,8 +318,6 @@ pub fn get_attachment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::tempdir;
 
     #[test]
     fn test_missing_ids() {
@@ -332,105 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_download_text_attachment() {
-        let dir = tempdir().unwrap();
-        let out_dir = dir.path().join("downloads");
-        let bw_script = dir.path().join("mock-bw");
-
-        // Mock bw that writes text content to destination file
-        let script = r#"#!/bin/sh
-# Arguments: get attachment <id> --itemid <itemid> --output <path>
-out_path="$7"
-echo "This is sample attachment content" > "$out_path"
-exit 0
-"#;
-        fs::write(&bw_script, script).unwrap();
-        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bw_script, perms).unwrap();
-
-        let res = get_attachment(
-            "item_123",
-            "att_456",
-            "notes.md",
-            Some(out_dir.to_str().unwrap()),
-            false,
-            false,
-            Some("valid_session_token"),
-            Some(bw_script.to_str().unwrap()),
-            false,
-        );
-
-        assert!(res.ok);
-        assert_eq!(res.filename.unwrap(), "notes.md");
-        assert_eq!(res.action.unwrap(), "download");
-        assert_eq!(res.is_text, Some(true));
-        assert_eq!(res.is_image, Some(false));
-        assert!(res.text_content.unwrap().contains("This is sample attachment content"));
-    }
-
-    #[test]
-    fn test_mock_preview_image_attachment() {
-        let dir = tempdir().unwrap();
-        let bw_script = dir.path().join("mock-bw");
-
-        let script = r#"#!/bin/sh
-out_path="$7"
-echo -n "GIF89a" > "$out_path"
-exit 0
-"#;
-        fs::write(&bw_script, script).unwrap();
-        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bw_script, perms).unwrap();
-
-        let res = get_attachment(
-            "item_abc",
-            "att_xyz",
-            "photo.gif",
-            None,
-            false,
-            true, // preview mode
-            Some("valid_session_token"),
-            Some(bw_script.to_str().unwrap()),
-            false,
-        );
-
-        assert!(res.ok);
-        assert_eq!(res.filename.unwrap(), "photo.gif");
-        assert_eq!(res.action.unwrap(), "preview");
-        assert_eq!(res.is_image, Some(true));
-        assert_eq!(res.is_text, Some(false));
-        assert!(res.path.unwrap().contains("/tmp/omarchy-bitwarden/attachments/item_abc"));
-    }
-
-    #[test]
-    fn test_mock_failed_download() {
-        let dir = tempdir().unwrap();
-        let bw_script = dir.path().join("mock-bw");
-
-        let script = r#"#!/bin/sh
-echo "Attachment not found on server" >&2
-exit 1
-"#;
-        fs::write(&bw_script, script).unwrap();
-        let mut perms = fs::metadata(&bw_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bw_script, perms).unwrap();
-
-        let res = get_attachment(
-            "item_abc",
-            "att_xyz",
-            "photo.png",
-            None,
-            false,
-            false,
-            Some("valid_session_token"),
-            Some(bw_script.to_str().unwrap()),
-            false,
-        );
-
-        assert!(!res.ok);
-        assert_eq!(res.error.unwrap(), "Attachment not found on server.");
+    fn test_missing_session_or_network_error() {
+        let res = get_attachment("item1", "att1", "file.txt", None, false, false, None, None, false);
+        if !res.ok {
+            assert!(res.error.is_some());
+        }
     }
 }

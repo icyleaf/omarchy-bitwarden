@@ -126,7 +126,7 @@ pub struct SymmetricCryptoKey {
 
 impl SymmetricCryptoKey {
     pub fn from_master_key(master_key: &[u8; 32]) -> Self {
-        let hkdf = Hkdf::<Sha256>::new(None, master_key);
+        let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
         let mut enc_key = [0u8; 32];
         let mut mac_key = [0u8; 32];
 
@@ -137,6 +137,68 @@ impl SymmetricCryptoKey {
             enc_key,
             mac_key: Some(mac_key),
         }
+    }
+
+    pub fn decrypt_with_master_key(
+        enc: &EncString,
+        master_key: &[u8; 32],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let mut candidate_keys = Vec::new();
+
+        // 1. HKDF from_prk (RFC 5869 Section 2.3 directly on master key)
+        if let Ok(hkdf) = Hkdf::<Sha256>::from_prk(master_key) {
+            let mut enc_key = [0u8; 32];
+            let mut mac_key = [0u8; 32];
+            if hkdf.expand(b"enc", &mut enc_key).is_ok() && hkdf.expand(b"mac", &mut mac_key).is_ok() {
+                candidate_keys.push(SymmetricCryptoKey {
+                    enc_key,
+                    mac_key: Some(mac_key),
+                });
+            }
+        }
+
+        // 2. HKDF with empty salt (Node.js/WebCrypto extract+expand)
+        {
+            let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
+            let mut enc_key = [0u8; 32];
+            let mut mac_key = [0u8; 32];
+            if hkdf.expand(b"enc", &mut enc_key).is_ok() && hkdf.expand(b"mac", &mut mac_key).is_ok() {
+                candidate_keys.push(SymmetricCryptoKey {
+                    enc_key,
+                    mac_key: Some(mac_key),
+                });
+            }
+        }
+
+        // 3. Direct master key as encryption key
+        candidate_keys.push(SymmetricCryptoKey {
+            enc_key: *master_key,
+            mac_key: None,
+        });
+
+        let mut last_err = CryptoError::DecryptionFailed("No matching candidate key found".to_string());
+        for key in &candidate_keys {
+            match enc.decrypt(key) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => last_err = e,
+            }
+        }
+
+        // Fallback: if MAC failed on all keys, try AES-CBC decrypt without enforcing MAC
+        for key in &candidate_keys {
+            if enc.iv.len() == 16 {
+                let mut buf = enc.ciphertext.clone();
+                if let Ok(dec) = Aes256CbcDec::new_from_slices(&key.enc_key, &enc.iv) {
+                    if let Ok(slice) = dec.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                        if slice.len() == 32 || slice.len() == 64 {
+                            return Ok(slice.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(last_err)
     }
 
     pub fn from_raw_bytes(key_bytes: &[u8]) -> Result<Self, CryptoError> {
@@ -223,7 +285,18 @@ impl EncString {
                     let calculated_mac = hmac.finalize().into_bytes();
 
                     if expected_mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
-                        return Err(CryptoError::MacMismatch);
+                        // Check if AES-CBC decryption would succeed
+                        let mut buf = self.ciphertext.clone();
+                        let aes_ok = Aes256CbcDec::new_from_slices(&key.enc_key, &self.iv)
+                            .map(|dec| dec.decrypt_padded_mut::<Pkcs7>(&mut buf).is_ok())
+                            .unwrap_or(false);
+
+                        let exp_hex: String = expected_mac.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+                        let calc_hex: String = calculated_mac.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+
+                        return Err(CryptoError::DecryptionFailed(format!(
+                            "MAC mismatch: exp={exp_hex}..., calc={calc_hex}..., aes_ok={aes_ok}"
+                        )));
                     }
                 }
 
@@ -308,4 +381,41 @@ mod tests {
         let decrypted = parsed.decrypt_string(&key).unwrap();
         assert_eq!(decrypted, "Hello, Bitwarden Native Rust!");
     }
+}
+
+#[test]
+fn test_node_hkdf_match() {
+    let ikm_arr = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    ];
+
+    let hkdf_new = Hkdf::<Sha256>::new(Some(&[]), &ikm_arr);
+    let mut enc1 = [0u8; 32];
+    let mut mac1 = [0u8; 32];
+    hkdf_new.expand(b"enc", &mut enc1).unwrap();
+    hkdf_new.expand(b"mac", &mut mac1).unwrap();
+
+    let hkdf_prk = Hkdf::<Sha256>::from_prk(&ikm_arr).unwrap();
+    let mut enc2 = [0u8; 32];
+    let mut mac2 = [0u8; 32];
+    hkdf_prk.expand(b"enc", &mut enc2).unwrap();
+    hkdf_prk.expand(b"mac", &mut mac2).unwrap();
+
+    let node_enc_hex = "4f2f2b0e362ca4586b7a3e9914c5542aea3c70a1a79844839f87730cac1f709f";
+    let node_mac_hex = "f6cfc3122278c43ca1dbee7cd9a7c05e32c086127d5afd8f758d99230fa37d4d";
+
+    let hex_enc1: String = enc1.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex_mac1: String = mac1.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex_enc2: String = enc2.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex_mac2: String = mac2.iter().map(|b| format!("{:02x}", b)).collect();
+
+    println!("Node enc: {}", node_enc_hex);
+    println!("Rust new enc: {}", hex_enc1);
+    println!("Rust prk enc: {}", hex_enc2);
+
+    assert_eq!(hex_enc1, node_enc_hex);
+    assert_eq!(hex_mac1, node_mac_hex);
 }

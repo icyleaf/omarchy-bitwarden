@@ -4,7 +4,7 @@ use omawarden::auth::AuthManager;
 use omawarden::clipboard::ClipboardManager;
 use omawarden::config::ConfigManager;
 use omawarden::daemon::{run_daemon_server, send_daemon_request, DaemonState};
-use omawarden::health::check_cli_health;
+use omawarden::health::check_system_health;
 use omawarden::hook::install_lock_hook;
 use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
@@ -259,7 +259,6 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();
-    let max_output_bytes = (cfg.max_output_mb * 1024 * 1024) as usize;
 
     match cli.command {
         Commands::Daemon { auto_lock } => {
@@ -320,9 +319,8 @@ fn main() -> ExitCode {
             }
         },
 
-        Commands::Health { bw_path } => {
-            let path_to_check = bw_path.unwrap_or(cfg.bw_path);
-            let status = check_cli_health(&path_to_check);
+        Commands::Health { bw_path: _ } => {
+            let status = check_system_health(&cfg.server_url);
             println!("{}", serde_json::to_string_pretty(&status).unwrap());
             if status.ok {
                 ExitCode::SUCCESS
@@ -332,7 +330,7 @@ fn main() -> ExitCode {
         }
 
         Commands::Auth { action } => {
-            let auth_mgr = AuthManager::new(&cfg.bw_path, None, Some(max_output_bytes));
+            let auth_mgr = AuthManager::new(&cfg.server_url, None, None);
             match action {
                 AuthAction::Status => {
                     if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "status" })) {
@@ -426,7 +424,7 @@ fn main() -> ExitCode {
         },
 
         Commands::Vault { action } => {
-            let vault_mgr = VaultManager::new(&cfg.bw_path, None, Some(max_output_bytes));
+            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
             match action {
                 VaultAction::Sync => {
                     let _ = send_daemon_request(&json!({ "action": "sync" }));
@@ -531,7 +529,7 @@ fn main() -> ExitCode {
                     open,
                     preview,
                     None,
-                    Some(&cfg.bw_path),
+                    None,
                     true,
                 );
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());

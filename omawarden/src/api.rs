@@ -33,13 +33,13 @@ impl std::error::Error for ApiError {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreloginResponse {
-    #[serde(rename = "kdf")]
+    #[serde(alias = "kdf", alias = "Kdf")]
     pub kdf: Option<u32>,
-    #[serde(rename = "kdfIterations")]
+    #[serde(alias = "kdfIterations", alias = "KdfIterations", alias = "iterations")]
     pub kdf_iterations: Option<u32>,
-    #[serde(rename = "kdfMemory")]
+    #[serde(alias = "kdfMemory", alias = "KdfMemory", alias = "memory")]
     pub kdf_memory: Option<u32>,
-    #[serde(rename = "kdfParallelism")]
+    #[serde(alias = "kdfParallelism", alias = "KdfParallelism", alias = "parallelism")]
     pub kdf_parallelism: Option<u32>,
 }
 
@@ -48,19 +48,19 @@ pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
-    #[serde(rename = "token_type")]
+    #[serde(rename = "token_type", alias = "tokenType")]
     pub token_type: Option<String>,
-    #[serde(rename = "Key")]
+    #[serde(alias = "Key", alias = "key", alias = "userKey", alias = "UserKey")]
     pub key: Option<String>,
-    #[serde(rename = "PrivateKey")]
+    #[serde(alias = "PrivateKey", alias = "private_key", alias = "privateKey")]
     pub private_key: Option<String>,
-    #[serde(rename = "Kdf")]
+    #[serde(alias = "Kdf", alias = "kdf")]
     pub kdf: Option<u32>,
-    #[serde(rename = "KdfIterations")]
+    #[serde(alias = "KdfIterations", alias = "kdfIterations", alias = "iterations")]
     pub kdf_iterations: Option<u32>,
-    #[serde(rename = "KdfMemory")]
+    #[serde(alias = "KdfMemory", alias = "kdfMemory", alias = "memory")]
     pub kdf_memory: Option<u32>,
-    #[serde(rename = "KdfParallelism")]
+    #[serde(alias = "KdfParallelism", alias = "kdfParallelism", alias = "parallelism")]
     pub kdf_parallelism: Option<u32>,
 }
 
@@ -164,8 +164,21 @@ impl BitwardenApiClient {
         let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
 
         if status.is_success() {
-            let token_resp = serde_json::from_str::<TokenResponse>(&body_text)
+            let mut token_resp = serde_json::from_str::<TokenResponse>(&body_text)
                 .map_err(|e| ApiError::Json(e.to_string()))?;
+
+            if token_resp.kdf.is_none() {
+                token_resp.kdf = prelogin.kdf;
+            }
+            if token_resp.kdf_iterations.is_none() {
+                token_resp.kdf_iterations = prelogin.kdf_iterations;
+            }
+            if token_resp.kdf_memory.is_none() {
+                token_resp.kdf_memory = prelogin.kdf_memory;
+            }
+            if token_resp.kdf_parallelism.is_none() {
+                token_resp.kdf_parallelism = prelogin.kdf_parallelism;
+            }
 
             // Decrypt User Key
             let enc_user_key = token_resp
@@ -175,13 +188,12 @@ impl BitwardenApiClient {
             let parsed_enc_key = EncString::parse(enc_user_key)
                 .map_err(|e| ApiError::Crypto(e.to_string()))?;
 
-            let master_symmetric_key = SymmetricCryptoKey::from_master_key(&master_key);
-            let decrypted_raw_user_key = parsed_enc_key
-                .decrypt(&master_symmetric_key)
-                .map_err(|e| ApiError::Crypto(e.to_string()))?;
+            let decrypted_raw_user_key =
+                SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)
+                    .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
 
             let user_key = SymmetricCryptoKey::from_raw_bytes(&decrypted_raw_user_key)
-                .map_err(|e| ApiError::Crypto(e.to_string()))?;
+                .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
 
             Ok((token_resp, user_key))
         } else {

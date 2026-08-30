@@ -1,13 +1,10 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::process::{Command, Stdio};
 use zeroize::Zeroizing;
 
-use crate::health::resolve_executable;
+use crate::api::BitwardenApiClient;
 use crate::keyring::KeyringManager;
-
-pub const MAX_AUTH_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
+use crate::storage::{StorageManager, VaultStorage};
 
 pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     let raw = match err_str {
@@ -16,6 +13,9 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     };
 
     let lower = raw.to_lowercase();
+    if lower.contains("mac mismatch:") {
+        return raw.to_string();
+    }
     if lower.contains("invalid")
         && (lower.contains("password") || lower.contains("username") || lower.contains("email"))
     {
@@ -66,99 +66,51 @@ pub struct AuthResult {
     pub error: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct BwStatusJson {
-    pub status: Option<String>,
-    #[serde(rename = "serverUrl")]
-    pub server_url: Option<String>,
-    #[serde(rename = "lastSync")]
-    pub last_sync: Option<String>,
-    #[serde(rename = "userEmail")]
-    pub user_email: Option<String>,
-    #[serde(rename = "userId")]
-    pub user_id: Option<String>,
-}
-
 pub struct AuthManager {
-    pub bw_path: String,
+    pub server_url: String,
+    pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
-    pub max_output_bytes: usize,
 }
 
 impl AuthManager {
     pub fn new(
-        bw_path: &str,
+        server_url: &str,
+        storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
-        max_output_bytes: Option<usize>,
     ) -> Self {
-        let resolved = resolve_executable(bw_path).unwrap_or_else(|| bw_path.to_string());
         Self {
-            bw_path: resolved,
+            server_url: server_url.to_string(),
+            storage_mgr: storage_mgr.unwrap_or_default(),
             keyring_mgr: keyring_mgr.unwrap_or_default(),
-            max_output_bytes: max_output_bytes.unwrap_or(MAX_AUTH_OUTPUT_BYTES),
         }
     }
 
-    pub fn verify_session(&self, session_token: &str) -> bool {
-        if session_token.is_empty() {
-            return false;
-        }
-        let status = Command::new(&self.bw_path)
-            .arg("sync")
-            .env("BW_SESSION", session_token)
-            .status();
-        match status {
-            Ok(s) => s.success(),
-            Err(_) => false,
-        }
-    }
+    pub fn get_status(&self, _verify: bool) -> AuthStatus {
+        let storage = self.storage_mgr.load();
+        let session = self.keyring_mgr.get_session();
 
-    pub fn get_status(&self, verify: bool) -> AuthStatus {
-        let mut session = self.keyring_mgr.get_session();
-        let output = Command::new(&self.bw_path).arg("status").output();
-
-        if let Ok(out) = output {
-            if out.status.success() && !out.stdout.is_empty() {
-                let limit = out.stdout.len().min(self.max_output_bytes);
-                let slice = &out.stdout[..limit];
-                if let Ok(data) = serde_json::from_slice::<BwStatusJson>(slice) {
-                    let mut status_val = data.status.unwrap_or_else(|| "unauthenticated".to_string());
-                    if session.is_some() && status_val != "unauthenticated" {
-                        if verify {
-                            if !self.verify_session(session.as_deref().unwrap_or_default()) {
-                                self.keyring_mgr.clear_session();
-                                session = None;
-                                status_val = "locked".to_string();
-                            } else {
-                                status_val = "unlocked".to_string();
-                            }
-                        } else {
-                            status_val = "unlocked".to_string();
-                        }
-                    }
-                    return AuthStatus {
-                        status: status_val,
-                        server_url: data.server_url,
-                        last_sync: data.last_sync,
-                        user_email: data.user_email,
-                        user_id: data.user_id,
-                        has_session: session.is_some(),
-                    };
-                }
-            }
-        }
-
-        let fallback_status = if session.is_some() {
-            "unlocked"
+        let status_str = if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
+            "unauthenticated".to_string()
+        } else if session.is_some() {
+            "unlocked".to_string()
         } else {
-            "unauthenticated"
+            "locked".to_string()
         };
+
         AuthStatus {
-            status: fallback_status.to_string(),
-            server_url: None,
-            last_sync: None,
-            user_email: None,
-            user_id: None,
+            status: status_str,
+            server_url: if storage.server_url.is_empty() {
+                Some(self.server_url.clone())
+            } else {
+                Some(storage.server_url)
+            },
+            last_sync: storage.last_sync,
+            user_email: if storage.user_email.is_empty() {
+                None
+            } else {
+                Some(storage.user_email)
+            },
+            user_id: storage.user_id,
             has_session: session.is_some(),
         }
     }
@@ -169,194 +121,95 @@ impl AuthManager {
         password: &str,
         code: Option<&str>,
     ) -> AuthResult {
-        let mut child = match Command::new(&self.bw_path)
-            .args(["login", email, "--passwordfile", "/proc/self/fd/0", "--raw"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
+        let client = BitwardenApiClient::new(&self.server_url);
+        let password_zeroizing = Zeroizing::new(password.to_string());
+
+        let (token_resp, _user_key) = match client.login_password(email, &password_zeroizing, code) {
+            Ok(r) => r,
             Err(e) => {
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
                     session: None,
                     error: Some(sanitize_auth_error(Some(&e.to_string()))),
-                }
+                };
             }
         };
 
-        let mut input_data = Zeroizing::new(format!("{}\n", password));
-        if let Some(c) = code {
-            input_data.push_str(&format!("{}\n", c));
+        let mut storage = self.storage_mgr.load();
+        storage.server_url = self.server_url.clone();
+        storage.user_email = email.trim().to_lowercase();
+        storage.access_token = Some(token_resp.access_token.clone());
+        storage.refresh_token = token_resp.refresh_token;
+        storage.enc_user_key = token_resp.key;
+        storage.enc_private_key = token_resp.private_key;
+        storage.kdf = token_resp.kdf;
+        storage.kdf_iterations = token_resp.kdf_iterations;
+        storage.kdf_memory = token_resp.kdf_memory;
+        storage.kdf_parallelism = token_resp.kdf_parallelism;
+
+        // Pull initial sync
+        if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
+            storage.ciphers = sync_data.ciphers;
+            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
         }
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input_data.as_bytes());
-        }
+        let _ = self.storage_mgr.save(&storage);
+        self.keyring_mgr.store_session(&token_resp.access_token);
 
-        let output = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                return AuthResult {
-                    ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
-                }
-            }
-        };
-
-        if output.status.success() {
-            let session = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !session.is_empty() {
-                self.keyring_mgr.store_session(&session);
-            }
-            AuthResult {
-                ok: true,
-                status: Some("unlocked".to_string()),
-                session: Some(session),
-                error: None,
-            }
-        } else {
-            let err_raw = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&output.stdout)
-            );
-            AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(sanitize_auth_error(Some(&err_raw))),
-            }
+        AuthResult {
+            ok: true,
+            status: Some("unlocked".to_string()),
+            session: Some(token_resp.access_token),
+            error: None,
         }
     }
 
-    pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
-        let mut child = match Command::new(&self.bw_path)
-            .args(["login", "--apikey"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return AuthResult {
-                    ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
-                }
-            }
-        };
-
-        let input_data = Zeroizing::new(format!("{}\n{}\n", client_id, client_secret));
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input_data.as_bytes());
-        }
-
-        let output = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                return AuthResult {
-                    ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
-                }
-            }
-        };
-
-        if output.status.success() {
-            AuthResult {
-                ok: true,
-                status: Some("locked".to_string()),
-                session: None,
-                error: None,
-            }
-        } else {
-            let err_raw = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&output.stdout)
-            );
-            AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(sanitize_auth_error(Some(&err_raw))),
-            }
+    pub fn login_apikey(&self, _client_id: &str, _client_secret: &str) -> AuthResult {
+        // Direct API Key flow
+        AuthResult {
+            ok: false,
+            status: Some("unauthenticated".to_string()),
+            session: None,
+            error: Some("API Key login will be integrated in next patch.".to_string()),
         }
     }
 
     pub fn unlock(&self, password: &str) -> AuthResult {
-        let mut child = match Command::new(&self.bw_path)
-            .args(["unlock", "--passwordfile", "/proc/self/fd/0", "--raw"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return AuthResult {
-                    ok: false,
-                    status: Some("locked".to_string()),
-                    session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
-                }
-            }
-        };
-
-        let input_data = Zeroizing::new(format!("{}\n", password));
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input_data.as_bytes());
+        let storage = self.storage_mgr.load();
+        if storage.enc_user_key.is_none() {
+            return AuthResult {
+                ok: false,
+                status: Some("unauthenticated".to_string()),
+                session: None,
+                error: Some("Account is not logged in.".to_string()),
+            };
         }
 
-        let output = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                return AuthResult {
-                    ok: false,
-                    status: Some("locked".to_string()),
-                    session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
+        let password_zeroizing = Zeroizing::new(password.to_string());
+        match self.storage_mgr.unlock_user_key(&password_zeroizing, &storage) {
+            Ok(_user_key) => {
+                let token = storage.access_token.clone().unwrap_or_else(|| "session_unlocked".to_string());
+                self.keyring_mgr.store_session(&token);
+
+                AuthResult {
+                    ok: true,
+                    status: Some("unlocked".to_string()),
+                    session: Some(token),
+                    error: None,
                 }
             }
-        };
-
-        if output.status.success() {
-            let session = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !session.is_empty() {
-                self.keyring_mgr.store_session(&session);
-            }
-            AuthResult {
-                ok: true,
-                status: Some("unlocked".to_string()),
-                session: Some(session),
-                error: None,
-            }
-        } else {
-            let err_raw = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&output.stdout)
-            );
-            AuthResult {
+            Err(e) => AuthResult {
                 ok: false,
                 status: Some("locked".to_string()),
                 session: None,
-                error: Some(sanitize_auth_error(Some(&err_raw))),
-            }
+                error: Some(sanitize_auth_error(Some(&e.to_string()))),
+            },
         }
     }
 
     pub fn lock(&self) -> AuthResult {
         self.keyring_mgr.clear_session();
-        let _ = Command::new(&self.bw_path).arg("lock").output();
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
@@ -367,7 +220,7 @@ impl AuthManager {
 
     pub fn logout(&self) -> AuthResult {
         self.keyring_mgr.clear_session();
-        let _ = Command::new(&self.bw_path).arg("logout").output();
+        let _ = self.storage_mgr.save(&VaultStorage::default());
         AuthResult {
             ok: true,
             status: Some("unauthenticated".to_string()),
@@ -380,8 +233,6 @@ impl AuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[test]
@@ -417,92 +268,31 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_auth_unlock_and_lock() {
+    fn test_auth_manager_status_and_lock() {
         let dir = tempdir().unwrap();
-        let session_file = dir.path().join("session.txt");
-        let bw_script = dir.path().join("mock-bw");
-        let secret_tool_script = dir.path().join("mock-secret-tool");
+        let storage_path = dir.path().join("test_auth_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
 
-        // Mock secret tool
-        let secret_tool_code = format!(
-            r#"#!/bin/sh
-SF="{}"
-case "$1" in
-    store)
-        cat > "$SF"
-        exit 0
-        ;;
-    lookup)
-        if [ -f "$SF" ]; then
-            cat "$SF"
-            exit 0
-        else
-            exit 1
-        fi
-        ;;
-    clear)
-        rm -f "$SF"
-        exit 0
-        ;;
-esac
-"#,
-            session_file.display()
-        );
-        fs::write(&secret_tool_script, secret_tool_code).unwrap();
-        let mut perms = fs::metadata(&secret_tool_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&secret_tool_script, perms).unwrap();
+        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let auth_mgr = AuthManager::new("https://vault.example.com", Some(storage_mgr.clone()), Some(mock_keyring));
 
-        // Mock bw
-        let bw_code = r#"#!/bin/sh
-case "$1" in
-    status)
-        echo '{"status": "locked", "serverUrl": "https://vault.bitwarden.com", "userEmail": "user@test.com"}'
-        exit 0
-        ;;
-    unlock)
-        cat > /dev/null
-        echo "dummy_unlocked_session_token_12345"
-        exit 0
-        ;;
-    lock)
-        exit 0
-        ;;
-    logout)
-        exit 0
-        ;;
-    *)
-        exit 1
-        ;;
-esac
-"#;
-        fs::write(&bw_script, bw_code).unwrap();
-        let mut perms2 = fs::metadata(&bw_script).unwrap().permissions();
-        perms2.set_mode(0o755);
-        fs::set_permissions(&bw_script, perms2).unwrap();
-
-        let keyring = KeyringManager::new(secret_tool_script.to_str().unwrap());
-        let auth_mgr = AuthManager::new(bw_script.to_str().unwrap(), Some(keyring.clone()), None);
-
-        // Initially status is locked
+        // Initially unauthenticated
         let st = auth_mgr.get_status(false);
-        assert_eq!(st.status, "locked");
-        assert!(!st.has_session);
+        assert_eq!(st.status, "unauthenticated");
 
-        // Unlock
-        let res = auth_mgr.unlock("my_master_password");
-        assert!(res.ok);
-        assert_eq!(res.status, Some("unlocked".to_string()));
-        assert_eq!(res.session, Some("dummy_unlocked_session_token_12345".to_string()));
+        // Simulate stored account
+        let mut storage = VaultStorage::default();
+        storage.user_email = "test@example.com".to_string();
+        storage.enc_user_key = Some("2.dummy_iv|dummy_ct|dummy_mac".to_string());
+        storage_mgr.save(&storage).unwrap();
 
-        // Status is now unlocked
-        let st_unlocked = auth_mgr.get_status(false);
-        assert_eq!(st_unlocked.status, "unlocked");
-        assert!(st_unlocked.has_session);
+        let st_locked = auth_mgr.get_status(false);
+        assert_eq!(st_locked.status, "locked");
+        assert_eq!(st_locked.user_email.as_deref(), Some("test@example.com"));
 
-        // Lock
-        let lock_res = auth_mgr.lock();
-        assert!(lock_res.ok);
-        assert_eq!(keyring.get_session(), None);
+        // Logout
+        let logout_res = auth_mgr.logout();
+        assert!(logout_res.ok);
+        assert_eq!(logout_res.status.as_deref(), Some("unauthenticated"));
     }
 }

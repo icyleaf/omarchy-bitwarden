@@ -1,10 +1,10 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::process::Command;
 
-use crate::health::resolve_executable;
+use crate::api::BitwardenApiClient;
 use crate::keyring::KeyringManager;
+use crate::storage::StorageManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshMetadata {
@@ -72,7 +72,6 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
     let mut passphrase: Option<String> = None;
     let mut key_type = "SSH".to_string();
 
-    // Regex for private key PEM header in notes
     let priv_re = Regex::new(
         r"(-----BEGIN (?:[A-Z0-9_ -]+ )?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z0-9_ -]+ )?PRIVATE KEY-----)",
     )
@@ -97,7 +96,6 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
         private_key = Some(matched);
     }
 
-    // Regex for public key line in notes
     let pub_re = Regex::new(
         r"((?:ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-[a-z0-9]+)\s+[A-Za-z0-9+/=.]+(?:\s+.*)?)",
     )
@@ -116,7 +114,6 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
         public_key = Some(matched);
     }
 
-    // Search in custom fields
     if let Some(fields_arr) = fields {
         for f in fields_arr {
             let fname = f
@@ -198,71 +195,46 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
 }
 
 pub struct VaultManager {
-    pub bw_path: String,
+    pub server_url: String,
+    pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
-    pub max_output_bytes: usize,
 }
 
 impl VaultManager {
     pub fn new(
-        bw_path: &str,
+        server_url: &str,
+        storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
-        max_output_bytes: Option<usize>,
     ) -> Self {
-        let resolved = resolve_executable(bw_path).unwrap_or_else(|| bw_path.to_string());
         Self {
-            bw_path: resolved,
+            server_url: server_url.to_string(),
+            storage_mgr: storage_mgr.unwrap_or_default(),
             keyring_mgr: keyring_mgr.unwrap_or_default(),
-            max_output_bytes: max_output_bytes.unwrap_or(10 * 1024 * 1024),
         }
     }
 
-    pub fn sync(&self, session: Option<&str>) -> bool {
-        let token = session
-            .map(|s| s.to_string())
-            .or_else(|| self.keyring_mgr.get_session());
-        let token = match token {
+    pub fn sync(&self, _session: Option<&str>) -> bool {
+        let storage = self.storage_mgr.load();
+        let token = match storage.access_token.as_ref() {
             Some(t) if !t.is_empty() => t,
             _ => return false,
         };
 
-        match Command::new(&self.bw_path)
-            .arg("sync")
-            .env("BW_SESSION", token)
-            .status()
-        {
-            Ok(status) => status.success(),
+        let client = BitwardenApiClient::new(&self.server_url);
+        match client.sync_vault(token) {
+            Ok(sync_resp) => {
+                let mut updated = storage;
+                updated.ciphers = sync_resp.ciphers;
+                updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
+                self.storage_mgr.save(&updated).is_ok()
+            }
             Err(_) => false,
         }
     }
 
-    pub fn fetch_items(&self, session: Option<&str>) -> Vec<VaultItem> {
-        let token = session
-            .map(|s| s.to_string())
-            .or_else(|| self.keyring_mgr.get_session());
-        let token = match token {
-            Some(t) if !t.is_empty() => t,
-            _ => return Vec::new(),
-        };
-
-        let output = match Command::new(&self.bw_path)
-            .args(["list", "items"])
-            .env("BW_SESSION", token)
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return Vec::new(),
-        };
-
-        if output.status.success() && !output.stdout.is_empty() {
-            let limit = output.stdout.len().min(self.max_output_bytes);
-            let slice = &output.stdout[..limit];
-            if let Ok(raw_items) = serde_json::from_slice::<Vec<Value>>(slice) {
-                return self.parse_raw_items(&raw_items);
-            }
-        }
-
-        Vec::new()
+    pub fn fetch_items(&self, _session: Option<&str>) -> Vec<VaultItem> {
+        let storage = self.storage_mgr.load();
+        self.parse_raw_items(&storage.ciphers)
     }
 
     pub fn parse_raw_items(&self, raw_items: &[Value]) -> Vec<VaultItem> {
@@ -660,7 +632,7 @@ mod tests {
             })
         ];
 
-        let vault_mgr = VaultManager::new("bw", None, None);
+        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
         let items = vault_mgr.parse_raw_items(&raw_items);
         assert_eq!(items.len(), 3);
 
@@ -673,17 +645,14 @@ mod tests {
         assert_eq!(items[2].type_name, "ssh_key");
         assert!(items[2].sub_title.contains("SSH Key"));
 
-        // Search query "github"
         let search_gh = vault_mgr.search(&items, "github", None);
         assert_eq!(search_gh.len(), 1);
         assert_eq!(search_gh[0].id, "1");
 
-        // Filter by category "card"
         let search_card = vault_mgr.search(&items, "", Some("card"));
         assert_eq!(search_card.len(), 1);
         assert_eq!(search_card[0].id, "2");
 
-        // Filter by category "ssh_key"
         let search_ssh = vault_mgr.search(&items, "", Some("ssh_key"));
         assert_eq!(search_ssh.len(), 1);
         assert_eq!(search_ssh[0].id, "3");
