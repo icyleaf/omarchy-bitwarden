@@ -7,6 +7,7 @@ Item {
 
   property var config: ({})
   property var cliHealth: ({})
+  property bool isDownloadingCli: false
   property bool isBusy: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
@@ -15,6 +16,7 @@ Item {
   signal saveRequested(var newSettings)
   signal closeRequested()
   signal refreshHealthRequested()
+  signal downloadCliRequested()
 
   ScrollView {
     anchors.fill: parent
@@ -100,6 +102,30 @@ Item {
               spacing: 4
               Text { text: settingsRoot.cliHealth.installed ? "✓" : "✕"; color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"; font.pixelSize: 10; font.weight: Font.Bold }
               Text { text: "Engine: " + (settingsRoot.cliHealth.version || (settingsRoot.cliHealth.installed ? "Ready" : "Missing")); color: settingsRoot.foreground; font.pixelSize: 10 }
+            }
+          }
+
+          // Download Engine Button (When missing or downloading)
+          Rectangle {
+            visible: !settingsRoot.cliHealth.installed
+            implicitHeight: 24
+            implicitWidth: dlBtnText.implicitWidth + 12
+            radius: 4
+            color: settingsRoot.accent
+
+            Text {
+              id: dlBtnText
+              anchors.centerIn: parent
+              text: settingsRoot.isDownloadingCli ? "Downloading..." : "Download Engine"
+              color: "#ffffff"
+              font.pixelSize: 10
+              font.weight: Font.Medium
+            }
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              enabled: !settingsRoot.isDownloadingCli
+              onClicked: settingsRoot.downloadCliRequested()
             }
           }
 

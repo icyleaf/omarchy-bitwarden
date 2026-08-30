@@ -50,6 +50,8 @@ Item {
     clipboard_available: false,
     error: "Checking CLI status..."
   })
+  property bool isDownloadingCli: false
+  property bool hasAttemptedAutoDownload: false
 
   property var authState: ({
     status: "unauthenticated",
@@ -172,6 +174,64 @@ Item {
     if (options.remember_email !== undefined) cmd.push("--remember-email", options.remember_email ? "true" : "false")
     configSetProc.command = cmd
     configSetProc.running = true
+  }
+
+  function downloadCli() {
+    if (root.isDownloadingCli) return
+    root.isDownloadingCli = true
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Downloading omawarden backend engine..."
+
+    var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+    var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
+    var version = (root.manifest && root.manifest.version) ? ("v" + root.manifest.version) : "v0.4.0"
+
+    var script = [
+      "set -e",
+      "TARGET_DIR=\"${1:-$HOME/.config/omarchy/plugins/icyleaf.bitwarden/bin}\"",
+      "VERSION=\"$2\"",
+      "REPO=\"icyleaf/omarchy-bitwarden\"",
+      "if [[ \"$VERSION\" != v* ]]; then VERSION=\"v$VERSION\"; fi",
+      "ARCH=$(uname -m)",
+      "case \"$ARCH\" in",
+      "  x86_64) TRIPLE=\"x86_64-unknown-linux-gnu\" ;;",
+      "  aarch64|arm64) TRIPLE=\"aarch64-unknown-linux-gnu\" ;;",
+      "  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Unsupported architecture: $ARCH\\\"}\"; exit 1 ;;",
+      "esac",
+      "ARCHIVE_NAME=\"omawarden-${VERSION}-${TRIPLE}\"",
+      "URL=\"https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}.tar.gz\"",
+      "LATEST_URL=\"https://github.com/${REPO}/releases/latest/download/${ARCHIVE_NAME}.tar.gz\"",
+      "TMP_DIR=$(mktemp -d)",
+      "trap 'rm -rf \"$TMP_DIR\"' EXIT",
+      "download_file() {",
+      "  if command -v curl >/dev/null 2>&1; then curl -sSLf \"$1\" -o \"$2\";",
+      "  elif command -v wget >/dev/null 2>&1; then wget -q -O \"$2\" \"$1\";",
+      "  else return 1; fi",
+      "}",
+      "if ! download_file \"$URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
+      "  if ! download_file \"$LATEST_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
+      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download omawarden from $URL or latest release\\\"}\"",
+      "    exit 1",
+      "  fi",
+      "fi",
+      "EXTRACT_DIR=$(mktemp -d)",
+      "tar -xzf \"$TMP_DIR/omawarden.tar.gz\" -C \"$EXTRACT_DIR\"",
+      "FOUND_BIN=$(find \"$EXTRACT_DIR\" -type f -name \"omawarden\" | head -n 1)",
+      "if [ -z \"$FOUND_BIN\" ]; then",
+      "  rm -rf \"$EXTRACT_DIR\"",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Binary omawarden not found in downloaded archive\\\"}\"",
+      "  exit 1",
+      "fi",
+      "mkdir -p \"$TARGET_DIR\"",
+      "cp \"$FOUND_BIN\" \"$TARGET_DIR/omawarden\"",
+      "chmod +x \"$TARGET_DIR/omawarden\"",
+      "rm -rf \"$EXTRACT_DIR\"",
+      "echo \"{\\\"ok\\\":true,\\\"path\\\":\\\"$TARGET_DIR/omawarden\\\",\\\"version\\\":\\\"$VERSION\\\"}\""
+    ].join("\n")
+
+    downloadCliProc.command = ["bash", "-c", script, "sh", baseDir, version]
+    downloadCliProc.running = true
   }
 
   function refreshHealth() {
@@ -924,6 +984,8 @@ Item {
             visible: root.effectiveView === "unlock" || root.effectiveView === "login"
             authState: root.authState
             config: root.config
+            cliHealth: root.cliHealth
+            isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
             loginMethod: root.loginMethod
             rememberEmailChecked: root.rememberEmailChecked
@@ -935,6 +997,7 @@ Item {
             onLoginPasswordRequested: function(email, pwd, code) { root.doLoginPassword(email, pwd, code) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onLogoutRequested: { root.doLogout() }
+            onDownloadCliRequested: { root.downloadCli() }
           }
 
           // Mode C: Settings View
@@ -943,6 +1006,7 @@ Item {
             visible: root.effectiveView === "settings"
             config: root.config
             cliHealth: root.cliHealth
+            isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
             foreground: root.foreground
             accent: root.accent
@@ -953,6 +1017,7 @@ Item {
               root.refreshHealth()
               root.refreshConfig()
             }
+            onDownloadCliRequested: { root.downloadCli() }
           }
         }
 
@@ -1074,11 +1139,19 @@ Item {
               clipboard_available: false,
               error: "CLI executable not found or output empty."
             })
+            if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
+              root.hasAttemptedAutoDownload = true
+              root.downloadCli()
+            }
             return
           }
           var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
             root.cliHealth = data
+            if (!data.installed && !root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
+              root.hasAttemptedAutoDownload = true
+              root.downloadCli()
+            }
           }
         } catch (e) {
           root.cliHealth = ({
@@ -1090,6 +1163,10 @@ Item {
             clipboard_available: false,
             error: "Failed to parse CLI health output."
           })
+          if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
+            root.hasAttemptedAutoDownload = true
+            root.downloadCli()
+          }
         }
       }
     }
@@ -1104,6 +1181,44 @@ Item {
           clipboard_available: false,
           error: "CLI executable not found or failed to execute."
         })
+        if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
+          root.hasAttemptedAutoDownload = true
+          root.downloadCli()
+        }
+      }
+    }
+  }
+
+  Process {
+    id: downloadCliProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isDownloadingCli = false
+        root.isBusy = false
+        try {
+          var cleanText = (text || "").trim()
+          var data = JSON.parse(cleanText)
+          if (data && data.ok) {
+            root.statusMessage = "omawarden engine installed successfully."
+            root.errorMessage = ""
+            root.refreshHealth()
+            root.refreshConfig()
+            root.refreshAuthStatus()
+          } else {
+            root.errorMessage = (data && data.error) ? data.error : "Failed to download omawarden."
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to process download response."
+        }
+      }
+    }
+    onExited: function(code) {
+      root.isDownloadingCli = false
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) {
+        root.errorMessage = "Download script failed."
       }
     }
   }
