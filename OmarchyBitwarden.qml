@@ -24,7 +24,8 @@ Item {
     var custom = Quickshell.env("OMARCHY_BITWARDEN_HELPER")
     if (custom) return custom
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-    return pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin/bitwarden-helper"
+    var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
+    return baseDir + "/omawarden"
   }
 
   // Configuration & CLI Health State
