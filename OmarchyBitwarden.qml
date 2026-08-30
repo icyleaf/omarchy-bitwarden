@@ -28,10 +28,9 @@ Item {
     return baseDir + "/omawarden"
   }
 
-  // Configuration & CLI Health State
+  // Configuration & Engine Health State
   property var config: ({
     server_url: "https://vault.bitwarden.com",
-    bw_path: "bw",
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
     max_output_mb: 10,
@@ -42,10 +41,12 @@ Item {
   property bool show2FAField: false
 
   property var cliHealth: ({
-    installed: false,
-    ok: false,
-    version: "",
-    executable_path: "",
+    installed: true,
+    ok: true,
+    version: "0.1.0",
+    server_reachable: true,
+    keyring_available: true,
+    clipboard_available: true,
     error: null
   })
 
@@ -160,7 +161,6 @@ Item {
   function updateConfig(options) {
     var cmd = [root.helperPath, "config", "set"]
     if (options.server_url !== undefined) cmd.push("--server-url", options.server_url)
-    if (options.bw_path !== undefined) cmd.push("--bw-path", options.bw_path)
     if (options.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(options.auto_lock_minutes))
     if (options.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(options.clipboard_clear_seconds))
     if (options.max_output_mb !== undefined) cmd.push("--max-output-mb", String(options.max_output_mb))
@@ -554,7 +554,6 @@ Item {
     root.statusMessage = "Saving configuration..."
     var cmd = [root.helperPath, "config", "set"]
     if (settings.server_url !== undefined) cmd.push("--server-url", settings.server_url)
-    if (settings.bw_path !== undefined) cmd.push("--bw-path", settings.bw_path)
     if (settings.download_dir !== undefined) cmd.push("--download-dir", settings.download_dir)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
@@ -1427,27 +1426,62 @@ onVisibleChanged: {
 
           ColumnLayout {
             Layout.fillWidth: true
-            spacing: 4
+            spacing: 6
             RowLayout {
               Layout.fillWidth: true
               Text {
-                text: "Bitwarden CLI executable path:"
+                text: "Backend Engine:"
                 color: root.foreground
                 font.pixelSize: Style.font.bodySmall
               }
               Item { Layout.fillWidth: true }
               Text {
-                text: root.cliHealth.executable_path ? ("Detected: " + root.cliHealth.executable_path) : "Not found in PATH"
-                color: root.cliHealth.ok ? "#4ade80" : Qt.darker(root.foreground, 1.4)
+                text: "omawarden v" + (root.cliHealth.version || "0.1.0") + " (Native Rust)"
+                color: "#818cf8"
                 font.pixelSize: Style.font.caption
+                font.bold: true
               }
             }
-            TextField {
-              id: inputBwPath
+            RowLayout {
               Layout.fillWidth: true
-              text: root.config.bw_path || "bw"
-              placeholderText: "bw (auto-detected from $PATH)"
-              font.pixelSize: Style.font.body
+              spacing: 12
+              RowLayout {
+                spacing: 4
+                Rectangle {
+                  width: 8; height: 8; radius: 4
+                  color: root.cliHealth.server_reachable ? "#4ade80" : "#f87171"
+                }
+                Text {
+                  text: root.cliHealth.server_reachable ? "Server Reachable" : "Server Offline"
+                  color: root.cliHealth.server_reachable ? "#4ade80" : "#f87171"
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              RowLayout {
+                spacing: 4
+                Rectangle {
+                  width: 8; height: 8; radius: 4
+                  color: root.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                }
+                Text {
+                  text: root.cliHealth.keyring_available ? "Keyring OK" : "Keyring Missing"
+                  color: root.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              RowLayout {
+                spacing: 4
+                Rectangle {
+                  width: 8; height: 8; radius: 4
+                  color: root.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                }
+                Text {
+                  text: root.cliHealth.clipboard_available ? "Clipboard OK" : "Clipboard Missing"
+                  color: root.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              Item { Layout.fillWidth: true }
             }
           }
 
@@ -1525,7 +1559,7 @@ onVisibleChanged: {
             Layout.fillWidth: true
             spacing: 8
             Button {
-              text: "Test CLI Connection"
+              text: "Test System Health"
               onClicked: root.refreshHealth()
             }
             Button {
@@ -1537,7 +1571,6 @@ onVisibleChanged: {
                 var maxOutputVal = parseInt(inputMaxOutputMb.text.trim())
                 root.saveSettings({
                   server_url: inputServerUrl.text.trim(),
-                  bw_path: inputBwPath.text.trim(),
                   download_dir: inputDownloadDir.text.trim(),
                   auto_lock_minutes: isNaN(autoLockVal) ? 15 : autoLockVal,
                   clipboard_clear_seconds: isNaN(clipClearVal) ? 30 : clipClearVal,
