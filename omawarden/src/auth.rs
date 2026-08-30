@@ -88,11 +88,26 @@ impl AuthManager {
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
         let storage = self.storage_mgr.load();
 
+        if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
+            return AuthStatus {
+                status: "unauthenticated".to_string(),
+                server_url: if storage.server_url.is_empty() {
+                    Some(self.server_url.clone())
+                } else {
+                    Some(storage.server_url)
+                },
+                last_sync: storage.last_sync,
+                user_email: None,
+                user_id: storage.user_id,
+                has_session: false,
+            };
+        }
+
         if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "status" })) {
             let is_unlocked = daemon_resp.get("is_unlocked").and_then(|v| v.as_bool()).unwrap_or(false);
-            let status_str = if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
-                "unauthenticated".to_string()
-            } else if is_unlocked {
+            let daemon_email = daemon_resp.get("user_email").and_then(|v| v.as_str()).unwrap_or("");
+            let is_unlocked_same_user = is_unlocked && !daemon_email.is_empty() && daemon_email == storage.user_email;
+            let status_str = if is_unlocked_same_user {
                 "unlocked".to_string()
             } else {
                 "locked".to_string()
@@ -106,35 +121,21 @@ impl AuthManager {
                     Some(storage.server_url)
                 },
                 last_sync: storage.last_sync,
-                user_email: if storage.user_email.is_empty() {
-                    None
-                } else {
-                    Some(storage.user_email)
-                },
+                user_email: Some(storage.user_email),
                 user_id: storage.user_id,
-                has_session: is_unlocked,
+                has_session: is_unlocked_same_user,
             };
         }
 
-        let status_str = if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
-            "unauthenticated".to_string()
-        } else {
-            "locked".to_string()
-        };
-
         AuthStatus {
-            status: status_str,
+            status: "locked".to_string(),
             server_url: if storage.server_url.is_empty() {
                 Some(self.server_url.clone())
             } else {
                 Some(storage.server_url)
             },
             last_sync: storage.last_sync,
-            user_email: if storage.user_email.is_empty() {
-                None
-            } else {
-                Some(storage.user_email)
-            },
+            user_email: Some(storage.user_email),
             user_id: storage.user_id,
             has_session: false,
         }

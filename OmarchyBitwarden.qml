@@ -2939,8 +2939,12 @@ onVisibleChanged: {
           var res = JSON.parse(text)
           if (res && res.code) {
             root.currentTotp = res
+          } else {
+            root.currentTotp = ({ code: "Invalid Secret", ttl: 0, period: 30 })
           }
-        } catch (e) {}
+        } catch (e) {
+          root.currentTotp = ({ code: "Invalid Secret", ttl: 0, period: 30 })
+        }
       }
     }
   }
