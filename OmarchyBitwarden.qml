@@ -2076,6 +2076,112 @@ onVisibleChanged: {
                     }
                   }
 
+                  // Identity Details
+                  ColumnLayout {
+                    visible: root.selectedItem && root.selectedItem.type_name === "identity" && root.selectedItem.identity !== null
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.firstName || root.selectedItem.identity.lastName))
+                      Layout.fillWidth: true
+                      Text { text: "Name:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.identity)
+                          ? ((root.selectedItem.identity.title ? (root.selectedItem.identity.title + " ") : "") + (root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.middleName ? (root.selectedItem.identity.middleName + " ") : "") + (root.selectedItem.identity.lastName || "")).trim()
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: "Copy"
+                        onClicked: {
+                          var fullName = ((root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.lastName || "")).trim()
+                          root.copyToClipboard(fullName, false, "name")
+                        }
+                      }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.username)
+                      Layout.fillWidth: true
+                      Text { text: "Username:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.username) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.username, false, "username") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.email)
+                      Layout.fillWidth: true
+                      Text { text: "Email:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.email) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.email, false, "email") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.phone)
+                      Layout.fillWidth: true
+                      Text { text: "Phone:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.phone) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.phone, false, "phone") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.company)
+                      Layout.fillWidth: true
+                      Text { text: "Company:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.company) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.company, false, "company") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.address1 || root.selectedItem.identity.city))
+                      Layout.fillWidth: true
+                      Text { text: "Address:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.identity)
+                          ? [root.selectedItem.identity.address1, root.selectedItem.identity.city, root.selectedItem.identity.state, root.selectedItem.identity.postalCode, root.selectedItem.identity.country].filter(Boolean).join(", ")
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.bodySmall
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                      }
+                      Button {
+                        text: "Copy"
+                        onClicked: {
+                          var addr = [root.selectedItem.identity.address1, root.selectedItem.identity.city, root.selectedItem.identity.state, root.selectedItem.identity.postalCode, root.selectedItem.identity.country].filter(Boolean).join(", ")
+                          root.copyToClipboard(addr, false, "address")
+                        }
+                      }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.ssn)
+                      Layout.fillWidth: true
+                      Text { text: "SSN:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.ssn, true, "SSN") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.passportNumber)
+                      Layout.fillWidth: true
+                      Text { text: "Passport:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.passportNumber, true, "passport") }
+                    }
+
+                    RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.licenseNumber)
+                      Layout.fillWidth: true
+                      Text { text: "License:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.licenseNumber, true, "license") }
+                    }
+                  }
+
                   // SSH Key Details
                   ColumnLayout {
                     visible: root.selectedItem && root.selectedItem.type_name === "ssh_key" && root.selectedItem.ssh_key !== null
