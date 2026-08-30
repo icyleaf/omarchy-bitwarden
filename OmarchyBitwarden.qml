@@ -813,6 +813,7 @@ Item {
         SearchHeader {
           id: searchHeader
           visible: root.effectiveView === "search"
+          Layout.preferredHeight: visible ? implicitHeight : 0
           searchQuery: root.searchQuery
           categoryList: root.categoryList
           activeCategory: root.activeCategory
