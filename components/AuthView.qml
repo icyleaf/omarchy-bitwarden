@@ -22,6 +22,7 @@ Item {
   signal loginApiKeyRequested(string clientId, string clientSecret)
   signal logoutRequested()
   signal downloadCliRequested()
+  signal settingsRequested()
 
   property alias unlockInput: unlockPasswordField
 
@@ -214,9 +215,41 @@ Item {
             }
           }
 
-          // Logout Link
+          // Bottom Links: Settings (left) and Logout (right)
           RowLayout {
-            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+
+            // Settings Button
+            Rectangle {
+              implicitHeight: 22
+              implicitWidth: unlockSetRow.implicitWidth + 8
+              radius: 4
+              color: unlockSetMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+
+              RowLayout {
+                id: unlockSetRow
+                anchors.centerIn: parent
+                spacing: 4
+                Text { text: "⚙️"; font.pixelSize: 10 }
+                Text {
+                  text: "Settings"
+                  color: unlockSetMouse.containsMouse ? authRoot.foreground : Qt.darker(authRoot.foreground, 1.4)
+                  font.pixelSize: 11
+                }
+              }
+
+              MouseArea {
+                id: unlockSetMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: authRoot.settingsRequested()
+              }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            // Logout Link
             Text {
               text: "Log out from account"
               color: Qt.darker(authRoot.foreground, 1.6)
@@ -392,6 +425,41 @@ Item {
                 }
               }
             }
+          }
+
+          // Bottom Left Settings Button
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Rectangle {
+              implicitHeight: 22
+              implicitWidth: loginSetRow.implicitWidth + 8
+              radius: 4
+              color: loginSetMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+
+              RowLayout {
+                id: loginSetRow
+                anchors.centerIn: parent
+                spacing: 4
+                Text { text: "⚙️"; font.pixelSize: 10 }
+                Text {
+                  text: "Server & Plugin Settings"
+                  color: loginSetMouse.containsMouse ? authRoot.foreground : Qt.darker(authRoot.foreground, 1.4)
+                  font.pixelSize: 11
+                }
+              }
+
+              MouseArea {
+                id: loginSetMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: authRoot.settingsRequested()
+              }
+            }
+
+            Item { Layout.fillWidth: true }
           }
         }
       }

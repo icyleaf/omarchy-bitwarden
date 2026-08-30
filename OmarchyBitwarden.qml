@@ -1004,6 +1004,7 @@ Item {
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
+            onSettingsRequested: { root.currentView = "settings" }
           }
 
           // Mode C: Settings View

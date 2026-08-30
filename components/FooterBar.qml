@@ -44,111 +44,116 @@ Rectangle {
     // 2. Bottom Left: Ghost Actions, Sync, Lock, Settings
     RowLayout {
       spacing: 2
-      visible: footerRoot.isUnlocked
 
-      // Actions Ghost Button
-      Rectangle {
-        implicitHeight: 22
-        implicitWidth: actionsBtnRow.implicitWidth + 12
-        radius: 4
-        color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-        border.width: 0
+      // Unlocked Actions Group
+      RowLayout {
+        spacing: 2
+        visible: footerRoot.isUnlocked
 
-        RowLayout {
-          id: actionsBtnRow
-          anchors.centerIn: parent
-          spacing: 4
-          Text {
-            text: "⚡ Actions"
-            color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-            font.pixelSize: 11
-            font.weight: Font.Medium
+        // Actions Ghost Button
+        Rectangle {
+          implicitHeight: 22
+          implicitWidth: actionsBtnRow.implicitWidth + 12
+          radius: 4
+          color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          border.width: 0
+
+          RowLayout {
+            id: actionsBtnRow
+            anchors.centerIn: parent
+            spacing: 4
+            Text {
+              text: "⚡ Actions"
+              color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
+            Text {
+              text: "Ctrl+K"
+              color: Qt.darker(footerRoot.foreground, 1.8)
+              font.pixelSize: 9
+            }
           }
-          Text {
-            text: "Ctrl+K"
-            color: Qt.darker(footerRoot.foreground, 1.8)
-            font.pixelSize: 9
+
+          MouseArea {
+            id: actionsMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: footerRoot.actionPaletteTriggered()
           }
         }
 
-        MouseArea {
-          id: actionsMouse
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: footerRoot.actionPaletteTriggered()
+        // Sync Ghost Button
+        Rectangle {
+          implicitHeight: 22
+          implicitWidth: syncBtnRow.implicitWidth + 12
+          radius: 4
+          color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          border.width: 0
+
+          RowLayout {
+            id: syncBtnRow
+            anchors.centerIn: parent
+            spacing: 4
+            Text {
+              text: "🔄 Sync"
+              color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
+            Text {
+              text: "Ctrl+R"
+              color: Qt.darker(footerRoot.foreground, 1.8)
+              font.pixelSize: 9
+            }
+          }
+
+          MouseArea {
+            id: syncMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: footerRoot.syncTriggered()
+          }
+        }
+
+        // Lock Ghost Button
+        Rectangle {
+          implicitHeight: 22
+          implicitWidth: lockBtnRow.implicitWidth + 12
+          radius: 4
+          color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          border.width: 0
+
+          RowLayout {
+            id: lockBtnRow
+            anchors.centerIn: parent
+            spacing: 4
+            Text {
+              text: "🔒 Lock"
+              color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
+            Text {
+              text: "Ctrl+L"
+              color: Qt.darker(footerRoot.foreground, 1.8)
+              font.pixelSize: 9
+            }
+          }
+
+          MouseArea {
+            id: lockMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: footerRoot.lockTriggered()
+          }
         }
       }
 
-      // Sync Ghost Button
-      Rectangle {
-        implicitHeight: 22
-        implicitWidth: syncBtnRow.implicitWidth + 12
-        radius: 4
-        color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-        border.width: 0
-
-        RowLayout {
-          id: syncBtnRow
-          anchors.centerIn: parent
-          spacing: 4
-          Text {
-            text: "🔄 Sync"
-            color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-            font.pixelSize: 11
-            font.weight: Font.Medium
-          }
-          Text {
-            text: "Ctrl+R"
-            color: Qt.darker(footerRoot.foreground, 1.8)
-            font.pixelSize: 9
-          }
-        }
-
-        MouseArea {
-          id: syncMouse
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: footerRoot.syncTriggered()
-        }
-      }
-
-      // Lock Ghost Button
-      Rectangle {
-        implicitHeight: 22
-        implicitWidth: lockBtnRow.implicitWidth + 12
-        radius: 4
-        color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-        border.width: 0
-
-        RowLayout {
-          id: lockBtnRow
-          anchors.centerIn: parent
-          spacing: 4
-          Text {
-            text: "🔒 Lock"
-            color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-            font.pixelSize: 11
-            font.weight: Font.Medium
-          }
-          Text {
-            text: "Ctrl+L"
-            color: Qt.darker(footerRoot.foreground, 1.8)
-            font.pixelSize: 9
-          }
-        }
-
-        MouseArea {
-          id: lockMouse
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: footerRoot.lockTriggered()
-        }
-      }
-
-      // Settings Ghost Button
+      // Settings Ghost Button (Always visible on bottom-left)
       Rectangle {
         implicitHeight: 22
         implicitWidth: settingsBtnRow.implicitWidth + 12
