@@ -1473,7 +1473,7 @@ onVisibleChanged: {
               Item { Layout.fillWidth: true }
               Text {
                 text: root.cliHealth.installed
-                  ? ("omawarden v" + (root.cliHealth.version || "unknown") + " (Native Rust)")
+                  ? ("omawarden v" + (root.cliHealth.version || "unknown") + (root.cliHealth.commit ? (" (" + root.cliHealth.commit + ")") : "") + " (Native Rust)")
                   : "omawarden (Not Found)"
                 color: root.cliHealth.installed ? "#818cf8" : "#f87171"
                 font.pixelSize: Style.font.caption

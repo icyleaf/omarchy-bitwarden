@@ -6,6 +6,8 @@ pub struct HealthStatus {
     pub installed: bool,
     pub ok: bool,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     pub server_url: String,
     pub server_reachable: bool,
     pub keyring_available: bool,
@@ -15,6 +17,7 @@ pub struct HealthStatus {
 
 pub fn check_system_health(server_url: &str) -> HealthStatus {
     let version = env!("CARGO_PKG_VERSION").to_string();
+    let commit = env!("GIT_HASH").to_string();
     let server_clean = server_url.trim_end_matches('/');
 
     // 1. Check server reachability
@@ -39,6 +42,11 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         installed: true,
         ok: all_ok,
         version: Some(version),
+        commit: if commit != "unknown" {
+            Some(commit)
+        } else {
+            None
+        },
         server_url: server_url.to_string(),
         server_reachable,
         keyring_available,
