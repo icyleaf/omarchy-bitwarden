@@ -1,12 +1,12 @@
 # omarchy-bitwarden
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Omarchy](https://img.shields.io/badge/Omarchy-Plugin-8b5cf6.svg)](https://github.com/omarchy)
 
-Native, high-performance Bitwarden and Vaultwarden credential manager overlay for the **Omarchy Shell** on Linux / Wayland.
+Native, high-performance Bitwarden and Vaultwarden credential manager overlay for the **Omarchy Shell** on Linux / Wayland, powered by the pure Rust `omawarden` engine.
 
-Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantaneous keyboard-driven vault access, secure Keyring session persistence, live TOTP generation, heuristic SSH key detection, and ephemeral clipboard protection.
+Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantaneous keyboard-driven vault access, secure Keyring session persistence, live TOTP generation, heuristic SSH key detection, and ephemeral clipboard protection with zero external runtime dependencies.
 
 ![Preview](preview.png)
 
@@ -15,7 +15,8 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 ## Features
 
 - **Instant Overlay & Zero Latency**: In-memory caching and non-blocking background sync allow opening and searching your entire vault in milliseconds.
-- **Secure Keyring Session Lifecycle**: Decrypted session tokens (`BW_SESSION`) are stored securely in FreeDesktop Secret Service (`secret-tool` / D-Bus). Auto-locks upon screen lock hooks or idle timeouts without storing cleartext master passwords.
+- **Pure Rust Native Engine (`omawarden`)**: 100% standalone execution with native cryptographic decryption (PBKDF2, Argon2id, AES-256-CBC, HMAC-SHA256), direct REST/OAuth2 API client, and optional resident memory daemon.
+- **Secure Keyring Session Lifecycle**: Decrypted session tokens are stored securely in FreeDesktop Secret Service (`secret-tool` / D-Bus). Auto-locks upon screen lock hooks or idle timeouts without storing cleartext master passwords.
 - **Multi-Tier High-Precision Fuzzy Search**: Sub-millisecond ranking algorithm prioritizing exact matches, prefixes, substrings, and acronym subsequences across item names, usernames, notes, and custom fields.
 - **Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>)**: Fast keyboard palette to copy usernames, passwords, TOTP codes, card CVVs, SSH keys, PINs, or launch website URLs.
 - **Live Real-time TOTP Token Engine**: Automatic TOTP countdown timer and live 6-digit one-time password generation.
@@ -45,10 +46,9 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 
 Ensure the following tools are available on your system:
 
-- **Bitwarden CLI**: `bw` ([Bitwarden CLI Docs](https://bitwarden.com/help/cli/))
 - **Keyring / Secret Service**: `secret-tool` (`libsecret` package on Arch/Debian/Fedora)
 - **Wayland Clipboard**: `wl-clipboard` (`wl-copy` / `wl-paste`)
-- **Python**: `>= 3.10`
+- **Rust Toolchain** (if building from source): `cargo` / `mise`
 
 ---
 
