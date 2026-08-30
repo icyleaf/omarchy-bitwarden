@@ -7,5 +7,6 @@ htmlcov/
 *.bak.*
 .scratch/
 config.json
+data.json
 target/
 bin/
