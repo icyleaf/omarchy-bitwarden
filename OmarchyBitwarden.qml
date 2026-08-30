@@ -2112,12 +2112,12 @@ onVisibleChanged: {
                     spacing: 8
 
                     RowLayout {
-                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.firstName || root.selectedItem.identity.lastName))
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.title || root.selectedItem.identity.firstName || root.selectedItem.identity.middleName || root.selectedItem.identity.lastName))
                       Layout.fillWidth: true
                       Text { text: "Name:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
                       Text {
                         text: (root.selectedItem && root.selectedItem.identity)
-                          ? ((root.selectedItem.identity.title ? (root.selectedItem.identity.title + " ") : "") + (root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.middleName ? (root.selectedItem.identity.middleName + " ") : "") + (root.selectedItem.identity.lastName || "")).trim()
+                          ? ((root.selectedItem.identity.title ? (root.selectedItem.identity.title + " ") : "") + (root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.middleName ? (root.selectedItem.identity.middleName + " ") : "") + (root.selectedItem.identity.lastName || "")).replace(/\s+/g, " ").trim()
                           : "—"
                         color: root.foreground
                         font.pixelSize: Style.font.body
@@ -2126,7 +2126,7 @@ onVisibleChanged: {
                       Button {
                         text: "Copy"
                         onClicked: {
-                          var fullName = ((root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.lastName || "")).trim()
+                          var fullName = ((root.selectedItem.identity.title ? (root.selectedItem.identity.title + " ") : "") + (root.selectedItem.identity.firstName || "") + " " + (root.selectedItem.identity.middleName ? (root.selectedItem.identity.middleName + " ") : "") + (root.selectedItem.identity.lastName || "")).replace(/\s+/g, " ").trim()
                           root.copyToClipboard(fullName, false, "name")
                         }
                       }
@@ -2165,7 +2165,7 @@ onVisibleChanged: {
                     }
 
                     RowLayout {
-                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.address1 || root.selectedItem.identity.city))
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && (root.selectedItem.identity.address1 || root.selectedItem.identity.city || root.selectedItem.identity.state || root.selectedItem.identity.postalCode))
                       Layout.fillWidth: true
                       Text { text: "Address:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
                       Text {
@@ -2187,10 +2187,29 @@ onVisibleChanged: {
                     }
 
                     RowLayout {
+                      visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.country && !(root.selectedItem.identity.address1 || root.selectedItem.identity.city))
+                      Layout.fillWidth: true
+                      Text { text: "Country:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
+                      Text { text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.country) || "—"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.country, false, "country") }
+                    }
+
+                    RowLayout {
                       visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.ssn)
                       Layout.fillWidth: true
                       Text { text: "SSN:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
-                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.ssn)
+                          ? (root.showPasswordRevealed ? root.selectedItem.identity.ssn : "•••••••••")
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: root.showPasswordRevealed ? "Hide" : "Reveal"
+                        onClicked: root.showPasswordRevealed = !root.showPasswordRevealed
+                      }
                       Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.ssn, true, "SSN") }
                     }
 
@@ -2198,7 +2217,18 @@ onVisibleChanged: {
                       visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.passportNumber)
                       Layout.fillWidth: true
                       Text { text: "Passport:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
-                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.passportNumber)
+                          ? (root.showPasswordRevealed ? root.selectedItem.identity.passportNumber : "•••••••••")
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: root.showPasswordRevealed ? "Hide" : "Reveal"
+                        onClicked: root.showPasswordRevealed = !root.showPasswordRevealed
+                      }
                       Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.passportNumber, true, "passport") }
                     }
 
@@ -2206,7 +2236,18 @@ onVisibleChanged: {
                       visible: Boolean(root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.licenseNumber)
                       Layout.fillWidth: true
                       Text { text: "License:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 80 }
-                      Text { text: "•••••••••"; color: root.foreground; font.pixelSize: Style.font.body; Layout.fillWidth: true }
+                      Text {
+                        text: (root.selectedItem && root.selectedItem.identity && root.selectedItem.identity.licenseNumber)
+                          ? (root.showPasswordRevealed ? root.selectedItem.identity.licenseNumber : "•••••••••")
+                          : "—"
+                        color: root.foreground
+                        font.pixelSize: Style.font.body
+                        Layout.fillWidth: true
+                      }
+                      Button {
+                        text: root.showPasswordRevealed ? "Hide" : "Reveal"
+                        onClicked: root.showPasswordRevealed = !root.showPasswordRevealed
+                      }
                       Button { text: "Copy"; onClicked: root.copyToClipboard(root.selectedItem.identity.licenseNumber, true, "license") }
                     }
                   }

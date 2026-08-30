@@ -576,49 +576,82 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
         }
         .to_string();
 
-        let sub_title = if let Some(ref l) = login_val {
-            l.get("username")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        } else if let Some(ref c) = card_val {
-            let num = c.get("number").and_then(|v| v.as_str()).unwrap_or("");
-            let brand = c.get("brand").and_then(|v| v.as_str()).unwrap_or("Card");
-            if num.len() >= 4 {
-                let last4 = &num[num.len() - 4..];
-                if !brand.is_empty() && brand != "Card" {
-                    format!("{} •••• {}", brand, last4)
+        let sub_title = match item_type {
+            1 => {
+                if let Some(ref l) = login_val {
+                    l.get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
                 } else {
-                    format!("•••• {}", last4)
+                    String::new()
                 }
-            } else if !brand.is_empty() {
-                brand.to_string()
-            } else {
-                "Payment Card".to_string()
             }
-        } else if let Some(ref id) = identity_val {
-            let full_name = format!(
-                "{} {}",
-                id.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
-                id.get("lastName").and_then(|v| v.as_str()).unwrap_or("")
-            )
-            .trim()
-            .to_string();
-            if !full_name.is_empty() {
-                full_name
-            } else if let Some(em) = id.get("email").and_then(|v| v.as_str()) {
-                if !em.is_empty() {
-                    em.to_string()
+            2 => "Secure Note".to_string(),
+            3 => {
+                if let Some(ref c) = card_val {
+                    let num = c.get("number").and_then(|v| v.as_str()).unwrap_or("");
+                    let brand = c.get("brand").and_then(|v| v.as_str()).unwrap_or("Card");
+                    if num.len() >= 4 {
+                        let last4 = &num[num.len() - 4..];
+                        if !brand.is_empty() && brand != "Card" {
+                            format!("{} •••• {}", brand, last4)
+                        } else {
+                            format!("•••• {}", last4)
+                        }
+                    } else if !brand.is_empty() {
+                        brand.to_string()
+                    } else {
+                        "Payment Card".to_string()
+                    }
+                } else {
+                    "Payment Card".to_string()
+                }
+            }
+            4 => {
+                if let Some(ref id) = identity_val {
+                    let full_name = format!(
+                        "{} {} {} {}",
+                        id.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("middleName").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("lastName").and_then(|v| v.as_str()).unwrap_or("")
+                    )
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                    if !full_name.is_empty() {
+                        full_name
+                    } else if let Some(em) = id.get("email").and_then(|v| v.as_str()) {
+                        if !em.is_empty() {
+                            em.to_string()
+                        } else {
+                            "Identity".to_string()
+                        }
+                    } else if let Some(un) = id.get("username").and_then(|v| v.as_str()) {
+                        if !un.is_empty() {
+                            un.to_string()
+                        } else {
+                            "Identity".to_string()
+                        }
+                    } else {
+                        "Identity".to_string()
+                    }
                 } else {
                     "Identity".to_string()
                 }
-            } else {
-                "Identity".to_string()
             }
-        } else if item_type == 2 {
-            "Secure Note".to_string()
-        } else {
-            String::new()
+            _ => {
+                if let Some(ref l) = login_val {
+                    l.get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            }
         };
 
         let mut search_tokens = vec![
