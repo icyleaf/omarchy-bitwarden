@@ -1,2 +1,10 @@
 [tools]
 rust = "latest"
+
+[tasks.build]
+description = "Build the CLI"
+run = "cargo build"
+
+[tasks.build-release]
+description = "Build the CLI in release mode"
+run = "cargo build --release"
