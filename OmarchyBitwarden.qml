@@ -1177,10 +1177,6 @@ Item {
           var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
             root.cliHealth = data
-            if (!data.installed && !root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
-              root.hasAttemptedAutoDownload = true
-              root.downloadCli()
-            }
           }
         } catch (e) {
           root.cliHealth = ({
@@ -1192,15 +1188,11 @@ Item {
             clipboard_available: false,
             error: "Failed to parse CLI health output."
           })
-          if (!root.hasAttemptedAutoDownload && !root.isDownloadingCli) {
-            root.hasAttemptedAutoDownload = true
-            root.downloadCli()
-          }
         }
       }
     }
     onExited: function(code) {
-      if (code !== 0) {
+      if (code !== 0 && (!root.cliHealth || !root.cliHealth.installed)) {
         root.cliHealth = ({
           installed: false,
           ok: false,

@@ -25,13 +25,35 @@ ScrollView {
   clip: true
   ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; active: true }
 
+  function getHostname(uri) {
+    if (!uri) return ""
+    var str = String(uri).trim()
+    var match = str.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?#]+)/i)
+    return match ? match[1] : ""
+  }
+
+  function getFaviconUrl(item) {
+    if (!item) return ""
+    if (item.type_name !== "login" && item.category !== "login") return ""
+    if (!item.login || !item.login.uris || item.login.uris.length === 0) return ""
+    for (var i = 0; i < item.login.uris.length; i++) {
+      var u = item.login.uris[i]
+      var uriStr = (typeof u === "string") ? u : (u && u.uri ? u.uri : "")
+      var domain = getHostname(uriStr)
+      if (domain && domain.indexOf(".") !== -1) {
+        return "https://icons.bitwarden.net/" + domain + "/icon.png"
+      }
+    }
+    return ""
+  }
+
   function getItemIcon(item) {
-    if (!item) return "🔑"
+    if (!item) return "🌐"
     if (item.type_name === "card") return "💳"
     if (item.type_name === "identity") return "🪪"
     if (item.type_name === "note") return "📝"
     if (item.type_name === "ssh_key" || item.category === "ssh_key") return "🔐"
-    return "🔑"
+    return "🌐"
   }
 
   function getAttachmentIcon(filename) {
@@ -232,9 +254,29 @@ ScrollView {
         Layout.fillWidth: true
         spacing: 10
 
-        Text {
-          text: inspectorRoot.getItemIcon(inspectorRoot.item)
-          font.pixelSize: 22
+        Item {
+          id: inspIconContainer
+          Layout.preferredWidth: 24
+          Layout.preferredHeight: 24
+
+          property string favUrl: inspectorRoot.getFaviconUrl(inspectorRoot.item)
+
+          Image {
+            id: inspFaviconImg
+            anchors.fill: parent
+            asynchronous: true
+            cache: true
+            fillMode: Image.PreserveAspectFit
+            source: inspIconContainer.favUrl
+            visible: inspIconContainer.favUrl !== "" && status === Image.Ready
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: !inspFaviconImg.visible
+            text: inspectorRoot.getItemIcon(inspectorRoot.item)
+            font.pixelSize: 20
+          }
         }
 
         ColumnLayout {

@@ -16,13 +16,35 @@ Item {
   signal itemSelected(int index)
   signal itemTriggered(int index)
 
+  function getHostname(uri) {
+    if (!uri) return ""
+    var str = String(uri).trim()
+    var match = str.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?#]+)/i)
+    return match ? match[1] : ""
+  }
+
+  function getFaviconUrl(item) {
+    if (!item) return ""
+    if (item.type_name !== "login" && item.category !== "login") return ""
+    if (!item.login || !item.login.uris || item.login.uris.length === 0) return ""
+    for (var i = 0; i < item.login.uris.length; i++) {
+      var u = item.login.uris[i]
+      var uriStr = (typeof u === "string") ? u : (u && u.uri ? u.uri : "")
+      var domain = getHostname(uriStr)
+      if (domain && domain.indexOf(".") !== -1) {
+        return "https://icons.bitwarden.net/" + domain + "/icon.png"
+      }
+    }
+    return ""
+  }
+
   function getItemIcon(item) {
-    if (!item) return "🔑"
+    if (!item) return "🌐"
     if (item.type_name === "card") return "💳"
     if (item.type_name === "identity") return "🪪"
     if (item.type_name === "note") return "📝"
     if (item.type_name === "ssh_key" || item.category === "ssh_key") return "🔐"
-    return "🔑"
+    return "🌐"
   }
 
   function getSubtitle(item) {
@@ -99,11 +121,30 @@ Item {
         anchors.rightMargin: 10
         spacing: 10
 
-        // Type Icon
-        Text {
-          text: itemListRoot.getItemIcon(modelData)
-          font.pixelSize: 16
+        // Type Icon (Favicon with fallback)
+        Item {
+          id: iconContainer
           Layout.preferredWidth: 20
+          Layout.preferredHeight: 20
+
+          property string favUrl: itemListRoot.getFaviconUrl(modelData)
+
+          Image {
+            id: faviconImg
+            anchors.fill: parent
+            asynchronous: true
+            cache: true
+            fillMode: Image.PreserveAspectFit
+            source: iconContainer.favUrl
+            visible: iconContainer.favUrl !== "" && status === Image.Ready
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: !faviconImg.visible
+            text: itemListRoot.getItemIcon(modelData)
+            font.pixelSize: 15
+          }
         }
 
         // Title and Subtitle Column
