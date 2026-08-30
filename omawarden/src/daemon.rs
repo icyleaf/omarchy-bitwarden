@@ -13,6 +13,8 @@ use crate::api::{decrypt_sync_ciphers, BitwardenApiClient};
 use crate::storage::{StorageManager, VaultStorage};
 use crate::vault::{VaultItem, VaultManager};
 
+use std::os::unix::process::CommandExt;
+
 pub fn get_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir).join("omawarden.sock")
@@ -28,12 +30,20 @@ pub fn ensure_daemon_running() {
     }
 
     if let Ok(exe_path) = env::current_exe() {
-        let _ = Command::new(exe_path)
-            .arg("daemon")
+        let mut cmd = Command::new(exe_path);
+        cmd.arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        let _ = cmd.spawn();
 
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(20));
