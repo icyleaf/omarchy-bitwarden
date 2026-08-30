@@ -1,7 +1,7 @@
 # ADR 0003: Omawarden Rust Native Helper and Resident Daemon Architecture
 
 ## Status
-Accepted
+Accepted (Supersedes [ADR 0001](0001-keyring-session-and-helper-architecture.md))
 
 ## Context
 The previous helper backend (`bitwarden-helper`) was implemented in Python, wrapping external CLI binaries (`secret-tool`, `wl-copy`, official Node.js `bw` CLI). While functional, this architecture introduces subprocess cold-start latency (~60-80ms), multiple IPC hops across process pipes, and reliance on system Python environments and external utilities.

@@ -1,7 +1,7 @@
 # ADR 0001: Keyring-backed Session and Helper Architecture
 
 ## Status
-Accepted
+Superseded by [ADR 0003: Omawarden Rust Native Helper and Resident Daemon Architecture](0003-omawarden-rust-native-helper-and-daemon-architecture.md)
 
 ## Context
 The Omarchy Bitwarden plugin needs to provide instantaneous, secure, and keyboard-driven credential search similar to the Raycast Bitwarden extension on Wayland / Hyprland. Calling the `bw` CLI directly on every keystroke in QML causes high latency and UI stuttering. Furthermore, sensitive `BW_SESSION` tokens must never be written to plaintext config files, and clipboard operations containing sensitive secrets must be cleared after a short window.
