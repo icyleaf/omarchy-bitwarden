@@ -50,7 +50,7 @@ Item {
   })
 
   property var authState: ({
-    status: "locked",
+    status: "unauthenticated",
     server_url: "",
     user_email: "",
     has_session: false
@@ -2905,13 +2905,32 @@ onVisibleChanged: {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
-          var wasNotUnlocked = (root.authState.status !== "unlocked")
-          root.authState = data
-          if (data.status === "unlocked" && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
-            root.loadVaultItems()
-            root.syncVault(true)
+          if (data && data.status) {
+            var wasNotUnlocked = (root.authState.status !== "unlocked")
+            root.authState = data
+            if (data.status === "unlocked" && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
+              root.loadVaultItems()
+              root.syncVault(true)
+            }
           }
-        } catch (e) {}
+        } catch (e) {
+          root.authState = ({
+            status: "unauthenticated",
+            server_url: "",
+            user_email: "",
+            has_session: false
+          })
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.authState = ({
+          status: "unauthenticated",
+          server_url: "",
+          user_email: "",
+          has_session: false
+        })
       }
     }
   }
