@@ -185,23 +185,17 @@ Item {
 
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
     var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
-    var version = (root.manifest && root.manifest.version) ? ("v" + root.manifest.version) : "v0.4.0"
 
     var script = [
       "set -e",
       "TARGET_DIR=\"${1:-$HOME/.config/omarchy/plugins/icyleaf.bitwarden/bin}\"",
-      "VERSION=\"$2\"",
       "REPO=\"icyleaf/omarchy-bitwarden\"",
-      "if [[ \"$VERSION\" != v* ]]; then VERSION=\"v$VERSION\"; fi",
       "ARCH=$(uname -m)",
       "case \"$ARCH\" in",
       "  x86_64) TRIPLE=\"x86_64-unknown-linux-gnu\" ;;",
       "  aarch64|arm64) TRIPLE=\"aarch64-unknown-linux-gnu\" ;;",
       "  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Unsupported architecture: $ARCH\\\"}\"; exit 1 ;;",
       "esac",
-      "ARCHIVE_NAME=\"omawarden-${VERSION}-${TRIPLE}\"",
-      "URL=\"https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}.tar.gz\"",
-      "LATEST_URL=\"https://github.com/${REPO}/releases/latest/download/${ARCHIVE_NAME}.tar.gz\"",
       "TMP_DIR=$(mktemp -d)",
       "trap 'rm -rf \"$TMP_DIR\"' EXIT",
       "download_file() {",
@@ -209,11 +203,23 @@ Item {
       "  elif command -v wget >/dev/null 2>&1; then wget -q -O \"$2\" \"$1\";",
       "  else return 1; fi",
       "}",
-      "if ! download_file \"$URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
-      "  if ! download_file \"$LATEST_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
-      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download omawarden from $URL or latest release\\\"}\"",
-      "    exit 1",
+      "LATEST_DIRECT_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz\"",
+      "if ! download_file \"$LATEST_DIRECT_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
+      "  if command -v curl >/dev/null 2>&1; then",
+      "    RELEASE_JSON=$(curl -sSL \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
+      "  elif command -v wget >/dev/null 2>&1; then",
+      "    RELEASE_JSON=$(wget -qO- \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
+      "  else",
+      "    RELEASE_JSON=\"\"",
       "  fi",
+      "  RESOLVED_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz$' | head -n 1 || true)",
+      "  if [ -n \"$RESOLVED_URL\" ]; then",
+      "    download_file \"$RESOLVED_URL\" \"$TMP_DIR/omawarden.tar.gz\" || true",
+      "  fi",
+      "fi",
+      "if [ ! -s \"$TMP_DIR/omawarden.tar.gz\" ]; then",
+      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download latest omawarden binary for $TRIPLE\\\"}\"",
+      "  exit 1",
       "fi",
       "EXTRACT_DIR=$(mktemp -d)",
       "tar -xzf \"$TMP_DIR/omawarden.tar.gz\" -C \"$EXTRACT_DIR\"",
@@ -227,10 +233,10 @@ Item {
       "cp \"$FOUND_BIN\" \"$TARGET_DIR/omawarden\"",
       "chmod +x \"$TARGET_DIR/omawarden\"",
       "rm -rf \"$EXTRACT_DIR\"",
-      "echo \"{\\\"ok\\\":true,\\\"path\\\":\\\"$TARGET_DIR/omawarden\\\",\\\"version\\\":\\\"$VERSION\\\"}\""
+      "echo \"{\\\"ok\\\":true,\\\"path\\\":\\\"$TARGET_DIR/omawarden\\\"}\""
     ].join("\n")
 
-    downloadCliProc.command = ["bash", "-c", script, "sh", baseDir, version]
+    downloadCliProc.command = ["bash", "-c", script, "sh", baseDir]
     downloadCliProc.running = true
   }
 

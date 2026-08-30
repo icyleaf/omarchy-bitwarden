@@ -58,6 +58,8 @@ jobs:
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+          cp "${ARCHIVE_NAME}.tar.gz" "omawarden-${{ matrix.target }}.tar.gz"
+          sha256sum "omawarden-${{ matrix.target }}.tar.gz" > "omawarden-${{ matrix.target }}.tar.gz.sha256"
           cd ..
 
           echo "archive_path=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
