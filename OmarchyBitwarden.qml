@@ -102,6 +102,13 @@ Item {
     return "login"
   }
 
+  onCurrentViewChanged: {
+    if (root.currentView === "settings" || root.effectiveView === "settings") {
+      root.refreshHealth()
+      root.refreshConfig()
+    }
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.errorMessage = ""
@@ -200,6 +207,7 @@ Item {
   }
 
   function refreshHealth() {
+    healthProc.running = false
     healthProc.command = [root.helperPath, "health"]
     healthProc.running = true
   }
@@ -2871,7 +2879,20 @@ onVisibleChanged: {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var data = JSON.parse(text)
+          var cleanText = (text || "").trim()
+          if (cleanText.length === 0) {
+            root.cliHealth = ({
+              installed: false,
+              ok: false,
+              version: "",
+              server_reachable: false,
+              keyring_available: false,
+              clipboard_available: false,
+              error: "CLI executable not found or output empty."
+            })
+            return
+          }
+          var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
             root.cliHealth = data
           }
