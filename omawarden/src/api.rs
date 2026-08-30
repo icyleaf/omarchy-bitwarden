@@ -341,134 +341,180 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
 
         // Decrypt login details if present
         let mut login_val: Option<Value> = None;
-        if let Some(login_obj) = c.get("login") {
-            let user = decrypt_cipher_string(
-                login_obj.get("username").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let pwd = decrypt_cipher_string(
-                login_obj.get("password").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let totp =
-                decrypt_cipher_string(login_obj.get("totp").and_then(|v| v.as_str()), &cipher_key);
+        if item_type == 1 {
+            if let Some(login_obj) = c.get("login").or_else(|| c.get("Login")) {
+                if !login_obj.is_null() {
+                    let user = decrypt_cipher_string(
+                        login_obj.get("username").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let pwd = decrypt_cipher_string(
+                        login_obj.get("password").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let totp = decrypt_cipher_string(
+                        login_obj.get("totp").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
 
-            let mut uris_decrypted = Vec::new();
-            if let Some(uris_arr) = login_obj.get("uris").and_then(|v| v.as_array()) {
-                for u in uris_arr {
-                    let uri_str =
-                        decrypt_cipher_string(u.get("uri").and_then(|v| v.as_str()), &cipher_key);
-                    uris_decrypted.push(json!({ "uri": uri_str }));
+                    let mut uris_decrypted = Vec::new();
+                    if let Some(uris_arr) = login_obj.get("uris").and_then(|v| v.as_array()) {
+                        for u in uris_arr {
+                            let uri_str = decrypt_cipher_string(
+                                u.get("uri").and_then(|v| v.as_str()),
+                                &cipher_key,
+                            );
+                            uris_decrypted.push(json!({ "uri": uri_str }));
+                        }
+                    }
+
+                    login_val = Some(json!({
+                        "username": user,
+                        "password": pwd,
+                        "totp": totp,
+                        "uris": uris_decrypted,
+                    }));
                 }
             }
-
-            login_val = Some(json!({
-                "username": user,
-                "password": pwd,
-                "totp": totp,
-                "uris": uris_decrypted,
-            }));
         }
 
         // Decrypt card details if present
         let mut card_val: Option<Value> = None;
-        if let Some(card_obj) = c.get("card") {
-            let cardholder_name = decrypt_cipher_string(
-                card_obj.get("cardholderName").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let brand =
-                decrypt_cipher_string(card_obj.get("brand").and_then(|v| v.as_str()), &cipher_key);
-            let number =
-                decrypt_cipher_string(card_obj.get("number").and_then(|v| v.as_str()), &cipher_key);
-            let exp_month = decrypt_cipher_string(
-                card_obj.get("expMonth").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let exp_year = decrypt_cipher_string(
-                card_obj.get("expYear").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let code =
-                decrypt_cipher_string(card_obj.get("code").and_then(|v| v.as_str()), &cipher_key);
+        if item_type == 3 {
+            if let Some(card_obj) = c.get("card").or_else(|| c.get("Card")) {
+                if !card_obj.is_null() {
+                    let cardholder_name = decrypt_cipher_string(
+                        card_obj.get("cardholderName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let brand = decrypt_cipher_string(
+                        card_obj.get("brand").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let number = decrypt_cipher_string(
+                        card_obj.get("number").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let exp_month = decrypt_cipher_string(
+                        card_obj.get("expMonth").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let exp_year = decrypt_cipher_string(
+                        card_obj.get("expYear").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let code = decrypt_cipher_string(
+                        card_obj.get("code").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
 
-            card_val = Some(json!({
-                "cardholderName": cardholder_name,
-                "brand": brand,
-                "number": number,
-                "expMonth": exp_month,
-                "expYear": exp_year,
-                "code": code,
-            }));
+                    card_val = Some(json!({
+                        "cardholderName": cardholder_name,
+                        "brand": brand,
+                        "number": number,
+                        "expMonth": exp_month,
+                        "expYear": exp_year,
+                        "code": code,
+                    }));
+                }
+            }
         }
 
         // Decrypt identity details if present
         let mut identity_val: Option<Value> = None;
-        if let Some(id_obj) = c.get("identity") {
-            let title =
-                decrypt_cipher_string(id_obj.get("title").and_then(|v| v.as_str()), &cipher_key);
-            let first_name = decrypt_cipher_string(
-                id_obj.get("firstName").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let middle_name = decrypt_cipher_string(
-                id_obj.get("middleName").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let last_name =
-                decrypt_cipher_string(id_obj.get("lastName").and_then(|v| v.as_str()), &cipher_key);
-            let address1 =
-                decrypt_cipher_string(id_obj.get("address1").and_then(|v| v.as_str()), &cipher_key);
-            let address2 =
-                decrypt_cipher_string(id_obj.get("address2").and_then(|v| v.as_str()), &cipher_key);
-            let city =
-                decrypt_cipher_string(id_obj.get("city").and_then(|v| v.as_str()), &cipher_key);
-            let state =
-                decrypt_cipher_string(id_obj.get("state").and_then(|v| v.as_str()), &cipher_key);
-            let postal_code = decrypt_cipher_string(
-                id_obj.get("postalCode").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let country =
-                decrypt_cipher_string(id_obj.get("country").and_then(|v| v.as_str()), &cipher_key);
-            let company =
-                decrypt_cipher_string(id_obj.get("company").and_then(|v| v.as_str()), &cipher_key);
-            let email =
-                decrypt_cipher_string(id_obj.get("email").and_then(|v| v.as_str()), &cipher_key);
-            let phone =
-                decrypt_cipher_string(id_obj.get("phone").and_then(|v| v.as_str()), &cipher_key);
-            let ssn =
-                decrypt_cipher_string(id_obj.get("ssn").and_then(|v| v.as_str()), &cipher_key);
-            let username =
-                decrypt_cipher_string(id_obj.get("username").and_then(|v| v.as_str()), &cipher_key);
-            let passport_number = decrypt_cipher_string(
-                id_obj.get("passportNumber").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
-            let license_number = decrypt_cipher_string(
-                id_obj.get("licenseNumber").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
+        if item_type == 4 {
+            if let Some(id_obj) = c.get("identity").or_else(|| c.get("Identity")) {
+                if !id_obj.is_null() {
+                    let title = decrypt_cipher_string(
+                        id_obj.get("title").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let first_name = decrypt_cipher_string(
+                        id_obj.get("firstName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let middle_name = decrypt_cipher_string(
+                        id_obj.get("middleName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let last_name = decrypt_cipher_string(
+                        id_obj.get("lastName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let address1 = decrypt_cipher_string(
+                        id_obj.get("address1").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let address2 = decrypt_cipher_string(
+                        id_obj.get("address2").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let city = decrypt_cipher_string(
+                        id_obj.get("city").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let state = decrypt_cipher_string(
+                        id_obj.get("state").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let postal_code = decrypt_cipher_string(
+                        id_obj.get("postalCode").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let country = decrypt_cipher_string(
+                        id_obj.get("country").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let company = decrypt_cipher_string(
+                        id_obj.get("company").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let email = decrypt_cipher_string(
+                        id_obj.get("email").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let phone = decrypt_cipher_string(
+                        id_obj.get("phone").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let ssn = decrypt_cipher_string(
+                        id_obj.get("ssn").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let username = decrypt_cipher_string(
+                        id_obj.get("username").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let passport_number = decrypt_cipher_string(
+                        id_obj.get("passportNumber").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let license_number = decrypt_cipher_string(
+                        id_obj.get("licenseNumber").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
 
-            identity_val = Some(json!({
-                "title": title,
-                "firstName": first_name,
-                "middleName": middle_name,
-                "lastName": last_name,
-                "address1": address1,
-                "address2": address2,
-                "city": city,
-                "state": state,
-                "postalCode": postal_code,
-                "country": country,
-                "company": company,
-                "email": email,
-                "phone": phone,
-                "ssn": ssn,
-                "username": username,
-                "passportNumber": passport_number,
-                "licenseNumber": license_number,
-            }));
+                    identity_val = Some(json!({
+                        "title": title,
+                        "firstName": first_name,
+                        "middleName": middle_name,
+                        "lastName": last_name,
+                        "address1": address1,
+                        "address2": address2,
+                        "city": city,
+                        "state": state,
+                        "postalCode": postal_code,
+                        "country": country,
+                        "company": company,
+                        "email": email,
+                        "phone": phone,
+                        "ssn": ssn,
+                        "username": username,
+                        "passportNumber": passport_number,
+                        "licenseNumber": license_number,
+                    }));
+                }
+            }
         }
 
         // Decrypt fields if present
@@ -735,9 +781,9 @@ pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) ->
             sub_title,
             notes,
             favorite,
-            login: login_val,
-            card: card_val,
-            identity: identity_val,
+            login: if item_type == 1 { login_val } else { None },
+            card: if item_type == 3 { card_val } else { None },
+            identity: if item_type == 4 { identity_val } else { None },
             ssh_key: None,
             fields: fields_decrypted,
             attachments: attachments_decrypted,
@@ -871,6 +917,9 @@ mod tests {
         assert_eq!(items[0].name, "Corporate Visa");
         assert_eq!(items[0].type_name, "card");
         assert_eq!(items[0].sub_title, "Visa •••• 4444");
+        assert!(items[0].login.is_none());
+        assert!(items[0].identity.is_none());
+        assert!(items[0].ssh_key.is_none());
         let card = items[0].card.as_ref().unwrap();
         assert_eq!(card.get("cardholderName").unwrap(), "Alice Doe");
         assert_eq!(card.get("brand").unwrap(), "Visa");
@@ -881,6 +930,9 @@ mod tests {
         assert_eq!(items[1].name, "Personal Identity");
         assert_eq!(items[1].type_name, "identity");
         assert_eq!(items[1].sub_title, "Alice Doe");
+        assert!(items[1].login.is_none());
+        assert!(items[1].card.is_none());
+        assert!(items[1].ssh_key.is_none());
         let id_val = items[1].identity.as_ref().unwrap();
         assert_eq!(id_val.get("firstName").unwrap(), "Alice");
         assert_eq!(id_val.get("lastName").unwrap(), "Doe");
@@ -893,6 +945,10 @@ mod tests {
         assert_eq!(items[2].name, "Server Recovery Keys");
         assert_eq!(items[2].type_name, "note");
         assert_eq!(items[2].sub_title, "Secure Note");
+        assert!(items[2].login.is_none());
+        assert!(items[2].card.is_none());
+        assert!(items[2].identity.is_none());
+        assert!(items[2].ssh_key.is_none());
         assert_eq!(
             items[2].notes.as_deref(),
             Some("Mnemonic: alpha beta gamma delta")
