@@ -19,15 +19,36 @@ def read_secret_stdin(explicit_arg: Optional[str] = None) -> str:
         return explicit_arg
     if not sys.stdin.isatty():
         try:
-            line = sys.stdin.readline()
-            if isinstance(line, str) and line != "":
-                return line.rstrip("\r\n")
             val = sys.stdin.read()
             if isinstance(val, str) and val != "":
                 return val.rstrip("\r\n")
         except Exception:
             return ""
     return ""
+
+def read_auth_payload(explicit_password: Optional[str] = None, explicit_code: Optional[str] = None) -> tuple[str, Optional[str]]:
+    if explicit_password is not None:
+        return (explicit_password, explicit_code)
+    raw = ""
+    if not sys.stdin.isatty():
+        try:
+            raw = sys.stdin.read().strip()
+        except Exception:
+            raw = ""
+    if not raw:
+        return ("", explicit_code)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            pwd = str(data.get("password") or "")
+            code_val = data.get("code") or explicit_code
+            return (pwd, str(code_val) if code_val else None)
+    except Exception:
+        pass
+    lines = raw.split("\n", 1)
+    if len(lines) > 1 and lines[1].strip():
+        return (lines[0].rstrip("\r"), lines[1].strip())
+    return (lines[0].rstrip("\r"), explicit_code)
 
 
 
@@ -174,12 +195,20 @@ def main(args: Optional[List[str]] = None) -> int:
             print(json.dumps(asdict(st), indent=2))
             return 0
         elif parsed.auth_action == "login-password":
-            password = read_secret_stdin(getattr(parsed, "password", None))
-            res = auth_mgr.login_password(parsed.email, password, parsed.code)
+            password, code = read_auth_payload(getattr(parsed, "password", None), getattr(parsed, "code", None))
+            res = auth_mgr.login_password(parsed.email, password, code)
             print(json.dumps(asdict(res), indent=2))
             return 0 if res.ok else 1
         elif parsed.auth_action == "login-apikey":
-            client_secret = read_secret_stdin(getattr(parsed, "client_secret", None))
+            raw_secret = read_secret_stdin(getattr(parsed, "client_secret", None))
+            client_secret = raw_secret
+            if raw_secret.startswith("{") and raw_secret.endswith("}"):
+                try:
+                    payload = json.loads(raw_secret)
+                    if isinstance(payload, dict) and "client_secret" in payload:
+                        client_secret = str(payload["client_secret"])
+                except Exception:
+                    pass
             res = auth_mgr.login_apikey(parsed.client_id, client_secret)
             print(json.dumps(asdict(res), indent=2))
             return 0 if res.ok else 1

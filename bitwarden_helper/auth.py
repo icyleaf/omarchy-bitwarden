@@ -126,12 +126,13 @@ class AuthManager:
 
     def login_password(self, email: str, password: str, code: Optional[str] = None) -> AuthResult:
         cmd = [self.bw_path, "login", email, "--passwordfile", "/proc/self/fd/0", "--raw"]
+        input_data = password + "\n"
         if code:
-            cmd.extend(["--code", code])
+            input_data += code + "\n"
         try:
             res = subprocess.run(
                 cmd,
-                input=password + "\n",
+                input=input_data,
                 capture_output=True,
                 text=True,
                 timeout=25,
@@ -150,16 +151,14 @@ class AuthManager:
             return AuthResult(ok=False, status="unauthenticated", session=None, error=sanitize_auth_error(str(e)))
 
     def login_apikey(self, client_id: str, client_secret: str) -> AuthResult:
-        extra_env = {
-            "BW_CLIENTID": client_id,
-            "BW_CLIENTSECRET": client_secret,
-        }
+        # Deliver client_id and client_secret exclusively through protected stdin pipe
+        # ensuring credentials never touch argv or child process environment
         try:
             res = subprocess.run(
                 [self.bw_path, "login", "--apikey"],
+                input=f"{client_id}\n{client_secret}\n",
                 capture_output=True,
                 text=True,
-                env=self._safe_env(extra=extra_env),
                 timeout=25,
                 check=False,
             )

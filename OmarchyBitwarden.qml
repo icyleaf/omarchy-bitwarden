@@ -600,8 +600,11 @@ Item {
     root.errorMessage = ""
     root.statusMessage = "Logging in to Bitwarden..."
     var cmd = [root.helperPath, "auth", "login-password", "--email", email]
-    if (code) cmd.push("--code", code)
-    authLoginProc.secret = password
+    if (code) {
+      authLoginProc.secret = JSON.stringify({ password: password, code: code })
+    } else {
+      authLoginProc.secret = password
+    }
     authLoginProc.command = cmd
     authLoginProc.running = true
   }

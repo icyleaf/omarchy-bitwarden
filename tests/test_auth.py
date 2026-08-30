@@ -69,6 +69,28 @@ def test_auth_login_password_success():
         assert "mypassword" not in args[0]
         assert kwargs.get("input") == "mypassword\n"
 
+def test_auth_login_password_with_2fa_code_descriptor_pipeline():
+    with patch("subprocess.run") as mock_run, \
+         patch("bitwarden_helper.keyring.KeyringManager.store_session") as mock_store:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="valid_session_token_456",
+            stderr=""
+        )
+        am = AuthManager(bw_path="bw")
+        res = am.login_password("test@test.com", "mypassword", code="654321")
+        assert res.ok is True
+        assert res.session == "valid_session_token_456"
+        args, kwargs = mock_run.call_args
+        # 2FA code and password must NEVER appear in argv
+        assert "--code" not in args[0]
+        assert "654321" not in args[0]
+        assert "mypassword" not in args[0]
+        assert "--passwordfile" in args[0]
+        assert "/proc/self/fd/0" in args[0]
+        # Both must be fed cleanly through protected stdin pipe
+        assert kwargs.get("input") == "mypassword\n654321\n"
+
 def test_auth_login_password_failure():
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
@@ -91,10 +113,15 @@ def test_auth_login_apikey_success():
         am = AuthManager(bw_path="bw")
         res = am.login_apikey("client.id", "client.secret")
         assert res.ok is True
-        _, kwargs = mock_run.call_args
-        env = kwargs.get("env", {})
-        assert env.get("BW_CLIENTID") == "client.id"
-        assert env.get("BW_CLIENTSECRET") == "client.secret"
+        args, kwargs = mock_run.call_args
+        # Must NOT be passed via process env or argv
+        env = kwargs.get("env") or {}
+        assert "BW_CLIENTID" not in env
+        assert "BW_CLIENTSECRET" not in env
+        assert "client.id" not in args[0]
+        assert "client.secret" not in args[0]
+        # Must be fed cleanly through protected stdin pipe
+        assert kwargs.get("input") == "client.id\nclient.secret\n"
 
 def test_auth_unlock_success():
     with patch("subprocess.run") as mock_run, \

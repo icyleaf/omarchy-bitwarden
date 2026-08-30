@@ -60,6 +60,56 @@ def test_cli_auth_status(tmp_path: Path, capsys):
             assert data["status"] == "locked"
             assert data["user_email"] == "a@b.com"
 
+def test_cli_auth_login_password_json_payload(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.login_password", return_value=AuthResult(ok=True, session="token_jwt")) as mock_login, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.read", return_value=json.dumps({"password": "secure_pwd", "code": "987654"})):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "login-password", "--email", "user@example.com"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            assert data["session"] == "token_jwt"
+            mock_login.assert_called_once_with("user@example.com", "secure_pwd", "987654")
+
+def test_cli_auth_login_password_multiline_payload(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.login_password", return_value=AuthResult(ok=True, session="token_jwt")) as mock_login, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.read", return_value="secure_pwd\n987654\n"):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "login-password", "--email", "user@example.com"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_login.assert_called_once_with("user@example.com", "secure_pwd", "987654")
+
+def test_cli_auth_login_apikey_stdin_json(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.login_apikey", return_value=AuthResult(ok=True, status="locked")) as mock_api, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.read", return_value=json.dumps({"client_secret": "my_super_secret"})):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "login-apikey", "--client-id", "user.xyz"]):
+            exit_code = main()
+            assert exit_code == 0
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["ok"] is True
+            mock_api.assert_called_once_with("user.xyz", "my_super_secret")
+
+def test_cli_auth_login_apikey_stdin_raw(tmp_path: Path, capsys):
+    config_file = tmp_path / "config.json"
+    with patch("bitwarden_helper.auth.AuthManager.login_apikey", return_value=AuthResult(ok=True, status="locked")) as mock_api, \
+         patch("sys.stdin.isatty", return_value=False), \
+         patch("sys.stdin.read", return_value="raw_secret_key_123"):
+        with patch("sys.argv", ["bitwarden-helper", "--config", str(config_file), "auth", "login-apikey", "--client-id", "user.xyz"]):
+            exit_code = main()
+            assert exit_code == 0
+            mock_api.assert_called_once_with("user.xyz", "raw_secret_key_123")
+
 def test_cli_auth_unlock(tmp_path: Path, capsys):
     config_file = tmp_path / "config.json"
     with patch("bitwarden_helper.auth.AuthManager.unlock", return_value=AuthResult(ok=True, session="token_123")):
