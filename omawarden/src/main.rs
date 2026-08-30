@@ -18,7 +18,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "omawarden",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), " ", env!("BUILD_DATE"), ")"),
     about = "High-performance helper CLI and daemon for Omarchy Bitwarden Plugin"
 )]
 struct Cli {

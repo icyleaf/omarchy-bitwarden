@@ -21,5 +21,5 @@ run = "omarchy-restart-shell"
 description = "Deploy the CLI in development mode"
 depends = ["build-release", "dev-update-omarchy-plugin"]
 depends_post = ["dev-restart-omarchy"]
-run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp target/debug/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
+run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f target/release/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
 

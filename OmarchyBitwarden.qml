@@ -433,7 +433,7 @@ Item {
   function getAvailableActions(item) {
     if (!item) return []
     var actions = []
-    
+
     if (item.type_name === "login" && item.login) {
       if (item.login.password) {
         actions.push({ label: "Copy Password", icon: "🔒", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
@@ -594,7 +594,7 @@ Item {
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
-    
+
     configSetProc.command = cmd
     configSetProc.running = true
   }
@@ -973,8 +973,8 @@ onVisibleChanged: {
             implicitWidth: lockStatusRow.implicitWidth + 12
             implicitHeight: 24
             radius: 12
-            color: (root.authState.status === "unlocked") 
-              ? Qt.rgba(0.2, 0.8, 0.2, 0.15) 
+            color: (root.authState.status === "unlocked")
+              ? Qt.rgba(0.2, 0.8, 0.2, 0.15)
               : Qt.rgba(0.8, 0.6, 0.2, 0.15)
             border.color: (root.authState.status === "unlocked")
               ? Qt.rgba(0.2, 0.8, 0.2, 0.4)
@@ -1473,7 +1473,7 @@ onVisibleChanged: {
               Item { Layout.fillWidth: true }
               Text {
                 text: root.cliHealth.installed
-                  ? ("omawarden v" + (root.cliHealth.version || "unknown") + (root.cliHealth.commit ? (" (" + root.cliHealth.commit + ")") : "") + " (Native Rust)")
+                  ? ("v" + (root.cliHealth.version || "unknown") + (root.cliHealth.commit ? (" (" + root.cliHealth.commit + (root.cliHealth.build_date ? (" " + root.cliHealth.build_date) : "") + ")") : ""))
                   : "omawarden (Not Found)"
                 color: root.cliHealth.installed ? "#818cf8" : "#f87171"
                 font.pixelSize: Style.font.caption
@@ -1990,8 +1990,8 @@ onVisibleChanged: {
                       Layout.fillWidth: true
                       Text { text: "Password:"; color: Qt.darker(root.foreground, 1.4); font.pixelSize: Style.font.bodySmall; Layout.preferredWidth: 70 }
                       Text {
-                        text: (root.selectedItem && root.selectedItem.login && root.selectedItem.login.password) 
-                          ? (root.showPasswordRevealed ? root.selectedItem.login.password : "••••••••••••") 
+                        text: (root.selectedItem && root.selectedItem.login && root.selectedItem.login.password)
+                          ? (root.showPasswordRevealed ? root.selectedItem.login.password : "••••••••••••")
                           : "—"
                         color: root.foreground
                         font.pixelSize: Style.font.body
