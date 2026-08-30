@@ -74,7 +74,19 @@ impl StorageManager {
         }
         let content = serde_json::to_string_pretty(data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        fs::write(&self.file_path, content)
+        fs::write(&self.file_path, content)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = fs::metadata(&self.file_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(&self.file_path, perms);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn unlock_user_key(

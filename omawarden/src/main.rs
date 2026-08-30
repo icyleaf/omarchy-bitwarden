@@ -10,7 +10,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -107,27 +107,18 @@ enum ConfigAction {
 enum AuthAction {
     #[command(about = "Get current authentication and vault lock status")]
     Status,
-    #[command(about = "Login using Master Password")]
+    #[command(about = "Login using Master Password (credentials read from stdin)")]
     LoginPassword {
         #[arg(long, required = true)]
         email: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long)]
-        code: Option<String>,
     },
-    #[command(about = "Login using API Key")]
+    #[command(about = "Login using API Key (client_secret read from stdin)")]
     LoginApikey {
         #[arg(long, required = true)]
         client_id: String,
-        #[arg(long)]
-        client_secret: Option<String>,
     },
-    #[command(about = "Unlock vault with master password")]
-    Unlock {
-        #[arg(long)]
-        password: Option<String>,
-    },
+    #[command(about = "Unlock vault with master password (password read from stdin)")]
+    Unlock,
     #[command(about = "Lock vault and clear session")]
     Lock,
     #[command(about = "Logout from Bitwarden account")]
@@ -160,10 +151,8 @@ enum VaultAction {
 
 #[derive(Subcommand)]
 enum ClipboardAction {
-    #[command(about = "Copy text to clipboard")]
+    #[command(about = "Copy text to clipboard (text read securely from stdin)")]
     Copy {
-        #[arg(long)]
-        text: Option<String>,
         #[arg(long)]
         sensitive: bool,
         #[arg(long)]
@@ -175,13 +164,8 @@ enum ClipboardAction {
 
 #[derive(Subcommand)]
 enum TotpAction {
-    #[command(about = "Generate TOTP code from secret or otpauth URI")]
-    Generate {
-        #[arg(index = 1)]
-        positional_secret: Option<String>,
-        #[arg(long)]
-        secret: Option<String>,
-    },
+    #[command(about = "Generate TOTP code from secret or otpauth URI (read from stdin)")]
+    Generate,
 }
 
 #[derive(Subcommand)]
@@ -203,35 +187,22 @@ enum AttachmentAction {
     },
 }
 
-fn read_secret_stdin(explicit_arg: Option<String>) -> String {
-    if let Some(arg) = explicit_arg {
-        return arg;
-    }
+fn read_secret_stdin() -> String {
     let stdin = io::stdin();
-    if !stdin.is_terminal() {
-        let mut buffer = String::new();
-        if stdin.lock().read_line(&mut buffer).is_ok() {
-            return buffer.trim_end_matches(&['\r', '\n'][..]).to_string();
-        }
+    let mut buffer = String::new();
+    if stdin.lock().read_line(&mut buffer).is_ok() {
+        return buffer.trim_end_matches(&['\r', '\n'][..]).to_string();
     }
     String::new()
 }
 
-fn read_auth_payload(
-    explicit_password: Option<String>,
-    explicit_code: Option<String>,
-) -> (String, Option<String>) {
-    if let Some(pwd) = explicit_password {
-        return (pwd, explicit_code);
-    }
+fn read_auth_payload() -> (String, Option<String>) {
     let stdin = io::stdin();
     let mut raw = String::new();
-    if !stdin.is_terminal() {
-        let _ = stdin.lock().read_line(&mut raw);
-    }
+    let _ = stdin.lock().read_line(&mut raw);
     let raw = raw.trim();
     if raw.is_empty() {
-        return (String::new(), explicit_code);
+        return (String::new(), None);
     }
 
     if let Ok(val) = serde_json::from_str::<Value>(raw) {
@@ -244,8 +215,7 @@ fn read_auth_payload(
             let code_val = map
                 .get("code")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or(explicit_code);
+                .map(|s| s.to_string());
             return (pwd, code_val);
         }
     }
@@ -262,7 +232,7 @@ fn read_auth_payload(
             return (first, Some(second_trimmed));
         }
     }
-    (first, explicit_code)
+    (first, None)
 }
 
 fn main() -> ExitCode {
@@ -348,12 +318,8 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
                 }
-                AuthAction::LoginPassword {
-                    email,
-                    password,
-                    code,
-                } => {
-                    let (pwd, code_val) = read_auth_payload(password, code);
+                AuthAction::LoginPassword { email } => {
+                    let (pwd, code_val) = read_auth_payload();
                     let res = auth_mgr.login_password(&email, &pwd, code_val.as_deref());
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
@@ -362,11 +328,8 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
-                AuthAction::LoginApikey {
-                    client_id,
-                    client_secret,
-                } => {
-                    let raw_secret = read_secret_stdin(client_secret);
+                AuthAction::LoginApikey { client_id } => {
+                    let raw_secret = read_secret_stdin();
                     let mut actual_secret = raw_secret.clone();
                     if raw_secret.starts_with('{') && raw_secret.ends_with('}') {
                         if let Ok(val) = serde_json::from_str::<Value>(&raw_secret) {
@@ -383,8 +346,8 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
-                AuthAction::Unlock { password } => {
-                    let pwd = read_secret_stdin(password);
+                AuthAction::Unlock => {
+                    let pwd = read_secret_stdin();
                     omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -482,12 +445,8 @@ fn main() -> ExitCode {
         Commands::Clipboard { action } => {
             let clip_mgr = ClipboardManager::default();
             match action {
-                ClipboardAction::Copy {
-                    text,
-                    sensitive,
-                    timeout,
-                } => {
-                    let text_val = read_secret_stdin(text);
+                ClipboardAction::Copy { sensitive, timeout } => {
+                    let text_val = read_secret_stdin();
                     let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
                     let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
                     println!(
@@ -516,13 +475,8 @@ fn main() -> ExitCode {
         }
 
         Commands::Totp { action } => match action {
-            TotpAction::Generate {
-                positional_secret,
-                secret,
-            } => {
-                let secret_val = secret
-                    .or(positional_secret)
-                    .unwrap_or_else(|| read_secret_stdin(None));
+            TotpAction::Generate => {
+                let secret_val = read_secret_stdin();
                 match generate_totp(&secret_val, None, 6, 30) {
                     Some(res) => {
                         println!("{}", serde_json::to_string_pretty(&res).unwrap());

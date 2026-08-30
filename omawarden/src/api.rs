@@ -350,14 +350,14 @@ pub fn decrypt_sync_ciphers_with_context(
             if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
                 if let Ok(enc_str) = EncString::parse(org_key_enc) {
                     let raw_key = match enc_str.enc_type {
-                        3 | 4 | 5 | 6 => {
+                        3..=6 => {
                             if let Some(ref rsa) = rsa_priv_key {
                                 enc_str.decrypt_rsa(rsa).ok()
                             } else {
                                 None
                             }
                         }
-                        0 | 1 | 2 => enc_str.decrypt(user_key).ok(),
+                        0..=2 => enc_str.decrypt(user_key).ok(),
                         _ => None,
                     };
                     if let Some(key_bytes) = raw_key {

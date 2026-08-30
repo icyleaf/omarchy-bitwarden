@@ -528,13 +528,6 @@ fn test_node_hkdf_match() {
 
     let hex_enc1: String = enc1.iter().map(|b| format!("{:02x}", b)).collect();
     let hex_mac1: String = mac1.iter().map(|b| format!("{:02x}", b)).collect();
-    let hex_enc2: String = enc2.iter().map(|b| format!("{:02x}", b)).collect();
-    let hex_mac2: String = mac2.iter().map(|b| format!("{:02x}", b)).collect();
-
-    println!("Node enc: {}", node_enc_hex);
-    println!("Rust new enc: {}", hex_enc1);
-    println!("Rust prk enc: {}", hex_enc2);
-    println!("Rust prk mac: {}", hex_mac2);
 
     assert_eq!(hex_enc1, node_enc_hex);
     assert_eq!(hex_mac1, node_mac_hex);
