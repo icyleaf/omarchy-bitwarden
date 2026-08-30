@@ -1,9 +1,10 @@
-name: Release
+name: Release Omawarden CLI
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'omawarden-*'
+      - 'omawarden-v*'
 
 permissions:
   contents: write
@@ -48,8 +49,9 @@ jobs:
       - name: Package artifact
         id: package
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
-          ARCHIVE_NAME="omawarden-${TAG_NAME}-${{ matrix.target }}"
+          RAW_TAG="${GITHUB_REF_NAME}"
+          VERSION="${RAW_TAG#omawarden-}"
+          ARCHIVE_NAME="omawarden-${VERSION}-${{ matrix.target }}"
           DIST_DIR="dist/${ARCHIVE_NAME}"
           mkdir -p "${DIST_DIR}"
           cp "target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
@@ -74,7 +76,7 @@ jobs:
             dist/*.sha256
 
   publish:
-    name: Publish GitHub Release
+    name: Publish Omawarden Release
     needs: build-release
     runs-on: ubuntu-latest
     steps:
@@ -90,6 +92,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          name: "omawarden ${{ github.ref_name }}"
           files: |
             artifacts/*.tar.gz
             artifacts/*.sha256
