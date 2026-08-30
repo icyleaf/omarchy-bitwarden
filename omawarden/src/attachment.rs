@@ -67,6 +67,7 @@ pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path)
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn get_attachment(
     item_id: &str,
     attachment_id: &str,
@@ -162,7 +163,10 @@ pub fn get_attachment(
         cfg.server_url.trim_end_matches('/')
     };
 
-    let download_url = format!("{}/api/ciphers/{}/attachment/{}", server_url, item_id, attachment_id);
+    let download_url = format!(
+        "{}/api/ciphers/{}/attachment/{}",
+        server_url, item_id, attachment_id
+    );
     let client = reqwest::blocking::Client::new();
     let resp = client
         .get(&download_url)
@@ -321,18 +325,46 @@ mod tests {
 
     #[test]
     fn test_missing_ids() {
-        let res = get_attachment("", "att1", "file.txt", None, false, false, Some("tok"), None, false);
+        let res = get_attachment(
+            "",
+            "att1",
+            "file.txt",
+            None,
+            false,
+            false,
+            Some("tok"),
+            None,
+            false,
+        );
         assert!(!res.ok);
-        assert_eq!(res.error.unwrap(), "Item ID and Attachment ID are required.");
+        assert_eq!(
+            res.error.unwrap(),
+            "Item ID and Attachment ID are required."
+        );
 
-        let res2 = get_attachment("item1", "", "file.txt", None, false, false, Some("tok"), None, false);
+        let res2 = get_attachment(
+            "item1",
+            "",
+            "file.txt",
+            None,
+            false,
+            false,
+            Some("tok"),
+            None,
+            false,
+        );
         assert!(!res2.ok);
-        assert_eq!(res2.error.unwrap(), "Item ID and Attachment ID are required.");
+        assert_eq!(
+            res2.error.unwrap(),
+            "Item ID and Attachment ID are required."
+        );
     }
 
     #[test]
     fn test_missing_session_or_network_error() {
-        let res = get_attachment("item1", "att1", "file.txt", None, false, false, None, None, false);
+        let res = get_attachment(
+            "item1", "att1", "file.txt", None, false, false, None, None, false,
+        );
         if !res.ok {
             assert!(res.error.is_some());
         }

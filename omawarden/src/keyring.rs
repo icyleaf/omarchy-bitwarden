@@ -21,7 +21,9 @@ impl KeyringManager {
         let path = which::which(secret_tool_path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| secret_tool_path.to_string());
-        Self { secret_tool_path: path }
+        Self {
+            secret_tool_path: path,
+        }
     }
 
     pub fn store_session(&self, session_token: &str) -> bool {
@@ -141,7 +143,10 @@ esac
 
         // Store session
         assert!(mgr.store_session("test_session_token_12345"));
-        assert_eq!(mgr.get_session(), Some("test_session_token_12345".to_string()));
+        assert_eq!(
+            mgr.get_session(),
+            Some("test_session_token_12345".to_string())
+        );
 
         // Clear session
         assert!(mgr.clear_session());

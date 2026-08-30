@@ -24,8 +24,8 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         .unwrap_or_default();
 
     let prelogin_url = format!("{}/api/accounts/prelogin", server_clean);
-    let server_reachable = client.get(&prelogin_url).send().is_ok()
-        || client.get(server_clean).send().is_ok();
+    let server_reachable =
+        client.get(&prelogin_url).send().is_ok() || client.get(server_clean).send().is_ok();
 
     // 2. Check Keyring (secret-tool)
     let keyring_available = which::which("secret-tool").is_ok();
@@ -44,7 +44,10 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         keyring_available,
         clipboard_available,
         error: if !server_reachable {
-            Some("Cannot reach Bitwarden server. Please check your network or server URL.".to_string())
+            Some(
+                "Cannot reach Bitwarden server. Please check your network or server URL."
+                    .to_string(),
+            )
         } else if !keyring_available {
             Some("Linux Secret Service (secret-tool) is not available.".to_string())
         } else if !clipboard_available {

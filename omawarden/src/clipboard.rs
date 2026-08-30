@@ -111,7 +111,10 @@ fi
 
         // Copy text
         assert!(mgr.copy("super_secret_password", false, 0));
-        assert_eq!(fs::read_to_string(&clip_file).unwrap(), "super_secret_password");
+        assert_eq!(
+            fs::read_to_string(&clip_file).unwrap(),
+            "super_secret_password"
+        );
 
         // Clear clipboard
         assert!(mgr.clear());

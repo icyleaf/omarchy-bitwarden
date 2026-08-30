@@ -6,7 +6,7 @@ use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -91,11 +91,7 @@ pub fn derive_master_key(
 
             let email_hash = Sha256::digest(email_normalized.as_bytes());
             argon2
-                .hash_password_into(
-                    password.as_bytes(),
-                    &email_hash,
-                    master_key.as_mut(),
-                )
+                .hash_password_into(password.as_bytes(), &email_hash, master_key.as_mut())
                 .map_err(|_| CryptoError::InvalidKdfParams)?;
         }
     }
@@ -103,17 +99,9 @@ pub fn derive_master_key(
     Ok(master_key)
 }
 
-pub fn derive_master_password_hash(
-    master_key: &[u8; 32],
-    password: &str,
-) -> String {
+pub fn derive_master_password_hash(master_key: &[u8; 32], password: &str) -> String {
     let mut hash = Zeroizing::new([0u8; 32]);
-    pbkdf2::pbkdf2_hmac::<Sha256>(
-        master_key.as_ref(),
-        password.as_bytes(),
-        1,
-        hash.as_mut(),
-    );
+    pbkdf2::pbkdf2_hmac::<Sha256>(master_key.as_ref(), password.as_bytes(), 1, hash.as_mut());
     BASE64.encode(hash.as_ref())
 }
 
@@ -130,8 +118,10 @@ impl SymmetricCryptoKey {
         let mut enc_key = [0u8; 32];
         let mut mac_key = [0u8; 32];
 
-        hkdf.expand(b"enc", &mut enc_key).expect("HKDF expand enc failed");
-        hkdf.expand(b"mac", &mut mac_key).expect("HKDF expand mac failed");
+        hkdf.expand(b"enc", &mut enc_key)
+            .expect("HKDF expand enc failed");
+        hkdf.expand(b"mac", &mut mac_key)
+            .expect("HKDF expand mac failed");
 
         Self {
             enc_key,
@@ -149,7 +139,9 @@ impl SymmetricCryptoKey {
         if let Ok(hkdf) = Hkdf::<Sha256>::from_prk(master_key) {
             let mut enc_key = [0u8; 32];
             let mut mac_key = [0u8; 32];
-            if hkdf.expand(b"enc", &mut enc_key).is_ok() && hkdf.expand(b"mac", &mut mac_key).is_ok() {
+            if hkdf.expand(b"enc", &mut enc_key).is_ok()
+                && hkdf.expand(b"mac", &mut mac_key).is_ok()
+            {
                 candidate_keys.push(SymmetricCryptoKey {
                     enc_key,
                     mac_key: Some(mac_key),
@@ -162,7 +154,9 @@ impl SymmetricCryptoKey {
             let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
             let mut enc_key = [0u8; 32];
             let mut mac_key = [0u8; 32];
-            if hkdf.expand(b"enc", &mut enc_key).is_ok() && hkdf.expand(b"mac", &mut mac_key).is_ok() {
+            if hkdf.expand(b"enc", &mut enc_key).is_ok()
+                && hkdf.expand(b"mac", &mut mac_key).is_ok()
+            {
                 candidate_keys.push(SymmetricCryptoKey {
                     enc_key,
                     mac_key: Some(mac_key),
@@ -176,7 +170,8 @@ impl SymmetricCryptoKey {
             mac_key: None,
         });
 
-        let mut last_err = CryptoError::DecryptionFailed("No matching candidate key found".to_string());
+        let mut last_err =
+            CryptoError::DecryptionFailed("No matching candidate key found".to_string());
         for key in &candidate_keys {
             match enc.decrypt(key) {
                 Ok(bytes) => return Ok(bytes),
@@ -277,7 +272,9 @@ impl EncString {
         match self.enc_type {
             0 | 2 => {
                 if self.iv.len() != 16 {
-                    return Err(CryptoError::DecryptionFailed("Invalid IV length".to_string()));
+                    return Err(CryptoError::DecryptionFailed(
+                        "Invalid IV length".to_string(),
+                    ));
                 }
 
                 // If MAC is present, verify MAC
@@ -324,7 +321,9 @@ impl EncString {
                     }
                 }
             }
-            Err(CryptoError::DecryptionFailed("Decryption failed".to_string()))
+            Err(CryptoError::DecryptionFailed(
+                "Decryption failed".to_string(),
+            ))
         })?;
         String::from_utf8(bytes).map_err(|_| CryptoError::Utf8Error)
     }
@@ -366,7 +365,10 @@ mod tests {
         type Aes256CbcEnc = cbc::Encryptor<Aes256>;
         let enc = Aes256CbcEnc::new_from_slices(&key.enc_key, &iv).unwrap();
         let mut buf = vec![0u8; 64];
-        let ct_len = enc.encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf).unwrap().len();
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf)
+            .unwrap()
+            .len();
         let ct = &buf[..ct_len];
 
         let mut hmac = HmacSha256::new_from_slice(key.mac_key.as_ref().unwrap()).unwrap();
@@ -392,10 +394,9 @@ mod tests {
 #[test]
 fn test_node_hkdf_match() {
     let ikm_arr = [
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd, 0xef,
     ];
 
     let hkdf_new = Hkdf::<Sha256>::new(Some(&[]), &ikm_arr);
@@ -421,6 +422,7 @@ fn test_node_hkdf_match() {
     println!("Node enc: {}", node_enc_hex);
     println!("Rust new enc: {}", hex_enc1);
     println!("Rust prk enc: {}", hex_enc2);
+    println!("Rust prk mac: {}", hex_mac2);
 
     assert_eq!(hex_enc1, node_enc_hex);
     assert_eq!(hex_mac1, node_mac_hex);

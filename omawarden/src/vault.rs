@@ -122,8 +122,7 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
                 .unwrap_or("")
                 .trim()
                 .to_lowercase()
-                .replace('-', "_")
-                .replace(' ', "_");
+                .replace(['-', ' '], "_");
             let fval = f
                 .get("value")
                 .map(|v| match v {
@@ -234,7 +233,9 @@ impl VaultManager {
 
     pub fn fetch_items(&self, _session: Option<&str>) -> Vec<VaultItem> {
         crate::daemon::ensure_daemon_running();
-        if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" })) {
+        if let Some(daemon_resp) =
+            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" }))
+        {
             if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
                 return items;
             }
@@ -423,10 +424,7 @@ impl VaultManager {
             }
             4 => {
                 if let Some(id_data) = raw.get("identity") {
-                    let email = id_data
-                        .get("email")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let email = id_data.get("email").and_then(|v| v.as_str()).unwrap_or("");
                     let fname = id_data
                         .get("firstName")
                         .and_then(|v| v.as_str())
@@ -544,7 +542,10 @@ impl VaultManager {
         }
 
         scored_items.sort_by(|a, b| b.1.cmp(&a.1));
-        scored_items.into_iter().map(|(item, _)| item.clone()).collect()
+        scored_items
+            .into_iter()
+            .map(|(item, _)| item.clone())
+            .collect()
     }
 }
 
@@ -585,7 +586,10 @@ mod tests {
         assert!(meta.is_ssh_key);
         assert_eq!(meta.key_type, "ED25519");
         assert!(meta.private_key.is_some());
-        assert_eq!(meta.public_key.unwrap(), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host");
+        assert_eq!(
+            meta.public_key.unwrap(),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host"
+        );
     }
 
     #[test]
@@ -634,7 +638,7 @@ mod tests {
                 "name": "Server Access",
                 "type": 2,
                 "notes": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
-            })
+            }),
         ];
 
         let vault_mgr = VaultManager::new("https://vault.example.com", None, None);

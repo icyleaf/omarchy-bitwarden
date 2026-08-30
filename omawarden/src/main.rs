@@ -16,7 +16,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "omawarden", about = "High-performance helper CLI and daemon for Omarchy Bitwarden Plugin")]
+#[command(
+    name = "omawarden",
+    about = "High-performance helper CLI and daemon for Omarchy Bitwarden Plugin"
+)]
 struct Cli {
     #[arg(long, value_name = "CONFIG_PATH", help = "Path to config.json")]
     config: Option<PathBuf>,
@@ -247,7 +250,11 @@ fn read_auth_payload(
     }
 
     let mut lines = raw.splitn(2, '\n');
-    let first = lines.next().unwrap_or("").trim_end_matches('\r').to_string();
+    let first = lines
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('\r')
+        .to_string();
     if let Some(second) = lines.next() {
         let second_trimmed = second.trim().to_string();
         if !second_trimmed.is_empty() {
@@ -340,7 +347,11 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
                 }
-                AuthAction::LoginPassword { email, password, code } => {
+                AuthAction::LoginPassword {
+                    email,
+                    password,
+                    code,
+                } => {
                     let (pwd, code_val) = read_auth_payload(password, code);
                     let res = auth_mgr.login_password(&email, &pwd, code_val.as_deref());
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -350,7 +361,10 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
-                AuthAction::LoginApikey { client_id, client_secret } => {
+                AuthAction::LoginApikey {
+                    client_id,
+                    client_secret,
+                } => {
                     let raw_secret = read_secret_stdin(client_secret);
                     let mut actual_secret = raw_secret.clone();
                     if raw_secret.starts_with('{') && raw_secret.ends_with('}') {
@@ -421,10 +435,15 @@ fn main() -> ExitCode {
                 VaultAction::Sync => {
                     omawarden::daemon::ensure_daemon_running();
                     let resp = send_daemon_request(&json!({ "action": "sync" }));
-                    let ok = resp.as_ref().and_then(|v| v.get("ok")).and_then(|v| v.as_bool()).unwrap_or_else(|| {
-                        vault_mgr.sync(None)
-                    });
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap());
+                    let ok = resp
+                        .as_ref()
+                        .and_then(|v| v.get("ok"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_else(|| vault_mgr.sync(None));
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
+                    );
                     if ok {
                         ExitCode::SUCCESS
                     } else {
@@ -434,7 +453,9 @@ fn main() -> ExitCode {
                 VaultAction::List { category } => {
                     omawarden::daemon::ensure_daemon_running();
                     if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" })) {
-                        if let Ok(items) = serde_json::from_value::<Vec<omawarden::vault::VaultItem>>(daemon_resp) {
+                        if let Ok(items) =
+                            serde_json::from_value::<Vec<omawarden::vault::VaultItem>>(daemon_resp)
+                        {
                             let filtered = vault_mgr.search(&items, "", category.as_deref());
                             println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                             return ExitCode::SUCCESS;
@@ -445,7 +466,9 @@ fn main() -> ExitCode {
                 }
                 VaultAction::Search { query, category } => {
                     omawarden::daemon::ensure_daemon_running();
-                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "search", "query": query, "category": category })) {
+                    if let Some(daemon_resp) = send_daemon_request(
+                        &json!({ "action": "search", "query": query, "category": category }),
+                    ) {
                         println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
                         return ExitCode::SUCCESS;
                     }
@@ -458,11 +481,18 @@ fn main() -> ExitCode {
         Commands::Clipboard { action } => {
             let clip_mgr = ClipboardManager::default();
             match action {
-                ClipboardAction::Copy { text, sensitive, timeout } => {
+                ClipboardAction::Copy {
+                    text,
+                    sensitive,
+                    timeout,
+                } => {
                     let text_val = read_secret_stdin(text);
                     let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
                     let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
+                    );
                     if ok {
                         ExitCode::SUCCESS
                     } else {
@@ -471,7 +501,10 @@ fn main() -> ExitCode {
                 }
                 ClipboardAction::Clear => {
                     let ok = clip_mgr.clear();
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
+                    );
                     if ok {
                         ExitCode::SUCCESS
                     } else {
@@ -482,7 +515,10 @@ fn main() -> ExitCode {
         }
 
         Commands::Totp { action } => match action {
-            TotpAction::Generate { positional_secret, secret } => {
+            TotpAction::Generate {
+                positional_secret,
+                secret,
+            } => {
                 let secret_val = secret
                     .or(positional_secret)
                     .unwrap_or_else(|| read_secret_stdin(None));
@@ -494,7 +530,10 @@ fn main() -> ExitCode {
                     None => {
                         println!(
                             "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({ "error": "Invalid TOTP secret" })).unwrap()
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({ "error": "Invalid TOTP secret" })
+                            )
+                            .unwrap()
                         );
                         ExitCode::FAILURE
                     }

@@ -39,7 +39,11 @@ pub struct PreloginResponse {
     pub kdf_iterations: Option<u32>,
     #[serde(alias = "kdfMemory", alias = "KdfMemory", alias = "memory")]
     pub kdf_memory: Option<u32>,
-    #[serde(alias = "kdfParallelism", alias = "KdfParallelism", alias = "parallelism")]
+    #[serde(
+        alias = "kdfParallelism",
+        alias = "KdfParallelism",
+        alias = "parallelism"
+    )]
     pub kdf_parallelism: Option<u32>,
 }
 
@@ -60,7 +64,11 @@ pub struct TokenResponse {
     pub kdf_iterations: Option<u32>,
     #[serde(alias = "KdfMemory", alias = "kdfMemory", alias = "memory")]
     pub kdf_memory: Option<u32>,
-    #[serde(alias = "KdfParallelism", alias = "kdfParallelism", alias = "parallelism")]
+    #[serde(
+        alias = "KdfParallelism",
+        alias = "kdfParallelism",
+        alias = "parallelism"
+    )]
     pub kdf_parallelism: Option<u32>,
 }
 
@@ -103,7 +111,10 @@ impl BitwardenApiClient {
             .map_err(|e| ApiError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ApiError::Http(format!("Prelogin returned status {}", resp.status())));
+            return Err(ApiError::Http(format!(
+                "Prelogin returned status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<PreloginResponse>()
@@ -181,12 +192,11 @@ impl BitwardenApiClient {
             }
 
             // Decrypt User Key
-            let enc_user_key = token_resp
-                .key
-                .as_ref()
-                .ok_or_else(|| ApiError::Crypto("User key missing in login response".to_string()))?;
-            let parsed_enc_key = EncString::parse(enc_user_key)
-                .map_err(|e| ApiError::Crypto(e.to_string()))?;
+            let enc_user_key = token_resp.key.as_ref().ok_or_else(|| {
+                ApiError::Crypto("User key missing in login response".to_string())
+            })?;
+            let parsed_enc_key =
+                EncString::parse(enc_user_key).map_err(|e| ApiError::Crypto(e.to_string()))?;
 
             let decrypted_raw_user_key =
                 SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)
@@ -222,7 +232,10 @@ impl BitwardenApiClient {
             .map_err(|e| ApiError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ApiError::Http(format!("Sync returned status {}", resp.status())));
+            return Err(ApiError::Http(format!(
+                "Sync returned status {}",
+                resp.status()
+            )));
         }
 
         resp.json::<SyncResponse>()
@@ -230,7 +243,10 @@ impl BitwardenApiClient {
     }
 }
 
-pub fn decrypt_cipher_string(enc_str_opt: Option<&str>, key: &SymmetricCryptoKey) -> Option<String> {
+pub fn decrypt_cipher_string(
+    enc_str_opt: Option<&str>,
+    key: &SymmetricCryptoKey,
+) -> Option<String> {
     let s = enc_str_opt?;
     if s.is_empty() {
         return Some(String::new());
@@ -241,14 +257,15 @@ pub fn decrypt_cipher_string(enc_str_opt: Option<&str>, key: &SymmetricCryptoKey
     }
 }
 
-pub fn decrypt_sync_ciphers(
-    ciphers: &[Value],
-    user_key: &SymmetricCryptoKey,
-) -> Vec<VaultItem> {
+pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) -> Vec<VaultItem> {
     let mut items: Vec<VaultItem> = Vec::new();
 
     for c in ciphers {
-        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = c
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let item_type = c.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
         let favorite = c.get("favorite").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -279,18 +296,14 @@ pub fn decrypt_sync_ciphers(
                 login_obj.get("password").and_then(|v| v.as_str()),
                 &cipher_key,
             );
-            let totp = decrypt_cipher_string(
-                login_obj.get("totp").and_then(|v| v.as_str()),
-                &cipher_key,
-            );
+            let totp =
+                decrypt_cipher_string(login_obj.get("totp").and_then(|v| v.as_str()), &cipher_key);
 
             let mut uris_decrypted = Vec::new();
             if let Some(uris_arr) = login_obj.get("uris").and_then(|v| v.as_array()) {
                 for u in uris_arr {
-                    let uri_str = decrypt_cipher_string(
-                        u.get("uri").and_then(|v| v.as_str()),
-                        &cipher_key,
-                    );
+                    let uri_str =
+                        decrypt_cipher_string(u.get("uri").and_then(|v| v.as_str()), &cipher_key);
                     uris_decrypted.push(json!({ "uri": uri_str }));
                 }
             }
@@ -307,10 +320,12 @@ pub fn decrypt_sync_ciphers(
         let mut fields_decrypted = Vec::new();
         if let Some(fields_arr) = c.get("fields").and_then(|v| v.as_array()) {
             for f in fields_arr {
-                let fname = decrypt_cipher_string(f.get("name").and_then(|v| v.as_str()), &cipher_key)
-                    .unwrap_or_default();
-                let fval = decrypt_cipher_string(f.get("value").and_then(|v| v.as_str()), &cipher_key)
-                    .unwrap_or_default();
+                let fname =
+                    decrypt_cipher_string(f.get("name").and_then(|v| v.as_str()), &cipher_key)
+                        .unwrap_or_default();
+                let fval =
+                    decrypt_cipher_string(f.get("value").and_then(|v| v.as_str()), &cipher_key)
+                        .unwrap_or_default();
                 let ftype = f.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
                 fields_decrypted.push(json!({
                     "name": fname,
@@ -329,9 +344,21 @@ pub fn decrypt_sync_ciphers(
                     &cipher_key,
                 )
                 .unwrap_or_default();
-                let att_id = att.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let size = att.get("size").and_then(|v| v.as_str()).unwrap_or("0").to_string();
-                let url = att.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let att_id = att
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let size = att
+                    .get("size")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let url = att
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 attachments_decrypted.push(json!({
                     "id": att_id,
@@ -398,14 +425,20 @@ pub fn decrypt_sync_ciphers(
         .to_string();
 
         let sub_title = if let Some(ref l) = login_val {
-            l.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            l.get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         } else if item_type == 2 {
             "Secure Note".to_string()
         } else {
             String::new()
         };
 
-        let mut search_tokens = vec![name.to_lowercase(), notes.clone().unwrap_or_default().to_lowercase()];
+        let mut search_tokens = vec![
+            name.to_lowercase(),
+            notes.clone().unwrap_or_default().to_lowercase(),
+        ];
         if !sub_title.is_empty() {
             search_tokens.push(sub_title.to_lowercase());
         }
@@ -496,7 +529,10 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "GitHub Enterprise");
         assert_eq!(items[0].sub_title, "octocat_native");
-        assert_eq!(items[0].notes.as_deref(), Some("Production SSH server access"));
+        assert_eq!(
+            items[0].notes.as_deref(),
+            Some("Production SSH server access")
+        );
         assert!(items[0].favorite);
     }
 }

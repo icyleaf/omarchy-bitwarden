@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::crypto::{EncString, KdfType, SymmetricCryptoKey, derive_master_key};
+use crate::crypto::{derive_master_key, EncString, KdfType, SymmetricCryptoKey};
 
 pub const DEFAULT_STORAGE_FILENAME: &str = "data.json";
 
@@ -66,9 +66,8 @@ impl StorageManager {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let content = serde_json::to_string_pretty(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         fs::write(&self.file_path, content)
     }
 
@@ -77,10 +76,9 @@ impl StorageManager {
         password: &str,
         storage: &VaultStorage,
     ) -> Result<SymmetricCryptoKey, crate::crypto::CryptoError> {
-        let enc_user_key = storage
-            .enc_user_key
-            .as_ref()
-            .ok_or_else(|| crate::crypto::CryptoError::InvalidEncString("Missing user key".to_string()))?;
+        let enc_user_key = storage.enc_user_key.as_ref().ok_or_else(|| {
+            crate::crypto::CryptoError::InvalidEncString("Missing user key".to_string())
+        })?;
 
         let kdf_type = KdfType::from(storage.kdf.unwrap_or(0));
         let iterations = storage.kdf_iterations.unwrap_or(600_000);
@@ -113,9 +111,11 @@ mod tests {
         let path = dir.path().join("test_storage.json");
         let mgr = StorageManager::new(path);
 
-        let mut storage = VaultStorage::default();
-        storage.user_email = "tester@domain.com".to_string();
-        storage.server_url = "https://vaultwarden.local".to_string();
+        let storage = VaultStorage {
+            user_email: "tester@domain.com".to_string(),
+            server_url: "https://vaultwarden.local".to_string(),
+            ..Default::default()
+        };
 
         mgr.save(&storage).unwrap();
         let loaded = mgr.load();

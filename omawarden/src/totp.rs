@@ -103,8 +103,16 @@ pub fn generate_totp(
     default_period: u64,
 ) -> Option<TotpResult> {
     let params = parse_totp_params(secret_or_uri)?;
-    let digits = if params.digits != 6 { params.digits } else { default_digits };
-    let period = if params.period != 30 { params.period } else { default_period };
+    let digits = if params.digits != 6 {
+        params.digits
+    } else {
+        default_digits
+    };
+    let period = if params.period != 30 {
+        params.period
+    } else {
+        default_period
+    };
 
     let now = timestamp.unwrap_or_else(|| {
         SystemTime::now()
@@ -125,7 +133,12 @@ pub fn generate_totp(
 
     let key = base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &padded)
         .or_else(|| base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &params.secret))
-        .or_else(|| base32::decode(base32::Alphabet::Rfc4648Lower { padding: false }, &params.secret))?;
+        .or_else(|| {
+            base32::decode(
+                base32::Alphabet::Rfc4648Lower { padding: false },
+                &params.secret,
+            )
+        })?;
 
     let msg = counter.to_be_bytes();
 
@@ -189,7 +202,9 @@ mod tests {
             Some("JBSWY3DPEHPK3PXP".to_string())
         );
         assert_eq!(
-            parse_totp_secret("otpauth://totp/Example:alice@google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example"),
+            parse_totp_secret(
+                "otpauth://totp/Example:alice@google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example"
+            ),
             Some("JBSWY3DPEHPK3PXP".to_string())
         );
         assert_eq!(

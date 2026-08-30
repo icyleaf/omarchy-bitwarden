@@ -32,14 +32,30 @@ pub struct Config {
     pub remember_email: bool,
 }
 
-fn default_server_url() -> String { DEFAULT_SERVER_URL.to_string() }
-fn default_bw_path() -> String { DEFAULT_BW_PATH.to_string() }
-fn default_download_dir() -> String { DEFAULT_DOWNLOAD_DIR.to_string() }
-fn default_auto_lock_minutes() -> i64 { DEFAULT_AUTO_LOCK_MINUTES }
-fn default_clipboard_clear_seconds() -> i64 { DEFAULT_CLIPBOARD_CLEAR_SECONDS }
-fn default_max_output_mb() -> i64 { DEFAULT_MAX_OUTPUT_MB }
-fn default_email() -> String { DEFAULT_EMAIL.to_string() }
-fn default_remember_email() -> bool { DEFAULT_REMEMBER_EMAIL }
+fn default_server_url() -> String {
+    DEFAULT_SERVER_URL.to_string()
+}
+fn default_bw_path() -> String {
+    DEFAULT_BW_PATH.to_string()
+}
+fn default_download_dir() -> String {
+    DEFAULT_DOWNLOAD_DIR.to_string()
+}
+fn default_auto_lock_minutes() -> i64 {
+    DEFAULT_AUTO_LOCK_MINUTES
+}
+fn default_clipboard_clear_seconds() -> i64 {
+    DEFAULT_CLIPBOARD_CLEAR_SECONDS
+}
+fn default_max_output_mb() -> i64 {
+    DEFAULT_MAX_OUTPUT_MB
+}
+fn default_email() -> String {
+    DEFAULT_EMAIL.to_string()
+}
+fn default_remember_email() -> bool {
+    DEFAULT_REMEMBER_EMAIL
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -95,9 +111,8 @@ impl ConfigManager {
         if let Some(parent) = self.config_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(config).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let content = serde_json::to_string_pretty(config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         fs::write(&self.config_path, content)
     }
 }
@@ -126,11 +141,13 @@ mod tests {
         let path = dir.path().join("config.json");
         let mgr = ConfigManager::new(Some(&path));
 
-        let mut cfg = Config::default();
-        cfg.server_url = "https://custom.vaultwarden.local".to_string();
-        cfg.email = "test@example.com".to_string();
-        cfg.auto_lock_minutes = 60;
-        cfg.remember_email = false;
+        let cfg = Config {
+            server_url: "https://custom.vaultwarden.local".to_string(),
+            email: "test@example.com".to_string(),
+            auto_lock_minutes: 60,
+            remember_email: false,
+            ..Default::default()
+        };
 
         mgr.save(&cfg).unwrap();
         assert!(path.exists());
@@ -143,7 +160,11 @@ mod tests {
     fn test_load_partial_json() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
-        fs::write(&path, r#"{"email": "partial@test.com", "auto_lock_minutes": 5}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"email": "partial@test.com", "auto_lock_minutes": 5}"#,
+        )
+        .unwrap();
 
         let mgr = ConfigManager::new(Some(&path));
         let loaded = mgr.load();

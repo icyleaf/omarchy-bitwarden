@@ -181,31 +181,63 @@ flowchart TD
 omarchy-bitwarden/
 ├── OmarchyBitwarden.qml         # Quickshell QML overlay UI & Action Palette
 ├── manifest.json                # Omarchy plugin manifest metadata
+├── .github/workflows/           # CI/CD and multi-architecture release pipelines
 ├── bin/
-│   └── bitwarden-helper         # Fast Python CLI bridge for QML Process calls
-├── bitwarden_helper/
-│   ├── auth.py                  # Authentication, login & unlock logic
-│   ├── keyring.py               # FreeDesktop Secret Service Keyring integration
-│   ├── vault.py                 # Vault parsing, scoring & heuristic classification
-│   ├── attachment.py           # Vault item attachment downloading and previewing
-│   ├── ssh.py                   # SSH key header pattern analysis
-│   ├── totp.py                  # RFC 6238 TOTP computation
-│   ├── clipboard.py             # Wayland ephemeral clipboard timer
-│   ├── config.py                # User configuration persistence
-│   ├── health.py                # CLI dependencies health checker
-│   └── hook.py                  # Omarchy screen-lock auto-lock hook
-└── tests/                       # Automated pytest test suites (72 test cases)
+│   └── omawarden                # Native compiled helper & daemon binary
+└── omawarden/                   # Pure Rust engine workspace crate
+    ├── Cargo.toml               # Rust package dependencies & configuration
+    └── src/
+        ├── main.rs              # CLI entry point, clap command handlers & stdin bridge
+        ├── daemon.rs            # Background resident Unix socket daemon & cache
+        ├── api.rs               # Direct REST/OAuth2 Bitwarden client
+        ├── auth.rs              # Authentication, login & unlock lifecycle
+        ├── crypto.rs            # PBKDF2, Argon2id, AES-256-CBC, HMAC crypto engine
+        ├── storage.rs           # Encrypted vault cache persistence (data.json)
+        ├── keyring.rs           # FreeDesktop Secret Service Keyring integration
+        ├── vault.rs             # In-memory vault parsing, fuzzy scoring & SSH detection
+        ├── totp.rs              # RFC 6238 TOTP computation & multi-algorithm engine
+        ├── clipboard.rs         # Ephemeral Wayland clipboard manager
+        ├── attachment.rs        # Attachment streaming & preview handling
+        ├── health.rs            # Diagnostic health checker
+        ├── hook.rs              # Screen-lock auto-lock hook installer
+        └── config.rs            # Configuration management (config.json)
 ```
 
 ---
 
-## Running Tests
+## Building and Testing
 
-Run all unit and integration tests with `pytest`:
+### Build from Source
+
+Build the optimized release binary with `cargo`:
 
 ```bash
-python3 -m pytest tests/
+cargo build --release
+mkdir -p bin && cp target/release/omawarden bin/omawarden
 ```
+
+### Running Tests
+
+Execute the comprehensive unit and integration test suite:
+
+```bash
+cargo test
+```
+
+### Formatting and Linting
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+---
+
+## Multi-Architecture Releases
+
+Tagged releases (`v*`) automatically trigger GitHub Actions matrix builds generating optimized release tarballs and SHA-256 checksums for:
+- `x86_64-unknown-linux-gnu` (Intel / AMD 64-bit Linux)
+- `aarch64-unknown-linux-gnu` (ARM 64-bit Linux, including Raspberry Pi & Asahi)
 
 ---
 

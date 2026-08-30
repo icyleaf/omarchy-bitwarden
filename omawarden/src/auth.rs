@@ -103,10 +103,19 @@ impl AuthManager {
             };
         }
 
-        if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "status" })) {
-            let is_unlocked = daemon_resp.get("is_unlocked").and_then(|v| v.as_bool()).unwrap_or(false);
-            let daemon_email = daemon_resp.get("user_email").and_then(|v| v.as_str()).unwrap_or("");
-            let is_unlocked_same_user = is_unlocked && !daemon_email.is_empty() && daemon_email == storage.user_email;
+        if let Some(daemon_resp) =
+            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "status" }))
+        {
+            let is_unlocked = daemon_resp
+                .get("is_unlocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let daemon_email = daemon_resp
+                .get("user_email")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_unlocked_same_user =
+                is_unlocked && !daemon_email.is_empty() && daemon_email == storage.user_email;
             let status_str = if is_unlocked_same_user {
                 "unlocked".to_string()
             } else {
@@ -141,16 +150,12 @@ impl AuthManager {
         }
     }
 
-    pub fn login_password(
-        &self,
-        email: &str,
-        password: &str,
-        code: Option<&str>,
-    ) -> AuthResult {
+    pub fn login_password(&self, email: &str, password: &str, code: Option<&str>) -> AuthResult {
         let client = BitwardenApiClient::new(&self.server_url);
         let password_zeroizing = Zeroizing::new(password.to_string());
 
-        let (token_resp, _user_key) = match client.login_password(email, &password_zeroizing, code) {
+        let (token_resp, _user_key) = match client.login_password(email, &password_zeroizing, code)
+        {
             Ok(r) => r,
             Err(e) => {
                 return AuthResult {
@@ -220,9 +225,15 @@ impl AuthManager {
         }
 
         let password_zeroizing = Zeroizing::new(password.to_string());
-        match self.storage_mgr.unlock_user_key(&password_zeroizing, &storage) {
+        match self
+            .storage_mgr
+            .unlock_user_key(&password_zeroizing, &storage)
+        {
             Ok(_user_key) => {
-                let token = storage.access_token.clone().unwrap_or_else(|| "session_unlocked".to_string());
+                let token = storage
+                    .access_token
+                    .clone()
+                    .unwrap_or_else(|| "session_unlocked".to_string());
                 self.keyring_mgr.store_session(&token);
 
                 // Auto-unlock daemon with decrypted items in memory
@@ -302,7 +313,9 @@ mod tests {
             "Vault is locked."
         );
         assert_eq!(
-            sanitize_auth_error(Some("Random error with token a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")),
+            sanitize_auth_error(Some(
+                "Random error with token a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+            )),
             "Random error with token [REDACTED]"
         );
     }
@@ -314,16 +327,22 @@ mod tests {
         let storage_mgr = StorageManager::new(storage_path);
 
         let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
-        let auth_mgr = AuthManager::new("https://vault.example.com", Some(storage_mgr.clone()), Some(mock_keyring));
+        let auth_mgr = AuthManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr.clone()),
+            Some(mock_keyring),
+        );
 
         // Initially unauthenticated
         let st = auth_mgr.get_status(false);
         assert_eq!(st.status, "unauthenticated");
 
         // Simulate stored account
-        let mut storage = VaultStorage::default();
-        storage.user_email = "test@example.com".to_string();
-        storage.enc_user_key = Some("2.dummy_iv|dummy_ct|dummy_mac".to_string());
+        let storage = VaultStorage {
+            user_email: "test@example.com".to_string(),
+            enc_user_key: Some("2.dummy_iv|dummy_ct|dummy_mac".to_string()),
+            ..Default::default()
+        };
         storage_mgr.save(&storage).unwrap();
 
         let st_locked = auth_mgr.get_status(false);
