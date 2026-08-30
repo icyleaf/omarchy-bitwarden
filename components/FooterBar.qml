@@ -5,8 +5,8 @@ import QtQuick.Layouts
 Rectangle {
   id: footerRoot
 
-  property string overlayVersion: "v0.4.0"
-  property string backendVersion: "omawarden v0.1.0"
+  property string overlayVersion: ""
+  property string backendVersion: ""
   property bool isUnlocked: true
   property bool isBusy: false
   property color foreground: "#ffffff"
@@ -159,7 +159,7 @@ Rectangle {
         Text {
           id: overlayVerText
           anchors.centerIn: parent
-          text: "Overlay " + (footerRoot.overlayVersion || "v0.4.0")
+          text: footerRoot.overlayVersion || "v0.4.0"
           color: Qt.darker(footerRoot.foreground, 1.6)
           font.pixelSize: 10
         }
@@ -183,7 +183,7 @@ Rectangle {
         Text {
           id: backendVerText
           anchors.centerIn: parent
-          text: footerRoot.backendVersion || "omawarden v0.1.0"
+          text: footerRoot.backendVersion || ""
           color: footerRoot.accent
           font.pixelSize: 10
         }
