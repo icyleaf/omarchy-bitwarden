@@ -829,7 +829,7 @@ Item {
     implicitHeight: 600
     minimumSize: Qt.size(720, 480)
 
-onVisibleChanged: {
+    onVisibleChanged: {
       if (visible) {
         Qt.callLater(function() {
           if (root.effectiveView === "search") searchInput.forceActiveFocus()
@@ -1998,7 +1998,7 @@ onVisibleChanged: {
                   Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: root.border
+                    color: Style.controlFill(false, false, root.foreground, root.accent)
                   }
 
                   // Login Details
