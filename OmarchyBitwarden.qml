@@ -288,12 +288,21 @@ Item {
 
     root.filteredItems = out
     root.selectedIndex = 0
-    root.onSelectedItemChanged()
+    root.handleSelectedItemChanged()
   }
 
   onSearchQueryChanged: filterVaultItems()
   onActiveCategoryChanged: filterVaultItems()
-  onSelectedIndexChanged: root.onSelectedItemChanged()
+  onSelectedIndexChanged: root.handleSelectedItemChanged()
+
+  function handleSelectedItemChanged() {
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.activeAttachmentPreview = null
+    root.loadingAttachmentId = ""
+    root.updateTotpForSelected()
+    root.updateAvailableActions()
+  }
 
   function updateAvailableActions() {
     root.currentAvailableActions = root.getAvailableActions(root.selectedItem)
@@ -306,14 +315,7 @@ Item {
     }
   }
 
-  onSelectedItemChanged: {
-    root.showPasswordRevealed = false
-    root.showPrivateKeyRevealed = false
-    root.activeAttachmentPreview = null
-    root.loadingAttachmentId = ""
-    root.updateTotpForSelected()
-    root.updateAvailableActions()
-  }
+  onSelectedItemChanged: root.handleSelectedItemChanged()
 
   function updateTotpForSelected() {
     var item = root.selectedItem
@@ -953,6 +955,7 @@ Item {
           isBusy: root.isBusy
           overlayVersion: (root.manifest && root.manifest.version) ? ("v" + root.manifest.version) : "v0.4.0"
           backendVersion: (root.cliHealth && root.cliHealth.version) || "omawarden v0.1.0"
+          background: root.background
           foreground: root.foreground
           accent: root.accent
           borderColor: root.borderColor
