@@ -2,6 +2,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use zeroize::Zeroizing;
 
 use crate::health::resolve_executable;
 use crate::keyring::KeyringManager;
@@ -186,7 +187,7 @@ impl AuthManager {
             }
         };
 
-        let mut input_data = format!("{}\n", password);
+        let mut input_data = Zeroizing::new(format!("{}\n", password));
         if let Some(c) = code {
             input_data.push_str(&format!("{}\n", c));
         }
@@ -252,7 +253,7 @@ impl AuthManager {
             }
         };
 
-        let input_data = format!("{}\n{}\n", client_id, client_secret);
+        let input_data = Zeroizing::new(format!("{}\n{}\n", client_id, client_secret));
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input_data.as_bytes());
         }
@@ -310,7 +311,7 @@ impl AuthManager {
             }
         };
 
-        let input_data = format!("{}\n", password);
+        let input_data = Zeroizing::new(format!("{}\n", password));
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input_data.as_bytes());
         }
@@ -373,5 +374,135 @@ impl AuthManager {
             session: None,
             error: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_sanitize_auth_error_patterns() {
+        assert_eq!(
+            sanitize_auth_error(Some("Invalid password")),
+            "Invalid username, email, or master password."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Decryption failed on item cipher")),
+            "Decryption failed. Incorrect master password."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Two-factor code required")),
+            "Two-factor authentication required or invalid code."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Already logged in")),
+            "Already logged in."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("network error ECONNREFUSED")),
+            "Network error: unable to reach Bitwarden server."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Vault is locked")),
+            "Vault is locked."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Random error with token a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")),
+            "Random error with token [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_mock_auth_unlock_and_lock() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session.txt");
+        let bw_script = dir.path().join("mock-bw");
+        let secret_tool_script = dir.path().join("mock-secret-tool");
+
+        // Mock secret tool
+        let secret_tool_code = format!(
+            r#"#!/bin/sh
+SF="{}"
+case "$1" in
+    store)
+        cat > "$SF"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "$SF" ]; then
+            cat "$SF"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        rm -f "$SF"
+        exit 0
+        ;;
+esac
+"#,
+            session_file.display()
+        );
+        fs::write(&secret_tool_script, secret_tool_code).unwrap();
+        let mut perms = fs::metadata(&secret_tool_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&secret_tool_script, perms).unwrap();
+
+        // Mock bw
+        let bw_code = r#"#!/bin/sh
+case "$1" in
+    status)
+        echo '{"status": "locked", "serverUrl": "https://vault.bitwarden.com", "userEmail": "user@test.com"}'
+        exit 0
+        ;;
+    unlock)
+        cat > /dev/null
+        echo "dummy_unlocked_session_token_12345"
+        exit 0
+        ;;
+    lock)
+        exit 0
+        ;;
+    logout)
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#;
+        fs::write(&bw_script, bw_code).unwrap();
+        let mut perms2 = fs::metadata(&bw_script).unwrap().permissions();
+        perms2.set_mode(0o755);
+        fs::set_permissions(&bw_script, perms2).unwrap();
+
+        let keyring = KeyringManager::new(secret_tool_script.to_str().unwrap());
+        let auth_mgr = AuthManager::new(bw_script.to_str().unwrap(), Some(keyring.clone()), None);
+
+        // Initially status is locked
+        let st = auth_mgr.get_status(false);
+        assert_eq!(st.status, "locked");
+        assert!(!st.has_session);
+
+        // Unlock
+        let res = auth_mgr.unlock("my_master_password");
+        assert!(res.ok);
+        assert_eq!(res.status, Some("unlocked".to_string()));
+        assert_eq!(res.session, Some("dummy_unlocked_session_token_12345".to_string()));
+
+        // Status is now unlocked
+        let st_unlocked = auth_mgr.get_status(false);
+        assert_eq!(st_unlocked.status, "unlocked");
+        assert!(st_unlocked.has_session);
+
+        // Lock
+        let lock_res = auth_mgr.lock();
+        assert!(lock_res.ok);
+        assert_eq!(keyring.get_session(), None);
     }
 }

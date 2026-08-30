@@ -5,6 +5,7 @@ pub const SERVICE_NAME: &str = "omarchy-bitwarden";
 pub const ACCOUNT_NAME: &str = "session";
 pub const LABEL: &str = "Omarchy Bitwarden Session";
 
+#[derive(Debug, Clone)]
 pub struct KeyringManager {
     pub secret_tool_path: String,
 }
@@ -78,5 +79,72 @@ impl KeyringManager {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_empty_token_store() {
+        let mgr = KeyringManager::default();
+        assert!(!mgr.store_session(""));
+    }
+
+    #[test]
+    fn test_mock_keyring_lifecycle() {
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("session_db.txt");
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+DB="{}"
+case "$1" in
+    store)
+        cat > "$DB"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "$DB" ]; then
+            cat "$DB"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        rm -f "$DB"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            db_file.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mgr = KeyringManager::new(script_path.to_str().unwrap());
+
+        // Initial lookup should be None
+        assert_eq!(mgr.get_session(), None);
+
+        // Store session
+        assert!(mgr.store_session("test_session_token_12345"));
+        assert_eq!(mgr.get_session(), Some("test_session_token_12345".to_string()));
+
+        // Clear session
+        assert!(mgr.clear_session());
+        assert_eq!(mgr.get_session(), None);
     }
 }
