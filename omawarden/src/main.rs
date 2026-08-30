@@ -10,7 +10,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -204,7 +204,7 @@ fn read_secret_stdin(explicit_arg: Option<String>) -> String {
     let stdin = io::stdin();
     if !stdin.is_terminal() {
         let mut buffer = String::new();
-        if stdin.lock().read_to_string(&mut buffer).is_ok() {
+        if stdin.lock().read_line(&mut buffer).is_ok() {
             return buffer.trim_end_matches(&['\r', '\n'][..]).to_string();
         }
     }
@@ -221,7 +221,7 @@ fn read_auth_payload(
     let stdin = io::stdin();
     let mut raw = String::new();
     if !stdin.is_terminal() {
-        let _ = stdin.lock().read_to_string(&mut raw);
+        let _ = stdin.lock().read_line(&mut raw);
     }
     let raw = raw.trim();
     if raw.is_empty() {
