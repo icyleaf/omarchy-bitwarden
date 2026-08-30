@@ -197,7 +197,26 @@ Rectangle {
 
     // 3. Bottom Right: Plain version info + Engine Download / Update badges
     RowLayout {
-      spacing: 6
+      spacing: 3
+
+      Text {
+        text: "Overlay " + footerRoot.overlayVersion
+        color: Qt.darker(footerRoot.foreground, 1.8)
+        font.pixelSize: 10
+      }
+
+      Text {
+        text: "•"
+        color: Qt.darker(footerRoot.foreground, 2.2)
+        font.pixelSize: 10
+      }
+
+      Text {
+        visible: footerRoot.isEngineInstalled
+        text: "Backend " + footerRoot.backendVersion
+        color: Qt.darker(footerRoot.foreground, 1.8)
+        font.pixelSize: 10
+      }
 
       // Downloading Engine Indicator
       Rectangle {
@@ -280,24 +299,6 @@ Rectangle {
           hoverEnabled: true
           onClicked: footerRoot.settingsTriggered()
         }
-      }
-
-      Text {
-        text: "Overlay " + footerRoot.overlayVersion
-        color: Qt.darker(footerRoot.foreground, 1.8)
-        font.pixelSize: 10
-      }
-
-      Text {
-        text: "•"
-        color: Qt.darker(footerRoot.foreground, 2.2)
-        font.pixelSize: 10
-      }
-
-      Text {
-        text: "Backend " + footerRoot.backendVersion
-        color: Qt.darker(footerRoot.foreground, 1.8)
-        font.pixelSize: 10
       }
     }
   }

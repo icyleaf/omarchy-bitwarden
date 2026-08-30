@@ -309,11 +309,7 @@ fn main() -> ExitCode {
         Commands::Health { bw_path: _ } => {
             let status = check_system_health(&cfg.server_url);
             println!("{}", serde_json::to_string_pretty(&status).unwrap());
-            if status.ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::SUCCESS
         }
 
         Commands::Auth { action } => {

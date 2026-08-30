@@ -21,10 +21,16 @@ Item {
   property var shell: null
   property var manifest: null
   property bool opened: false
+  function toLocalPath(url) {
+    if (!url) return ""
+    var str = url.toString ? url.toString() : String(url)
+    return str.replace(/^file:\/+/i, "/")
+  }
+
   property string helperPath: {
     var custom = Quickshell.env("OMARCHY_BITWARDEN_HELPER")
     if (custom) return custom
-    var localPath = Qt.resolvedUrl("bin/omawarden").toString().replace(/^file:\/\//, "")
+    var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
     if (localPath) return localPath
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
     var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
@@ -195,80 +201,13 @@ Item {
     root.errorMessage = ""
     root.statusMessage = "Downloading omawarden backend engine..."
 
-    var localDir = Qt.resolvedUrl("bin").toString().replace(/^file:\/\//, "")
+    var localDir = root.toLocalPath(Qt.resolvedUrl("bin"))
     var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
     var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
-
-    var script = [
-      "set -e",
-      "TARGET_DIR=\"${1:-$HOME/.config/omarchy/plugins/icyleaf.bitwarden/bin}\"",
-      "REPO=\"icyleaf/omarchy-bitwarden\"",
-      "ARCH=$(uname -m)",
-      "case \"$ARCH\" in",
-      "  x86_64) TRIPLE=\"x86_64-unknown-linux-gnu\" ;;",
-      "  aarch64|arm64) TRIPLE=\"aarch64-unknown-linux-gnu\" ;;",
-      "  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Unsupported architecture: $ARCH\\\"}\"; exit 1 ;;",
-      "esac",
-      "TMP_DIR=$(mktemp -d)",
-      "trap 'rm -rf \"$TMP_DIR\"' EXIT",
-      "download_file() {",
-      "  if command -v curl >/dev/null 2>&1; then",
-      "    curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 30 \"$1\" -o \"$2\";",
-      "  elif command -v wget >/dev/null 2>&1; then",
-      "    wget -q --user-agent=\"OmarchyBitwarden\" --timeout=30 -O \"$2\" \"$1\";",
-      "  else return 1; fi",
-      "}",
-      "if command -v curl >/dev/null 2>&1; then",
-      "  RELEASE_JSON=$(curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 10 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
-      "elif command -v wget >/dev/null 2>&1; then",
-      "  RELEASE_JSON=$(wget -qO- --user-agent=\"OmarchyBitwarden\" --timeout=10 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null || true)",
-      "else",
-      "  RELEASE_JSON=\"\"",
-      "fi",
-      "RESOLVED_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz$' | head -n 1 || true)",
-      "RESOLVED_SHA_URL=$(echo \"$RELEASE_JSON\" | grep -o 'https://[^\" ]*releases/download/[^\" ]*' | grep \"$TRIPLE\" | grep '\\.tar\\.gz\\.sha256$' | head -n 1 || true)",
-      "if [ -z \"$RESOLVED_URL\" ]; then",
-      "  RESOLVED_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz\"",
-      "  RESOLVED_SHA_URL=\"https://github.com/${REPO}/releases/latest/download/omawarden-${TRIPLE}.tar.gz.sha256\"",
-      "fi",
-      "if ! download_file \"$RESOLVED_URL\" \"$TMP_DIR/omawarden.tar.gz\"; then",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to download omawarden from $RESOLVED_URL\\\"}\"",
-      "  exit 1",
-      "fi",
-      "download_file \"$RESOLVED_SHA_URL\" \"$TMP_DIR/omawarden.tar.gz.sha256\" || true",
-      "if [ ! -s \"$TMP_DIR/omawarden.tar.gz\" ]; then",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Downloaded omawarden archive is empty\\\"}\"",
-      "  exit 1",
-      "fi",
-      "if [ -s \"$TMP_DIR/omawarden.tar.gz.sha256\" ]; then",
-      "  EXPECTED_SHA=$(awk '{print $1}' \"$TMP_DIR/omawarden.tar.gz.sha256\" | tr -d ' \\r\\n')",
-      "  if command -v sha256sum >/dev/null 2>&1; then",
-      "    ACTUAL_SHA=$(sha256sum \"$TMP_DIR/omawarden.tar.gz\" | awk '{print $1}' | tr -d ' \\r\\n')",
-      "  elif command -v shasum >/dev/null 2>&1; then",
-      "    ACTUAL_SHA=$(shasum -a 256 \"$TMP_DIR/omawarden.tar.gz\" | awk '{print $1}' | tr -d ' \\r\\n')",
-      "  fi",
-      "  if [ -n \"$EXPECTED_SHA\" ] && [ \"$EXPECTED_SHA\" != \"$ACTUAL_SHA\" ]; then",
-      "    echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"SHA-256 verification failed\\\"}\"",
-      "    exit 1",
-      "  fi",
-      "fi",
-      "EXTRACT_DIR=$(mktemp -d)",
-      "tar -xzf \"$TMP_DIR/omawarden.tar.gz\" -C \"$EXTRACT_DIR\"",
-      "FOUND_BIN=$(find \"$EXTRACT_DIR\" -type f -name \"omawarden\" | head -n 1)",
-      "if [ -z \"$FOUND_BIN\" ]; then",
-      "  rm -rf \"$EXTRACT_DIR\"",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Binary omawarden not found in archive\\\"}\"",
-      "  exit 1",
-      "fi",
-      "mkdir -p \"$TARGET_DIR\"",
-      "cp \"$FOUND_BIN\" \"$TARGET_DIR/omawarden\"",
-      "chmod +x \"$TARGET_DIR/omawarden\"",
-      "rm -rf \"$EXTRACT_DIR\"",
-      "echo \"{\\\"ok\\\":true,\\\"path\\\":\\\"$TARGET_DIR/omawarden\\\",\\\"verified\\\":true}\""
-    ].join("\n")
+    var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/download-engine.sh"))
 
     downloadCliProc.running = false
-    downloadCliProc.command = ["bash", "-c", script, "sh", baseDir]
+    downloadCliProc.command = ["bash", scriptPath, baseDir]
     downloadCliProc.running = true
   }
 
@@ -299,24 +238,9 @@ Item {
       root.updateCheckStatus = "Checking for updates..."
     }
 
-    var script = [
-      "REPO=\"icyleaf/omarchy-bitwarden\"",
-      "if command -v curl >/dev/null 2>&1; then",
-      "  TAG=$(curl -sSL -H \"User-Agent: OmarchyBitwarden\" --max-time 6 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | head -n 1 | cut -d'\"' -f4 || true)",
-      "elif command -v wget >/dev/null 2>&1; then",
-      "  TAG=$(wget -qO- --user-agent=\"OmarchyBitwarden\" --timeout=6 \"https://api.github.com/repos/${REPO}/releases/latest\" 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | head -n 1 | cut -d'\"' -f4 || true)",
-      "else",
-      "  TAG=\"\"",
-      "fi",
-      "if [ -n \"$TAG\" ]; then",
-      "  echo \"{\\\"ok\\\":true,\\\"tag\\\":\\\"$TAG\\\"}\"",
-      "else",
-      "  echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"Failed to fetch latest release metadata\\\"}\"",
-      "fi"
-    ].join("\n")
-
+    var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/check-update.sh"))
     updateCheckProc.running = false
-    updateCheckProc.command = ["bash", "-c", script]
+    updateCheckProc.command = ["bash", scriptPath]
     updateCheckProc.running = true
   }
 
@@ -1241,9 +1165,6 @@ Item {
           var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
             root.cliHealth = data
-            if (data.version && root.latestVersion) {
-              root.updateAvailable = (root.compareSemVer(root.latestVersion, data.version) > 0)
-            }
           }
         } catch (e) {
           root.cliHealth = ({
