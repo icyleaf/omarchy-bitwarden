@@ -239,8 +239,8 @@ impl EncString {
             .map_err(|_| CryptoError::InvalidEncString(raw.to_string()))?;
 
         let parts: Vec<&str> = rest.split('|').collect();
-        if parts.len() == 1 {
-            // RSA or direct ciphertext
+        if enc_type == 3 || enc_type == 4 || enc_type == 5 || enc_type == 6 || parts.len() == 1 {
+            // RSA ciphertext format: <cipher_text_b64> or <cipher_text_b64>|<hmac>
             let ciphertext = BASE64
                 .decode(parts[0])
                 .map_err(|_| CryptoError::InvalidEncString(raw.to_string()))?;
@@ -279,16 +279,26 @@ impl EncString {
 
     pub fn decrypt_rsa(&self, rsa_key: &rsa::RsaPrivateKey) -> Result<Vec<u8>, CryptoError> {
         match self.enc_type {
-            3 => {
+            4 | 6 => {
+                // Bitwarden type 4 (Rsa2048_OaepSha1_B64) & 6 (Rsa2048_OaepSha1_HmacSha256_B64) use SHA-1
                 let padding = rsa::Oaep::new::<sha1::Sha1>();
                 rsa_key
                     .decrypt(padding, &self.ciphertext)
+                    .or_else(|_| {
+                        let padding256 = rsa::Oaep::new::<Sha256>();
+                        rsa_key.decrypt(padding256, &self.ciphertext)
+                    })
                     .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
             }
-            4 => {
-                let padding = rsa::Oaep::new::<Sha256>();
+            3 | 5 => {
+                // Bitwarden type 3 (Rsa2048_OaepSha256_B64) & 5 (Rsa2048_OaepSha256_HmacSha256_B64) use SHA-256
+                let padding256 = rsa::Oaep::new::<Sha256>();
                 rsa_key
-                    .decrypt(padding, &self.ciphertext)
+                    .decrypt(padding256, &self.ciphertext)
+                    .or_else(|_| {
+                        let padding = rsa::Oaep::new::<sha1::Sha1>();
+                        rsa_key.decrypt(padding, &self.ciphertext)
+                    })
                     .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
             }
             _ => Err(CryptoError::UnsupportedCipherType(self.enc_type)),

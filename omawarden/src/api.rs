@@ -350,14 +350,14 @@ pub fn decrypt_sync_ciphers_with_context(
             if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
                 if let Ok(enc_str) = EncString::parse(org_key_enc) {
                     let raw_key = match enc_str.enc_type {
-                        3 | 4 => {
+                        3 | 4 | 5 | 6 => {
                             if let Some(ref rsa) = rsa_priv_key {
                                 enc_str.decrypt_rsa(rsa).ok()
                             } else {
                                 None
                             }
                         }
-                        0 | 2 => enc_str.decrypt(user_key).ok(),
+                        0 | 1 | 2 => enc_str.decrypt(user_key).ok(),
                         _ => None,
                     };
                     if let Some(key_bytes) = raw_key {
@@ -1174,5 +1174,66 @@ mod tests {
         assert_eq!(items[0].sub_title, "Bob Acme");
         assert!(items[0].identity.is_some());
         assert!(items[0].search_text.contains("acme global"));
+    }
+
+    #[test]
+    fn test_decrypt_organization_ciphers_with_rsa_type_4() {
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::rand_core::OsRng;
+        use rsa::RsaPrivateKey;
+
+        let raw_user_key = [15u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        // 1. Generate 2048-bit RSA key for user
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub_key = rsa::RsaPublicKey::from(&priv_key);
+        let priv_der = priv_key.to_pkcs8_der().unwrap();
+        let priv_b64 = BASE64.encode(priv_der.as_bytes());
+
+        // Encrypt private key with user_key (CipherType 2)
+        let enc_private_key = encrypt_test_string(&priv_b64, &user_key);
+
+        // 2. Org key (64 bytes) encrypted with RSA-OAEP SHA-1 (CipherType 4)
+        let raw_org_key = [22u8; 64];
+        let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+        let enc_org_bytes = pub_key
+            .encrypt(&mut rng, rsa::Oaep::new::<sha1::Sha1>(), &raw_org_key)
+            .unwrap();
+        let org_key_b64 = BASE64.encode(&enc_org_bytes);
+
+        let organizations = vec![json!({
+            "id": "org-rsa-4",
+            "name": "LZSH",
+            "key": format!("4.{}", org_key_b64),
+        })];
+
+        let ciphers = vec![json!({
+            "id": "cipher-rsa-4",
+            "type": 4,
+            "organizationId": "org-rsa-4",
+            "name": encrypt_test_string("Wang Shen Identity", &org_key),
+            "identity": {
+                "firstName": encrypt_test_string("Shen", &org_key),
+                "lastName": encrypt_test_string("Wang", &org_key),
+                "company": encrypt_test_string("LZSH Org", &org_key),
+            }
+        })];
+
+        let items = decrypt_sync_ciphers_with_context(
+            &ciphers,
+            &[],
+            &organizations,
+            &user_key,
+            Some(&enc_private_key),
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Wang Shen Identity");
+        assert_eq!(items[0].organization_name.as_deref(), Some("LZSH"));
+        assert_eq!(items[0].sub_title, "Shen Wang");
+        let id_obj = items[0].identity.as_ref().unwrap();
+        assert_eq!(id_obj.get("company").unwrap(), "LZSH Org");
     }
 }
