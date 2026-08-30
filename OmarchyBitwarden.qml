@@ -375,7 +375,11 @@ Item {
         }
         break
       case "note":
-        copyToClipboard(item.notes || "", false, "secure note")
+        if (item.notes) {
+          copyToClipboard(item.notes, false, "secure note")
+        } else if (item.fields && item.fields.length > 0 && item.fields[0].value) {
+          copyToClipboard(String(item.fields[0].value), item.fields[0].type === 1, item.fields[0].name || "custom field")
+        }
         break
       case "identity":
         if (item.identity && item.identity.email) {

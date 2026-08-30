@@ -588,6 +588,106 @@ ScrollView {
         }
       }
 
+      // Empty Secure Note Placeholder
+      Rectangle {
+        visible: Boolean(inspectorRoot.item && inspectorRoot.item.type_name === "note" && !inspectorRoot.item.notes && (!inspectorRoot.item.fields || inspectorRoot.item.fields.length === 0) && (!inspectorRoot.item.attachments || inspectorRoot.item.attachments.length === 0))
+        Layout.fillWidth: true
+        height: 60
+        radius: 4
+        color: Qt.rgba(0, 0, 0, 0.15)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
+
+        Text {
+          anchors.centerIn: parent
+          text: "📝 This secure note has no text or custom fields."
+          color: Qt.darker(inspectorRoot.foreground, 1.8)
+          font.pixelSize: 11
+        }
+      }
+
+      // --------------------------------------------------
+      // CUSTOM FIELDS SECTION (Notes, Logins, Cards, etc.)
+      // --------------------------------------------------
+      ColumnLayout {
+        visible: Boolean(inspectorRoot.item && inspectorRoot.item.fields && inspectorRoot.item.fields.length > 0)
+        Layout.fillWidth: true
+        spacing: 6
+
+        Text {
+          text: "Custom Fields (" + (inspectorRoot.item && inspectorRoot.item.fields ? inspectorRoot.item.fields.length : 0) + "):"
+          color: Qt.darker(inspectorRoot.foreground, 1.5)
+          font.pixelSize: 11
+        }
+
+        Repeater {
+          model: (inspectorRoot.item && inspectorRoot.item.fields) ? inspectorRoot.item.fields : []
+
+          Rectangle {
+            Layout.fillWidth: true
+            height: 36
+            radius: 4
+            color: Qt.rgba(0, 0, 0, 0.2)
+            border.color: inspectorRoot.borderColor
+            border.width: 1
+
+            property bool isHiddenField: Boolean(modelData && modelData.type === 1)
+            property bool isRevealed: false
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.leftMargin: 10
+              anchors.rightMargin: 10
+              spacing: 8
+
+              Text {
+                text: (modelData.name || "Field") + ":"
+                color: Qt.darker(inspectorRoot.foreground, 1.5)
+                font.pixelSize: 11
+                Layout.preferredWidth: Math.min(implicitWidth, 120)
+                elide: Text.ElideRight
+              }
+
+              Text {
+                text: (modelData.type === 1 && !parent.parent.isRevealed) ? "••••••••••••••••" : (modelData.value || "")
+                color: inspectorRoot.foreground
+                font.pixelSize: 11
+                font.family: (modelData.type === 1) ? "monospace" : "sans-serif"
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+
+              Rectangle {
+                visible: modelData.type === 1
+                implicitHeight: 20
+                implicitWidth: revFldText.implicitWidth + 8
+                radius: 3
+                color: Qt.rgba(1, 1, 1, 0.08)
+                Text { id: revFldText; anchors.centerIn: parent; text: parent.parent.parent.isRevealed ? "Hide" : "Show"; color: inspectorRoot.foreground; font.pixelSize: 10 }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: parent.parent.parent.isRevealed = !parent.parent.parent.isRevealed
+                }
+              }
+
+              Rectangle {
+                implicitHeight: 20
+                implicitWidth: cpFldText.implicitWidth + 8
+                radius: 3
+                color: Qt.rgba(1, 1, 1, 0.08)
+                Text { id: cpFldText; anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: inspectorRoot.copyRequested(modelData.value || "", modelData.type === 1, modelData.name || "field")
+                }
+              }
+            }
+          }
+        }
+      }
+
       // --------------------------------------------------
       // SSH KEY SECTION
       // --------------------------------------------------
