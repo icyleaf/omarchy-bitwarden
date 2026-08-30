@@ -85,7 +85,7 @@ Item {
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
-  readonly property color border: Color.menu.border
+  readonly property color borderColor: Color.menu.border
   readonly property color accent: Color.menu.selectedText
   readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property string fontFamily: Style.font.menuFamily
@@ -819,7 +819,7 @@ Item {
           rawVaultItems: root.rawVaultItems
           foreground: root.foreground
           accent: root.accent
-          border: root.border
+          borderColor: root.borderColor
           onSearchQueryChanged: root.searchQuery = searchQuery
           onCategorySelected: function(cat) { root.activeCategory = cat }
           onClearSearchRequested: {
@@ -851,7 +851,7 @@ Item {
               foreground: root.foreground
               accent: root.accent
               selectedBackground: root.selectedBackground
-              border: root.border
+              borderColor: root.borderColor
               onItemSelected: function(idx) { root.selectedIndex = idx }
               onItemTriggered: function(idx) {
                 root.selectedIndex = idx
@@ -863,7 +863,7 @@ Item {
             Rectangle {
               Layout.fillHeight: true
               width: 1
-              color: root.border
+              color: root.borderColor
             }
 
             // Right Column: Detail Inspector OR Empty Cheat Sheet
@@ -883,7 +883,7 @@ Item {
                 loadingAttachmentId: root.loadingAttachmentId
                 foreground: root.foreground
                 accent: root.accent
-                border: root.border
+                borderColor: root.borderColor
                 onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
@@ -900,7 +900,7 @@ Item {
                 authState: root.authState
                 foreground: root.foreground
                 accent: root.accent
-                border: root.border
+                borderColor: root.borderColor
               }
             }
           }
@@ -918,7 +918,7 @@ Item {
             show2FAField: root.show2FAField
             foreground: root.foreground
             accent: root.accent
-            border: root.border
+            borderColor: root.borderColor
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
             onLoginPasswordRequested: function(email, pwd, code) { root.doLoginPassword(email, pwd, code) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
@@ -934,7 +934,7 @@ Item {
             isBusy: root.isBusy
             foreground: root.foreground
             accent: root.accent
-            border: root.border
+            borderColor: root.borderColor
             onSaveRequested: function(newSettings) { root.saveSettings(newSettings) }
             onCloseRequested: { root.currentView = "auto" }
             onRefreshHealthRequested: {
@@ -952,7 +952,7 @@ Item {
           backendVersion: (root.cliHealth && root.cliHealth.version) || "omawarden v0.1.0"
           foreground: root.foreground
           accent: root.accent
-          border: root.border
+          borderColor: root.borderColor
           onActionPaletteTriggered: {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
@@ -988,7 +988,7 @@ Item {
         selectedIndex: root.actionPaletteIndex
         foreground: root.foreground
         accent: root.accent
-        border: root.border
+        borderColor: root.borderColor
         onActionSelected: function(actionItem) {
           root.showActionPalette = false
           if (actionItem && typeof actionItem.action === "function") {

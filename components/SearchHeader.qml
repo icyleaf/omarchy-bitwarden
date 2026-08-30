@@ -13,7 +13,7 @@ ColumnLayout {
   property var rawVaultItems: []
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal categorySelected(string category)
   signal clearSearchRequested()
@@ -27,7 +27,7 @@ ColumnLayout {
     height: 40
     radius: 6
     color: Qt.rgba(0, 0, 0, 0.25)
-    border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.border
+    border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
     border.width: 1
 
     RowLayout {
@@ -89,7 +89,7 @@ ColumnLayout {
     rawVaultItems: searchHeaderRoot.rawVaultItems
     foreground: searchHeaderRoot.foreground
     accent: searchHeaderRoot.accent
-    border: searchHeaderRoot.border
+    borderColor: searchHeaderRoot.borderColor
     onCategorySelected: function(cat) {
       searchHeaderRoot.categorySelected(cat)
     }

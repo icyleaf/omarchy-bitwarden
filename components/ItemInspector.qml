@@ -13,7 +13,7 @@ ScrollView {
   property string loadingAttachmentId: ""
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal copyRequested(string text, bool isSensitive, string label)
   signal viewAttachmentRequested(var item, var att)
@@ -136,7 +136,7 @@ ScrollView {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.border }
+      Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.borderColor }
 
       // Preview Content: Image
       Item {
@@ -197,7 +197,7 @@ ScrollView {
           Layout.preferredHeight: 240
           radius: 4
           color: Qt.rgba(0, 0, 0, 0.3)
-          border.color: inspectorRoot.border
+          border.color: inspectorRoot.borderColor
           border.width: 1
 
           ScrollView {
@@ -303,7 +303,7 @@ ScrollView {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.border }
+      Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.borderColor }
 
       // --------------------------------------------------
       // LOGIN CREDENTIALS SECTION
@@ -451,14 +451,14 @@ ScrollView {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName)
           Layout.fillWidth: true
           Text { text: "Cardholder:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.item.card.cardholderName || ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.cardholderName || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
           Layout.fillWidth: true
           Text { text: "Card Number:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.number || "") : "•••• •••• •••• ••••"
+            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.number || "") : "•••• •••• •••• ••••") : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             font.family: "monospace"
@@ -467,21 +467,21 @@ ScrollView {
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.card) inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number") } }
           }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
           Layout.fillWidth: true
           Text { text: "Expires:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || ""); color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || "")) : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
           Layout.fillWidth: true
           Text { text: "Security Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.code || "") : "•••"
+            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             font.family: "monospace"
@@ -490,7 +490,7 @@ ScrollView {
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.card) inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV") } }
           }
         }
       }
@@ -508,7 +508,7 @@ ScrollView {
           Layout.fillWidth: true
           Text { text: "Full Name:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ")
+            text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ") : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             Layout.fillWidth: true
@@ -518,25 +518,25 @@ ScrollView {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
           Layout.fillWidth: true
           Text { text: "Email:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.item.identity.email || ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.email || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") } }
           }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
           Layout.fillWidth: true
           Text { text: "Phone:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.item.identity.phone || ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.phone || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
           Layout.fillWidth: true
           Text { text: "Address:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
+            text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             elide: Text.ElideRight
@@ -560,7 +560,7 @@ ScrollView {
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item) inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") } }
           }
         }
 
@@ -569,7 +569,7 @@ ScrollView {
           implicitHeight: Math.min(notesText.implicitHeight + 16, 160)
           radius: 4
           color: Qt.rgba(0, 0, 0, 0.25)
-          border.color: inspectorRoot.border
+          border.color: inspectorRoot.borderColor
           border.width: 1
 
           ScrollView {
@@ -600,13 +600,13 @@ ScrollView {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.key_type)
           Layout.fillWidth: true
           Text { text: "Key Type:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.item.ssh_key.key_type || ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.key_type || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
           Layout.fillWidth: true
           Text { text: "Fingerprint:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.item.ssh_key.fingerprint || ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.fingerprint || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
         }
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
@@ -616,7 +616,7 @@ ScrollView {
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") } }
           }
         }
         RowLayout {
@@ -632,7 +632,7 @@ ScrollView {
           Rectangle {
             implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
             Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") } }
           }
         }
       }
@@ -659,7 +659,7 @@ ScrollView {
             height: 38
             radius: 4
             color: Qt.rgba(0, 0, 0, 0.2)
-            border.color: inspectorRoot.border
+            border.color: inspectorRoot.borderColor
             border.width: 1
 
             RowLayout {

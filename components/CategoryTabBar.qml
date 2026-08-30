@@ -10,7 +10,7 @@ RowLayout {
   property var rawVaultItems: []
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal categorySelected(string category)
 

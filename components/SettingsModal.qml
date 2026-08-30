@@ -10,7 +10,7 @@ Item {
   property bool isBusy: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal saveRequested(var newSettings)
   signal closeRequested()
@@ -63,7 +63,7 @@ Item {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: settingsRoot.border }
+      Rectangle { Layout.fillWidth: true; height: 1; color: settingsRoot.borderColor }
 
       // 1. Engine Diagnostic Health Badges
       ColumnLayout {
@@ -152,7 +152,7 @@ Item {
           spacing: 4
           Text { text: "Bitwarden / Vaultwarden Server URL:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
           Rectangle {
-            Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.border; border.width: 1
+            Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
             TextInput {
               id: sUrlInput
               anchors.fill: parent; anchors.margins: 8; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
@@ -167,7 +167,7 @@ Item {
           spacing: 4
           Text { text: "Attachment Download Directory:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
           Rectangle {
-            Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.border; border.width: 1
+            Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
             TextInput {
               id: dlDirInput
               anchors.fill: parent; anchors.margins: 8; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
@@ -187,7 +187,7 @@ Item {
             spacing: 4
             Text { text: "Auto-lock Timeout (Minutes):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
             Rectangle {
-              Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.border; border.width: 1
+              Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: lockMinInput
                 anchors.fill: parent; anchors.margins: 8; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
@@ -202,7 +202,7 @@ Item {
             spacing: 4
             Text { text: "Clipboard Auto-Clear (Seconds):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
             Rectangle {
-              Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.border; border.width: 1
+              Layout.fillWidth: true; height: 34; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: clipSecInput
                 anchors.fill: parent; anchors.margins: 8; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true

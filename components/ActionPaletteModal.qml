@@ -11,7 +11,7 @@ Rectangle {
   property string actionFilterQuery: ""
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal actionSelected(var actionItem)
   signal closeRequested()
@@ -90,7 +90,7 @@ Rectangle {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: paletteRoot.border }
+      Rectangle { Layout.fillWidth: true; height: 1; color: paletteRoot.borderColor }
 
       // Action List
       ListView {

@@ -11,7 +11,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal itemSelected(int index)
   signal itemTriggered(int index)

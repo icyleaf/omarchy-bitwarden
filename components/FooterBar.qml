@@ -11,7 +11,7 @@ Rectangle {
   property bool isBusy: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal actionPaletteTriggered()
   signal syncTriggered()
@@ -21,7 +21,7 @@ Rectangle {
   height: 34
   Layout.fillWidth: true
   color: Qt.rgba(0, 0, 0, 0.2)
-  border.color: footerRoot.border
+  border.color: footerRoot.borderColor
   border.width: 1
   radius: 6
 

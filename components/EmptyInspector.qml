@@ -9,7 +9,7 @@ Item {
   property var authState: ({})
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color border: Qt.rgba(1, 1, 1, 0.1)
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   ColumnLayout {
     anchors.fill: parent
@@ -55,7 +55,7 @@ Item {
     Rectangle {
       Layout.fillWidth: true
       height: 1
-      color: emptyInspectorRoot.border
+      color: emptyInspectorRoot.borderColor
     }
 
     // Shortcuts Cheat Sheet
@@ -225,7 +225,7 @@ Item {
       implicitHeight: 28
       radius: 4
       color: Qt.rgba(1, 1, 1, 0.04)
-      border.color: emptyInspectorRoot.border
+      border.color: emptyInspectorRoot.borderColor
       border.width: 1
 
       RowLayout {
