@@ -14,7 +14,6 @@ Item {
     root.refreshConfig()
     root.refreshHealth()
     root.refreshAuthStatus()
-    root.loadVaultItems()
   }
 
   property var shell: null
@@ -51,7 +50,7 @@ Item {
   })
 
   property var authState: ({
-    status: "unlocked",
+    status: "locked",
     server_url: "",
     user_email: "",
     has_session: false
@@ -2705,9 +2704,9 @@ onVisibleChanged: {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
-          var wasLocked = (root.authState.status !== "unlocked")
+          var wasNotUnlocked = (root.authState.status !== "unlocked")
           root.authState = data
-          if (data.status === "unlocked" && wasLocked) {
+          if (data.status === "unlocked" && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
             root.loadVaultItems()
             root.syncVault(true)
           }
@@ -2744,10 +2743,8 @@ onVisibleChanged: {
               has_session: true
             })
             root.refreshAuthStatus()
-            if (data.session) {
-              root.loadVaultItems()
-              root.syncVault(true)
-            }
+            root.loadVaultItems()
+            root.syncVault(true)
           } else {
             root.errorMessage = data.error || "Unlock failed."
           }
@@ -2798,16 +2795,14 @@ onVisibleChanged: {
             if (typeof inputLoginPassword !== "undefined" && inputLoginPassword) inputLoginPassword.text = ""
 
             root.authState = ({
-              status: data.status || "unlocked",
-              server_url: (root.config && root.config.server_url) || "",
-              user_email: (typeof inputLoginEmail !== "undefined" && inputLoginEmail) ? inputLoginEmail.text.trim() : "",
-              has_session: Boolean(data.session)
+              status: "unlocked",
+              server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
+              user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
+              has_session: true
             })
             root.refreshAuthStatus()
-            if (data.session) {
-              root.loadVaultItems()
-              root.syncVault(true)
-            }
+            root.loadVaultItems()
+            root.syncVault(true)
           } else {
             root.errorMessage = data.error || "Login failed."
             var errLower = (data.error || "").toLowerCase()
