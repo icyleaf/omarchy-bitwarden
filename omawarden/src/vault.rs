@@ -233,8 +233,13 @@ impl VaultManager {
     }
 
     pub fn fetch_items(&self, _session: Option<&str>) -> Vec<VaultItem> {
-        let storage = self.storage_mgr.load();
-        self.parse_raw_items(&storage.ciphers)
+        crate::daemon::ensure_daemon_running();
+        if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" })) {
+            if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
+                return items;
+            }
+        }
+        Vec::new()
     }
 
     pub fn parse_raw_items(&self, raw_items: &[Value]) -> Vec<VaultItem> {

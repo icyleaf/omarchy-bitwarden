@@ -87,12 +87,37 @@ impl AuthManager {
 
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
         let storage = self.storage_mgr.load();
-        let session = self.keyring_mgr.get_session();
+
+        if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "status" })) {
+            let is_unlocked = daemon_resp.get("is_unlocked").and_then(|v| v.as_bool()).unwrap_or(false);
+            let status_str = if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
+                "unauthenticated".to_string()
+            } else if is_unlocked {
+                "unlocked".to_string()
+            } else {
+                "locked".to_string()
+            };
+
+            return AuthStatus {
+                status: status_str,
+                server_url: if storage.server_url.is_empty() {
+                    Some(self.server_url.clone())
+                } else {
+                    Some(storage.server_url)
+                },
+                last_sync: storage.last_sync,
+                user_email: if storage.user_email.is_empty() {
+                    None
+                } else {
+                    Some(storage.user_email)
+                },
+                user_id: storage.user_id,
+                has_session: is_unlocked,
+            };
+        }
 
         let status_str = if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
             "unauthenticated".to_string()
-        } else if session.is_some() {
-            "unlocked".to_string()
         } else {
             "locked".to_string()
         };
@@ -111,7 +136,7 @@ impl AuthManager {
                 Some(storage.user_email)
             },
             user_id: storage.user_id,
-            has_session: session.is_some(),
+            has_session: false,
         }
     }
 
@@ -157,6 +182,13 @@ impl AuthManager {
         let _ = self.storage_mgr.save(&storage);
         self.keyring_mgr.store_session(&token_resp.access_token);
 
+        // Auto-unlock daemon with decrypted items in memory
+        crate::daemon::ensure_daemon_running();
+        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "unlock",
+            "password": password
+        }));
+
         AuthResult {
             ok: true,
             status: Some("unlocked".to_string()),
@@ -191,6 +223,13 @@ impl AuthManager {
             Ok(_user_key) => {
                 let token = storage.access_token.clone().unwrap_or_else(|| "session_unlocked".to_string());
                 self.keyring_mgr.store_session(&token);
+
+                // Auto-unlock daemon with decrypted items in memory
+                crate::daemon::ensure_daemon_running();
+                let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                    "action": "unlock",
+                    "password": password
+                }));
 
                 AuthResult {
                     ok: true,

@@ -333,10 +333,7 @@ fn main() -> ExitCode {
             let auth_mgr = AuthManager::new(&cfg.server_url, None, None);
             match action {
                 AuthAction::Status => {
-                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "status" })) {
-                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
-                        return ExitCode::SUCCESS;
-                    }
+                    omawarden::daemon::ensure_daemon_running();
                     let st = auth_mgr.get_status(false);
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
@@ -371,14 +368,7 @@ fn main() -> ExitCode {
                 }
                 AuthAction::Unlock { password } => {
                     let pwd = read_secret_stdin(password);
-                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "unlock", "password": pwd })) {
-                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
-                        return if daemon_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            ExitCode::SUCCESS
-                        } else {
-                            ExitCode::FAILURE
-                        };
-                    }
+                    omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
@@ -437,31 +427,24 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
+                    omawarden::daemon::ensure_daemon_running();
                     if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" })) {
-                        if let Some(arr) = daemon_resp.as_array() {
-                            if !arr.is_empty() {
-                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
-                                return ExitCode::SUCCESS;
-                            }
+                        if let Ok(items) = serde_json::from_value::<Vec<omawarden::vault::VaultItem>>(daemon_resp) {
+                            let filtered = vault_mgr.search(&items, "", category.as_deref());
+                            println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
+                            return ExitCode::SUCCESS;
                         }
                     }
-                    let items = vault_mgr.fetch_items(None);
-                    let filtered = vault_mgr.search(&items, "", category.as_deref());
-                    println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
+                    println!("[]");
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
+                    omawarden::daemon::ensure_daemon_running();
                     if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "search", "query": query, "category": category })) {
-                        if let Some(arr) = daemon_resp.as_array() {
-                            if !arr.is_empty() {
-                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
-                                return ExitCode::SUCCESS;
-                            }
-                        }
+                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                        return ExitCode::SUCCESS;
                     }
-                    let items = vault_mgr.fetch_items(None);
-                    let results = vault_mgr.search(&items, &query, category.as_deref());
-                    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                    println!("[]");
                     ExitCode::SUCCESS
                 }
             }

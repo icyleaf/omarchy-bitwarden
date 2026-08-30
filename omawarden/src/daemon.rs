@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,28 @@ pub fn get_socket_path() -> PathBuf {
     } else {
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/omawarden-{}.sock", uid))
+    }
+}
+
+pub fn ensure_daemon_running() {
+    if send_daemon_request(&json!({ "action": "ping" })).is_some() {
+        return;
+    }
+
+    if let Ok(exe_path) = env::current_exe() {
+        let _ = Command::new(exe_path)
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(20));
+            if send_daemon_request(&json!({ "action": "ping" })).is_some() {
+                break;
+            }
+        }
     }
 }
 
@@ -77,17 +100,17 @@ impl DaemonState {
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
-        let storage = self.storage.read().map_err(|e| e.to_string())?.clone();
-        if storage.enc_user_key.is_none() {
+        let fresh_storage = self.storage_mgr.load();
+        if fresh_storage.enc_user_key.is_none() {
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
 
         let user_key = self
             .storage_mgr
-            .unlock_user_key(password, &storage)
-            .map_err(|e| format!("Unlock failed: {}", e))?;
+            .unlock_user_key(password, &fresh_storage)
+            .map_err(|e| format!("Unlock failed: {:?}", e))?;
 
-        let items = decrypt_sync_ciphers(&storage.ciphers, &user_key);
+        let items = decrypt_sync_ciphers(&fresh_storage.ciphers, &user_key);
         let count = items.len();
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
@@ -96,13 +119,16 @@ impl DaemonState {
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = true;
         }
+        if let Ok(mut st) = self.storage.write() {
+            *st = fresh_storage;
+        }
         self.touch_activity();
 
         Ok(count)
     }
 
     pub fn sync(&self) -> Result<usize, String> {
-        let storage = self.storage.read().map_err(|e| e.to_string())?.clone();
+        let storage = self.storage_mgr.load();
         let token = storage
             .access_token
             .as_ref()
@@ -193,16 +219,17 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
     let response = match action {
+        "ping" => json!({ "ok": true, "pong": true }),
         "status" => {
             let is_unlocked = state.is_unlocked.read().map(|g| *g).unwrap_or(false);
-            let st = state.storage.read().unwrap().clone();
+            let fresh_storage = state.storage_mgr.load();
             json!({
                 "ok": true,
-                "status": if is_unlocked { "unlocked" } else if st.enc_user_key.is_some() { "locked" } else { "unauthenticated" },
-                "server_url": st.server_url,
-                "user_email": st.user_email,
-                "user_id": st.user_id,
-                "last_sync": st.last_sync,
+                "status": if is_unlocked { "unlocked" } else if fresh_storage.enc_user_key.is_some() { "locked" } else { "unauthenticated" },
+                "server_url": fresh_storage.server_url,
+                "user_email": fresh_storage.user_email,
+                "user_id": fresh_storage.user_id,
+                "last_sync": fresh_storage.last_sync,
                 "is_unlocked": is_unlocked,
                 "items_count": state.decrypted_items.read().map(|i| i.len()).unwrap_or(0),
             })
@@ -223,16 +250,26 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             Err(e) => json!({ "ok": false, "error": e }),
         },
         "list" => {
-            let items = state.decrypted_items.read().unwrap().clone();
-            json!(items)
+            let is_unlocked = state.is_unlocked.read().map(|g| *g).unwrap_or(false);
+            if !is_unlocked {
+                json!([])
+            } else {
+                let items = state.decrypted_items.read().unwrap().clone();
+                json!(items)
+            }
         }
         "search" => {
-            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let category = req.get("category").and_then(|v| v.as_str());
-            let items = state.decrypted_items.read().unwrap().clone();
-            let vault_mgr = VaultManager::new("bw", None, None);
-            let results = vault_mgr.search(&items, query, category);
-            json!(results)
+            let is_unlocked = state.is_unlocked.read().map(|g| *g).unwrap_or(false);
+            if !is_unlocked {
+                json!([])
+            } else {
+                let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let category = req.get("category").and_then(|v| v.as_str());
+                let items = state.decrypted_items.read().unwrap().clone();
+                let vault_mgr = VaultManager::new("", None, None);
+                let results = vault_mgr.search(&items, query, category);
+                json!(results)
+            }
         }
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };

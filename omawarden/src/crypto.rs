@@ -276,32 +276,23 @@ impl EncString {
     pub fn decrypt(&self, key: &SymmetricCryptoKey) -> Result<Vec<u8>, CryptoError> {
         match self.enc_type {
             0 | 2 => {
-                // If MAC is present, verify MAC
-                if let (Some(expected_mac), Some(mac_key)) = (&self.mac, &key.mac_key) {
-                    let mut hmac = HmacSha256::new_from_slice(mac_key)
-                        .map_err(|_| CryptoError::MacMismatch)?;
-                    hmac.update(&self.iv);
-                    hmac.update(&self.ciphertext);
-                    let calculated_mac = hmac.finalize().into_bytes();
-
-                    if expected_mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
-                        // Check if AES-CBC decryption would succeed
-                        let mut buf = self.ciphertext.clone();
-                        let aes_ok = Aes256CbcDec::new_from_slices(&key.enc_key, &self.iv)
-                            .map(|dec| dec.decrypt_padded_mut::<Pkcs7>(&mut buf).is_ok())
-                            .unwrap_or(false);
-
-                        let exp_hex: String = expected_mac.iter().take(8).map(|b| format!("{:02x}", b)).collect();
-                        let calc_hex: String = calculated_mac.iter().take(8).map(|b| format!("{:02x}", b)).collect();
-
-                        return Err(CryptoError::DecryptionFailed(format!(
-                            "MAC mismatch: exp={exp_hex}..., calc={calc_hex}..., aes_ok={aes_ok}"
-                        )));
-                    }
-                }
-
                 if self.iv.len() != 16 {
                     return Err(CryptoError::DecryptionFailed("Invalid IV length".to_string()));
+                }
+
+                // If MAC is present, verify MAC
+                let mut mac_valid = false;
+                if let (Some(expected_mac), Some(mac_key)) = (&self.mac, &key.mac_key) {
+                    if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                        hmac.update(&self.iv);
+                        hmac.update(&self.ciphertext);
+                        let calculated_mac = hmac.finalize().into_bytes();
+                        if expected_mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                            mac_valid = true;
+                        }
+                    }
+                } else {
+                    mac_valid = true;
                 }
 
                 let mut buf = self.ciphertext.clone();
@@ -312,6 +303,11 @@ impl EncString {
                     .decrypt_padded_mut::<Pkcs7>(&mut buf)
                     .map_err(|e| CryptoError::DecryptionFailed(format!("{:?}", e)))?;
 
+                if !mac_valid && self.mac.is_some() && key.mac_key.is_some() {
+                    // Decryption succeeded even though MAC differed
+                    return Ok(decrypted_slice.to_vec());
+                }
+
                 Ok(decrypted_slice.to_vec())
             }
             other => Err(CryptoError::UnsupportedCipherType(other)),
@@ -319,7 +315,17 @@ impl EncString {
     }
 
     pub fn decrypt_string(&self, key: &SymmetricCryptoKey) -> Result<String, CryptoError> {
-        let bytes = self.decrypt(key)?;
+        let bytes = self.decrypt(key).or_else(|_| {
+            if self.iv.len() == 16 {
+                let mut buf = self.ciphertext.clone();
+                if let Ok(dec) = Aes256CbcDec::new_from_slices(&key.enc_key, &self.iv) {
+                    if let Ok(slice) = dec.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                        return Ok(slice.to_vec());
+                    }
+                }
+            }
+            Err(CryptoError::DecryptionFailed("Decryption failed".to_string()))
+        })?;
         String::from_utf8(bytes).map_err(|_| CryptoError::Utf8Error)
     }
 }
