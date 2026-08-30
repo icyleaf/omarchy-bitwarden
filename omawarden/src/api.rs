@@ -290,7 +290,10 @@ impl BitwardenApiClient {
             serde_json::from_str::<TokenResponse>(&body_text)
                 .map_err(|e| ApiError::Json(e.to_string()))
         } else {
-            Err(ApiError::AuthFailed(format!("Refresh token failed: HTTP {}", status)))
+            Err(ApiError::AuthFailed(format!(
+                "Refresh token failed: HTTP {}",
+                status
+            )))
         }
     }
 
