@@ -173,6 +173,8 @@ enum ClipboardAction {
 enum TotpAction {
     #[command(about = "Generate TOTP code from secret or otpauth URI")]
     Generate {
+        #[arg(index = 1)]
+        positional_secret: Option<String>,
         #[arg(long)]
         secret: Option<String>,
     },
@@ -480,8 +482,10 @@ fn main() -> ExitCode {
         }
 
         Commands::Totp { action } => match action {
-            TotpAction::Generate { secret } => {
-                let secret_val = read_secret_stdin(secret);
+            TotpAction::Generate { positional_secret, secret } => {
+                let secret_val = secret
+                    .or(positional_secret)
+                    .unwrap_or_else(|| read_secret_stdin(None));
                 match generate_totp(&secret_val, None, 6, 30) {
                     Some(res) => {
                         println!("{}", serde_json::to_string_pretty(&res).unwrap());

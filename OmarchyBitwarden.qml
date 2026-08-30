@@ -354,8 +354,8 @@ Item {
   function updateTotpForSelected() {
     var item = root.selectedItem
     if (item && item.login && item.login.totp) {
-      totpGenProc.secret = item.login.totp
-      totpGenProc.command = [root.helperPath, "totp", "generate"]
+      totpGenProc.running = false
+      totpGenProc.command = [root.helperPath, "totp", "generate", "--secret", item.login.totp]
       totpGenProc.running = true
     } else {
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
@@ -2923,14 +2923,6 @@ onVisibleChanged: {
 
   Process {
     id: totpGenProc
-    property string secret: ""
-    stdinEnabled: true
-    onStarted: {
-      if (secret) {
-        write(secret + "\n")
-        secret = ""
-      }
-    }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
