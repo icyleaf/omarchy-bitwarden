@@ -222,6 +222,50 @@ impl BitwardenApiClient {
         }
     }
 
+    pub fn login_apikey(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<TokenResponse, ApiError> {
+        let identity_url = format!("{}/identity/connect/token", self.server_url);
+        let fallback_url = format!("{}/connect/token", self.server_url);
+
+        let mut form_params: HashMap<&str, String> = HashMap::new();
+        form_params.insert("grant_type", "client_credentials".to_string());
+        form_params.insert("client_id", client_id.trim().to_string());
+        form_params.insert("client_secret", client_secret.trim().to_string());
+        form_params.insert("scope", "api".to_string());
+        form_params.insert("deviceType", "linux".to_string());
+        form_params.insert("deviceIdentifier", "omarchy-bitwarden".to_string());
+        form_params.insert("deviceName", "Omarchy Bitwarden".to_string());
+
+        let mut resp = self.client.post(&identity_url).form(&form_params).send();
+        if let Ok(ref r) = resp {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = self.client.post(&fallback_url).form(&form_params).send();
+            }
+        }
+
+        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let status = resp.status();
+        let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
+
+        if status.is_success() {
+            serde_json::from_str::<TokenResponse>(&body_text)
+                .map_err(|e| ApiError::Json(e.to_string()))
+        } else {
+            if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
+                if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_desc.to_string()));
+                }
+                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+            }
+            Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+        }
+    }
+
     pub fn sync_vault(&self, access_token: &str) -> Result<SyncResponse, ApiError> {
         let url = format!("{}/api/sync", self.server_url);
         let resp = self

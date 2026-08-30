@@ -203,13 +203,45 @@ impl AuthManager {
         }
     }
 
-    pub fn login_apikey(&self, _client_id: &str, _client_secret: &str) -> AuthResult {
-        // Direct API Key flow
+    pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
+        let client = BitwardenApiClient::new(&self.server_url);
+        let token_resp = match client.login_apikey(client_id, client_secret) {
+            Ok(r) => r,
+            Err(e) => {
+                return AuthResult {
+                    ok: false,
+                    status: Some("unauthenticated".to_string()),
+                    session: None,
+                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
+                };
+            }
+        };
+
+        let mut storage = self.storage_mgr.load();
+        storage.server_url = self.server_url.clone();
+        storage.access_token = Some(token_resp.access_token.clone());
+        storage.refresh_token = token_resp.refresh_token;
+        storage.enc_user_key = token_resp.key;
+        storage.enc_private_key = token_resp.private_key;
+        storage.kdf = token_resp.kdf;
+        storage.kdf_iterations = token_resp.kdf_iterations;
+        storage.kdf_memory = token_resp.kdf_memory;
+        storage.kdf_parallelism = token_resp.kdf_parallelism;
+
+        // Pull initial sync
+        if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
+            storage.ciphers = sync_data.ciphers;
+            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+        }
+
+        let _ = self.storage_mgr.save(&storage);
+        self.keyring_mgr.store_session(&token_resp.access_token);
+
         AuthResult {
-            ok: false,
-            status: Some("unauthenticated".to_string()),
-            session: None,
-            error: Some("API Key login will be integrated in next patch.".to_string()),
+            ok: true,
+            status: Some("locked".to_string()),
+            session: Some(token_resp.access_token),
+            error: None,
         }
     }
 
@@ -261,6 +293,9 @@ impl AuthManager {
 
     pub fn lock(&self) -> AuthResult {
         self.keyring_mgr.clear_session();
+        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "lock"
+        }));
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
@@ -272,6 +307,9 @@ impl AuthManager {
     pub fn logout(&self) -> AuthResult {
         self.keyring_mgr.clear_session();
         let _ = self.storage_mgr.save(&VaultStorage::default());
+        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "lock"
+        }));
         AuthResult {
             ok: true,
             status: Some("unauthenticated".to_string()),
@@ -349,9 +387,33 @@ mod tests {
         assert_eq!(st_locked.status, "locked");
         assert_eq!(st_locked.user_email.as_deref(), Some("test@example.com"));
 
+        // Lock
+        let lock_res = auth_mgr.lock();
+        assert!(lock_res.ok);
+        assert_eq!(lock_res.status.as_deref(), Some("locked"));
+
         // Logout
         let logout_res = auth_mgr.logout();
         assert!(logout_res.ok);
         assert_eq!(logout_res.status.as_deref(), Some("unauthenticated"));
+    }
+
+    #[test]
+    fn test_login_apikey_network_failure() {
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_apikey_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let auth_mgr = AuthManager::new(
+            "http://127.0.0.1:9", // Invalid dead port to verify network error handling
+            Some(storage_mgr),
+            Some(mock_keyring),
+        );
+
+        let res = auth_mgr.login_apikey("user.client-id-123", "secret-xyz");
+        assert!(!res.ok);
+        assert_eq!(res.status.as_deref(), Some("unauthenticated"));
+        assert!(res.error.is_some());
     }
 }
