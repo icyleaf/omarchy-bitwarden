@@ -810,8 +810,11 @@ Item {
 
       ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 14
-        spacing: 10
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        anchors.topMargin: 14
+        anchors.bottomMargin: 4
+        spacing: 8
 
         // 1. Search & Category Header (Search View)
         SearchHeader {

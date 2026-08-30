@@ -12,33 +12,43 @@ Rectangle {
   property color background: "transparent"
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  property color borderColor: "transparent"
+  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
 
   signal actionPaletteTriggered()
   signal syncTriggered()
   signal lockTriggered()
   signal settingsTriggered()
 
-  height: 28
+  height: 30
   Layout.fillWidth: true
   color: footerRoot.background
   border.width: 0
   radius: 0
 
+  // 1. Top border matching Omarchy theme border
+  Rectangle {
+    anchors.top: parent.top
+    anchors.left: parent.left
+    anchors.right: parent.right
+    height: 1
+    color: footerRoot.borderColor
+  }
+
   RowLayout {
     anchors.fill: parent
-    anchors.leftMargin: 4
-    anchors.rightMargin: 4
+    anchors.topMargin: 3
+    anchors.leftMargin: 2
+    anchors.rightMargin: 2
     spacing: 4
 
-    // 1. Bottom Left: Ghost Actions, Sync, Lock, Settings
+    // 2. Bottom Left: Ghost Actions, Sync, Lock, Settings
     RowLayout {
       spacing: 2
       visible: footerRoot.isUnlocked
 
       // Actions Ghost Button
       Rectangle {
-        implicitHeight: 24
+        implicitHeight: 22
         implicitWidth: actionsBtnRow.implicitWidth + 12
         radius: 4
         color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
@@ -72,7 +82,7 @@ Rectangle {
 
       // Sync Ghost Button
       Rectangle {
-        implicitHeight: 24
+        implicitHeight: 22
         implicitWidth: syncBtnRow.implicitWidth + 12
         radius: 4
         color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
@@ -106,7 +116,7 @@ Rectangle {
 
       // Lock Ghost Button
       Rectangle {
-        implicitHeight: 24
+        implicitHeight: 22
         implicitWidth: lockBtnRow.implicitWidth + 12
         radius: 4
         color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
@@ -140,7 +150,7 @@ Rectangle {
 
       // Settings Ghost Button
       Rectangle {
-        implicitHeight: 24
+        implicitHeight: 22
         implicitWidth: settingsBtnRow.implicitWidth + 12
         radius: 4
         color: settingsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
@@ -175,7 +185,7 @@ Rectangle {
 
     Item { Layout.fillWidth: true }
 
-    // 2. Bottom Right: Plain, uncolored version info
+    // 3. Bottom Right: Plain, uncolored version info
     RowLayout {
       spacing: 6
 
