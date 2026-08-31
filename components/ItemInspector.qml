@@ -9,11 +9,18 @@ ScrollView {
   property var currentTotp: ({ code: "", ttl: 30, period: 30 })
   property bool showPasswordRevealed: false
   property bool showPrivateKeyRevealed: false
+  property bool showCardNumberRevealed: false
+  property bool showCardCodeRevealed: false
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+
+  onItemChanged: {
+    showCardNumberRevealed = false
+    showCardCodeRevealed = false
+  }
 
   signal copyRequested(string text, bool isSensitive, string label)
   signal viewAttachmentRequested(var item, var att)
@@ -54,6 +61,16 @@ ScrollView {
     if (item.type_name === "note") return "📝"
     if (item.type_name === "ssh_key" || item.category === "ssh_key") return "🔐"
     return "🌐"
+  }
+
+  function formatMaskedCardNumber(num) {
+    if (!num) return "•••• •••• •••• ••••"
+    var clean = String(num).replace(/\s+/g, "")
+    if (clean.length > 4) {
+      var last4 = clean.slice(-4)
+      return "•••• •••• •••• " + last4
+    }
+    return "•••• •••• •••• ••••"
   }
 
   function getAttachmentIcon(filename) {
@@ -296,6 +313,26 @@ ScrollView {
               Layout.fillWidth: true
             }
 
+            // Monochrome Favorite Badge
+            Rectangle {
+              visible: Boolean(inspectorRoot.item && inspectorRoot.item.favorite)
+              implicitHeight: 18
+              implicitWidth: favText.implicitWidth + 8
+              radius: 3
+              color: Qt.rgba(1, 1, 1, 0.08)
+              border.color: Qt.rgba(1, 1, 1, 0.15)
+              border.width: 1
+
+              Text {
+                id: favText
+                anchors.centerIn: parent
+                text: "★ Favorite"
+                color: Qt.darker(inspectorRoot.foreground, 1.2)
+                font.pixelSize: 10
+                font.weight: Font.Medium
+              }
+            }
+
             // Organization Badge
             Rectangle {
               visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
@@ -361,7 +398,7 @@ ScrollView {
           Layout.fillWidth: true
           spacing: 8
 
-          Text { text: "Username:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 70 }
+          Text { text: "Username:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
             text: (inspectorRoot.item && inspectorRoot.item.login) ? (inspectorRoot.item.login.username || "") : ""
             color: inspectorRoot.foreground
@@ -371,13 +408,13 @@ ScrollView {
             Layout.fillWidth: true
           }
           Rectangle {
-            implicitHeight: 20
-            implicitWidth: cpUserText.implicitWidth + 8
-            radius: 3
-            color: Qt.rgba(1, 1, 1, 0.08)
-            Text { id: cpUserText; anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpUserMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpUserMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
             MouseArea {
+              id: cpUserMouse
               anchors.fill: parent
+              hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.username, false, "username")
             }
@@ -390,7 +427,7 @@ ScrollView {
           Layout.fillWidth: true
           spacing: 8
 
-          Text { text: "Password:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 70 }
+          Text { text: "Password:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
             text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.login.password || "") : "••••••••••••••••"
             color: inspectorRoot.foreground
@@ -401,27 +438,79 @@ ScrollView {
             Layout.fillWidth: true
           }
           Rectangle {
-            implicitHeight: 20
-            implicitWidth: revPwdText.implicitWidth + 8
-            radius: 3
-            color: Qt.rgba(1, 1, 1, 0.08)
-            Text { id: revPwdText; anchors.centerIn: parent; text: inspectorRoot.showPasswordRevealed ? "Hide" : "Show"; color: inspectorRoot.foreground; font.pixelSize: 10 }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: revPwdMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: inspectorRoot.showPasswordRevealed ? "⊘" : "👁"; color: revPwdMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
             MouseArea {
+              id: revPwdMouse
               anchors.fill: parent
+              hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: inspectorRoot.togglePasswordRevealed()
             }
           }
           Rectangle {
-            implicitHeight: 20
-            implicitWidth: cpPwdText.implicitWidth + 8
-            radius: 3
-            color: Qt.rgba(1, 1, 1, 0.08)
-            Text { id: cpPwdText; anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpPwdMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpPwdMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
             MouseArea {
+              id: cpPwdMouse
               anchors.fill: parent
+              hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.password, true, "password")
+            }
+          }
+        }
+
+        // Websites / URIs list
+        Repeater {
+          model: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.uris) ? inspectorRoot.item.login.uris : []
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            property string rawUri: (typeof modelData === "string") ? modelData : (modelData && modelData.uri ? modelData.uri : "")
+
+            Text { text: (index === 0 ? "Website:" : ""); color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
+            Text {
+              text: parent.rawUri
+              color: inspectorRoot.foreground
+              font.pixelSize: 11
+              font.weight: Font.Medium
+              elide: Text.ElideRight
+              Layout.fillWidth: true
+            }
+
+            Rectangle {
+              implicitHeight: 22; implicitWidth: 22; radius: 4
+              color: cpUriMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+              Text { anchors.centerIn: parent; text: "❐"; color: cpUriMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+              MouseArea {
+                id: cpUriMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: inspectorRoot.copyRequested(parent.parent.rawUri, false, "website URL")
+              }
+            }
+
+            Rectangle {
+              implicitHeight: 22; implicitWidth: 22; radius: 4
+              color: openUriMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+              Text { anchors.centerIn: parent; text: "↗"; color: openUriMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+              MouseArea {
+                id: openUriMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  var u = parent.parent.rawUri
+                  if (u && !u.match(/^https?:\/\//i)) u = "https://" + u
+                  Qt.openUrlExternally(u)
+                }
+              }
             }
           }
         }
@@ -436,7 +525,7 @@ ScrollView {
             Layout.fillWidth: true
             spacing: 8
 
-            Text { text: "TOTP Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 70 }
+            Text { text: "TOTP Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
             Text {
               text: inspectorRoot.currentTotp.code || "Generating..."
               color: inspectorRoot.accent
@@ -451,13 +540,13 @@ ScrollView {
               font.pixelSize: 10
             }
             Rectangle {
-              implicitHeight: 20
-              implicitWidth: cpTotpText.implicitWidth + 8
-              radius: 3
-              color: Qt.rgba(1, 1, 1, 0.08)
-              Text { id: cpTotpText; anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
+              implicitHeight: 22; implicitWidth: 22; radius: 4
+              color: cpTotpMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+              Text { anchors.centerIn: parent; text: "❐"; color: cpTotpMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
               MouseArea {
+                id: cpTotpMouse
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: inspectorRoot.copyRequested(inspectorRoot.currentTotp.code, true, "TOTP code")
               }
@@ -487,52 +576,136 @@ ScrollView {
       ColumnLayout {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.card)
         Layout.fillWidth: true
-        spacing: 6
+        spacing: 8
 
+        // Cardholder
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Cardholder:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.cardholderName || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpHolderMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpHolderMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpHolderMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.cardholderName, false, "cardholder name")
+            }
+          }
         }
+
+        // Card Brand
+        RowLayout {
+          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.brand)
+          Layout.fillWidth: true
+          spacing: 8
+          Text { text: "Brand:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.brand || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+        }
+
+        // Card Number (Protected)
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Card Number:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.number || "") : "•••• •••• •••• ••••") : ""
+            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? (inspectorRoot.item.card.number || "") : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             font.family: "monospace"
+            font.weight: Font.Medium
             Layout.fillWidth: true
           }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.card) inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: revCardNumMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: inspectorRoot.showCardNumberRevealed ? "⊘" : "👁"; color: revCardNumMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: revCardNumMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.showCardNumberRevealed = !inspectorRoot.showCardNumberRevealed
+            }
+          }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpCardNumMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpCardNumMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpCardNumMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number")
+            }
           }
         }
+
+        // Expires
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Expires:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || "")) : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + " / " + (inspectorRoot.item.card.expYear || "")) : ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpExpMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpExpMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpExpMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.copyRequested((inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || ""), false, "expiration date")
+            }
+          }
         }
+
+        // Security Code / CVV (Protected)
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Security Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
-            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
+            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardCodeRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
             color: inspectorRoot.foreground
             font.pixelSize: 11
             font.family: "monospace"
+            font.weight: Font.Medium
             Layout.fillWidth: true
           }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.card) inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: revCvvMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: inspectorRoot.showCardCodeRevealed ? "⊘" : "👁"; color: revCvvMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: revCvvMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.showCardCodeRevealed = !inspectorRoot.showCardCodeRevealed
+            }
+          }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpCvvMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpCvvMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpCvvMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV")
+            }
           }
         }
       }
@@ -543,11 +716,12 @@ ScrollView {
       ColumnLayout {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity)
         Layout.fillWidth: true
-        spacing: 6
+        spacing: 8
 
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.firstName || inspectorRoot.item.identity.lastName))
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Full Name:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
             text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ") : ""
@@ -555,27 +729,67 @@ ScrollView {
             font.pixelSize: 11
             Layout.fillWidth: true
           }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpNameMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpNameMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpNameMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                var n = [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ")
+                inspectorRoot.copyRequested(n, false, "full name")
+              }
+            }
+          }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Email:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.email || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpEmailMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpEmailMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpEmailMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") }
+            }
           }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Phone:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.phone || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpPhoneMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpPhoneMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpPhoneMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.phone, false, "phone number") }
+            }
+          }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Address:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text {
             text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
@@ -583,6 +797,21 @@ ScrollView {
             font.pixelSize: 11
             elide: Text.ElideRight
             Layout.fillWidth: true
+          }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpAddrMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpAddrMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpAddrMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                var a = [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
+                inspectorRoot.copyRequested(a, false, "address")
+              }
+            }
           }
         }
       }
@@ -600,9 +829,16 @@ ScrollView {
           Text { text: "Notes:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11 }
           Item { Layout.fillWidth: true }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item) inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpNotesMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpNotesMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpNotesMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item) inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") }
+            }
           }
         }
 
@@ -649,7 +885,7 @@ ScrollView {
       }
 
       // --------------------------------------------------
-      // CUSTOM FIELDS SECTION (Notes, Logins, Cards, etc.)
+      // CUSTOM FIELDS SECTION (Weakened subtle borders)
       // --------------------------------------------------
       ColumnLayout {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.fields && inspectorRoot.item.fields.length > 0)
@@ -669,8 +905,8 @@ ScrollView {
             Layout.fillWidth: true
             height: 36
             radius: 4
-            color: Qt.rgba(0, 0, 0, 0.2)
-            border.color: inspectorRoot.borderColor
+            color: Qt.rgba(0, 0, 0, 0.15)
+            border.color: Qt.rgba(1, 1, 1, 0.04)
             border.width: 1
 
             property bool isHiddenField: Boolean(modelData && modelData.type === 1)
@@ -699,28 +935,30 @@ ScrollView {
                 Layout.fillWidth: true
               }
 
+              // Ghost Reveal Button (for hidden custom fields)
               Rectangle {
                 visible: modelData.type === 1
-                implicitHeight: 20
-                implicitWidth: revFldText.implicitWidth + 8
-                radius: 3
-                color: Qt.rgba(1, 1, 1, 0.08)
-                Text { id: revFldText; anchors.centerIn: parent; text: parent.parent.parent.isRevealed ? "Hide" : "Show"; color: inspectorRoot.foreground; font.pixelSize: 10 }
+                implicitHeight: 22; implicitWidth: 22; radius: 4
+                color: revFldMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                Text { anchors.centerIn: parent; text: parent.parent.parent.isRevealed ? "⊘" : "👁"; color: revFldMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
                 MouseArea {
+                  id: revFldMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: parent.parent.parent.isRevealed = !parent.parent.parent.isRevealed
                 }
               }
 
+              // Ghost Copy Button
               Rectangle {
-                implicitHeight: 20
-                implicitWidth: cpFldText.implicitWidth + 8
-                radius: 3
-                color: Qt.rgba(1, 1, 1, 0.08)
-                Text { id: cpFldText; anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
+                implicitHeight: 22; implicitWidth: 22; radius: 4
+                color: cpFldMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                Text { anchors.centerIn: parent; text: "❐"; color: cpFldMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
                 MouseArea {
+                  id: cpFldMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: inspectorRoot.copyRequested(modelData.value || "", modelData.type === 1, modelData.name || "field")
                 }
@@ -741,40 +979,80 @@ ScrollView {
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.key_type)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Key Type:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.key_type || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Fingerprint:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.fingerprint || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
+          Rectangle {
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpFpMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpFpMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpFpMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.fingerprint, false, "fingerprint") }
+            }
+          }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Public Key:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: "Available"; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpPubMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpPubMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpPubMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
+            }
           }
         }
+
         RowLayout {
           visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
           Layout.fillWidth: true
+          spacing: 8
           Text { text: "Private Key:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
           Text { text: inspectorRoot.showPrivateKeyRevealed ? "Revealed" : "Encrypted (Hidden)"; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: inspectorRoot.showPrivateKeyRevealed ? "Hide" : "Show"; color: inspectorRoot.foreground; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: inspectorRoot.togglePrivateKeyRevealed() }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: revPrivMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: inspectorRoot.showPrivateKeyRevealed ? "⊘" : "👁"; color: revPrivMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: revPrivMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: inspectorRoot.togglePrivateKeyRevealed()
+            }
           }
           Rectangle {
-            implicitHeight: 20; implicitWidth: 40; radius: 3; color: Qt.rgba(1, 1, 1, 0.08)
-            Text { anchors.centerIn: parent; text: "Copy"; color: inspectorRoot.accent; font.pixelSize: 10 }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") } }
+            implicitHeight: 22; implicitWidth: 22; radius: 4
+            color: cpPrivMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+            Text { anchors.centerIn: parent; text: "❐"; color: cpPrivMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4); font.pixelSize: 12 }
+            MouseArea {
+              id: cpPrivMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
+            }
           }
         }
       }
@@ -834,43 +1112,38 @@ ScrollView {
                 }
               }
 
-              // View / Preview Button
+              // View / Preview Ghost Button
               Rectangle {
-                implicitHeight: 22
-                implicitWidth: viewAttText.implicitWidth + 10
-                radius: 3
-                color: Qt.rgba(1, 1, 1, 0.08)
-
+                implicitHeight: 22; implicitWidth: 22; radius: 4
+                color: viewAttMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
                 Text {
-                  id: viewAttText
                   anchors.centerIn: parent
-                  text: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "Loading..." : "View"
-                  color: inspectorRoot.accent
-                  font.pixelSize: 10
+                  text: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "⏳" : "👁"
+                  color: viewAttMouse.containsMouse ? inspectorRoot.foreground : Qt.darker(inspectorRoot.foreground, 1.4)
+                  font.pixelSize: 12
                 }
                 MouseArea {
+                  id: viewAttMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: inspectorRoot.viewAttachmentRequested(inspectorRoot.item, modelData)
                 }
               }
 
-              // Download Button
+              // Download Ghost Button
               Rectangle {
-                implicitHeight: 22
-                implicitWidth: dlAttText.implicitWidth + 10
-                radius: 3
-                color: Qt.rgba(1, 1, 1, 0.08)
-
+                implicitHeight: 22; implicitWidth: 22; radius: 4
+                color: dlAttMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
                 Text {
-                  id: dlAttText
                   anchors.centerIn: parent
-                  text: "Download"
-                  color: inspectorRoot.foreground
-                  font.pixelSize: 10
+                  text: "📥"
+                  font.pixelSize: 12
                 }
                 MouseArea {
+                  id: dlAttMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: inspectorRoot.downloadAttachmentRequested(inspectorRoot.item, modelData)
                 }

@@ -165,6 +165,14 @@ Item {
               Layout.fillWidth: true
             }
 
+            // Monochrome Favorite Indicator
+            Text {
+              visible: Boolean(modelData.favorite)
+              text: "★"
+              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
+              font.pixelSize: 11
+            }
+
             // Organization Badge
             Rectangle {
               visible: Boolean(modelData.organization_name)
