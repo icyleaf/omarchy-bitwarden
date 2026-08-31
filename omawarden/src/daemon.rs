@@ -484,6 +484,28 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 json!({ "ok": false, "error": "Unable to resolve attachment key (vault locked or missing item)" })
             }
         }
+        "totp" => {
+            let secret = req.get("secret").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(res) = crate::totp::generate_totp(secret, None, 6, 30) {
+                json!({ "ok": true, "code": res.code, "ttl": res.ttl, "period": res.period })
+            } else {
+                json!({ "ok": false, "error": "Invalid TOTP secret" })
+            }
+        }
+        "copy" => {
+            let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let sensitive = req
+                .get("sensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let timeout = req.get("timeout").and_then(|v| v.as_i64()).unwrap_or(30);
+            let clip_mgr = crate::clipboard::ClipboardManager::default();
+            if clip_mgr.copy(text, sensitive, timeout) {
+                json!({ "ok": true })
+            } else {
+                json!({ "ok": false, "error": "Failed to copy to clipboard" })
+            }
+        }
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
@@ -509,5 +531,13 @@ mod tests {
         state.lock();
         assert!(!*state.is_unlocked.read().unwrap());
         assert_eq!(state.decrypted_items.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_daemon_totp_action() {
+        let res = crate::totp::generate_totp("JBSWY3DPEHPK3PXP", None, 6, 30);
+        assert!(res.is_some());
+        let totp_res = res.unwrap();
+        assert_eq!(totp_res.code.len(), 6);
     }
 }
