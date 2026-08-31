@@ -741,7 +741,7 @@ Item {
 
   Timer {
     interval: 1000
-    running: root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp
+    running: Boolean(root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp)
     repeat: true
     onTriggered: {
       if (root.currentTotp.ttl > 1) {
