@@ -219,7 +219,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 .get("attachment_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if let Some(key) = state.vault_mgr.resolve_attachment_key(item_id, attachment_id) {
+            if let Some(key) = state
+                .vault_mgr
+                .resolve_attachment_key(item_id, attachment_id)
+            {
                 let mut raw = Vec::new();
                 raw.extend_from_slice(&key.enc_key);
                 if let Some(mac_k) = key.mac_key {

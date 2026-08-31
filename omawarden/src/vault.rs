@@ -480,9 +480,7 @@ impl VaultManager {
                     .decrypt(&base_key)
                     .or_else(|_| parsed_k.decrypt(user_key));
                 if let Ok(raw_k_bytes) = raw_k {
-                    if let Some(k) =
-                        parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
-                    {
+                    if let Some(k) = parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes) {
                         cipher_key = k;
                     }
                 }
@@ -1002,7 +1000,10 @@ mod tests {
         assert_eq!(vault_mgr.get_items().len(), 0);
 
         let st = vault_mgr.get_status();
-        assert_eq!(st.get("status").unwrap().as_str().unwrap(), "unauthenticated");
+        assert_eq!(
+            st.get("status").unwrap().as_str().unwrap(),
+            "unauthenticated"
+        );
 
         vault_mgr.lock();
         assert!(!vault_mgr.is_unlocked());
