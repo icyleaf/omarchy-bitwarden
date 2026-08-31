@@ -74,9 +74,11 @@ Rectangle {
 
           TextInput {
             id: paletteFilterInput
-            anchors.fill: parent
-            verticalAlignment: TextInput.AlignVCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
             color: paletteRoot.foreground
+            font.family: "sans-serif"
             font.pixelSize: 12
             selectByMouse: true
             clip: true
@@ -88,10 +90,12 @@ Rectangle {
           }
 
           Text {
-            anchors.fill: parent
-            verticalAlignment: Text.AlignVCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
             text: "Type an action name..."
             color: Qt.darker(paletteRoot.foreground, 1.8)
+            font.family: "sans-serif"
             font.pixelSize: 12
             visible: !paletteFilterInput.text
           }

@@ -335,7 +335,7 @@ Item {
             Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
             TextInput {
               id: sUrlInput
-              anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
+              anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
               text: (settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "https://vault.bitwarden.com"
             }
           }
@@ -350,7 +350,7 @@ Item {
             Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
             TextInput {
               id: dlDirInput
-              anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
+              anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
               text: (settingsRoot.config && settingsRoot.config.download_dir) ? settingsRoot.config.download_dir : "~/Downloads"
             }
           }
@@ -370,7 +370,7 @@ Item {
               Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: lockMinInput
-                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                 text: (settingsRoot.config && settingsRoot.config.auto_lock_minutes) ? String(settingsRoot.config.auto_lock_minutes) : "15"
               }
             }
@@ -385,7 +385,7 @@ Item {
               Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: clipSecInput
-                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: settingsRoot.foreground; font.pixelSize: 12; selectByMouse: true
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                 text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
               }
             }

@@ -51,9 +51,11 @@ ColumnLayout {
 
         TextInput {
           id: searchInputField
-          anchors.fill: parent
-          verticalAlignment: TextInput.AlignVCenter
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
           color: searchHeaderRoot.foreground
+          font.family: "sans-serif"
           font.pixelSize: 12
           selectByMouse: true
           clip: true
@@ -61,10 +63,12 @@ ColumnLayout {
         }
 
         Text {
-          anchors.fill: parent
-          verticalAlignment: Text.AlignVCenter
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
           text: "Search Bitwarden vault (names, usernames, notes, tags)..."
           color: Qt.darker(searchHeaderRoot.foreground, 2.0)
+          font.family: "sans-serif"
           font.pixelSize: 12
           visible: !searchInputField.text
         }

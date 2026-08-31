@@ -78,7 +78,7 @@ omarchy-shell shell toggle icyleaf.bitwarden
 
 ```lua
 -- ~/.config/hypr/bindings.lua
-o.bind("SUPER + slash", "Bitwarden Vault", "omarchy-shell shell toggle icyleaf.bitwarden")
+o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
 ```
 
 5. **Set window rule**:

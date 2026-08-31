@@ -97,9 +97,11 @@ Item {
 
                 TextInput {
                   id: unlockPasswordField
-                  anchors.fill: parent
-                  verticalAlignment: TextInput.AlignVCenter
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground
+                  font.family: "sans-serif"
                   font.pixelSize: 12
                   echoMode: TextInput.Password
                   selectByMouse: true
@@ -112,10 +114,12 @@ Item {
                 }
 
                 Text {
-                  anchors.fill: parent
-                  verticalAlignment: Text.AlignVCenter
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
                   text: "Enter master password..."
                   color: Qt.darker(authRoot.foreground, 2.0)
+                  font.family: "sans-serif"
                   font.pixelSize: 12
                   visible: !unlockPasswordField.text
                 }
@@ -240,8 +244,8 @@ Item {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginEmailInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginEmailInput
-                  anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
-                  color: authRoot.foreground; font.pixelSize: 12; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                   text: (authRoot.config && authRoot.config.email) ? authRoot.config.email : ""
                 }
               }
@@ -255,8 +259,8 @@ Item {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginPwdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginPwdInput
-                  anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
-                  color: authRoot.foreground; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
                 }
               }
             }
@@ -270,8 +274,8 @@ Item {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: login2FAInput
-                  anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
-                  color: authRoot.foreground; font.pixelSize: 12; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                 }
               }
             }
@@ -319,7 +323,7 @@ Item {
               Text { text: "API Client ID (`user.xxxxxxxx`):"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientIdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
-                TextInput { id: apiClientIdInput; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: authRoot.foreground; font.pixelSize: 12; selectByMouse: true }
+                TextInput { id: apiClientIdInput; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true }
               }
             }
 
@@ -329,7 +333,7 @@ Item {
               Text { text: "API Client Secret:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientSecInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
-                TextInput { id: apiClientSecInput; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter; color: authRoot.foreground; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true }
+                TextInput { id: apiClientSecInput; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true }
               }
             }
 

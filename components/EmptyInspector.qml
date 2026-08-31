@@ -41,7 +41,7 @@ Item {
       ColumnLayout {
         spacing: 2
         Text {
-          text: "Bitwarden Vault"
+          text: "Omarchy Bitwarden"
           color: emptyInspectorRoot.foreground
           font.pixelSize: 13
           font.weight: Font.DemiBold
@@ -220,41 +220,5 @@ Item {
       }
     }
 
-    Item { Layout.fillHeight: true }
-
-    // Footer Hint
-    Rectangle {
-      Layout.fillWidth: true
-      implicitHeight: 26
-      radius: 4
-      color: Qt.rgba(0, 0, 0, 0.15)
-      border.color: emptyInspectorRoot.borderColor
-      border.width: 1
-
-      RowLayout {
-        anchors.centerIn: parent
-        spacing: 6
-        RowLayout {
-          spacing: 3
-          Text {
-            text: "\uf0eb"
-            font.family: emptyInspectorRoot.fontFamily
-            color: emptyInspectorRoot.accent
-            font.pixelSize: 10
-          }
-          Text {
-            text: "Tip:"
-            color: emptyInspectorRoot.accent
-            font.pixelSize: 10
-            font.weight: Font.Medium
-          }
-        }
-        Text {
-          text: "Select any item from the left list to inspect credentials and attachments."
-          color: Qt.darker(emptyInspectorRoot.foreground, 1.5)
-          font.pixelSize: 10
-        }
-      }
-    }
   }
 }
