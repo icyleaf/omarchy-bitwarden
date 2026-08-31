@@ -196,9 +196,6 @@ flowchart TD
 omarchy-bitwarden/
 ├── OmarchyBitwarden.qml         # Quickshell QML overlay UI & Action Palette
 ├── manifest.json                # Omarchy plugin manifest metadata
-├── .github/workflows/           # CI/CD and multi-architecture release pipelines
-├── bin/
-│   └── omawarden                # Native compiled helper & daemon binary
 └── omawarden/                   # Pure Rust engine workspace crate
     ├── Cargo.toml               # Rust package dependencies & configuration
     └── src/
@@ -233,7 +230,8 @@ mise install
 Build the optimized release binary with `cargo`:
 
 ```bash
-cargo build --release
+cd omawarden
+mise build-release
 mkdir -p bin && cp target/release/omawarden bin/omawarden
 ```
 

@@ -40,6 +40,7 @@ jobs:
 
       - name: Build release binary
         run: |
+          cd omawarden
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
@@ -54,7 +55,7 @@ jobs:
           ARCHIVE_NAME="omawarden-${VERSION}-${{ matrix.target }}"
           DIST_DIR="dist/${ARCHIVE_NAME}"
           mkdir -p "${DIST_DIR}"
-          cp "target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
+          cp "omawarden/target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
           cp LICENSE README.md "${DIST_DIR}/"
           
           cd dist
