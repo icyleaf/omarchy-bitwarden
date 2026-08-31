@@ -46,39 +46,7 @@ Item {
       // Header
       RowLayout {
         Layout.fillWidth: true
-        spacing: 8
-
-        Rectangle {
-          implicitHeight: 24
-          implicitWidth: backBtnText.implicitWidth + 12
-          radius: 4
-          color: Qt.rgba(0, 0, 0, 0.2)
-          border.color: settingsRoot.borderColor
-          border.width: 1
-
-          RowLayout {
-            id: backBtnText
-            anchors.centerIn: parent
-            spacing: 4
-            Text {
-              text: "\uf060"
-              font.family: settingsRoot.fontFamily
-              color: settingsRoot.foreground
-              font.pixelSize: 10
-            }
-            Text {
-              text: "Back to Vault"
-              color: settingsRoot.foreground
-              font.pixelSize: 11
-              font.weight: Font.Medium
-            }
-          }
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: settingsRoot.closeRequested()
-          }
-        }
+        spacing: 2
 
         RowLayout {
           spacing: 6
@@ -393,11 +361,38 @@ Item {
         }
       }
 
-      // Save Button
       RowLayout {
         Layout.fillWidth: true
         Item { Layout.fillWidth: true }
+        spacing: 8
 
+        // Back Button
+        Rectangle {
+          implicitHeight: 30
+          implicitWidth: backBtnText.implicitWidth + 12
+          radius: 5
+          color: Qt.rgba(0, 0, 0, 0.2)
+          border.color: settingsRoot.borderColor
+          border.width: 1
+
+          RowLayout {
+            id: backBtnText
+            anchors.centerIn: parent
+            Text {
+              text: "Cancel"
+              color: settingsRoot.foreground
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
+          }
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: settingsRoot.closeRequested()
+          }
+        }
+
+        // Save Button
         Rectangle {
           implicitHeight: 30
           implicitWidth: saveBtnText.implicitWidth + 20
