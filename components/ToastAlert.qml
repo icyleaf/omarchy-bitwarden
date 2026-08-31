@@ -10,7 +10,7 @@ Item {
   property bool isBusy: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   signal clearRequested()
 

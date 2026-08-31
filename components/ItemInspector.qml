@@ -16,7 +16,7 @@ ScrollView {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   onItemChanged: {
     showCardNumberRevealed = false
@@ -448,6 +448,7 @@ ScrollView {
           model: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.uris) ? inspectorRoot.item.login.uris : []
 
           RowLayout {
+            id: uriRowItem
             Layout.fillWidth: true
             spacing: 8
 
@@ -455,7 +456,7 @@ ScrollView {
 
             Text { text: (index === 0 ? "Website:" : ""); color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
             Text {
-              text: parent.rawUri
+              text: uriRowItem.rawUri
               color: inspectorRoot.foreground
               font.pixelSize: 11
               font.weight: Font.Medium
@@ -467,7 +468,7 @@ ScrollView {
               iconText: "\uf08e"
               tooltip: "Open website"
               onClicked: {
-                var u = parent.parent.rawUri
+                var u = uriRowItem.rawUri
                 if (u && !u.match(/^https?:\/\//i)) u = "https://" + u
                 Qt.openUrlExternally(u)
               }
@@ -476,7 +477,7 @@ ScrollView {
             GhostIconButton {
               iconText: "\uf0c5"
               tooltip: "Copy website URL"
-              onClicked: inspectorRoot.copyRequested(parent.parent.rawUri, false, "website URL")
+              onClicked: inspectorRoot.copyRequested(uriRowItem.rawUri, false, "website URL")
             }
           }
         }
@@ -794,6 +795,7 @@ ScrollView {
           model: (inspectorRoot.item && inspectorRoot.item.fields) ? inspectorRoot.item.fields : []
 
           Rectangle {
+            id: customFieldCard
             Layout.fillWidth: true
             height: 36
             radius: 4
@@ -819,7 +821,7 @@ ScrollView {
               }
 
               Text {
-                text: (modelData.type === 1 && !parent.parent.isRevealed) ? "••••••••••••••••" : (modelData.value || "")
+                text: (modelData.type === 1 && !customFieldCard.isRevealed) ? "••••••••••••••••" : (modelData.value || "")
                 color: inspectorRoot.foreground
                 font.pixelSize: 11
                 font.family: (modelData.type === 1) ? "monospace" : "sans-serif"
@@ -830,9 +832,9 @@ ScrollView {
               // Ghost Reveal Button (for hidden custom fields)
               GhostIconButton {
                 visible: modelData.type === 1
-                iconText: parent.parent.isRevealed ? "\uf070" : "\uf06e"
-                tooltip: parent.parent.isRevealed ? "Hide field" : "Show field"
-                onClicked: parent.parent.isRevealed = !parent.parent.isRevealed
+                iconText: customFieldCard.isRevealed ? "\uf070" : "\uf06e"
+                tooltip: customFieldCard.isRevealed ? "Hide field" : "Show field"
+                onClicked: customFieldCard.isRevealed = !customFieldCard.isRevealed
               }
 
               // Ghost Copy Button

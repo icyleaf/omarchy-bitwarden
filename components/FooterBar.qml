@@ -17,7 +17,7 @@ Rectangle {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   signal actionPaletteTriggered()
   signal syncTriggered()
@@ -237,7 +237,7 @@ Rectangle {
       spacing: 3
 
       Text {
-        text: "Overlay " + footerRoot.overlayVersion
+        text: "Omarchy Bitwarden " + footerRoot.overlayVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
         font.pixelSize: 10
       }
@@ -249,8 +249,8 @@ Rectangle {
       }
 
       Text {
-        visible: footerRoot.isEngineInstalled
-        text: "Backend " + footerRoot.backendVersion
+        visible: footerRoot.isEngineInstalled && !footerRoot.updateAvailable
+        text: "Omawarden " + footerRoot.backendVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
         font.pixelSize: 10
       }
@@ -327,21 +327,20 @@ Rectangle {
         implicitWidth: updateBadgeRow.implicitWidth + 10
         radius: 4
         color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
-        border.color: "#4ade80"
-        border.width: 1
+        border.width: 0
 
         RowLayout {
           id: updateBadgeRow
           anchors.centerIn: parent
           spacing: 3
           Text {
-            text: "\uf005"
+            text: "Omawarden"
             font.family: footerRoot.fontFamily
             color: "#4ade80"
             font.pixelSize: 9
           }
           Text {
-            text: "v" + footerRoot.latestVersion + " Available"
+            text: "\uf005 " + footerRoot.latestVersion + " Available"
             color: "#4ade80"
             font.pixelSize: 10
             font.weight: Font.Medium

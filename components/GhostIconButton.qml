@@ -10,8 +10,7 @@ Rectangle {
   property color iconColor: mouseArea.containsMouse ? foreground : Qt.darker(foreground, 1.4)
   property color hoverBackground: Qt.rgba(1, 1, 1, 0.1)
   property string tooltip: ""
-
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   signal clicked()
 

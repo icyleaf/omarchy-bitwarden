@@ -12,7 +12,7 @@ Item {
   property color accent: "#3b82f6"
   property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   signal itemSelected(int index)
   signal itemTriggered(int index)

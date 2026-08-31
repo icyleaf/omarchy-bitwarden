@@ -16,7 +16,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
-  readonly property string fontFamily: Style.font.menuFamily
+  property string fontFamily: ""
 
   signal unlockRequested(string password)
   signal loginPasswordRequested(string email, string password, string code)

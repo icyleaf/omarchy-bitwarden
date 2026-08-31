@@ -899,6 +899,7 @@ Item {
           categoryList: root.categoryList
           activeCategory: root.activeCategory
           rawVaultItems: root.rawVaultItems
+          fontFamily: root.fontFamily
           foreground: root.foreground
           accent: root.accent
           borderColor: root.borderColor
@@ -930,6 +931,7 @@ Item {
               items: root.filteredItems
               selectedIndex: root.selectedIndex
               searchQuery: root.searchQuery
+              fontFamily: root.fontFamily
               foreground: root.foreground
               accent: root.accent
               selectedBackground: root.selectedBackground
@@ -963,6 +965,7 @@ Item {
                 showPrivateKeyRevealed: root.showPrivateKeyRevealed
                 activeAttachmentPreview: root.activeAttachmentPreview
                 loadingAttachmentId: root.loadingAttachmentId
+                fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
                 borderColor: root.borderColor
@@ -980,6 +983,7 @@ Item {
                 visible: root.selectedItem === null
                 rawVaultItems: root.rawVaultItems
                 authState: root.authState
+                fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
                 borderColor: root.borderColor
@@ -1000,6 +1004,7 @@ Item {
             loginMethod: root.loginMethod
             rememberEmailChecked: root.rememberEmailChecked
             show2FAField: root.show2FAField
+            fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
@@ -1023,6 +1028,7 @@ Item {
             latestVersion: root.latestVersion
             isCheckingUpdate: root.isCheckingUpdate
             updateCheckStatus: root.updateCheckStatus
+            fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
@@ -1048,6 +1054,7 @@ Item {
           updateAvailable: root.updateAvailable
           latestVersion: root.latestVersion
           background: root.background
+          fontFamily: root.fontFamily
           foreground: root.foreground
           accent: root.accent
           borderColor: root.borderColor
@@ -1068,10 +1075,12 @@ Item {
       ToastAlert {
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.margins: 12
+        anchors.topMargin: 14
+        anchors.rightMargin: 14
         statusMessage: root.statusMessage
         errorMessage: root.errorMessage
         isBusy: root.isBusy
+        fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
         onClearRequested: {
@@ -1085,6 +1094,7 @@ Item {
         active: root.showActionPalette
         actions: root.currentAvailableActions
         selectedIndex: root.actionPaletteIndex
+        fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
         borderColor: root.borderColor
