@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Omarchy](https://img.shields.io/badge/Omarchy-Plugin-8b5cf6.svg)](https://github.com/omarchy)
 
-Native, high-performance Bitwarden and Vaultwarden credential manager overlay for the **Omarchy Shell** on Linux / Wayland, powered by the pure Rust `omawarden` engine.
+Native, high-performance Bitwarden and Vaultwarden credential manager overlay for the **Omarchy Shell** on Linux / Hyprland, powered by the pure Rust `omawarden` engine.
 
 Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantaneous keyboard-driven vault access, secure Keyring session persistence, live TOTP generation, heuristic SSH key detection, and ephemeral clipboard protection with zero external runtime dependencies.
 
@@ -51,7 +51,6 @@ Ensure the following tools are available on your system:
 
 - **Keyring / Secret Service**: `secret-tool` (`libsecret` package on Arch/Debian/Fedora)
 - **Wayland Clipboard**: `wl-clipboard` (`wl-copy` / `wl-paste`)
-- **Rust Toolchain** (if building from source): `cargo` / `mise`
 
 ---
 
@@ -59,28 +58,38 @@ Ensure the following tools are available on your system:
 
 1. **Clone or Link to Omarchy Plugins Directory**:
 
-   ```bash
-   git clone https://github.com/icyleaf/omarchy-bitwarden.git ~/.config/omarchy/plugins/icyleaf.bitwarden
-   ```
+```bash
+git clone https://github.com/icyleaf/omarchy-bitwarden.git ~/.config/omarchy/plugins/icyleaf.bitwarden
+```
 
 2. **Reload Omarchy Shell Plugins**:
 
-   ```bash
-   omarchy-shell shell rescanPlugins
-   ```
+```bash
+omarchy-shell shell rescanPlugins
+```
 
 3. **Toggle Overlay**:
 
-   ```bash
-   omarchy-shell shell toggle icyleaf.bitwarden
-   ```
+```bash
+omarchy-shell shell toggle icyleaf.bitwarden
+```
 
 4. **Bind a Global Hotkey** (in `~/.config/hypr/bindings.lua`):
 
-   ```lua
-   -- ~/.config/hypr/bindings.lua
-   o.bind("SUPER + slash", "Bitwarden Vault", "omarchy-shell shell toggle icyleaf.bitwarden")
-   ```
+```lua
+-- ~/.config/hypr/bindings.lua
+o.bind("SUPER + slash", "Bitwarden Vault", "omarchy-shell shell toggle icyleaf.bitwarden")
+```
+
+5. **Set window rule**:
+
+```lua
+o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
+  float = true,
+  center = true,
+  size = { 1152, 768 }
+})
+```
 
 ---
 
@@ -215,6 +224,12 @@ omarchy-bitwarden/
 
 ### Build from Source
 
+Install cargo with `mise`:
+
+```bash
+mise install
+```
+
 Build the optimized release binary with `cargo`:
 
 ```bash
@@ -242,6 +257,7 @@ cargo clippy --all-targets -- -D warnings
 ## Multi-Architecture Releases
 
 Tagged releases (`v*`) automatically trigger GitHub Actions matrix builds generating optimized release tarballs and SHA-256 checksums for:
+
 - `x86_64-unknown-linux-gnu` (Intel / AMD 64-bit Linux)
 - `aarch64-unknown-linux-gnu` (ARM 64-bit Linux, including Raspberry Pi & Asahi)
 

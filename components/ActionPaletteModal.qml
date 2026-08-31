@@ -12,6 +12,7 @@ Rectangle {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal actionSelected(var actionItem)
   signal closeRequested()
@@ -23,9 +24,10 @@ Rectangle {
   function getFilteredActions() {
     if (!actions) return []
     if (!actionFilterQuery) return actions
-    var q = actionFilterQuery.toLowerCase()
+    var q = actionFilterQuery.toLowerCase().trim()
     return actions.filter(function(a) {
-      return (a.label && a.label.toLowerCase().indexOf(q) !== -1) || (a.shortcut && a.shortcut.toLowerCase().indexOf(q) !== -1)
+      return (a.label && a.label.toLowerCase().indexOf(q) !== -1) ||
+             (a.shortcut && a.shortcut.toLowerCase().indexOf(q) !== -1)
     })
   }
 
@@ -34,6 +36,7 @@ Rectangle {
     onClicked: paletteRoot.closeRequested()
   }
 
+  // Modal Dialog Card
   Rectangle {
     id: paletteBox
     anchors.centerIn: parent
@@ -58,7 +61,12 @@ Rectangle {
         Layout.fillWidth: true
         spacing: 8
 
-        Text { text: "⚡"; font.pixelSize: 13 }
+        Text {
+          text: "\uf0e7"
+          font.family: paletteRoot.fontFamily
+          font.pixelSize: 13
+          color: paletteRoot.accent
+        }
 
         Item {
           Layout.fillWidth: true
@@ -96,7 +104,11 @@ Rectangle {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: paletteRoot.borderColor }
+      Rectangle {
+        Layout.fillWidth: true
+        height: 1
+        color: paletteRoot.borderColor
+      }
 
       // Action List
       ListView {
@@ -125,8 +137,10 @@ Rectangle {
             spacing: 8
 
             Text {
-              text: modelData.icon || "⚡"
+              text: modelData.icon || "\uf0e7"
+              font.family: paletteRoot.fontFamily
               font.pixelSize: 13
+              color: actionDelegate.isSelected ? "#ffffff" : Qt.darker(paletteRoot.foreground, 1.3)
             }
 
             Text {

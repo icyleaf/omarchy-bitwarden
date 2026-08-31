@@ -14,6 +14,7 @@ ColumnLayout {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal categorySelected(string category)
   signal clearSearchRequested()
@@ -37,7 +38,8 @@ ColumnLayout {
       spacing: 6
 
       Text {
-        text: "🔍"
+        text: "\uf002"
+        font.family: searchHeaderRoot.fontFamily
         font.pixelSize: 12
         color: Qt.darker(searchHeaderRoot.foreground, 1.4)
         Layout.alignment: Qt.AlignVCenter
@@ -71,7 +73,8 @@ ColumnLayout {
       // Clear search button
       Text {
         visible: Boolean(searchInputField.text)
-        text: "✕"
+        text: "\uf00d"
+        font.family: searchHeaderRoot.fontFamily
         color: clearMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.5)
         font.pixelSize: 11
         Layout.alignment: Qt.AlignVCenter

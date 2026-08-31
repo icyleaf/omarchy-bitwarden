@@ -17,6 +17,7 @@ Rectangle {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal actionPaletteTriggered()
   signal syncTriggered()
@@ -67,11 +68,20 @@ Rectangle {
             id: actionsBtnRow
             anchors.centerIn: parent
             spacing: 4
-            Text {
-              text: "⚡ Actions"
-              color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-              font.pixelSize: 11
-              font.weight: Font.Medium
+            RowLayout {
+              spacing: 3
+              Text {
+                text: "\uf0e7"
+                font.family: footerRoot.fontFamily
+                color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+              }
+              Text {
+                text: "Actions"
+                color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+                font.weight: Font.Medium
+              }
             }
             Text {
               text: "Ctrl+K"
@@ -101,11 +111,20 @@ Rectangle {
             id: syncBtnRow
             anchors.centerIn: parent
             spacing: 4
-            Text {
-              text: "🔄 Sync"
-              color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-              font.pixelSize: 11
-              font.weight: Font.Medium
+            RowLayout {
+              spacing: 3
+              Text {
+                text: "\uf021"
+                font.family: footerRoot.fontFamily
+                color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+              }
+              Text {
+                text: "Sync"
+                color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+                font.weight: Font.Medium
+              }
             }
             Text {
               text: "Ctrl+R"
@@ -135,11 +154,20 @@ Rectangle {
             id: lockBtnRow
             anchors.centerIn: parent
             spacing: 4
-            Text {
-              text: "🔒 Lock"
-              color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-              font.pixelSize: 11
-              font.weight: Font.Medium
+            RowLayout {
+              spacing: 3
+              Text {
+                text: "\uf023"
+                font.family: footerRoot.fontFamily
+                color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+              }
+              Text {
+                text: "Lock"
+                color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: 11
+                font.weight: Font.Medium
+              }
             }
             Text {
               text: "Ctrl+L"
@@ -170,11 +198,20 @@ Rectangle {
           id: settingsBtnRow
           anchors.centerIn: parent
           spacing: 4
-          Text {
-            text: "⚙️ Settings"
-            color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-            font.pixelSize: 11
-            font.weight: Font.Medium
+          RowLayout {
+            spacing: 3
+            Text {
+              text: "\uf013"
+              font.family: footerRoot.fontFamily
+              color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              font.pixelSize: 11
+            }
+            Text {
+              text: "Settings"
+              color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
           }
           Text {
             text: "Ctrl+,"
@@ -233,7 +270,13 @@ Rectangle {
           anchors.centerIn: parent
           spacing: 3
           Text {
-            text: "⏳ Downloading Engine..."
+            text: "\uf021"
+            font.family: footerRoot.fontFamily
+            color: footerRoot.accent
+            font.pixelSize: 9
+          }
+          Text {
+            text: "Downloading Engine..."
             color: footerRoot.accent
             font.pixelSize: 10
             font.weight: Font.Medium
@@ -256,7 +299,13 @@ Rectangle {
           anchors.centerIn: parent
           spacing: 3
           Text {
-            text: "📥 Download Engine"
+            text: "\uf019"
+            font.family: footerRoot.fontFamily
+            color: "#f87171"
+            font.pixelSize: 9
+          }
+          Text {
+            text: "Download Engine"
             color: "#f87171"
             font.pixelSize: 10
             font.weight: Font.DemiBold
@@ -286,7 +335,13 @@ Rectangle {
           anchors.centerIn: parent
           spacing: 3
           Text {
-            text: "✨ v" + footerRoot.latestVersion + " Available"
+            text: "\uf005"
+            font.family: footerRoot.fontFamily
+            color: "#4ade80"
+            font.pixelSize: 9
+          }
+          Text {
+            text: "v" + footerRoot.latestVersion + " Available"
             color: "#4ade80"
             font.pixelSize: 10
             font.weight: Font.Medium

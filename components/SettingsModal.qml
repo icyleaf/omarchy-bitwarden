@@ -16,6 +16,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal saveRequested(var newSettings)
   signal closeRequested()
@@ -27,7 +28,16 @@ Item {
     anchors.fill: parent
     anchors.margins: 18
     clip: true
-    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; active: true }
+    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+    ScrollBar.vertical: ScrollBar {
+      id: settingsVScrollBar
+      policy: ScrollBar.AsNeeded
+      contentItem: Rectangle {
+        implicitWidth: 4
+        radius: 2
+        color: settingsVScrollBar.pressed ? Qt.rgba(1, 1, 1, 0.4) : (settingsVScrollBar.hovered ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.15))
+      }
+    }
 
     ColumnLayout {
       width: settingsRoot.width - 36
@@ -46,13 +56,22 @@ Item {
           border.color: settingsRoot.borderColor
           border.width: 1
 
-          Text {
+          RowLayout {
             id: backBtnText
             anchors.centerIn: parent
-            text: "← Back to Vault"
-            color: settingsRoot.foreground
-            font.pixelSize: 11
-            font.weight: Font.Medium
+            spacing: 4
+            Text {
+              text: "\uf060"
+              font.family: settingsRoot.fontFamily
+              color: settingsRoot.foreground
+              font.pixelSize: 10
+            }
+            Text {
+              text: "Back to Vault"
+              color: settingsRoot.foreground
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
           }
           MouseArea {
             anchors.fill: parent
@@ -61,12 +80,22 @@ Item {
           }
         }
 
-        Text {
-          text: "⚙️ Plugin Settings & Engine Health"
-          color: settingsRoot.foreground
-          font.pixelSize: 13
-          font.weight: Font.DemiBold
+        RowLayout {
+          spacing: 6
           Layout.fillWidth: true
+          Text {
+            text: "\uf013"
+            font.family: settingsRoot.fontFamily
+            color: settingsRoot.accent
+            font.pixelSize: 13
+          }
+          Text {
+            text: "Plugin Settings & Engine Health"
+            color: settingsRoot.foreground
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            Layout.fillWidth: true
+          }
         }
       }
 
@@ -136,7 +165,12 @@ Item {
             anchors.margins: 8
             spacing: 8
 
-            Text { text: "✨"; font.pixelSize: 14 }
+            Text {
+              text: "\uf005"
+              font.family: settingsRoot.fontFamily
+              color: "#4ade80"
+              font.pixelSize: 14
+            }
 
             ColumnLayout {
               Layout.fillWidth: true
@@ -205,7 +239,12 @@ Item {
               id: cliBadgeRow
               anchors.centerIn: parent
               spacing: 4
-              Text { text: settingsRoot.cliHealth.installed ? "✓" : "✕"; color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"; font.pixelSize: 10; font.weight: Font.Bold }
+              Text {
+                text: settingsRoot.cliHealth.installed ? "\uf00c" : "\uf00d"
+                font.family: settingsRoot.fontFamily
+                color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"
+                font.pixelSize: 10
+              }
               Text { text: "Engine: " + (settingsRoot.cliHealth.version || (settingsRoot.cliHealth.installed ? "Ready" : "Missing")); color: settingsRoot.foreground; font.pixelSize: 10 }
             }
           }
@@ -247,7 +286,12 @@ Item {
               id: krBadgeRow
               anchors.centerIn: parent
               spacing: 4
-              Text { text: settingsRoot.cliHealth.keyring_available ? "✓" : "✕"; color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"; font.pixelSize: 10; font.weight: Font.Bold }
+              Text {
+                text: settingsRoot.cliHealth.keyring_available ? "\uf00c" : "\uf00d"
+                font.family: settingsRoot.fontFamily
+                color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                font.pixelSize: 10
+              }
               Text { text: "Keyring: " + (settingsRoot.cliHealth.keyring_available ? "Ready" : "Unavailable"); color: settingsRoot.foreground; font.pixelSize: 10 }
             }
           }
@@ -265,7 +309,12 @@ Item {
               id: clipBadgeRow
               anchors.centerIn: parent
               spacing: 4
-              Text { text: settingsRoot.cliHealth.clipboard_available ? "✓" : "✕"; color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"; font.pixelSize: 10; font.weight: Font.Bold }
+              Text {
+                text: settingsRoot.cliHealth.clipboard_available ? "\uf00c" : "\uf00d"
+                font.family: settingsRoot.fontFamily
+                color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                font.pixelSize: 10
+              }
               Text { text: "Clipboard: " + (settingsRoot.cliHealth.clipboard_available ? "Ready" : "Missing"); color: settingsRoot.foreground; font.pixelSize: 10 }
             }
           }

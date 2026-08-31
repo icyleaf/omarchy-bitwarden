@@ -10,6 +10,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   ColumnLayout {
     anchors.fill: parent
@@ -30,8 +31,10 @@ Item {
 
         Text {
           anchors.centerIn: parent
-          text: "🛡️"
+          text: "\uf132"
+          font.family: emptyInspectorRoot.fontFamily
           font.pixelSize: 20
+          color: emptyInspectorRoot.accent
         }
       }
 
@@ -231,11 +234,20 @@ Item {
       RowLayout {
         anchors.centerIn: parent
         spacing: 6
-        Text {
-          text: "💡 Tip:"
-          color: emptyInspectorRoot.accent
-          font.pixelSize: 10
-          font.weight: Font.Medium
+        RowLayout {
+          spacing: 3
+          Text {
+            text: "\uf0eb"
+            font.family: emptyInspectorRoot.fontFamily
+            color: emptyInspectorRoot.accent
+            font.pixelSize: 10
+          }
+          Text {
+            text: "Tip:"
+            color: emptyInspectorRoot.accent
+            font.pixelSize: 10
+            font.weight: Font.Medium
+          }
         }
         Text {
           text: "Select any item from the left list to inspect credentials and attachments."

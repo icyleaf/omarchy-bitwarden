@@ -12,6 +12,7 @@ Item {
   property color accent: "#3b82f6"
   property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal itemSelected(int index)
   signal itemTriggered(int index)
@@ -39,12 +40,12 @@ Item {
   }
 
   function getItemIcon(item) {
-    if (!item) return "🌐"
-    if (item.type_name === "card") return "💳"
-    if (item.type_name === "identity") return "🪪"
-    if (item.type_name === "note") return "📝"
-    if (item.type_name === "ssh_key" || item.category === "ssh_key") return "🔐"
-    return "🌐"
+    if (!item) return "\uf084"
+    if (item.type_name === "card") return "\uf09d"
+    if (item.type_name === "identity") return "\uf2c2"
+    if (item.type_name === "note") return "\uf0f6"
+    if (item.type_name === "ssh_key" || item.category === "ssh_key") return "\uf084"
+    return "\uf084"
   }
 
   function getSubtitle(item) {
@@ -67,8 +68,10 @@ Item {
 
       Text {
         Layout.alignment: Qt.AlignHCenter
-        text: "🔍"
+        text: "\uf002"
+        font.family: itemListRoot.fontFamily
         font.pixelSize: 28
+        color: Qt.darker(itemListRoot.foreground, 1.8)
       }
 
       Text {
@@ -93,11 +96,25 @@ Item {
   ListView {
     id: listView
     anchors.fill: parent
+    anchors.rightMargin: 6
     visible: Boolean(itemListRoot.items && itemListRoot.items.length > 0)
     model: itemListRoot.items
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     currentIndex: itemListRoot.selectedIndex
+    spacing: 2
+
+    ScrollBar.vertical: ScrollBar {
+      id: vScrollBar
+      anchors.right: parent.right
+      anchors.rightMargin: -5
+      policy: ScrollBar.AsNeeded
+      contentItem: Rectangle {
+        implicitWidth: 4
+        radius: 2
+        color: vScrollBar.pressed ? Qt.rgba(1, 1, 1, 0.4) : (vScrollBar.hovered ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.15))
+      }
+    }
 
     onCurrentIndexChanged: {
       if (currentIndex !== itemListRoot.selectedIndex) {
@@ -143,7 +160,9 @@ Item {
             anchors.centerIn: parent
             visible: !faviconImg.visible
             text: itemListRoot.getItemIcon(modelData)
-            font.pixelSize: 15
+            font.family: itemListRoot.fontFamily
+            font.pixelSize: 14
+            color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
           }
         }
 
@@ -165,14 +184,6 @@ Item {
               Layout.fillWidth: true
             }
 
-            // Monochrome Favorite Indicator
-            Text {
-              visible: Boolean(modelData.favorite)
-              text: "★"
-              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
-              font.pixelSize: 11
-            }
-
             // Organization Badge
             Rectangle {
               visible: Boolean(modelData.organization_name)
@@ -186,7 +197,8 @@ Item {
               Text {
                 id: orgText
                 anchors.centerIn: parent
-                text: "🏢 " + (modelData.organization_name || "")
+                text: "\uf1ad " + (modelData.organization_name || "")
+                font.family: itemListRoot.fontFamily
                 color: "#fbbf24"
                 font.pixelSize: 9
                 font.weight: Font.Medium
@@ -206,7 +218,8 @@ Item {
               Text {
                 id: folderText
                 anchors.centerIn: parent
-                text: "📁 " + (modelData.folder_name || "")
+                text: "\uf07b " + (modelData.folder_name || "")
+                font.family: itemListRoot.fontFamily
                 color: "#60a5fa"
                 font.pixelSize: 9
                 font.weight: Font.Medium
@@ -216,9 +229,19 @@ Item {
             // Attachment Indicator
             Text {
               visible: Boolean(modelData.attachments && modelData.attachments.length > 0)
-              text: "📎"
-              font.pixelSize: 10
-              color: Qt.darker(itemListRoot.foreground, 1.5)
+              text: "\uf0c6"
+              font.family: itemListRoot.fontFamily
+              font.pixelSize: 11
+              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.5)
+            }
+
+            // Monochrome Favorite Indicator (Always at the far right)
+            Text {
+              visible: Boolean(modelData.favorite)
+              text: "\uf005"
+              font.family: itemListRoot.fontFamily
+              font.pixelSize: 11
+              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
             }
           }
 
@@ -249,11 +272,6 @@ Item {
           itemListRoot.itemTriggered(index)
         }
       }
-    }
-
-    ScrollBar.vertical: ScrollBar {
-      policy: ScrollBar.AsNeeded
-      active: true
     }
   }
 }

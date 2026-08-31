@@ -469,16 +469,16 @@ Item {
 
     if (item.type_name === "login" && item.login) {
       if (item.login.password) {
-        actions.push({ label: "Copy Password", icon: "🔒", shortcut: "↵", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
+        actions.push({ label: "Copy Password", icon: "\uf023", shortcut: "↵", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
       }
       if (item.login.username) {
-        actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "👤", shortcut: "", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
+        actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
       }
       if ((item.login.totp) || (root.currentTotp && root.currentTotp.code)) {
         var totpLabel = "Copy TOTP Code" + ((root.currentTotp && root.currentTotp.code) ? (" (" + root.currentTotp.code + ")") : "")
         actions.push({
           label: totpLabel,
-          icon: "⏱️",
+          icon: "\uf017",
           shortcut: "",
           action: function() {
             if (root.currentTotp && root.currentTotp.code) {
@@ -494,7 +494,7 @@ Item {
             (function(targetUri) {
               actions.push({
                 label: "Open URL (" + targetUri + ")",
-                icon: "🌐",
+                icon: "\uf08e",
                 shortcut: "",
                 action: function() { Qt.openUrlExternally(targetUri) }
               })
@@ -503,33 +503,33 @@ Item {
         }
       }
     } else if (item.type_name === "card" && item.card) {
-      if (item.card.number) actions.push({ label: "Copy Card Number", icon: "💳", shortcut: "↵", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
-      if (item.card.code) actions.push({ label: "Copy Security Code (CVV)", icon: "🔢", shortcut: "", action: function() { root.copyToClipboard(item.card.code, true, "CVV") } })
-      if (item.card.cardholderName) actions.push({ label: "Copy Cardholder Name", icon: "👤", shortcut: "", action: function() { root.copyToClipboard(item.card.cardholderName, false, "cardholder") } })
+      if (item.card.number) actions.push({ label: "Copy Card Number", icon: "\uf09d", shortcut: "↵", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
+      if (item.card.code) actions.push({ label: "Copy Security Code (CVV)", icon: "\uf292", shortcut: "", action: function() { root.copyToClipboard(item.card.code, true, "CVV") } })
+      if (item.card.cardholderName) actions.push({ label: "Copy Cardholder Name", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(item.card.cardholderName, false, "cardholder") } })
       if (item.card.expMonth && item.card.expYear) {
         var expStr = item.card.expMonth + "/" + item.card.expYear
-        actions.push({ label: "Copy Expiration (" + expStr + ")", icon: "📅", shortcut: "", action: function() { root.copyToClipboard(expStr, false, "expiration") } })
+        actions.push({ label: "Copy Expiration (" + expStr + ")", icon: "\uf073", shortcut: "", action: function() { root.copyToClipboard(expStr, false, "expiration") } })
       }
     } else if (item.type_name === "ssh_key" && item.ssh_key) {
-      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "🔑", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
-      if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "🗝️", shortcut: "↵", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
-      if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "🔒", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
+      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
+      if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "\uf084", shortcut: "↵", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
+      if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "\uf023", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
     } else if (item.type_name === "identity" && item.identity) {
       var idFullName = ((item.identity.firstName || "") + " " + (item.identity.lastName || "")).trim()
-      if (idFullName) actions.push({ label: "Copy Full Name (" + idFullName + ")", icon: "👤", shortcut: "", action: function() { root.copyToClipboard(idFullName, false, "full name") } })
-      if (item.identity.username) actions.push({ label: "Copy Username (" + item.identity.username + ")", icon: "🏷️", shortcut: "", action: function() { root.copyToClipboard(item.identity.username, false, "username") } })
-      if (item.identity.email) actions.push({ label: "Copy Email (" + item.identity.email + ")", icon: "✉️", shortcut: "↵", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
-      if (item.identity.phone) actions.push({ label: "Copy Phone (" + item.identity.phone + ")", icon: "📞", shortcut: "", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
-      if (item.identity.company) actions.push({ label: "Copy Company (" + item.identity.company + ")", icon: "🏢", shortcut: "", action: function() { root.copyToClipboard(item.identity.company, false, "company") } })
+      if (idFullName) actions.push({ label: "Copy Full Name (" + idFullName + ")", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(idFullName, false, "full name") } })
+      if (item.identity.username) actions.push({ label: "Copy Username (" + item.identity.username + ")", icon: "\uf02b", shortcut: "", action: function() { root.copyToClipboard(item.identity.username, false, "username") } })
+      if (item.identity.email) actions.push({ label: "Copy Email (" + item.identity.email + ")", icon: "\uf0e0", shortcut: "↵", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
+      if (item.identity.phone) actions.push({ label: "Copy Phone (" + item.identity.phone + ")", icon: "\uf095", shortcut: "", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
+      if (item.identity.company) actions.push({ label: "Copy Company (" + item.identity.company + ")", icon: "\uf1ad", shortcut: "", action: function() { root.copyToClipboard(item.identity.company, false, "company") } })
       var addrStr = [item.identity.address1, item.identity.city, item.identity.state, item.identity.postalCode, item.identity.country].filter(Boolean).join(", ")
-      if (addrStr) actions.push({ label: "Copy Address (" + addrStr + ")", icon: "📍", shortcut: "", action: function() { root.copyToClipboard(addrStr, false, "address") } })
-      if (item.identity.ssn) actions.push({ label: "Copy SSN", icon: "🔢", shortcut: "", action: function() { root.copyToClipboard(item.identity.ssn, true, "SSN") } })
-      if (item.identity.passportNumber) actions.push({ label: "Copy Passport Number", icon: "🛂", shortcut: "", action: function() { root.copyToClipboard(item.identity.passportNumber, true, "passport") } })
-      if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "🪪", shortcut: "", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
+      if (addrStr) actions.push({ label: "Copy Address (" + addrStr + ")", icon: "\uf041", shortcut: "", action: function() { root.copyToClipboard(addrStr, false, "address") } })
+      if (item.identity.ssn) actions.push({ label: "Copy SSN", icon: "\uf292", shortcut: "", action: function() { root.copyToClipboard(item.identity.ssn, true, "SSN") } })
+      if (item.identity.passportNumber) actions.push({ label: "Copy Passport Number", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.passportNumber, true, "passport") } })
+      if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
     }
 
     if (item.notes) {
-      actions.push({ label: "Copy Notes", icon: "📝", shortcut: "", action: function() { root.copyToClipboard(item.notes, false, "notes") } })
+      actions.push({ label: "Copy Notes", icon: "\uf0f6", shortcut: "", action: function() { root.copyToClipboard(item.notes, false, "notes") } })
     }
 
     if (item.fields) {
@@ -541,7 +541,7 @@ Item {
             (function(pinVal) {
               actions.push({
                 label: "Copy PIN",
-                icon: "🔢",
+                icon: "\uf292",
                 shortcut: "",
                 action: function() { root.copyToClipboard(String(pinVal), true, "PIN") }
               })
@@ -550,7 +550,7 @@ Item {
             (function(fld) {
               actions.push({
                 label: "Copy " + fld.name,
-                icon: "🏷️",
+                icon: "\uf02b",
                 shortcut: "",
                 action: function() { root.copyToClipboard(String(fld.value), true, fld.name) }
               })
@@ -567,13 +567,13 @@ Item {
           (function(currAtt) {
             actions.push({
               label: "View Attachment: " + currAtt.fileName,
-              icon: "👁️",
+              icon: "\uf06e",
               shortcut: "",
               action: function() { root.viewAttachment(item, currAtt) }
             })
             actions.push({
               label: "Download Attachment: " + currAtt.fileName,
-              icon: "💾",
+              icon: "\uf019",
               shortcut: "",
               action: function() { root.downloadAttachment(item, currAtt) }
             })
@@ -585,7 +585,7 @@ Item {
     if (item.folder_name) {
       actions.push({
         label: "Copy Folder (" + item.folder_name + ")",
-        icon: "📁",
+        icon: "\uf07b",
         shortcut: "",
         action: function() { root.copyToClipboard(item.folder_name, false, "folder name") }
       })
@@ -594,15 +594,15 @@ Item {
     if (item.organization_name) {
       actions.push({
         label: "Copy Organization (" + item.organization_name + ")",
-        icon: "🏢",
+        icon: "\uf1ad",
         shortcut: "",
         action: function() { root.copyToClipboard(item.organization_name, false, "organization name") }
       })
     }
 
-    actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "📋", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
-    actions.push({ label: "Sync Vault Now", icon: "🔄", shortcut: "Ctrl+R", action: function() { root.syncVault(false) } })
-    actions.push({ label: "Lock Vault", icon: "🔒", shortcut: "Ctrl+L", action: function() { root.doLock() } })
+    actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
+    actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false) } })
+    actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
 
     return actions
   }

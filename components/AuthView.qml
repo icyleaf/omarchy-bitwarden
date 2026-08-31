@@ -16,6 +16,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal unlockRequested(string password)
   signal loginPasswordRequested(string email, string password, string code)
@@ -58,7 +59,13 @@ Item {
           ColumnLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: 4
-            Text { Layout.alignment: Qt.AlignHCenter; text: "🔒"; font.pixelSize: 28 }
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: "\uf023"
+              font.family: authRoot.fontFamily
+              font.pixelSize: 28
+              color: authRoot.accent
+            }
             Text { Layout.alignment: Qt.AlignHCenter; text: "Vault is Locked"; color: authRoot.foreground; font.pixelSize: 14; font.weight: Font.DemiBold }
             Text {
               Layout.alignment: Qt.AlignHCenter
@@ -173,7 +180,13 @@ Item {
           ColumnLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: 4
-            Text { Layout.alignment: Qt.AlignHCenter; text: "🛡️"; font.pixelSize: 28 }
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: "\uf132"
+              font.family: authRoot.fontFamily
+              font.pixelSize: 28
+              color: authRoot.accent
+            }
             Text { Layout.alignment: Qt.AlignHCenter; text: "Log In to Bitwarden"; color: authRoot.foreground; font.pixelSize: 14; font.weight: Font.DemiBold }
             Text {
               Layout.alignment: Qt.AlignHCenter
@@ -268,7 +281,14 @@ Item {
               spacing: 6
               Rectangle {
                 width: 14; height: 14; radius: 3; color: authRoot.rememberEmailChecked ? authRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: authRoot.borderColor; border.width: 1
-                Text { anchors.centerIn: parent; visible: authRoot.rememberEmailChecked; text: "✓"; color: "#ffffff"; font.pixelSize: 9; font.weight: Font.Bold }
+                Text {
+                  anchors.centerIn: parent
+                  visible: authRoot.rememberEmailChecked
+                  text: "\uf00c"
+                  font.family: authRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: authRoot.rememberEmailChecked = !authRoot.rememberEmailChecked }
               }
               Text { text: "Remember Email"; color: authRoot.foreground; font.pixelSize: 11 }

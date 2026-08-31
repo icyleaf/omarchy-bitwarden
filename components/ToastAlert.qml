@@ -10,6 +10,7 @@ Item {
   property bool isBusy: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
+  readonly property string fontFamily: Style.font.menuFamily
 
   signal clearRequested()
 
@@ -34,8 +35,10 @@ Item {
       spacing: 6
 
       Text {
-        text: isBusy ? "⏳" : (errorMessage ? "⚠️" : "ℹ️")
+        text: isBusy ? "\uf021" : (errorMessage ? "\uf071" : "\uf129")
+        font.family: toastRoot.fontFamily
         font.pixelSize: 11
+        color: "#ffffff"
       }
 
       Text {
@@ -49,7 +52,8 @@ Item {
 
       Text {
         visible: !isBusy && Boolean(errorMessage || statusMessage)
-        text: "✕"
+        text: "\uf00d"
+        font.family: toastRoot.fontFamily
         color: Qt.rgba(1, 1, 1, 0.6)
         font.pixelSize: 10
         MouseArea {
