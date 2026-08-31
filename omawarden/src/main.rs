@@ -406,7 +406,7 @@ fn main() -> ExitCode {
                         .as_ref()
                         .and_then(|v| v.get("ok"))
                         .and_then(|v| v.as_bool())
-                        .unwrap_or_else(|| vault_mgr.sync(None));
+                        .unwrap_or_else(|| vault_mgr.sync().is_ok());
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
@@ -418,28 +418,14 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
-                    omawarden::daemon::ensure_daemon_running();
-                    if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" })) {
-                        if let Ok(items) =
-                            serde_json::from_value::<Vec<omawarden::vault::VaultItem>>(daemon_resp)
-                        {
-                            let filtered = vault_mgr.search(&items, "", category.as_deref());
-                            println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
-                            return ExitCode::SUCCESS;
-                        }
-                    }
-                    println!("[]");
+                    let items = vault_mgr.get_items();
+                    let filtered = vault_mgr.search(&items, "", category.as_deref());
+                    println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
-                    omawarden::daemon::ensure_daemon_running();
-                    if let Some(daemon_resp) = send_daemon_request(
-                        &json!({ "action": "search", "query": query, "category": category }),
-                    ) {
-                        println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
-                        return ExitCode::SUCCESS;
-                    }
-                    println!("[]");
+                    let results = vault_mgr.search_items(&query, category.as_deref());
+                    println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
                 }
             }

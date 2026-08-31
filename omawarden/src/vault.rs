@@ -1,10 +1,15 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::sync::RwLock;
 
-use crate::api::BitwardenApiClient;
+use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient};
+use crate::crypto::{
+    parse_rsa_private_key_der, parse_symmetric_key_from_decrypted_bytes, EncString,
+    SymmetricCryptoKey,
+};
 use crate::keyring::KeyringManager;
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, VaultStorage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshMetadata {
@@ -100,7 +105,7 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
             key_type = "ECDSA".to_string();
         } else if matched.contains("BEGIN DSA PRIVATE KEY") {
             key_type = "DSA".to_string();
-        } else if matched.contains("BEGIN PRIVATE KEY") {
+        } else {
             key_type = "PKCS8".to_string();
         }
         private_key = Some(matched);
@@ -124,29 +129,34 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
         public_key = Some(matched);
     }
 
-    if let Some(fields_arr) = fields {
-        for f in fields_arr {
+    if let Some(field_arr) = fields {
+        for f in field_arr {
             let fname = f
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .trim()
-                .to_lowercase()
-                .replace(['-', ' '], "_");
+                .to_lowercase();
             let fval = f
                 .get("value")
-                .map(|v| match v {
-                    Value::String(s) => s.trim().to_string(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if fval.is_empty() {
+                continue;
+            }
 
             if matches!(
                 fname.as_str(),
-                "private_key" | "privatekey" | "ssh_private_key" | "id_rsa" | "id_ed25519"
-            ) || fval.contains("-----BEGIN ")
+                "private_key"
+                    | "privatekey"
+                    | "ssh_private_key"
+                    | "id_rsa"
+                    | "id_ed25519"
+                    | "id_ecdsa"
+            ) || fval.contains("PRIVATE KEY-----")
             {
-                if fval.contains("-----BEGIN ") {
+                if private_key.is_none() || fval.contains("BEGIN") {
                     if fval.contains("RSA") {
                         key_type = "RSA".to_string();
                     } else if fval.contains("OPENSSH") {
@@ -207,6 +217,10 @@ pub struct VaultManager {
     pub server_url: String,
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
+    pub storage: RwLock<VaultStorage>,
+    pub decrypted_items: RwLock<Vec<VaultItem>>,
+    pub user_key: RwLock<Option<SymmetricCryptoKey>>,
+    pub is_unlocked: RwLock<bool>,
 }
 
 impl VaultManager {
@@ -215,42 +229,303 @@ impl VaultManager {
         storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
     ) -> Self {
-        Self {
-            server_url: server_url.to_string(),
-            storage_mgr: storage_mgr.unwrap_or_default(),
-            keyring_mgr: keyring_mgr.unwrap_or_default(),
-        }
-    }
-
-    pub fn sync(&self, _session: Option<&str>) -> bool {
-        let storage = self.storage_mgr.load();
-        let token = match storage.access_token.as_ref() {
-            Some(t) if !t.is_empty() => t,
-            _ => return false,
+        let sm = storage_mgr.unwrap_or_default();
+        let storage = sm.load();
+        let effective_url = if server_url.is_empty() {
+            storage.server_url.clone()
+        } else {
+            server_url.to_string()
         };
 
-        let client = BitwardenApiClient::new(&self.server_url);
-        match client.sync_vault(token) {
-            Ok(sync_resp) => {
-                let mut updated = storage;
-                updated.ciphers = sync_resp.ciphers;
-                updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
-                self.storage_mgr.save(&updated).is_ok()
-            }
-            Err(_) => false,
+        Self {
+            server_url: effective_url,
+            storage_mgr: sm,
+            keyring_mgr: keyring_mgr.unwrap_or_default(),
+            storage: RwLock::new(storage),
+            decrypted_items: RwLock::new(Vec::new()),
+            user_key: RwLock::new(None),
+            is_unlocked: RwLock::new(false),
         }
     }
 
-    pub fn fetch_items(&self, _session: Option<&str>) -> Vec<VaultItem> {
-        crate::daemon::ensure_daemon_running();
-        if let Some(daemon_resp) =
-            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" }))
-        {
-            if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
-                return items;
+    pub fn is_unlocked(&self) -> bool {
+        self.is_unlocked.read().map(|g| *g).unwrap_or(false)
+    }
+
+    pub fn lock(&self) {
+        if let Ok(mut unl) = self.is_unlocked.write() {
+            *unl = false;
+        }
+        if let Ok(mut items) = self.decrypted_items.write() {
+            items.clear();
+        }
+        if let Ok(mut key) = self.user_key.write() {
+            *key = None;
+        }
+    }
+
+    pub fn unlock(&self, password: &str) -> Result<usize, String> {
+        let fresh_storage = self.storage_mgr.load();
+        if fresh_storage.enc_user_key.is_none() {
+            return Err("Account not logged in or missing encryption keys.".to_string());
+        }
+
+        let user_key = self
+            .storage_mgr
+            .unlock_user_key(password, &fresh_storage)
+            .map_err(|e| format!("Unlock failed: {:?}", e))?;
+
+        let items = decrypt_sync_ciphers_with_context(
+            &fresh_storage.ciphers,
+            &fresh_storage.folders,
+            &fresh_storage.organizations,
+            &user_key,
+            fresh_storage.enc_private_key.as_deref(),
+        );
+        let count = items.len();
+
+        if let Ok(mut dec_items) = self.decrypted_items.write() {
+            *dec_items = items;
+        }
+        if let Ok(mut key) = self.user_key.write() {
+            *key = Some(user_key);
+        }
+        if let Ok(mut unl) = self.is_unlocked.write() {
+            *unl = true;
+        }
+        if let Ok(mut st) = self.storage.write() {
+            *st = fresh_storage;
+        }
+
+        Ok(count)
+    }
+
+    pub fn sync(&self) -> Result<usize, String> {
+        let storage = self.storage_mgr.load();
+        let token = storage
+            .access_token
+            .as_ref()
+            .ok_or_else(|| "Session token missing. Please log in.".to_string())?;
+
+        let client = BitwardenApiClient::new(if self.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        });
+        let sync_resp_res = client.sync_vault(token);
+
+        let sync_resp = match sync_resp_res {
+            Ok(resp) => resp,
+            Err(ApiError::Http(ref msg)) if msg.contains("401") => {
+                if let Some(ref ref_tok) = storage.refresh_token {
+                    if let Ok(tok_resp) = client.refresh_token_grant(ref_tok) {
+                        let mut updated_tok = storage.clone();
+                        updated_tok.access_token = Some(tok_resp.access_token.clone());
+                        if let Some(new_ref) = tok_resp.refresh_token {
+                            updated_tok.refresh_token = Some(new_ref);
+                        }
+                        let _ = self.storage_mgr.save(&updated_tok);
+                        client
+                            .sync_vault(&tok_resp.access_token)
+                            .map_err(|e| format!("Sync failed: {:?}", e))?
+                    } else {
+                        return Err("Session expired. Please log in again.".to_string());
+                    }
+                } else {
+                    return Err("Session expired. Please log in again.".to_string());
+                }
+            }
+            Err(e) => return Err(format!("Sync failed: {:?}", e)),
+        };
+
+        let count = sync_resp.ciphers.len();
+        let mut updated = storage.clone();
+        updated.ciphers = sync_resp.ciphers;
+        updated.folders = sync_resp.folders;
+        updated.collections = sync_resp.collections;
+        if let Some(ref prof) = sync_resp.profile {
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                updated.organizations = orgs.clone();
             }
         }
-        Vec::new()
+        updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
+
+        self.storage_mgr
+            .save(&updated)
+            .map_err(|e| format!("Failed to save storage: {:?}", e))?;
+
+        if let Ok(key_guard) = self.user_key.read() {
+            if let Some(user_key) = key_guard.as_ref() {
+                let items = decrypt_sync_ciphers_with_context(
+                    &updated.ciphers,
+                    &updated.folders,
+                    &updated.organizations,
+                    user_key,
+                    updated.enc_private_key.as_deref(),
+                );
+                if let Ok(mut dec_items) = self.decrypted_items.write() {
+                    *dec_items = items;
+                }
+            }
+        }
+
+        if let Ok(mut st) = self.storage.write() {
+            *st = updated;
+        }
+
+        Ok(count)
+    }
+
+    pub fn get_items(&self) -> Vec<VaultItem> {
+        let is_unlocked = self.is_unlocked();
+        if !is_unlocked {
+            if let Some(daemon_resp) =
+                crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" }))
+            {
+                if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
+                    return items;
+                }
+            }
+            return Vec::new();
+        }
+        self.decrypted_items
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn search_items(&self, query: &str, category: Option<&str>) -> Vec<VaultItem> {
+        let is_unlocked = self.is_unlocked();
+        if !is_unlocked {
+            if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({
+                "action": "search",
+                "query": query,
+                "category": category
+            })) {
+                if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
+                    return items;
+                }
+            }
+            return Vec::new();
+        }
+        let items = self.decrypted_items.read().unwrap().clone();
+        self.search(&items, query, category)
+    }
+
+    pub fn resolve_attachment_key(
+        &self,
+        item_id: &str,
+        attachment_id: &str,
+    ) -> Option<SymmetricCryptoKey> {
+        let user_key_guard = self.user_key.read().ok()?;
+        let user_key = user_key_guard.as_ref()?;
+        let storage_guard = self.storage.read().ok()?;
+
+        let rsa_priv_key = if let Some(ref enc_priv) = storage_guard.enc_private_key {
+            if let Ok(enc_priv_str) = EncString::parse(enc_priv) {
+                if let Ok(der_bytes) = enc_priv_str.decrypt(user_key) {
+                    parse_rsa_private_key_der(&der_bytes).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let cipher = storage_guard
+            .ciphers
+            .iter()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))?;
+
+        let org_id_opt = cipher.get("organizationId").and_then(|v| v.as_str());
+        let mut base_key = user_key.clone();
+        if let Some(oid) = org_id_opt {
+            if let Some(org) = storage_guard
+                .organizations
+                .iter()
+                .find(|o| o.get("id").and_then(|v| v.as_str()) == Some(oid))
+            {
+                if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
+                    if let Ok(enc_str) = EncString::parse(org_key_enc) {
+                        let raw_key = match enc_str.enc_type {
+                            3..=6 => {
+                                if let Some(ref rsa) = rsa_priv_key {
+                                    enc_str.decrypt_rsa(rsa).ok()
+                                } else {
+                                    None
+                                }
+                            }
+                            0..=2 => enc_str.decrypt(user_key).ok(),
+                            _ => None,
+                        };
+                        if let Some(key_bytes) = raw_key {
+                            if let Some(sym_key) =
+                                parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                            {
+                                base_key = sym_key;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut cipher_key = base_key.clone();
+        if let Some(enc_key_str) = cipher.get("key").and_then(|v| v.as_str()) {
+            if let Ok(parsed_k) = EncString::parse(enc_key_str) {
+                let raw_k = parsed_k
+                    .decrypt(&base_key)
+                    .or_else(|_| parsed_k.decrypt(user_key));
+                if let Ok(raw_k_bytes) = raw_k {
+                    if let Some(k) =
+                        parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
+                    {
+                        cipher_key = k;
+                    }
+                }
+            }
+        }
+
+        if let Some(attachments) = cipher.get("attachments").and_then(|v| v.as_array()) {
+            if let Some(att) = attachments
+                .iter()
+                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(attachment_id))
+            {
+                if let Some(att_key_enc) = att.get("key").and_then(|v| v.as_str()) {
+                    if let Ok(parsed_k) = EncString::parse(att_key_enc) {
+                        let raw_k = parsed_k
+                            .decrypt(&cipher_key)
+                            .or_else(|_| parsed_k.decrypt(user_key));
+                        if let Ok(raw_k_bytes) = raw_k {
+                            if let Some(k) = parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
+                            {
+                                return Some(k);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(cipher_key)
+    }
+
+    pub fn get_status(&self) -> Value {
+        let is_unlocked = self.is_unlocked();
+        let fresh_storage = self.storage_mgr.load();
+        json!({
+            "ok": true,
+            "status": if is_unlocked { "unlocked" } else if fresh_storage.enc_user_key.is_some() { "locked" } else { "unauthenticated" },
+            "server_url": fresh_storage.server_url,
+            "user_email": fresh_storage.user_email,
+            "user_id": fresh_storage.user_id,
+            "last_sync": fresh_storage.last_sync,
+            "is_unlocked": is_unlocked,
+            "items_count": self.decrypted_items.read().map(|i| i.len()).unwrap_or(0),
+        })
     }
 
     pub fn parse_raw_items(&self, raw_items: &[Value]) -> Vec<VaultItem> {
@@ -714,5 +989,22 @@ mod tests {
         let search_ssh = vault_mgr.search(&items, "", Some("ssh_key"));
         assert_eq!(search_ssh.len(), 1);
         assert_eq!(search_ssh[0].id, "3");
+    }
+
+    #[test]
+    fn test_vault_manager_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault_test.json");
+        let storage_mgr = StorageManager::new(path);
+
+        let vault_mgr = VaultManager::new("https://vault.example.com", Some(storage_mgr), None);
+        assert!(!vault_mgr.is_unlocked());
+        assert_eq!(vault_mgr.get_items().len(), 0);
+
+        let st = vault_mgr.get_status();
+        assert_eq!(st.get("status").unwrap().as_str().unwrap(), "unauthenticated");
+
+        vault_mgr.lock();
+        assert!(!vault_mgr.is_unlocked());
     }
 }
