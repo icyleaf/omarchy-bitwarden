@@ -2,7 +2,7 @@
 name = "omawarden"
 version = "0.2.0"
 edition = "2021"
-description = "High-performance Rust helper and daemon for Omarchy Bitwarden Plugin"
+description = "High-performance and low memory Bitwarden CLI (Designed for Omarchy Plugin)"
 authors = ["icyleaf"]
 
 [dependencies]
@@ -10,24 +10,24 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.10"
-which = "7.0"
+which = "8.0"
 zeroize = { version = "1.8", features = ["derive"] }
 chrono = "0.4"
 url = "2.5"
-totp-rs = { version = "5.6", features = ["otpauth"] }
+totp-rs = { version = "6.0", features = ["otpauth"] }
 base32 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 aes = "0.8"
 cbc = "0.1"
 pbkdf2 = "0.12"
-argon2 = "0.5"
+argon2 = "0.6"
 hkdf = "0.12"
 subtle = "2.6"
 rsa = { version = "0.9", features = ["sha2", "sha1"] }
-pkcs8 = { version = "0.10", features = ["std"] }
+pkcs8 = { version = "0.11", features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
