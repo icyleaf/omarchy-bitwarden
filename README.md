@@ -35,6 +35,9 @@ Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantane
 | Shortcut                       | Description                                                               |
 | :----------------------------- | :------------------------------------------------------------------------ |
 | <kbd>Enter</kbd>               | Copy primary credential (Password / Card Number / Public Key)             |
+| <kbd>Ctrl</kbd> + <kbd>U</kbd> | Copy username                                                             |
+| <kbd>Ctrl</kbd> + <kbd>T</kbd> | Copy live TOTP code                                                       |
+| <kbd>Ctrl</kbd> + <kbd>O</kbd> | Open primary website URL in default browser                               |
 | <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, Org Name, etc.)            |
 | <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open / Toggle Settings configuration view                                 |
 | <kbd>Ctrl</kbd> + <kbd>L</kbd> | Manually lock the vault immediately                                       |

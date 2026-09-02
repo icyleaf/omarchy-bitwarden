@@ -463,6 +463,47 @@ Item {
     }
   }
 
+  function copyItemUsername(item) {
+    if (!item) return
+    var uName = ""
+    if (item.type_name === "login" && item.login && item.login.username) {
+      uName = item.login.username
+    } else if (item.type_name === "identity" && item.identity && item.identity.username) {
+      uName = item.identity.username
+    }
+    if (uName) {
+      root.copyToClipboard(uName, false, "username")
+    }
+  }
+
+  function copyItemTotp(item) {
+    if (!item) return
+    if (root.currentTotp && root.currentTotp.code) {
+      root.copyToClipboard(root.currentTotp.code, true, "TOTP code")
+    }
+  }
+
+  function openFirstWebsite(item) {
+    if (!item) return
+    var targetUri = ""
+    if (item.type_name === "login" && item.login && item.login.uris && item.login.uris.length > 0) {
+      for (var u = 0; u < item.login.uris.length; u++) {
+        var uriObj = item.login.uris[u]
+        var uriStr = (typeof uriObj === "string") ? uriObj : (uriObj && uriObj.uri ? uriObj.uri : "")
+        if (uriStr) {
+          targetUri = uriStr
+          break
+        }
+      }
+    }
+    if (targetUri) {
+      if (!targetUri.match(/^https?:\/\//i)) {
+        targetUri = "https://" + targetUri
+      }
+      Qt.openUrlExternally(targetUri)
+    }
+  }
+
   function getAvailableActions(item) {
     if (!item) return []
     var actions = []
@@ -472,14 +513,14 @@ Item {
         actions.push({ label: "Copy Password", icon: "\uf023", shortcut: "↵", action: function() { root.copyToClipboard(item.login.password, true, "password") } })
       }
       if (item.login.username) {
-        actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
+        actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "\uf007", shortcut: "Ctrl+U", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
       }
       if ((item.login.totp) || (root.currentTotp && root.currentTotp.code)) {
         var totpLabel = "Copy TOTP Code" + ((root.currentTotp && root.currentTotp.code) ? (" (" + root.currentTotp.code + ")") : "")
         actions.push({
           label: totpLabel,
           icon: "\uf017",
-          shortcut: "",
+          shortcut: "Ctrl+T",
           action: function() {
             if (root.currentTotp && root.currentTotp.code) {
               root.copyToClipboard(root.currentTotp.code, true, "TOTP code")
@@ -488,17 +529,24 @@ Item {
         })
       }
       if (item.login.uris && item.login.uris.length > 0) {
+        var hasAssignedUrlShortcut = false
         for (var u = 0; u < item.login.uris.length; u++) {
           var uriObj = item.login.uris[u]
-          if (uriObj && uriObj.uri) {
-            (function(targetUri) {
+          var uriStr = (typeof uriObj === "string") ? uriObj : (uriObj && uriObj.uri ? uriObj.uri : "")
+          if (uriStr) {
+            (function(targetUri, isFirstUri) {
               actions.push({
                 label: "Open URL (" + targetUri + ")",
                 icon: "\uf08e",
-                shortcut: "",
-                action: function() { Qt.openUrlExternally(targetUri) }
+                shortcut: isFirstUri ? "Ctrl+O" : "",
+                action: function() {
+                  var openUrl = targetUri
+                  if (!openUrl.match(/^https?:\/\//i)) openUrl = "https://" + openUrl
+                  Qt.openUrlExternally(openUrl)
+                }
               })
-            })(uriObj.uri)
+            })(uriStr, !hasAssignedUrlShortcut)
+            hasAssignedUrlShortcut = true
           }
         }
       }
@@ -517,7 +565,7 @@ Item {
     } else if (item.type_name === "identity" && item.identity) {
       var idFullName = ((item.identity.firstName || "") + " " + (item.identity.lastName || "")).trim()
       if (idFullName) actions.push({ label: "Copy Full Name (" + idFullName + ")", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(idFullName, false, "full name") } })
-      if (item.identity.username) actions.push({ label: "Copy Username (" + item.identity.username + ")", icon: "\uf02b", shortcut: "", action: function() { root.copyToClipboard(item.identity.username, false, "username") } })
+      if (item.identity.username) actions.push({ label: "Copy Username (" + item.identity.username + ")", icon: "\uf02b", shortcut: "Ctrl+U", action: function() { root.copyToClipboard(item.identity.username, false, "username") } })
       if (item.identity.email) actions.push({ label: "Copy Email (" + item.identity.email + ")", icon: "\uf0e0", shortcut: "↵", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
       if (item.identity.phone) actions.push({ label: "Copy Phone (" + item.identity.phone + ")", icon: "\uf095", shortcut: "", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
       if (item.identity.company) actions.push({ label: "Copy Company (" + item.identity.company + ")", icon: "\uf1ad", shortcut: "", action: function() { root.copyToClipboard(item.identity.company, false, "company") } })
@@ -783,6 +831,24 @@ Item {
         root.actionPaletteIndex = 0
         root.showActionPalette = true
       }
+    }
+
+    Shortcut {
+      sequence: "Ctrl+U"
+      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
+      onActivated: root.copyItemUsername(root.selectedItem)
+    }
+
+    Shortcut {
+      sequence: "Ctrl+T"
+      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
+      onActivated: root.copyItemTotp(root.selectedItem)
+    }
+
+    Shortcut {
+      sequence: "Ctrl+O"
+      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
+      onActivated: root.openFirstWebsite(root.selectedItem)
     }
 
     Shortcut {

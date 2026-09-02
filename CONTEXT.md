@@ -50,7 +50,7 @@
 - **Overlay Window**: Main search launcher modal summoned by global shortcut (`Super+/` or user-defined).
 - **Category Tabs**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
 - **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, and attachments.
-- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password, Copy Username, Copy TOTP, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault, Sync).
+- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy Username `Ctrl+U`, Copy TOTP `Ctrl+T`, Open Website `Ctrl+O`, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
 - **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, and `max_output_mb`, with real-time CLI readiness indicators.
 
 ## Boundaries & Non-Goals

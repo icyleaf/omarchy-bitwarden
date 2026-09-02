@@ -99,6 +99,78 @@ Item {
         Layout.fillWidth: true
       }
 
+      // Ctrl+U
+      Rectangle {
+        implicitHeight: 22
+        implicitWidth: kU.implicitWidth + 12
+        radius: 4
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: kU
+          anchors.centerIn: parent
+          text: "Ctrl + U"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 11
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Copy username"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 11
+        Layout.fillWidth: true
+      }
+
+      // Ctrl+T
+      Rectangle {
+        implicitHeight: 22
+        implicitWidth: kT.implicitWidth + 12
+        radius: 4
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: kT
+          anchors.centerIn: parent
+          text: "Ctrl + T"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 11
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Copy live TOTP code"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 11
+        Layout.fillWidth: true
+      }
+
+      // Ctrl+O
+      Rectangle {
+        implicitHeight: 22
+        implicitWidth: kO.implicitWidth + 12
+        radius: 4
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: kO
+          anchors.centerIn: parent
+          text: "Ctrl + O"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 11
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Open primary website in default browser"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 11
+        Layout.fillWidth: true
+      }
+
       // Ctrl+K
       Rectangle {
         implicitHeight: 22
@@ -117,7 +189,7 @@ Item {
         }
       }
       Text {
-        text: "Open Action Palette (copy TOTP, username, PIN)"
+        text: "Open Action Palette (copy attributes, PIN, attachments)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 11
         Layout.fillWidth: true
