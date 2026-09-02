@@ -88,6 +88,31 @@ ScrollView {
       columnSpacing: 10
       Layout.fillWidth: true
 
+      // Tab
+      Rectangle {
+        implicitHeight: 20
+        implicitWidth: k3.implicitWidth + 10
+        radius: 3
+        color: Qt.rgba(0, 0, 0, 0.25)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: k3
+          anchors.centerIn: parent
+          text: "Tab"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 10
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Switch category filter (Logins, Cards, Notes, SSH)"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 10
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+      }
+
       // Enter
       Rectangle {
         implicitHeight: 20
@@ -213,30 +238,7 @@ ScrollView {
         wrapMode: Text.WordWrap
       }
 
-      // Tab
-      Rectangle {
-        implicitHeight: 20
-        implicitWidth: k3.implicitWidth + 10
-        radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
-        border.color: emptyInspectorRoot.borderColor
-        border.width: 1
-        Text {
-          id: k3
-          anchors.centerIn: parent
-          text: "Tab"
-          color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
-          font.weight: Font.Medium
-        }
-      }
-      Text {
-        text: "Switch category filter (Logins, Cards, Notes, SSH)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
-        Layout.fillWidth: true
-        wrapMode: Text.WordWrap
-      }
+
 
       // Ctrl+R
       Rectangle {
