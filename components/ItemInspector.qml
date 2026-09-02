@@ -83,11 +83,26 @@ ScrollView {
     return "•••• •••• •••• ••••"
   }
 
+  function isAttachmentPreviewable(filename) {
+    if (!filename) return false
+    var dotIdx = filename.lastIndexOf(".")
+    if (dotIdx === -1) return false
+    var ext = filename.slice(dotIdx + 1).toLowerCase()
+    var previewableExts = [
+      "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico",
+      "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "log",
+      "sh", "bash", "zsh", "py", "js", "ts", "jsx", "tsx", "html", "htm", "css", "scss", "sass", "less",
+      "xml", "conf", "config", "ini", "env", "pem", "key", "pub", "crt", "cer",
+      "diff", "patch", "sql", "lua", "c", "cpp", "cc", "cxx", "h", "hpp", "rs", "go", "java", "kt", "kts", "rb", "php"
+    ]
+    return previewableExts.indexOf(ext) !== -1
+  }
+
   function getAttachmentIcon(filename) {
     if (!filename) return "\uf15b"
     var ext = filename.split(".").pop().toLowerCase()
-    if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"].indexOf(ext) !== -1) return "\uf03e"
-    if (["txt", "md", "json", "yaml", "yml", "csv", "log", "sh", "py", "js", "ts", "html", "css"].indexOf(ext) !== -1) return "\uf0f6"
+    if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].indexOf(ext) !== -1) return "\uf03e"
+    if (["txt", "md", "json", "yaml", "yml", "toml", "csv", "log", "sh", "py", "js", "ts", "html", "css", "xml", "conf", "ini", "env", "sql", "rs", "go", "c", "cpp"].indexOf(ext) !== -1) return "\uf0f6"
     if (["pdf"].indexOf(ext) !== -1) return "\uf1c1"
     if (["zip", "tar", "gz", "7z", "rar"].indexOf(ext) !== -1) return "\uf1c6"
     return "\uf15b"
@@ -240,6 +255,71 @@ ScrollView {
               font.family: "monospace"
               text: (inspectorRoot.activeAttachmentPreview && inspectorRoot.activeAttachmentPreview.text_content) ? inspectorRoot.activeAttachmentPreview.text_content : ""
               background: null
+            }
+          }
+        }
+      }
+
+      // Preview Content: Binary / Non-previewable fallback
+      ColumnLayout {
+        visible: Boolean(inspectorRoot.activeAttachmentPreview && !inspectorRoot.activeAttachmentPreview.is_image && !inspectorRoot.activeAttachmentPreview.is_text)
+        Layout.fillWidth: true
+        spacing: 12
+        Layout.topMargin: 20
+        Layout.bottomMargin: 20
+
+        Text {
+          Layout.alignment: Qt.AlignHCenter
+          text: "\uf15b"
+          font.family: inspectorRoot.fontFamily
+          font.pixelSize: 36
+          color: Qt.darker(inspectorRoot.foreground, 1.8)
+        }
+
+        Text {
+          Layout.alignment: Qt.AlignHCenter
+          text: "Preview not available for this file format"
+          color: Qt.darker(inspectorRoot.foreground, 1.4)
+          font.pixelSize: 12
+          font.weight: Font.Medium
+        }
+
+        Rectangle {
+          Layout.alignment: Qt.AlignHCenter
+          implicitHeight: 28
+          implicitWidth: dlRow.implicitWidth + 20
+          radius: 4
+          color: dlMouse.containsMouse ? Qt.rgba(inspectorRoot.accent.r, inspectorRoot.accent.g, inspectorRoot.accent.b, 0.3) : Qt.rgba(inspectorRoot.accent.r, inspectorRoot.accent.g, inspectorRoot.accent.b, 0.15)
+          border.color: inspectorRoot.accent
+          border.width: 1
+
+          RowLayout {
+            id: dlRow
+            anchors.centerIn: parent
+            spacing: 6
+            Text {
+              text: "\uf019"
+              font.family: inspectorRoot.fontFamily
+              color: inspectorRoot.accent
+              font.pixelSize: 12
+            }
+            Text {
+              text: "Open or Save File"
+              color: inspectorRoot.foreground
+              font.pixelSize: 11
+              font.weight: Font.Medium
+            }
+          }
+
+          MouseArea {
+            id: dlMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+              if (inspectorRoot.activeAttachmentPreview && inspectorRoot.activeAttachmentPreview.path) {
+                Qt.openUrlExternally("file://" + inspectorRoot.activeAttachmentPreview.path)
+              }
             }
           }
         }
@@ -966,8 +1046,9 @@ ScrollView {
                 }
               }
 
-              // View / Preview Ghost Button
+              // View / Preview Ghost Button (Only for previewable attachments)
               GhostIconButton {
+                visible: inspectorRoot.isAttachmentPreviewable(modelData.fileName)
                 iconText: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "\uf021" : "\uf06e"
                 tooltip: "Preview attachment"
                 onClicked: inspectorRoot.viewAttachmentRequested(inspectorRoot.item, modelData)

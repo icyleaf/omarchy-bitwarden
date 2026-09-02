@@ -289,6 +289,21 @@ Item {
     vaultListProc.running = true
   }
 
+  function isAttachmentPreviewable(filename) {
+    if (!filename) return false
+    var dotIdx = filename.lastIndexOf(".")
+    if (dotIdx === -1) return false
+    var ext = filename.slice(dotIdx + 1).toLowerCase()
+    var previewableExts = [
+      "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico",
+      "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "log",
+      "sh", "bash", "zsh", "py", "js", "ts", "jsx", "tsx", "html", "htm", "css", "scss", "sass", "less",
+      "xml", "conf", "config", "ini", "env", "pem", "key", "pub", "crt", "cer",
+      "diff", "patch", "sql", "lua", "c", "cpp", "cc", "cxx", "h", "hpp", "rs", "go", "java", "kt", "kts", "rb", "php"
+    ]
+    return previewableExts.indexOf(ext) !== -1
+  }
+
   function isSubsequence(pattern, text) {
     if (!pattern) return true
     pattern = pattern.toLowerCase()
@@ -647,12 +662,14 @@ Item {
         var att = item.attachments[a]
         if (att && att.fileName) {
           (function(currAtt) {
-            actions.push({
-              label: "View Attachment: " + currAtt.fileName,
-              icon: "\uf06e",
-              shortcut: "",
-              action: function() { root.viewAttachment(item, currAtt) }
-            })
+            if (root.isAttachmentPreviewable(currAtt.fileName)) {
+              actions.push({
+                label: "View Attachment: " + currAtt.fileName,
+                icon: "\uf06e",
+                shortcut: "",
+                action: function() { root.viewAttachment(item, currAtt) }
+              })
+            }
             actions.push({
               label: "Download Attachment: " + currAtt.fileName,
               icon: "\uf019",
