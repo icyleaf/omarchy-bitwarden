@@ -87,6 +87,30 @@ Rectangle {
               paletteRoot.actionFilterQuery = text
               paletteRoot.selectedIndex = 0
             }
+            Keys.onPressed: function(event) {
+              var filtered = paletteRoot.getFilteredActions()
+              if (event.key === Qt.Key_Down) {
+                if (filtered.length > 0) {
+                  paletteRoot.selectedIndex = (paletteRoot.selectedIndex + 1) % filtered.length
+                  paletteListView.positionViewAtIndex(paletteRoot.selectedIndex, ListView.Contain)
+                }
+                event.accepted = true
+              } else if (event.key === Qt.Key_Up) {
+                if (filtered.length > 0) {
+                  paletteRoot.selectedIndex = (paletteRoot.selectedIndex - 1 + filtered.length) % filtered.length
+                  paletteListView.positionViewAtIndex(paletteRoot.selectedIndex, ListView.Contain)
+                }
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (filtered.length > 0 && paletteRoot.selectedIndex >= 0 && paletteRoot.selectedIndex < filtered.length) {
+                  paletteRoot.actionSelected(filtered[paletteRoot.selectedIndex])
+                }
+                event.accepted = true
+              } else if (event.key === Qt.Key_Escape) {
+                paletteRoot.closeRequested()
+                event.accepted = true
+              }
+            }
           }
 
           Text {
@@ -192,7 +216,9 @@ Rectangle {
 
   onActiveChanged: {
     if (active) {
+      actionFilterQuery = ""
       paletteFilterInput.text = ""
+      selectedIndex = 0
       paletteFilterInput.forceActiveFocus()
     }
   }

@@ -17,6 +17,15 @@ Item {
   signal itemSelected(int index)
   signal itemTriggered(int index)
 
+  onSelectedIndexChanged: {
+    if (selectedIndex >= 0 && items && selectedIndex < items.length) {
+      if (listView.currentIndex !== selectedIndex) {
+        listView.currentIndex = selectedIndex
+      }
+      listView.positionViewAtIndex(selectedIndex, ListView.Contain)
+    }
+  }
+
   function getHostname(uri) {
     if (!uri) return ""
     var str = String(uri).trim()

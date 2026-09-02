@@ -399,8 +399,13 @@ Item {
 
   onShowActionPaletteChanged: {
     if (root.showActionPalette) {
-      root.actionPaletteIndex = 0
       root.updateAvailableActions()
+    } else {
+      Qt.callLater(function() {
+        if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
+          searchHeader.searchField.forceActiveFocus()
+        }
+      })
     }
   }
 
@@ -918,21 +923,8 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
         if (root.showActionPalette) {
-          var actions = root.currentAvailableActions || []
           if (event.key === Qt.Key_Escape) {
             root.showActionPalette = false
-            event.accepted = true
-          } else if (event.key === Qt.Key_Down) {
-            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex + 1) % actions.length
-            event.accepted = true
-          } else if (event.key === Qt.Key_Up) {
-            if (actions.length > 0) root.actionPaletteIndex = (root.actionPaletteIndex - 1 + actions.length) % actions.length
-            event.accepted = true
-          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (actions.length > 0 && root.actionPaletteIndex < actions.length) {
-              actions[root.actionPaletteIndex].action()
-              root.showActionPalette = false
-            }
             event.accepted = true
           }
           return
@@ -1182,7 +1174,6 @@ Item {
       ActionPaletteModal {
         active: root.showActionPalette
         actions: root.currentAvailableActions
-        selectedIndex: root.actionPaletteIndex
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
