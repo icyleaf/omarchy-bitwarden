@@ -25,10 +25,11 @@ To provide a unified debugging mechanism that helps both users and maintainers t
    - Both CLI and QML logging pipelines enforce sanitization regexes prior to output:
      - Bearer tokens: `Bearer [A-Za-z0-9-_.]+` $\to$ `Bearer <REDACTED_TOKEN>`
      - Passwords, 2FA codes, API client secrets, encryption keys, and master keys are scrubbed with `<REDACTED>`.
+     - Server URLs: Custom/self-hosted endpoints, private IP addresses, and custom internal domains are masked as `<REDACTED_CUSTOM_HOST>` or `<REDACTED_LOCAL_IP>`, while official public endpoints (`vault.bitwarden.com` / `vault.bitwarden.eu`) are categorized as `Official Cloud`.
 
 4. **In-App Logs Viewer & Issue Diagnostics Export**:
-   - A dedicated Logs section within Settings displays the in-memory ring buffer (up to 500 recent entries) with level filtering (All, Error, Warn).
-   - A "Copy Diagnostics" action aggregates anonymized environment metadata (OS, Quickshell, omawarden Git commit SHA, server host domain, log level) and recent logs into a preformatted Markdown report for GitHub Issue submissions.
+   - A dedicated Logs section within Settings displays the in-memory ring buffer (up to 500 recent entries) with level filtering (All, Errors, Warnings, Info, Debug).
+   - A "Copy Diagnostics" action aggregates anonymized environment metadata (OS, Quickshell, omawarden Git commit SHA, masked server endpoint type, log level) and recent logs into a preformatted Markdown report for GitHub Issue submissions without leaking private network topology or secrets.
 
 ## Consequences
 - **Positive**:

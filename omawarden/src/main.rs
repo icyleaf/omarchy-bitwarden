@@ -328,11 +328,20 @@ fn main() -> ExitCode {
                     cfg.log_level = v.to_lowercase();
                 }
                 let _ = config_mgr.save(&cfg);
+                let safe_url = if cfg.server_url.is_empty() {
+                    "default (official)".to_string()
+                } else if cfg.server_url.contains("vault.bitwarden.com")
+                    || cfg.server_url.contains("vault.bitwarden.eu")
+                {
+                    cfg.server_url.clone()
+                } else {
+                    "<REDACTED_CUSTOM_HOST>".to_string()
+                };
                 omawarden::log_info!(
                     "omawarden:config",
                     "Updated configuration (log_level: {}, server_url: {}).",
                     cfg.log_level,
-                    cfg.server_url
+                    safe_url
                 );
                 println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
                 ExitCode::SUCCESS

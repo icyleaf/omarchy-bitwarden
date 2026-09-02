@@ -307,6 +307,23 @@ Item {
     return previewableExts.indexOf(ext) !== -1
   }
 
+  function sanitizeServerUrl(url) {
+    if (!url || !url.trim()) return "Default (https://vault.bitwarden.com)"
+    var trimmed = url.trim()
+    var lower = trimmed.toLowerCase()
+    if (lower === "https://vault.bitwarden.com" || lower === "http://vault.bitwarden.com") {
+      return "Official Cloud (https://vault.bitwarden.com)"
+    }
+    if (lower === "https://vault.bitwarden.eu" || lower === "http://vault.bitwarden.eu") {
+      return "Official Cloud (https://vault.bitwarden.eu)"
+    }
+    var scheme = (lower.indexOf("http://") === 0) ? "http" : "https"
+    if (lower.indexOf("127.0.0.1") !== -1 || lower.indexOf("localhost") !== -1 || lower.indexOf("192.168.") !== -1 || lower.indexOf("10.") !== -1 || lower.indexOf("172.") !== -1) {
+      return "Self-Hosted / Local IP (" + scheme + "://<REDACTED_LOCAL_IP>)"
+    }
+    return "Self-Hosted / Custom (" + scheme + "://<REDACTED_CUSTOM_HOST>)"
+  }
+
   function sanitizeLog(text) {
     if (!text) return ""
     var str = String(text)
@@ -838,14 +855,15 @@ Item {
   function copyDiagnostics() {
     var ts = new Date().toISOString()
     var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : "Unknown"
-    var sUrl = (root.config && root.config.server_url) ? root.config.server_url : "https://vault.bitwarden.com"
+    var rawUrl = (root.config && root.config.server_url) ? root.config.server_url : ""
+    var sUrl = root.sanitizeServerUrl(rawUrl)
     var lLevel = (root.config && root.config.log_level) ? root.config.log_level : "error"
     var vStatus = (root.authState ? root.authState.status : "unknown")
 
     var report = "### Omarchy Bitwarden Diagnostics Report\n\n"
     report += "- **Generated At**: " + ts + "\n"
     report += "- **omawarden Version**: " + cliVer + "\n"
-    report += "- **Server URL Host**: " + sUrl + "\n"
+    report += "- **Server URL**: " + sUrl + "\n"
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
