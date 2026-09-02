@@ -3,8 +3,8 @@ name: Release Omawarden CLI
 on:
   push:
     tags:
-      - 'omawarden-*'
-      - 'omawarden-v*'
+      - "omawarden-*"
+      - "omawarden-v*"
 
 permissions:
   contents: write
@@ -38,6 +38,18 @@ jobs:
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Validate Cargo.toml version matches release tag
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${RAW_TAG#omawarden-}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          CARGO_VERSION=$(grep '^version = ' omawarden/Cargo.toml | head -n 1 | cut -d'"' -f2)
+          echo "Release tag version: ${TAG_VERSION}, Cargo.toml version: ${CARGO_VERSION}"
+          if [ "${TAG_VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Release tag version (${TAG_VERSION}) does not match omawarden/Cargo.toml version (${CARGO_VERSION})!"
+            exit 1
+          fi
+
       - name: Build release binary
         run: |
           cd omawarden
@@ -57,7 +69,7 @@ jobs:
           mkdir -p "${DIST_DIR}"
           cp "omawarden/target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
           cp LICENSE README.md "${DIST_DIR}/"
-          
+
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
