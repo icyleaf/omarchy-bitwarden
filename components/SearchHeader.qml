@@ -22,6 +22,14 @@ ColumnLayout {
   spacing: 6
   Layout.fillWidth: true
 
+  onVisibleChanged: {
+    if (visible) {
+      Qt.callLater(function() {
+        searchInputField.forceActiveFocus()
+      })
+    }
+  }
+
   // 1. Search Box Bar
   Rectangle {
     Layout.fillWidth: true

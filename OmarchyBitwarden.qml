@@ -134,6 +134,16 @@ Item {
     }
   }
 
+  onEffectiveViewChanged: {
+    Qt.callLater(function() {
+      if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
+        searchHeader.searchField.forceActiveFocus()
+      } else if (root.opened && authViewComponent && authViewComponent.unlockInput) {
+        authViewComponent.unlockInput.forceActiveFocus()
+      }
+    })
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.errorMessage = ""
@@ -1366,6 +1376,11 @@ Item {
               root.loadVaultItems()
               root.syncVault(true, false)
             }
+            Qt.callLater(function() {
+              if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
+                searchHeader.searchField.forceActiveFocus()
+              }
+            })
           }
         } catch (e) {
           root.authState = ({
@@ -1541,6 +1556,11 @@ Item {
         root.lastSyncTime = Date.now()
         root.statusMessage = "Vault synchronized."
         root.loadVaultItems()
+        Qt.callLater(function() {
+          if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
+            searchHeader.searchField.forceActiveFocus()
+          }
+        })
       }
     }
     onExited: function(code) {
@@ -1561,12 +1581,22 @@ Item {
           root.isLoadingVault = false
           var cleanText = (text || "").trim()
           if (cleanText === root.lastVaultItemsRawText && root.rawVaultItems && root.rawVaultItems.length > 0) {
+            Qt.callLater(function() {
+              if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
+                searchHeader.searchField.forceActiveFocus()
+              }
+            })
             return
           }
           root.lastVaultItemsRawText = cleanText
           var items = JSON.parse(cleanText)
           root.rawVaultItems = items || []
           root.filterVaultItems(false)
+          Qt.callLater(function() {
+            if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
+              searchHeader.searchField.forceActiveFocus()
+            }
+          })
         } catch (e) {
           console.error("Failed to parse vault items:", e)
         }
