@@ -102,6 +102,9 @@ Item {
   property bool isBusy: false
   property bool isLoadingVault: false
   property bool lastSyncWasManual: false
+  property real lastSyncTime: 0
+  property int syncCooldownSeconds: 300
+  property string lastVaultItemsRawText: ""
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -148,7 +151,7 @@ Item {
     root.checkUpdates(false)
     if (root.authState.status === "unlocked") {
       if (!root.rawVaultItems || root.rawVaultItems.length === 0) root.loadVaultItems()
-      root.syncVault(true)
+      root.syncVault(true, false)
     }
     Qt.callLater(function() {
       if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
@@ -255,12 +258,17 @@ Item {
     authStatusProc.running = true
   }
 
-  function syncVault(isBackground) {
-    root.lastSyncWasManual = !isBackground
-    if (!isBackground) {
-      root.isBusy = true
-      root.statusMessage = "Syncing vault with Bitwarden..."
+  function syncVault(isBackground, force) {
+    if (vaultSyncProc.running) return
+    var now = Date.now()
+    if (isBackground && !force) {
+      if (root.lastSyncTime > 0 && (now - root.lastSyncTime) < (root.syncCooldownSeconds * 1000)) {
+        return
+      }
     }
+    root.lastSyncWasManual = !isBackground
+    root.isBusy = true
+    root.statusMessage = "Syncing vault with Bitwarden..."
     vaultSyncProc.command = [root.helperPath, "vault", "sync"]
     vaultSyncProc.running = true
   }
@@ -286,7 +294,8 @@ Item {
     return false
   }
 
-  function filterVaultItems() {
+  function filterVaultItems(resetSelection) {
+    var currentId = (root.selectedItem && !resetSelection) ? root.selectedItem.id : null
     var q = (root.searchQuery || "").trim().toLowerCase()
     var cat = root.activeCategory
     var items = root.rawVaultItems || []
@@ -357,12 +366,22 @@ Item {
     }
 
     root.filteredItems = out
-    root.selectedIndex = 0
+
+    var targetIndex = 0
+    if (currentId && out.length > 0) {
+      for (var k = 0; k < out.length; k++) {
+        if (out[k].id === currentId) {
+          targetIndex = k
+          break
+        }
+      }
+    }
+    root.selectedIndex = targetIndex
     root.handleSelectedItemChanged()
   }
 
-  onSearchQueryChanged: filterVaultItems()
-  onActiveCategoryChanged: filterVaultItems()
+  onSearchQueryChanged: filterVaultItems(true)
+  onActiveCategoryChanged: filterVaultItems(true)
   onSelectedIndexChanged: root.handleSelectedItemChanged()
 
   function handleSelectedItemChanged() {
@@ -649,7 +668,7 @@ Item {
     }
 
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
-    actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false) } })
+    actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
     actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
 
     return actions
@@ -722,6 +741,8 @@ Item {
     })
     root.rawVaultItems = []
     root.filteredItems = []
+    root.lastVaultItemsRawText = ""
+    root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
     root.selectedIndex = 0
@@ -765,6 +786,8 @@ Item {
     })
     root.rawVaultItems = []
     root.filteredItems = []
+    root.lastVaultItemsRawText = ""
+    root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
     root.selectedIndex = 0
@@ -860,7 +883,7 @@ Item {
     Shortcut {
       sequence: "Ctrl+R"
       enabled: root.opened && root.authState.status === "unlocked" && !root.isBusy
-      onActivated: root.syncVault(false)
+      onActivated: root.syncVault(false, true)
     }
 
     Shortcut {
@@ -1128,7 +1151,7 @@ Item {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
           }
-          onSyncTriggered: { root.syncVault(false) }
+          onSyncTriggered: { root.syncVault(false, true) }
           onLockTriggered: { root.doLock() }
           onSettingsTriggered: {
             root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
@@ -1350,7 +1373,7 @@ Item {
             root.authState = data
             if (data.status === "unlocked" && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
               root.loadVaultItems()
-              root.syncVault(true)
+              root.syncVault(true, false)
             }
           }
         } catch (e) {
@@ -1402,7 +1425,7 @@ Item {
             })
             root.refreshAuthStatus()
             root.loadVaultItems()
-            root.syncVault(true)
+            root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Unlock failed."
           }
@@ -1447,7 +1470,7 @@ Item {
             })
             root.refreshAuthStatus()
             root.loadVaultItems()
-            root.syncVault(true)
+            root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Login failed."
             var errLower = (data.error || "").toLowerCase()
@@ -1481,6 +1504,8 @@ Item {
         })
         root.rawVaultItems = []
         root.filteredItems = []
+        root.lastVaultItemsRawText = ""
+        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -1504,6 +1529,8 @@ Item {
         })
         root.rawVaultItems = []
         root.filteredItems = []
+        root.lastVaultItemsRawText = ""
+        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -1520,15 +1547,14 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
-        if (root.lastSyncWasManual) {
-          root.statusMessage = "Vault synchronized."
-        }
+        root.lastSyncTime = Date.now()
+        root.statusMessage = "Vault synchronized."
         root.loadVaultItems()
       }
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0 && root.lastSyncWasManual) {
+      if (code !== 0) {
         root.errorMessage = "Vault sync failed."
       }
     }
@@ -1542,9 +1568,14 @@ Item {
       onStreamFinished: {
         try {
           root.isLoadingVault = false
-          var items = JSON.parse(text)
+          var cleanText = (text || "").trim()
+          if (cleanText === root.lastVaultItemsRawText && root.rawVaultItems && root.rawVaultItems.length > 0) {
+            return
+          }
+          root.lastVaultItemsRawText = cleanText
+          var items = JSON.parse(cleanText)
           root.rawVaultItems = items || []
-          root.filterVaultItems()
+          root.filterVaultItems(false)
         } catch (e) {
           console.error("Failed to parse vault items:", e)
         }
