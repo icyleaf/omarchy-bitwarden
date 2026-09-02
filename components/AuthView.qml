@@ -27,6 +27,25 @@ Item {
 
   property alias unlockInput: unlockPasswordField
 
+  function clearInputs() {
+    if (unlockPasswordField) unlockPasswordField.text = ""
+    if (loginPwdInput) loginPwdInput.text = ""
+    if (login2FAInput) login2FAInput.text = ""
+    if (apiClientSecInput) apiClientSecInput.text = ""
+  }
+
+  onVisibleChanged: {
+    if (!visible) {
+      clearInputs()
+    }
+  }
+
+  onAuthStateChanged: {
+    if (authState && (authState.status === "locked" || authState.status === "unlocked" || authState.status === "unauthenticated")) {
+      clearInputs()
+    }
+  }
+
   Flickable {
     id: authFlickable
     anchors.fill: parent

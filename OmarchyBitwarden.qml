@@ -899,6 +899,7 @@ Item {
 
   function doLock() {
     root.logInfo("omarchy:auth", "Locking vault...")
+    if (authViewComponent) authViewComponent.clearInputs()
     root.authState = ({
       status: "locked",
       server_url: (root.authState && root.authState.server_url) || "",
@@ -947,6 +948,7 @@ Item {
 
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
+    if (authViewComponent) authViewComponent.clearInputs()
     root.authState = ({
       status: "unauthenticated",
       server_url: "",
@@ -1611,6 +1613,7 @@ Item {
           if (data.ok) {
             root.statusMessage = "Vault unlocked successfully."
             root.searchQuery = ""
+            if (authViewComponent) authViewComponent.clearInputs()
             root.authState = ({
               status: "unlocked",
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -1660,6 +1663,7 @@ Item {
           if (data.ok) {
             root.statusMessage = "Logged in successfully."
             root.searchQuery = ""
+            if (authViewComponent) authViewComponent.clearInputs()
 
             root.show2FAField = false
             root.authState = ({
