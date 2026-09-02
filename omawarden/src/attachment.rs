@@ -95,15 +95,16 @@ pub fn get_attachment(
     }
 
     let cfg = ConfigManager::new(None).load();
-    let storage = StorageManager::default().load();
+    let storage_mgr = StorageManager::default();
+    let storage = storage_mgr.load();
 
-    let token = session_token
+    let initial_token = session_token
         .map(|s| s.to_string())
         .or_else(|| KeyringManager::default().get_session())
         .or_else(|| storage.access_token.clone());
 
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
+    let token_val = match initial_token {
+        Some(ref t) if !t.is_empty() => t.clone(),
         _ => {
             return AttachmentResponse {
                 ok: false,
@@ -118,6 +119,7 @@ pub fn get_attachment(
             };
         }
     };
+    let mut active_token = token_val;
 
     let safe_filename = if filename.is_empty() || filename == "." {
         format!("attachment_{}", attachment_id)
@@ -174,11 +176,35 @@ pub fn get_attachment(
         .build()
         .unwrap_or_default();
 
-    let bytes = match client
+    let mut download_res = client
         .get(&download_url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-    {
+        .header("Authorization", format!("Bearer {}", active_token))
+        .send();
+
+    // If 401 Unauthorized, attempt token refresh using refresh_token
+    if let Ok(ref r) = download_res {
+        if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(ref ref_tok) = storage.refresh_token {
+                let api_client = crate::api::BitwardenApiClient::new(server_url);
+                if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
+                    let mut fresh_st = storage_mgr.load();
+                    fresh_st.access_token = Some(tok_resp.access_token.clone());
+                    if let Some(ref new_ref) = tok_resp.refresh_token {
+                        fresh_st.refresh_token = Some(new_ref.clone());
+                    }
+                    let _ = storage_mgr.save(&fresh_st);
+                    active_token = tok_resp.access_token;
+
+                    download_res = client
+                        .get(&download_url)
+                        .header("Authorization", format!("Bearer {}", active_token))
+                        .send();
+                }
+            }
+        }
+    }
+
+    let bytes = match download_res {
         Ok(r) if r.status().is_success() => {
             let body_bytes = match r.bytes() {
                 Ok(b) => b.to_vec(),
@@ -199,15 +225,51 @@ pub fn get_attachment(
 
             // Check if response is a JSON object with a direct download url (e.g. S3 / signed storage url)
             if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                if let Some(signed_url) = json_val.get("url").and_then(|u| u.as_str()) {
-                    if let Ok(blob_resp) = client.get(signed_url).send() {
+                if let Some(url_str) = json_val.get("url").and_then(|u| u.as_str()) {
+                    let full_signed_url = if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                        url_str.to_string()
+                    } else if url_str.starts_with('/') {
+                        format!("{}{}", server_url, url_str)
+                    } else {
+                        format!("{}/{}", server_url, url_str)
+                    };
+
+                    let mut req = client.get(&full_signed_url);
+                    if full_signed_url.starts_with(server_url) && !full_signed_url.contains("token=") {
+                        req = req.header("Authorization", format!("Bearer {}", active_token));
+                    }
+
+                    if let Ok(blob_resp) = req.send() {
                         if blob_resp.status().is_success() {
                             blob_resp.bytes().map(|b| b.to_vec()).unwrap_or(body_bytes)
                         } else {
-                            body_bytes
+                            return AttachmentResponse {
+                                ok: false,
+                                error: Some(format!(
+                                    "Failed to fetch attachment from storage (HTTP {})",
+                                    blob_resp.status()
+                                )),
+                                path: None,
+                                filename: None,
+                                action: None,
+                                is_image: None,
+                                is_text: None,
+                                text_content: None,
+                                size: None,
+                            };
                         }
                     } else {
-                        body_bytes
+                        return AttachmentResponse {
+                            ok: false,
+                            error: Some("Failed to connect to attachment storage URL".to_string()),
+                            path: None,
+                            filename: None,
+                            action: None,
+                            is_image: None,
+                            is_text: None,
+                            text_content: None,
+                            size: None,
+                        };
                     }
                 } else {
                     body_bytes
@@ -449,6 +511,27 @@ mod tests {
         );
         if !res.ok {
             assert!(res.error.is_some());
+        }
+    }
+
+    #[test]
+    fn test_safe_filename_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().to_str().unwrap();
+        let res = get_attachment(
+            "item1",
+            "att1",
+            "../../../etc/passwd",
+            Some(target),
+            false,
+            false,
+            Some("fake_token"),
+            None,
+            false,
+        );
+        // It should sanitize filename to passwd or fail gracefully on network/auth without directory traversal
+        if res.ok {
+            assert_eq!(res.filename.unwrap(), "passwd");
         }
     }
 }
