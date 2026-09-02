@@ -218,7 +218,12 @@ pub fn get_attachment(
     // If 401 Unauthorized, attempt token refresh using refresh_token
     if let Ok(ref r) = download_res {
         if r.status() == reqwest::StatusCode::UNAUTHORIZED {
-            crate::log_warn!("omawarden:attachment", "HTTP 401 Unauthorized for item {} attachment {}. Attempting token refresh.", item_id, attachment_id);
+            crate::log_warn!(
+                "omawarden:attachment",
+                "HTTP 401 Unauthorized for item {} attachment {}. Attempting token refresh.",
+                item_id,
+                attachment_id
+            );
             if let Some(ref ref_tok) = storage.refresh_token {
                 let api_client = crate::api::BitwardenApiClient::new(server_url);
                 if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
@@ -229,7 +234,10 @@ pub fn get_attachment(
                     }
                     let _ = storage_mgr.save(&fresh_st);
                     active_token = tok_resp.access_token;
-                    crate::log_info!("omawarden:attachment", "Token refresh successful, retrying download.");
+                    crate::log_info!(
+                        "omawarden:attachment",
+                        "Token refresh successful, retrying download."
+                    );
 
                     download_res = client
                         .get(&download_url)
@@ -266,16 +274,19 @@ pub fn get_attachment(
             // Check if response is a JSON object with a direct download url (e.g. S3 / signed storage url)
             if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                 if let Some(url_str) = json_val.get("url").and_then(|u| u.as_str()) {
-                    let full_signed_url = if url_str.starts_with("http://") || url_str.starts_with("https://") {
-                        url_str.to_string()
-                    } else if url_str.starts_with('/') {
-                        format!("{}{}", server_url, url_str)
-                    } else {
-                        format!("{}/{}", server_url, url_str)
-                    };
+                    let full_signed_url =
+                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                            url_str.to_string()
+                        } else if url_str.starts_with('/') {
+                            format!("{}{}", server_url, url_str)
+                        } else {
+                            format!("{}/{}", server_url, url_str)
+                        };
 
                     let mut req = client.get(&full_signed_url);
-                    if full_signed_url.starts_with(server_url) && !full_signed_url.contains("token=") {
+                    if full_signed_url.starts_with(server_url)
+                        && !full_signed_url.contains("token=")
+                    {
                         req = req.header("Authorization", format!("Bearer {}", active_token));
                     }
 
@@ -283,7 +294,10 @@ pub fn get_attachment(
                         if blob_resp.status().is_success() {
                             blob_resp.bytes().map(|b| b.to_vec()).unwrap_or(body_bytes)
                         } else {
-                            let err_msg = format!("Failed to fetch attachment from storage (HTTP {})", blob_resp.status());
+                            let err_msg = format!(
+                                "Failed to fetch attachment from storage (HTTP {})",
+                                blob_resp.status()
+                            );
                             crate::log_error!("omawarden:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
@@ -627,15 +641,25 @@ mod tests {
             false,
         );
 
-        assert!(res.ok, "Expected cached fast-path to succeed: {:?}", res.error);
+        assert!(
+            res.ok,
+            "Expected cached fast-path to succeed: {:?}",
+            res.error
+        );
         assert_eq!(res.filename.unwrap(), "test_file.txt");
         assert_eq!(res.action.unwrap(), "download");
-        assert_eq!(res.text_content.unwrap(), "cached attachment secret content 12345");
+        assert_eq!(
+            res.text_content.unwrap(),
+            "cached attachment secret content 12345"
+        );
 
         // Verify file was copied to destination
         let dest = temp_dir.path().join("test_file.txt");
         assert!(dest.exists());
-        assert_eq!(fs::read_to_string(&dest).unwrap(), "cached attachment secret content 12345");
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            "cached attachment secret content 12345"
+        );
 
         // Cleanup
         let _ = fs::remove_file(&preview_file);

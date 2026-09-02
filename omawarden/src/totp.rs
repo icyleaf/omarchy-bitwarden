@@ -180,7 +180,12 @@ pub fn generate_totp(
     let code_val = code_int % modulus;
     let code_str = format!("{:0width$}", code_val, width = digits as usize);
 
-    crate::log_info!("omawarden:totp", "Generated TOTP token (ttl: {}s, period: {}s).", ttl, period);
+    crate::log_info!(
+        "omawarden:totp",
+        "Generated TOTP token (ttl: {}s, period: {}s).",
+        ttl,
+        period
+    );
 
     Some(TotpResult {
         code: code_str,

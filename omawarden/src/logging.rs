@@ -40,14 +40,14 @@ pub fn sanitize_log_message(msg: &str) -> String {
     static PWD_RE: OnceLock<Regex> = OnceLock::new();
     static SECRET_RE: OnceLock<Regex> = OnceLock::new();
 
-    let token_re = TOKEN_RE.get_or_init(|| {
-        Regex::new(r"(?i)bearer\s+[a-z0-9_\-\.]+").unwrap()
-    });
+    let token_re = TOKEN_RE.get_or_init(|| Regex::new(r"(?i)bearer\s+[a-z0-9_\-\.]+").unwrap());
     let pwd_re = PWD_RE.get_or_init(|| {
-        Regex::new(r#"(?i)("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*""#).unwrap()
+        Regex::new(r#"(?i)("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*""#)
+            .unwrap()
     });
     let secret_re = SECRET_RE.get_or_init(|| {
-        Regex::new(r#"(?i)("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*""#).unwrap()
+        Regex::new(r#"(?i)("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*""#)
+            .unwrap()
     });
 
     let s1 = token_re.replace_all(msg, "Bearer <REDACTED>");

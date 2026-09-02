@@ -151,7 +151,11 @@ impl AuthManager {
     }
 
     pub fn login_password(&self, email: &str, password: &str, code: Option<&str>) -> AuthResult {
-        crate::log_info!("omawarden:auth", "Starting login with password for {}", email);
+        crate::log_info!(
+            "omawarden:auth",
+            "Starting login with password for {}",
+            email
+        );
         let client = BitwardenApiClient::new(&self.server_url);
         let password_zeroizing = Zeroizing::new(password.to_string());
 
@@ -221,7 +225,11 @@ impl AuthManager {
     }
 
     pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
-        crate::log_info!("omawarden:auth", "Starting login with API Key client_id: {}", client_id);
+        crate::log_info!(
+            "omawarden:auth",
+            "Starting login with API Key client_id: {}",
+            client_id
+        );
         let client = BitwardenApiClient::new(&self.server_url);
         let token_resp = match client.login_apikey(client_id, client_secret) {
             Ok(r) => r,

@@ -307,7 +307,12 @@ fn main() -> ExitCode {
                     cfg.log_level = v.to_lowercase();
                 }
                 let _ = config_mgr.save(&cfg);
-                omawarden::log_info!("omawarden:config", "Updated configuration (log_level: {}, server_url: {}).", cfg.log_level, cfg.server_url);
+                omawarden::log_info!(
+                    "omawarden:config",
+                    "Updated configuration (log_level: {}, server_url: {}).",
+                    cfg.log_level,
+                    cfg.server_url
+                );
                 println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
                 ExitCode::SUCCESS
             }

@@ -30,7 +30,12 @@ impl ClipboardManager {
         {
             Ok(c) => c,
             Err(e) => {
-                crate::log_error!("omawarden:clipboard", "Failed to spawn {}: {:?}", self.wl_copy_path, e);
+                crate::log_error!(
+                    "omawarden:clipboard",
+                    "Failed to spawn {}: {:?}",
+                    self.wl_copy_path,
+                    e
+                );
                 return false;
             }
         };
