@@ -11,6 +11,7 @@ pub const DEFAULT_CLIPBOARD_CLEAR_SECONDS: i64 = 30;
 pub const DEFAULT_MAX_OUTPUT_MB: i64 = 10;
 pub const DEFAULT_EMAIL: &str = "";
 pub const DEFAULT_REMEMBER_EMAIL: bool = true;
+pub const DEFAULT_LOG_LEVEL: &str = "error";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -30,6 +31,8 @@ pub struct Config {
     pub email: String,
     #[serde(default = "default_remember_email")]
     pub remember_email: bool,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_server_url() -> String {
@@ -56,6 +59,9 @@ fn default_email() -> String {
 fn default_remember_email() -> bool {
     DEFAULT_REMEMBER_EMAIL
 }
+fn default_log_level() -> String {
+    DEFAULT_LOG_LEVEL.to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -68,6 +74,7 @@ impl Default for Config {
             max_output_mb: default_max_output_mb(),
             email: default_email(),
             remember_email: default_remember_email(),
+            log_level: default_log_level(),
         }
     }
 }
@@ -133,6 +140,7 @@ mod tests {
         assert_eq!(cfg.max_output_mb, 10);
         assert_eq!(cfg.email, "");
         assert!(cfg.remember_email);
+        assert_eq!(cfg.log_level, "error");
     }
 
     #[test]

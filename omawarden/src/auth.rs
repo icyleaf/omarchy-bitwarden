@@ -151,6 +151,7 @@ impl AuthManager {
     }
 
     pub fn login_password(&self, email: &str, password: &str, code: Option<&str>) -> AuthResult {
+        crate::log_info!("omawarden:auth", "Starting login with password for {}", email);
         let client = BitwardenApiClient::new(&self.server_url);
         let password_zeroizing = Zeroizing::new(password.to_string());
 
@@ -158,11 +159,13 @@ impl AuthManager {
         {
             Ok(r) => r,
             Err(e) => {
+                let err_msg = sanitize_auth_error(Some(&e.to_string()));
+                crate::log_error!("omawarden:auth", "Login failed for {}: {}", email, err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
                     session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
+                    error: Some(err_msg),
                 };
             }
         };
@@ -202,6 +205,13 @@ impl AuthManager {
             "password": password
         }));
 
+        crate::log_info!(
+            "omawarden:auth",
+            "Login successful for {}. Initial sync retrieved {} ciphers.",
+            email,
+            storage.ciphers.len()
+        );
+
         AuthResult {
             ok: true,
             status: Some("unlocked".to_string()),
@@ -211,15 +221,18 @@ impl AuthManager {
     }
 
     pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
+        crate::log_info!("omawarden:auth", "Starting login with API Key client_id: {}", client_id);
         let client = BitwardenApiClient::new(&self.server_url);
         let token_resp = match client.login_apikey(client_id, client_secret) {
             Ok(r) => r,
             Err(e) => {
+                let err_msg = sanitize_auth_error(Some(&e.to_string()));
+                crate::log_error!("omawarden:auth", "API key login failed: {}", err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
                     session: None,
-                    error: Some(sanitize_auth_error(Some(&e.to_string()))),
+                    error: Some(err_msg),
                 };
             }
         };
@@ -251,6 +264,8 @@ impl AuthManager {
         let _ = self.storage_mgr.save(&storage);
         self.keyring_mgr.store_session(&token_resp.access_token);
 
+        crate::log_info!("omawarden:auth", "API key authentication successful.");
+
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
@@ -260,8 +275,10 @@ impl AuthManager {
     }
 
     pub fn unlock(&self, password: &str) -> AuthResult {
+        crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
         let storage = self.storage_mgr.load();
         if storage.enc_user_key.is_none() {
+            crate::log_error!("omawarden:auth", "Account is not logged in.");
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -289,6 +306,8 @@ impl AuthManager {
                     "password": password
                 }));
 
+                crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
+
                 AuthResult {
                     ok: true,
                     status: Some("unlocked".to_string()),
@@ -296,12 +315,16 @@ impl AuthManager {
                     error: None,
                 }
             }
-            Err(e) => AuthResult {
-                ok: false,
-                status: Some("locked".to_string()),
-                session: None,
-                error: Some(sanitize_auth_error(Some(&e.to_string()))),
-            },
+            Err(e) => {
+                let err_msg = sanitize_auth_error(Some(&e.to_string()));
+                crate::log_error!("omawarden:auth", "Unlock failed: {}", err_msg);
+                AuthResult {
+                    ok: false,
+                    status: Some("locked".to_string()),
+                    session: None,
+                    error: Some(err_msg),
+                }
+            }
         }
     }
 
@@ -310,6 +333,7 @@ impl AuthManager {
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
@@ -324,6 +348,7 @@ impl AuthManager {
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        crate::log_info!("omawarden:auth", "Account logged out and session cleared.");
         AuthResult {
             ok: true,
             status: Some("unauthenticated".to_string()),

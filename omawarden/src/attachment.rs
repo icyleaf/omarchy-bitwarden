@@ -218,6 +218,7 @@ pub fn get_attachment(
     // If 401 Unauthorized, attempt token refresh using refresh_token
     if let Ok(ref r) = download_res {
         if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+            crate::log_warn!("omawarden:attachment", "HTTP 401 Unauthorized for item {} attachment {}. Attempting token refresh.", item_id, attachment_id);
             if let Some(ref ref_tok) = storage.refresh_token {
                 let api_client = crate::api::BitwardenApiClient::new(server_url);
                 if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
@@ -228,11 +229,14 @@ pub fn get_attachment(
                     }
                     let _ = storage_mgr.save(&fresh_st);
                     active_token = tok_resp.access_token;
+                    crate::log_info!("omawarden:attachment", "Token refresh successful, retrying download.");
 
                     download_res = client
                         .get(&download_url)
                         .header("Authorization", format!("Bearer {}", active_token))
                         .send();
+                } else {
+                    crate::log_error!("omawarden:attachment", "Token refresh grant failed.");
                 }
             }
         }
@@ -243,9 +247,11 @@ pub fn get_attachment(
             let body_bytes = match r.bytes() {
                 Ok(b) => b.to_vec(),
                 Err(e) => {
+                    let err_msg = format!("Failed to read attachment response bytes: {}", e);
+                    crate::log_error!("omawarden:attachment", "{}", err_msg);
                     return AttachmentResponse {
                         ok: false,
-                        error: Some(format!("Failed to read attachment response bytes: {}", e)),
+                        error: Some(err_msg),
                         path: None,
                         filename: None,
                         action: None,
@@ -277,12 +283,11 @@ pub fn get_attachment(
                         if blob_resp.status().is_success() {
                             blob_resp.bytes().map(|b| b.to_vec()).unwrap_or(body_bytes)
                         } else {
+                            let err_msg = format!("Failed to fetch attachment from storage (HTTP {})", blob_resp.status());
+                            crate::log_error!("omawarden:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
-                                error: Some(format!(
-                                    "Failed to fetch attachment from storage (HTTP {})",
-                                    blob_resp.status()
-                                )),
+                                error: Some(err_msg),
                                 path: None,
                                 filename: None,
                                 action: None,
@@ -293,9 +298,11 @@ pub fn get_attachment(
                             };
                         }
                     } else {
+                        let err_msg = "Failed to connect to attachment storage URL".to_string();
+                        crate::log_error!("omawarden:attachment", "{}", err_msg);
                         return AttachmentResponse {
                             ok: false,
-                            error: Some("Failed to connect to attachment storage URL".to_string()),
+                            error: Some(err_msg),
                             path: None,
                             filename: None,
                             action: None,
@@ -313,9 +320,11 @@ pub fn get_attachment(
             }
         }
         Ok(r) => {
+            let err_msg = format!("Server returned HTTP {}", r.status());
+            crate::log_error!("omawarden:attachment", "{}", err_msg);
             return AttachmentResponse {
                 ok: false,
-                error: Some(format!("Server returned HTTP {}", r.status())),
+                error: Some(err_msg),
                 path: None,
                 filename: None,
                 action: None,
@@ -326,9 +335,11 @@ pub fn get_attachment(
             };
         }
         Err(e) => {
+            let err_msg = format!("Network download failed: {}", e);
+            crate::log_error!("omawarden:attachment", "{}", err_msg);
             return AttachmentResponse {
                 ok: false,
-                error: Some(format!("Network download failed: {}", e)),
+                error: Some(err_msg),
                 path: None,
                 filename: None,
                 action: None,

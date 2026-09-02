@@ -100,6 +100,8 @@ enum ConfigAction {
         email: Option<String>,
         #[arg(long)]
         remember_email: Option<String>,
+        #[arg(long)]
+        log_level: Option<String>,
     },
 }
 
@@ -274,6 +276,7 @@ fn main() -> ExitCode {
                 max_output_mb,
                 email,
                 remember_email,
+                log_level,
             } => {
                 if let Some(v) = server_url {
                     cfg.server_url = v;
@@ -300,7 +303,11 @@ fn main() -> ExitCode {
                     let lower = v.trim().to_lowercase();
                     cfg.remember_email = matches!(lower.as_str(), "true" | "1" | "yes");
                 }
+                if let Some(v) = log_level {
+                    cfg.log_level = v.to_lowercase();
+                }
                 let _ = config_mgr.save(&cfg);
+                omawarden::log_info!("omawarden:config", "Updated configuration (log_level: {}, server_url: {}).", cfg.log_level, cfg.server_url);
                 println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
                 ExitCode::SUCCESS
             }

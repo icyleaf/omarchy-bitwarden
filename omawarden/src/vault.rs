@@ -267,13 +267,17 @@ impl VaultManager {
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
         let fresh_storage = self.storage_mgr.load();
         if fresh_storage.enc_user_key.is_none() {
+            crate::log_error!("omawarden:vault", "Account not logged in or missing encryption keys.");
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
 
         let user_key = self
             .storage_mgr
             .unlock_user_key(password, &fresh_storage)
-            .map_err(|e| format!("Unlock failed: {:?}", e))?;
+            .map_err(|e| {
+                crate::log_error!("omawarden:vault", "Unlock user key failed: {:?}", e);
+                format!("Unlock failed: {:?}", e)
+            })?;
 
         let items = decrypt_sync_ciphers_with_context(
             &fresh_storage.ciphers,
@@ -297,15 +301,20 @@ impl VaultManager {
             *st = fresh_storage;
         }
 
+        crate::log_info!("omawarden:vault", "Decrypted and cached {} items in memory.", count);
         Ok(count)
     }
 
     pub fn sync(&self) -> Result<usize, String> {
+        crate::log_info!("omawarden:vault", "Starting vault synchronization with server...");
         let storage = self.storage_mgr.load();
         let token = storage
             .access_token
             .as_ref()
-            .ok_or_else(|| "Session token missing. Please log in.".to_string())?;
+            .ok_or_else(|| {
+                crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
+                "Session token missing. Please log in.".to_string()
+            })?;
 
         let client = BitwardenApiClient::new(if self.server_url.is_empty() {
             &storage.server_url
@@ -317,8 +326,10 @@ impl VaultManager {
         let sync_resp = match sync_resp_res {
             Ok(resp) => resp,
             Err(ApiError::Http(ref msg)) if msg.contains("401") => {
+                crate::log_warn!("omawarden:vault", "HTTP 401 on sync. Attempting token refresh...");
                 if let Some(ref ref_tok) = storage.refresh_token {
                     if let Ok(tok_resp) = client.refresh_token_grant(ref_tok) {
+                        crate::log_info!("omawarden:vault", "Token refresh successful. Resuming sync.");
                         let mut updated_tok = storage.clone();
                         updated_tok.access_token = Some(tok_resp.access_token.clone());
                         if let Some(new_ref) = tok_resp.refresh_token {
@@ -327,15 +338,23 @@ impl VaultManager {
                         let _ = self.storage_mgr.save(&updated_tok);
                         client
                             .sync_vault(&tok_resp.access_token)
-                            .map_err(|e| format!("Sync failed: {:?}", e))?
+                            .map_err(|e| {
+                                crate::log_error!("omawarden:vault", "Sync failed after token refresh: {:?}", e);
+                                format!("Sync failed: {:?}", e)
+                            })?
                     } else {
+                        crate::log_error!("omawarden:vault", "Session expired. Please log in again.");
                         return Err("Session expired. Please log in again.".to_string());
                     }
                 } else {
+                    crate::log_error!("omawarden:vault", "Session expired and no refresh token available.");
                     return Err("Session expired. Please log in again.".to_string());
                 }
             }
-            Err(e) => return Err(format!("Sync failed: {:?}", e)),
+            Err(e) => {
+                crate::log_error!("omawarden:vault", "Sync failed: {:?}", e);
+                return Err(format!("Sync failed: {:?}", e));
+            }
         };
 
         let count = sync_resp.ciphers.len();
@@ -372,6 +391,13 @@ impl VaultManager {
         if let Ok(mut st) = self.storage.write() {
             *st = updated;
         }
+
+        crate::log_info!(
+            "omawarden:vault",
+            "Vault sync complete. {} ciphers, {} folders saved.",
+            count,
+            self.storage.read().map(|s| s.folders.len()).unwrap_or(0)
+        );
 
         Ok(count)
     }

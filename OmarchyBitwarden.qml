@@ -105,6 +105,7 @@ Item {
   property real lastSyncTime: 0
   property int syncCooldownSeconds: 300
   property string lastVaultItemsRawText: ""
+  property var logBuffer: []
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -276,6 +277,7 @@ Item {
         return
       }
     }
+    root.logInfo("omarchy:vault", "Starting vault sync (manual: " + (!isBackground) + ", force: " + Boolean(force) + ")...")
     root.lastSyncWasManual = !isBackground
     root.isBusy = true
     root.statusMessage = "Syncing vault with Bitwarden..."
@@ -284,6 +286,7 @@ Item {
   }
 
   function loadVaultItems() {
+    root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
     vaultListProc.running = true
@@ -302,6 +305,79 @@ Item {
       "diff", "patch", "sql", "lua", "c", "cpp", "cc", "cxx", "h", "hpp", "rs", "go", "java", "kt", "kts", "rb", "php"
     ]
     return previewableExts.indexOf(ext) !== -1
+  }
+
+  function sanitizeLog(text) {
+    if (!text) return ""
+    var str = String(text)
+    str = str.replace(/bearer\s+[a-z0-9_\-\.]+/gi, "Bearer <REDACTED>")
+    str = str.replace(/("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
+    str = str.replace(/("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
+    return str
+  }
+
+  function appendLog(level, source, message) {
+    var sanitized = root.sanitizeLog(message)
+    if (!sanitized || sanitized.trim().length === 0) return
+    var ts = new Date().toISOString()
+    var entry = {
+      timestamp: ts,
+      level: level.toUpperCase(),
+      source: source || "omarchy:ui",
+      message: sanitized.trim()
+    }
+
+    var buf = root.logBuffer.slice()
+    buf.push(entry)
+    if (buf.length > 500) {
+      buf.shift()
+    }
+    root.logBuffer = buf
+
+    var formatted = "[" + ts + "] [" + entry.level + "] [" + entry.source + "] " + entry.message
+    if (entry.level === "ERROR") {
+      console.error(formatted)
+    } else if (entry.level === "WARN") {
+      console.warn(formatted)
+    } else {
+      console.log(formatted)
+    }
+  }
+
+  function logError(source, msg) { root.appendLog("ERROR", source, msg) }
+  function logWarn(source, msg) { root.appendLog("WARN", source, msg) }
+  function logInfo(source, msg) { root.appendLog("INFO", source, msg) }
+  function logDebug(source, msg) { root.appendLog("DEBUG", source, msg) }
+
+  function handleProcessStderr(text, defaultSource) {
+    if (!text) return
+    var lines = String(text).split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (!line) continue
+      var match = line.match(/^(?:\[([0-9T:\-\.Z]+)\]\s+)?\[(ERROR|WARN|INFO|DEBUG|TRACE)\]\s+\[([^\]]+)\]\s+(.*)$/i)
+      if (match) {
+        var ts = match[1] || new Date().toISOString()
+        var lvl = match[2].toUpperCase()
+        var src = match[3]
+        var msg = match[4]
+        var entry = {
+          timestamp: ts,
+          level: lvl,
+          source: src,
+          message: root.sanitizeLog(msg)
+        }
+        var buf = root.logBuffer.slice()
+        buf.push(entry)
+        if (buf.length > 500) buf.shift()
+        root.logBuffer = buf
+        if (lvl === "ERROR") console.error(line)
+        else if (lvl === "WARN") console.warn(line)
+        else console.log(line)
+      } else {
+        root.logError(defaultSource || "omawarden:cli", line)
+      }
+    }
   }
 
   function isSubsequence(pattern, text) {
@@ -461,6 +537,7 @@ Item {
 
   function copyToClipboard(text, isSensitive, label) {
     if (!text) return
+    root.logInfo("omarchy:clipboard", "Copying " + (label || "item") + " to clipboard (sensitive: " + isSensitive + ")")
     var cmd = [root.helperPath, "clipboard", "copy"]
     if (isSensitive) {
       cmd.push("--sensitive")
@@ -708,6 +785,7 @@ Item {
 
   function viewAttachment(item, att) {
     if (!item || !att) return
+    root.logInfo("omarchy:attachment", "Requesting preview for " + (att.fileName || "attachment"))
     root.loadingAttachmentId = (att.id || att.fileName || "loading")
     attachmentProc.activeAttachmentId = att.id || ""
     attachmentProc.command = [
@@ -724,6 +802,7 @@ Item {
 
   function downloadAttachment(item, att) {
     if (!item || !att) return
+    root.logInfo("omarchy:attachment", "Requesting download for " + (att.fileName || "attachment"))
     root.statusMessage = "Downloading attachment " + (att.fileName || "") + "..."
     var cmd = [
       root.helperPath,
@@ -742,6 +821,7 @@ Item {
 
   function saveSettings(settings) {
     root.isBusy = true
+    root.logInfo("omarchy:settings", "Saving configuration (log_level: " + (settings.log_level || "error") + ")...")
     root.statusMessage = "Saving configuration..."
     var cmd = [root.helperPath, "config", "set"]
     if (settings.server_url !== undefined) cmd.push("--server-url", settings.server_url)
@@ -749,13 +829,48 @@ Item {
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
+    if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
 
     configSetProc.command = cmd
     configSetProc.running = true
   }
 
+  function copyDiagnostics() {
+    var ts = new Date().toISOString()
+    var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : "Unknown"
+    var sUrl = (root.config && root.config.server_url) ? root.config.server_url : "https://vault.bitwarden.com"
+    var lLevel = (root.config && root.config.log_level) ? root.config.log_level : "error"
+    var vStatus = (root.authState ? root.authState.status : "unknown")
+
+    var report = "### Omarchy Bitwarden Diagnostics Report\n\n"
+    report += "- **Generated At**: " + ts + "\n"
+    report += "- **omawarden Version**: " + cliVer + "\n"
+    report += "- **Server URL Host**: " + sUrl + "\n"
+    report += "- **Configured Log Level**: " + lLevel + "\n"
+    report += "- **Vault Status**: " + vStatus + "\n"
+    report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
+    report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
+    report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
+    report += "#### Recent Logs (" + (root.logBuffer ? root.logBuffer.length : 0) + " entries):\n\n```text\n"
+
+    var logs = root.logBuffer || []
+    var recent = logs.slice(-50)
+    for (var i = 0; i < recent.length; i++) {
+      var item = recent[i]
+      report += "[" + item.timestamp + "] [" + item.level + "] [" + item.source + "] " + item.message + "\n"
+    }
+    if (recent.length === 0) {
+      report += "(No logs recorded yet)\n"
+    }
+    report += "```\n"
+
+    root.copyToClipboard(report, false, "Diagnostics report")
+    root.statusMessage = "Diagnostics report copied to clipboard."
+  }
+
   function doUnlock(password) {
     if (!password) return
+    root.logInfo("omarchy:auth", "Submitting unlock request...")
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Unlocking vault..."
@@ -765,6 +880,7 @@ Item {
   }
 
   function doLock() {
+    root.logInfo("omarchy:auth", "Locking vault...")
     root.authState = ({
       status: "locked",
       server_url: (root.authState && root.authState.server_url) || "",
@@ -786,6 +902,7 @@ Item {
 
   function doLoginPassword(email, password, code) {
     if (!email || !password) return
+    root.logInfo("omarchy:auth", "Submitting password login for " + email + "...")
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Logging in to Bitwarden..."
@@ -801,6 +918,7 @@ Item {
 
   function doLoginApiKey(clientId, clientSecret) {
     if (!clientId || !clientSecret) return
+    root.logInfo("omarchy:auth", "Submitting API Key login for client " + clientId + "...")
     root.isBusy = true
     root.errorMessage = ""
     root.statusMessage = "Authenticating with API Key..."
@@ -810,6 +928,7 @@ Item {
   }
 
   function doLogout() {
+    root.logInfo("omarchy:auth", "Logging out session...")
     root.authState = ({
       status: "unauthenticated",
       server_url: "",
@@ -1130,6 +1249,7 @@ Item {
             visible: root.effectiveView === "settings"
             config: root.config
             cliHealth: root.cliHealth
+            logBuffer: root.logBuffer
             isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
             updateAvailable: root.updateAvailable
@@ -1148,6 +1268,8 @@ Item {
             }
             onCheckUpdateRequested: { root.checkUpdates(true) }
             onDownloadCliRequested: { root.downloadCli() }
+            onCopyDiagnosticsRequested: { root.copyDiagnostics() }
+            onClearLogsRequested: { root.logBuffer = [] }
           }
         }
 
@@ -1231,8 +1353,14 @@ Item {
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
-        } catch (e) {}
+        } catch (e) {
+          root.logError("omarchy:ui", "Failed to parse config: " + e)
+        }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:config")
     }
   }
 
@@ -1250,8 +1378,13 @@ Item {
           root.refreshHealth()
         } catch (e) {
           root.statusMessage = "Failed to update config."
+          root.logError("omarchy:ui", "Failed to parse updated config: " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:config")
     }
     onExited: function(code) {
       root.isBusy = false
@@ -1293,8 +1426,13 @@ Item {
             clipboard_available: false,
             error: "Failed to parse CLI health output."
           })
+          root.logError("omarchy:ui", "Failed to parse health status: " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:health")
     }
     onExited: function(code) {
       if (code !== 0 && (!root.cliHealth || !root.cliHealth.installed)) {
@@ -1330,11 +1468,17 @@ Item {
             root.refreshAuthStatus()
           } else {
             root.errorMessage = (data && data.error) ? data.error : "Failed to download omawarden."
+            root.logError("omarchy:cli-download", root.errorMessage)
           }
         } catch (e) {
           root.errorMessage = "Failed to process download response."
+          root.logError("omarchy:cli-download", root.errorMessage + ": " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omarchy:cli-download")
     }
     onExited: function(code) {
       root.isDownloadingCli = false
@@ -1373,6 +1517,10 @@ Item {
         }
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omarchy:update")
+    }
     onExited: function(code) {
       root.isCheckingUpdate = false
     }
@@ -1406,8 +1554,13 @@ Item {
             user_email: "",
             has_session: false
           })
+          root.logError("omarchy:auth", "Failed to parse auth status: " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
       if (code !== 0) {
@@ -1451,12 +1604,18 @@ Item {
             root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Unlock failed."
+            root.logError("omarchy:auth", root.errorMessage)
           }
         } catch (e) {
           root.errorMessage = "Failed to parse unlock response."
+          root.logError("omarchy:auth", root.errorMessage + ": " + e)
         }
         root.isBusy = false
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
       root.isBusy = false
@@ -1496,6 +1655,7 @@ Item {
             root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Login failed."
+            root.logError("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
             if (errLower.indexOf("two-step") !== -1 || errLower.indexOf("two-factor") !== -1 || errLower.indexOf("code") !== -1) {
               root.show2FAField = true
@@ -1503,9 +1663,14 @@ Item {
           }
         } catch (e) {
           root.errorMessage = "Failed to parse login response."
+          root.logError("omarchy:auth", root.errorMessage + ": " + e)
         }
         root.isBusy = false
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
       root.isBusy = false
@@ -1533,6 +1698,10 @@ Item {
         root.isBusy = false
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+    }
     onExited: function(code) {
       root.isBusy = false
     }
@@ -1558,6 +1727,10 @@ Item {
         root.isBusy = false
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+    }
     onExited: function(code) {
       root.isBusy = false
     }
@@ -1580,10 +1753,15 @@ Item {
         })
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
+    }
     onExited: function(code) {
       root.isBusy = false
       if (code !== 0) {
         root.errorMessage = "Vault sync failed."
+        root.logError("omarchy:vault", "Vault sync process exited with code " + code)
       }
     }
   }
@@ -1615,9 +1793,13 @@ Item {
             }
           })
         } catch (e) {
-          console.error("Failed to parse vault items:", e)
+          root.logError("omarchy:vault", "Failed to parse vault items: " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
     }
   }
 
@@ -1632,6 +1814,10 @@ Item {
       }
     }
     command: []
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:clipboard")
+    }
   }
 
   Process {
@@ -1648,8 +1834,10 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        var cleanText = (text || "").trim()
+        if (!cleanText) return
         try {
-          var res = JSON.parse(text)
+          var res = JSON.parse(cleanText)
           if (res && res.code) {
             root.currentTotp = res
           } else {
@@ -1657,8 +1845,13 @@ Item {
           }
         } catch (e) {
           root.currentTotp = ({ code: "Invalid Secret", ttl: 0, period: 30 })
+          root.logError("omarchy:totp", "Failed to parse TOTP response: " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:totp")
     }
   }
 
@@ -1683,11 +1876,17 @@ Item {
             }
           } else {
             root.errorMessage = data.error || "Failed to process attachment."
+            root.logError("omarchy:attachment", root.errorMessage)
           }
         } catch (e) {
           root.errorMessage = "Failed to parse attachment response."
+          root.logError("omarchy:attachment", root.errorMessage + ": " + e)
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:attachment")
     }
     onExited: function(code) {
       root.loadingAttachmentId = ""

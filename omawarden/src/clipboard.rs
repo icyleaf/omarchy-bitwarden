@@ -29,7 +29,10 @@ impl ClipboardManager {
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => return false,
+            Err(e) => {
+                crate::log_error!("omawarden:clipboard", "Failed to spawn {}: {:?}", self.wl_copy_path, e);
+                return false;
+            }
         };
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -38,11 +41,22 @@ impl ClipboardManager {
 
         let success = match child.wait() {
             Ok(status) => status.success(),
-            Err(_) => false,
+            Err(e) => {
+                crate::log_error!("omawarden:clipboard", "wl-copy process error: {:?}", e);
+                false
+            }
         };
 
-        if success && sensitive && timeout_seconds > 0 {
-            self.schedule_auto_clear(timeout_seconds);
+        if success {
+            crate::log_info!(
+                "omawarden:clipboard",
+                "Copied content to clipboard (sensitive: {}, ttl: {}s)",
+                sensitive,
+                timeout_seconds
+            );
+            if sensitive && timeout_seconds > 0 {
+                self.schedule_auto_clear(timeout_seconds);
+            }
         }
 
         success
@@ -69,8 +83,17 @@ impl ClipboardManager {
 
     pub fn clear(&self) -> bool {
         match Command::new(&self.wl_copy_path).arg("--clear").output() {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+            Ok(output) => {
+                let success = output.status.success();
+                if success {
+                    crate::log_info!("omawarden:clipboard", "Clipboard cleared.");
+                }
+                success
+            }
+            Err(e) => {
+                crate::log_error!("omawarden:clipboard", "Failed to clear clipboard: {:?}", e);
+                false
+            }
         }
     }
 }
