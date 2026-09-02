@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "icyleaf.bitwarden",
   "name": "Omarchy Bitwarden",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": "icyleaf",
   "license": "MIT",
   "description": "Fast Bitwarden vault search, credential copy, and security manager for Omarchy.",
