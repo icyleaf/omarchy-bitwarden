@@ -255,15 +255,6 @@ cargo clippy --all-targets -- -D warnings
 
 ---
 
-## Multi-Architecture Releases
-
-Tagged releases (`v*`) automatically trigger GitHub Actions matrix builds generating optimized release tarballs and SHA-256 checksums for:
-
-- `x86_64-unknown-linux-gnu` (Intel / AMD 64-bit Linux)
-- `aarch64-unknown-linux-gnu` (ARM 64-bit Linux, including Raspberry Pi & Asahi)
-
----
-
 ## License
 
 This project is open-sourced under the [MIT License](LICENSE).
