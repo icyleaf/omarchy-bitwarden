@@ -1,6 +1,6 @@
 [package]
 name = "omawarden"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "High-performance and low memory Bitwarden CLI (Designed for Omarchy Plugin)"
 authors = ["icyleaf"]
