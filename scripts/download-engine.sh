@@ -101,7 +101,17 @@ if [ -z "$FOUND_BIN" ]; then
 fi
 
 mkdir -p "$TARGET_DIR"
-cp "$FOUND_BIN" "$TARGET_DIR/omawarden"
+chmod +x "$FOUND_BIN"
+
+# Terminate running daemon processes to free active sockets and file locks
+if command -v pkill >/dev/null 2>&1; then
+  pkill -f "$TARGET_DIR/omawarden" 2>/dev/null || true
+  sleep 0.1
+fi
+
+# Use atomic unlink and copy/move to avoid Linux ETXTBSY ("Text file busy") error
+rm -f "$TARGET_DIR/omawarden" 2>/dev/null || true
+cp -f "$FOUND_BIN" "$TARGET_DIR/omawarden" 2>/dev/null || mv -f "$FOUND_BIN" "$TARGET_DIR/omawarden"
 chmod +x "$TARGET_DIR/omawarden"
 rm -rf "$EXTRACT_DIR"
 
