@@ -10,7 +10,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -201,6 +201,27 @@ fn read_secret_stdin() -> String {
     let mut buffer = String::new();
     if stdin.lock().read_line(&mut buffer).is_ok() {
         return buffer.trim_end_matches(&['\r', '\n'][..]).to_string();
+    }
+    String::new()
+}
+
+fn read_clipboard_stdin() -> String {
+    let stdin = io::stdin();
+    let mut raw = String::new();
+    if stdin.lock().read_line(&mut raw).is_ok() {
+        let trimmed = raw.trim_end_matches(&['\r', '\n'][..]);
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(text) = val.get("text").and_then(|v| v.as_str()) {
+                return text.to_string();
+            }
+        }
+        let mut rest = String::new();
+        let _ = stdin.lock().read_to_string(&mut rest);
+        if rest.is_empty() {
+            return trimmed.to_string();
+        } else {
+            return format!("{}{}", raw, rest);
+        }
     }
     String::new()
 }
@@ -447,7 +468,7 @@ fn main() -> ExitCode {
             let clip_mgr = ClipboardManager::default();
             match action {
                 ClipboardAction::Copy { sensitive, timeout } => {
-                    let text_val = read_secret_stdin();
+                    let text_val = read_clipboard_stdin();
                     let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
                     let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
                     println!(

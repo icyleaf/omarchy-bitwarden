@@ -542,7 +542,7 @@ Item {
     if (isSensitive) {
       cmd.push("--sensitive")
     }
-    clipCopyProc.secret = text
+    clipCopyProc.secret = JSON.stringify({ text: String(text) })
     clipCopyProc.command = cmd
     clipCopyProc.running = true
     root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? " (clears in 30s)" : "") + "."

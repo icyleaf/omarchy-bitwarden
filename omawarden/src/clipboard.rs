@@ -144,6 +144,11 @@ fi
             "super_secret_password"
         );
 
+        // Copy multi-line report
+        let multiline_report = "### Title\n\n- item 1\n- item 2\n```\nlog 1\n```\n";
+        assert!(mgr.copy(multiline_report, false, 0));
+        assert_eq!(fs::read_to_string(&clip_file).unwrap(), multiline_report);
+
         // Clear clipboard
         assert!(mgr.clear());
         assert!(!clip_file.exists());
