@@ -51,7 +51,8 @@
 - **Category Tabs**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
 - **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, and attachments.
 - **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy Username `Ctrl+U`, Copy TOTP `Ctrl+T`, Open Website `Ctrl+O`, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
-- **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, and `max_output_mb`, with real-time CLI readiness indicators.
+- **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, `max_output_mb`, and `log_level`, with real-time CLI readiness indicators and an embedded Logs Viewer.
+- **Observability & Diagnostics**: Dual-channel structured logging across `omawarden` (`stderr`) and Quickshell (`console.error`), featuring module prefixes (`[omawarden:cli]`, `[omarchy:ui]`), configurable log levels (`error` by default), zero-knowledge credential redaction, and one-click "Copy Diagnostics" for GitHub issue reporting (see `docs/adr/0004-structured-logging-and-diagnostics.md`).
 
 ## Boundaries & Non-Goals
 - **Non-Goals**: Full vault item creation/editing/management (e.g. creating complex cryptographic policies or modifying organization memberships is handled via official Bitwarden web/apps). Focus is on lightning-fast retrieval, search, copying, and secure autofill in the Omarchy desktop.
