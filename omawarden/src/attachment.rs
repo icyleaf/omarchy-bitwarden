@@ -159,6 +159,40 @@ pub fn get_attachment(
 
     let dest_path = target_dir.join(&safe_filename);
 
+    let preview_cached_path = PathBuf::from("/tmp/omarchy-bitwarden/attachments")
+        .join(item_id)
+        .join(&safe_filename);
+
+    // Fast-path: Check if already previewed or downloaded to avoid duplicate network requests
+    if (!open_file && !preview) && preview_cached_path.is_file() {
+        if preview_cached_path != dest_path {
+            let _ = fs::copy(&preview_cached_path, &dest_path);
+        }
+        if let Ok(cached_bytes) = fs::read(&dest_path) {
+            return build_attachment_response(
+                &dest_path,
+                &safe_filename,
+                &target_dir,
+                open_file,
+                preview,
+                notify,
+                &cached_bytes,
+            );
+        }
+    } else if (open_file || preview) && dest_path.is_file() {
+        if let Ok(cached_bytes) = fs::read(&dest_path) {
+            return build_attachment_response(
+                &dest_path,
+                &safe_filename,
+                &target_dir,
+                open_file,
+                preview,
+                notify,
+                &cached_bytes,
+            );
+        }
+    }
+
     // Direct HTTP download via REST API
     let server_url = if !storage.server_url.is_empty() {
         storage.server_url.trim_end_matches('/')
@@ -376,6 +410,26 @@ pub fn get_attachment(
         };
     }
 
+    build_attachment_response(
+        &dest_path,
+        &safe_filename,
+        &target_dir,
+        open_file,
+        preview,
+        notify,
+        &bytes,
+    )
+}
+
+fn build_attachment_response(
+    dest_path: &Path,
+    safe_filename: &str,
+    target_dir: &Path,
+    open_file: bool,
+    preview: bool,
+    notify: bool,
+    bytes: &[u8],
+) -> AttachmentResponse {
     let ext = dest_path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -391,6 +445,7 @@ pub fn get_attachment(
             | "json"
             | "yaml"
             | "yml"
+            | "toml"
             | "csv"
             | "log"
             | "sh"
@@ -414,8 +469,11 @@ pub fn get_attachment(
             | "diff"
             | "patch"
             | "sql"
-            | "toml"
             | "lua"
+            | "rs"
+            | "go"
+            | "c"
+            | "cpp"
     );
 
     let file_size = bytes.len() as u64;
@@ -435,7 +493,7 @@ pub fn get_attachment(
     }
 
     let action_str = if open_file {
-        let _ = Command::new("xdg-open").arg(&dest_path).spawn();
+        let _ = Command::new("xdg-open").arg(dest_path).spawn();
         "view".to_string()
     } else if preview {
         "preview".to_string()
@@ -444,7 +502,7 @@ pub fn get_attachment(
             send_notification_with_actions(
                 "Bitwarden Attachment",
                 &format!("Saved {} to {}", safe_filename, target_dir.display()),
-                &dest_path,
+                dest_path,
             );
         }
         "download".to_string()
@@ -454,7 +512,7 @@ pub fn get_attachment(
         ok: true,
         error: None,
         path: Some(dest_path.to_string_lossy().to_string()),
-        filename: Some(safe_filename),
+        filename: Some(safe_filename.to_string()),
         action: Some(action_str),
         is_image: Some(is_image),
         is_text: Some(is_text),
@@ -529,9 +587,46 @@ mod tests {
             None,
             false,
         );
-        // It should sanitize filename to passwd or fail gracefully on network/auth without directory traversal
         if res.ok {
             assert_eq!(res.filename.unwrap(), "passwd");
         }
+    }
+
+    #[test]
+    fn test_cached_preview_download_reuse() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dl_target = temp_dir.path().to_str().unwrap();
+
+        // Create a simulated preview cache file in /tmp/omarchy-bitwarden/attachments/test_item_999/test_file.txt
+        let preview_dir = PathBuf::from("/tmp/omarchy-bitwarden/attachments/test_item_999");
+        let _ = fs::create_dir_all(&preview_dir);
+        let preview_file = preview_dir.join("test_file.txt");
+        let _ = fs::write(&preview_file, b"cached attachment secret content 12345");
+
+        // Now download the attachment without network access (using fake token)
+        let res = get_attachment(
+            "test_item_999",
+            "att_999",
+            "test_file.txt",
+            Some(dl_target),
+            false,
+            false,
+            Some("fake_token"),
+            None,
+            false,
+        );
+
+        assert!(res.ok, "Expected cached fast-path to succeed: {:?}", res.error);
+        assert_eq!(res.filename.unwrap(), "test_file.txt");
+        assert_eq!(res.action.unwrap(), "download");
+        assert_eq!(res.text_content.unwrap(), "cached attachment secret content 12345");
+
+        // Verify file was copied to destination
+        let dest = temp_dir.path().join("test_file.txt");
+        assert!(dest.exists());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "cached attachment secret content 12345");
+
+        // Cleanup
+        let _ = fs::remove_file(&preview_file);
     }
 }
