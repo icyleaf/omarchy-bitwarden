@@ -28,6 +28,7 @@ ScrollView {
   signal copyRequested(string text, bool isSensitive, string label)
   signal viewAttachmentRequested(var item, var att)
   signal downloadAttachmentRequested(var item, var att)
+  signal exportSshKeyRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
   signal togglePrivateKeyRevealed()
@@ -1118,6 +1119,11 @@ ScrollView {
               iconText: "\uf0c5"
               tooltip: "Copy private key"
               onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
+            }
+            GhostIconButton {
+              iconText: "\uf019"
+              tooltip: "Export SSH key to ~/.ssh"
+              onClicked: { if (inspectorRoot.item) inspectorRoot.exportSshKeyRequested(inspectorRoot.item) }
             }
           }
 
