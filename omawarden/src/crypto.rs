@@ -217,6 +217,42 @@ impl SymmetricCryptoKey {
             Err(CryptoError::InvalidKeyLength)
         }
     }
+
+    pub fn encrypt_string(&self, plaintext: &str) -> Result<String, CryptoError> {
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use rand_core::RngCore;
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+
+        let mut iv = [0u8; 16];
+        rand_core::OsRng.fill_bytes(&mut iv);
+
+        let enc = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
+            .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid key/iv: {}", e)))?;
+        let mut buf = vec![0u8; plaintext.len() + 32];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext.as_bytes(), &mut buf)
+            .map_err(|e| CryptoError::DecryptionFailed(format!("Encryption failed: {}", e)))?
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mac_str = if let Some(ref mac_k) = self.mac_key {
+            let mut hmac = HmacSha256::new_from_slice(mac_k)
+                .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid mac key: {}", e)))?;
+            hmac.update(&iv);
+            hmac.update(ct);
+            let mac = hmac.finalize().into_bytes();
+            format!("|{}", BASE64.encode(mac))
+        } else {
+            String::new()
+        };
+
+        Ok(format!(
+            "2.{}|{}{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            mac_str
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -606,6 +606,141 @@ impl VaultManager {
         Some(cipher_key)
     }
 
+    pub fn get_user_key(&self) -> Option<SymmetricCryptoKey> {
+        self.user_key.read().ok().and_then(|k| k.clone())
+    }
+
+    pub fn create_ssh_key(
+        &self,
+        name: &str,
+        ssh_key_data: &crate::ssh::GeneratedSshKey,
+        notes: Option<&str>,
+        folder_id: Option<&str>,
+        user_key: &SymmetricCryptoKey,
+    ) -> Result<VaultItem, String> {
+        let storage = self.storage_mgr.load();
+        let token = storage
+            .access_token
+            .as_deref()
+            .ok_or_else(|| "Not logged in or missing access token".to_string())?;
+
+        let enc_name = user_key
+            .encrypt_string(name)
+            .map_err(|e| format!("Failed to encrypt item name: {:?}", e))?;
+
+        let enc_notes = if let Some(n) = notes.filter(|s| !s.is_empty()) {
+            Some(
+                user_key
+                    .encrypt_string(n)
+                    .map_err(|e| format!("Failed to encrypt notes: {:?}", e))?,
+            )
+        } else {
+            None
+        };
+
+        let enc_private_key = user_key
+            .encrypt_string(&ssh_key_data.private_key)
+            .map_err(|e| format!("Failed to encrypt private key: {:?}", e))?;
+
+        let enc_public_key = user_key
+            .encrypt_string(&ssh_key_data.public_key)
+            .map_err(|e| format!("Failed to encrypt public key: {:?}", e))?;
+
+        let enc_fingerprint = user_key
+            .encrypt_string(&ssh_key_data.fingerprint)
+            .map_err(|e| format!("Failed to encrypt fingerprint: {:?}", e))?;
+
+        let payload = json!({
+            "type": 5,
+            "folderId": folder_id,
+            "organizationId": null,
+            "name": enc_name,
+            "notes": enc_notes,
+            "favorite": false,
+            "reprompt": 0,
+            "sshKey": {
+                "privateKey": enc_private_key,
+                "publicKey": enc_public_key,
+                "keyFingerprint": enc_fingerprint,
+            }
+        });
+
+        let client = BitwardenApiClient::new(if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        });
+
+        let created_cipher = client
+            .create_cipher(token, &payload)
+            .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?;
+
+        // Update local storage data.json
+        let mut updated_storage = storage.clone();
+        updated_storage.ciphers.push(created_cipher.clone());
+        let _ = self.storage_mgr.save(&updated_storage);
+
+        // Decrypt the created item into a VaultItem
+        let decrypted_items = decrypt_sync_ciphers_with_context(
+            &[created_cipher],
+            &updated_storage.folders,
+            &updated_storage.organizations,
+            user_key,
+            updated_storage.enc_private_key.as_deref(),
+        );
+
+        let decrypted_item = decrypted_items
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Failed to decrypt newly created cipher item".to_string())?;
+
+        // Update in-memory items if unlocked
+        if let Ok(mut items) = self.decrypted_items.write() {
+            items.push(decrypted_item.clone());
+        }
+
+        crate::log_info!(
+            "omawarden:vault",
+            "Successfully created and stored SSH key '{}' ({})",
+            decrypted_item.name,
+            decrypted_item.id
+        );
+
+        Ok(decrypted_item)
+    }
+
+    pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
+        let items = self.get_items();
+        let target = id_or_name.trim();
+
+        // 1. Exact ID match
+        if let Some(item) = items
+            .iter()
+            .find(|i| i.type_name == "ssh_key" && i.id == target)
+        {
+            return Some(item.clone());
+        }
+
+        // 2. Exact Name match (case-insensitive)
+        if let Some(item) = items
+            .iter()
+            .find(|i| i.type_name == "ssh_key" && i.name.eq_ignore_ascii_case(target))
+        {
+            return Some(item.clone());
+        }
+
+        // 3. Name contains query (case-insensitive)
+        let lower = target.to_lowercase();
+        if let Some(item) = items
+            .iter()
+            .find(|i| i.type_name == "ssh_key" && i.name.to_lowercase().contains(&lower))
+        {
+            return Some(item.clone());
+        }
+
+        None
+    }
+
     pub fn get_status(&self) -> Value {
         let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
@@ -1160,5 +1295,55 @@ mod tests {
 
         vault_mgr.lock();
         assert!(!vault_mgr.is_unlocked());
+    }
+
+    #[test]
+    fn test_find_ssh_key() {
+        let raw_items = vec![
+            json!({
+                "id": "item-uuid-1",
+                "name": "Production Deploy Key",
+                "type": 5,
+                "sshKey": {
+                    "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
+                    "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+                    "keyFingerprint": "SHA256:abc123xyz"
+                }
+            }),
+            json!({
+                "id": "item-uuid-2",
+                "name": "GitHub CI Key",
+                "type": 5,
+                "sshKey": {
+                    "publicKey": "ssh-rsa AAAAB3NzaC1yc2EAAA test@github",
+                    "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\ntest-rsa\n-----END OPENSSH PRIVATE KEY-----",
+                    "keyFingerprint": "SHA256:rsa456"
+                }
+            }),
+        ];
+
+        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
+        let items = vault_mgr.parse_raw_items(&raw_items);
+        *vault_mgr.decrypted_items.write().unwrap() = items;
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        // Exact ID lookup
+        let found_id = vault_mgr.find_ssh_key("item-uuid-1");
+        assert!(found_id.is_some());
+        assert_eq!(found_id.unwrap().name, "Production Deploy Key");
+
+        // Exact name lookup (case insensitive)
+        let found_name = vault_mgr.find_ssh_key("github ci key");
+        assert!(found_name.is_some());
+        assert_eq!(found_name.unwrap().id, "item-uuid-2");
+
+        // Substring name lookup
+        let found_sub = vault_mgr.find_ssh_key("deploy");
+        assert!(found_sub.is_some());
+        assert_eq!(found_sub.unwrap().id, "item-uuid-1");
+
+        // Not found
+        let not_found = vault_mgr.find_ssh_key("nonexistent-key");
+        assert!(not_found.is_none());
     }
 }

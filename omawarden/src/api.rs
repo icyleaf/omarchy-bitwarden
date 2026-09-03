@@ -335,6 +335,29 @@ impl BitwardenApiClient {
         resp.json::<SyncResponse>()
             .map_err(|e| ApiError::Json(e.to_string()))
     }
+
+    pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
+        let url = format!("{}/api/ciphers", self.server_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(payload)
+            .send()
+            .map_err(|e| ApiError::Http(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(ApiError::Http(format!(
+                "Create cipher failed ({}): {}",
+                status, body
+            )));
+        }
+
+        resp.json::<Value>()
+            .map_err(|e| ApiError::Json(e.to_string()))
+    }
 }
 
 pub fn decrypt_cipher_string(

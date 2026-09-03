@@ -6,6 +6,10 @@ use omawarden::config::ConfigManager;
 use omawarden::daemon::{run_daemon_server, send_daemon_request, DaemonState};
 use omawarden::health::check_system_health;
 use omawarden::hook::install_lock_hook;
+use omawarden::ssh::{
+    generate_keypair, parse_private_key, write_keypair_files, write_keypair_files_named,
+    SshAlgorithm,
+};
 use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
@@ -70,6 +74,11 @@ enum Commands {
     Attachment {
         #[command(subcommand)]
         action: AttachmentAction,
+    },
+    #[command(about = "SSH key lifecycle management (generate, import, export)")]
+    SshKey {
+        #[command(subcommand)]
+        action: SshKeyAction,
     },
     #[command(about = "Run omawarden background daemon")]
     Daemon {
@@ -193,6 +202,57 @@ enum AttachmentAction {
         open: bool,
         #[arg(long)]
         preview: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshKeyAction {
+    #[command(about = "Generate a new SSH keypair and store it in Bitwarden")]
+    Create {
+        #[arg(long, required = true)]
+        name: String,
+        #[arg(long, default_value = "ed25519")]
+        algorithm: SshAlgorithm,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    #[command(about = "Import an existing SSH private key file or STDIN into Bitwarden")]
+    Import {
+        #[arg(long, required = true)]
+        name: String,
+        #[arg(long)]
+        private_key: Option<PathBuf>,
+        #[arg(long)]
+        public_key: Option<PathBuf>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    #[command(about = "Export an SSH key to local file or standard output")]
+    Export {
+        #[arg(index = 1, required = true)]
+        query: String,
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        #[arg(long)]
+        private_key_file: Option<String>,
+        #[arg(long)]
+        public_key_file: Option<String>,
+        #[arg(long)]
+        stdout: bool,
+        #[arg(long)]
+        public_only: bool,
+        #[arg(long)]
+        private_only: bool,
     },
 }
 
@@ -560,5 +620,346 @@ fn main() -> ExitCode {
                 }
             }
         },
+
+        Commands::SshKey { action } => {
+            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+            match action {
+                SshKeyAction::Create {
+                    name,
+                    algorithm,
+                    comment,
+                    notes,
+                    folder,
+                    out_dir,
+                } => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let keypair = match generate_keypair(algorithm, comment.as_deref()) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            eprintln!("Error generating SSH key: {}", e);
+                            println!("{}", json!({ "ok": false, "error": e }));
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    let daemon_req = json!({
+                        "action": "ssh_key_create",
+                        "name": name,
+                        "private_key": keypair.private_key,
+                        "public_key": keypair.public_key,
+                        "fingerprint": keypair.fingerprint,
+                        "notes": notes,
+                        "folder_id": folder,
+                    });
+
+                    let daemon_res = send_daemon_request(&daemon_req);
+                    let item_val = if let Some(res) =
+                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                    {
+                        res.get("item").cloned()
+                    } else {
+                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                            Ok(user_key) => {
+                                match vault_mgr.create_ssh_key(
+                                    &name,
+                                    &keypair,
+                                    notes.as_deref(),
+                                    folder.as_deref(),
+                                    &user_key,
+                                ) {
+                                    Ok(item) => Some(json!(item)),
+                                    Err(e) => {
+                                        eprintln!("Error creating SSH key cipher: {}", e);
+                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Authentication required: {}", e);
+                                println!("{}", json!({ "ok": false, "error": e }));
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    };
+
+                    let mut files_json = json!(null);
+                    if let Some(ref dest_dir) = out_dir {
+                        match write_keypair_files(
+                            dest_dir,
+                            algorithm.default_filename_prefix(),
+                            &keypair.private_key,
+                            &keypair.public_key,
+                        ) {
+                            Ok((priv_p, pub_p)) => {
+                                files_json = json!({
+                                    "private_key_path": priv_p.to_string_lossy(),
+                                    "public_key_path": pub_p.to_string_lossy(),
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: Failed to write exported files to {:?}: {}",
+                                    dest_dir, e
+                                );
+                            }
+                        }
+                    }
+
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "item": item_val,
+                            "files": files_json,
+                        }))
+                        .unwrap()
+                    );
+                    ExitCode::SUCCESS
+                }
+
+                SshKeyAction::Import {
+                    name,
+                    private_key,
+                    public_key,
+                    stdin,
+                    notes,
+                    folder,
+                } => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let raw_priv = if stdin || private_key.is_none() {
+                        let mut buffer = String::new();
+                        let _ = io::stdin().read_to_string(&mut buffer);
+                        buffer
+                    } else if let Some(ref p) = private_key {
+                        match std::fs::read_to_string(p) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("Error reading private key file {:?}: {}", p, e);
+                                println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    let mut keypair = match parse_private_key(&raw_priv) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            eprintln!("Error parsing private key: {}", e);
+                            println!("{}", json!({ "ok": false, "error": e }));
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    if let Some(ref pub_path) = public_key {
+                        if let Ok(pub_content) = std::fs::read_to_string(pub_path) {
+                            let trimmed_pub = pub_content.trim().to_string();
+                            if !trimmed_pub.is_empty() {
+                                keypair.public_key = trimmed_pub;
+                            }
+                        }
+                    }
+
+                    let daemon_req = json!({
+                        "action": "ssh_key_create",
+                        "name": name,
+                        "private_key": keypair.private_key,
+                        "public_key": keypair.public_key,
+                        "fingerprint": keypair.fingerprint,
+                        "notes": notes,
+                        "folder_id": folder,
+                    });
+
+                    let daemon_res = send_daemon_request(&daemon_req);
+                    let item_val = if let Some(res) =
+                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                    {
+                        res.get("item").cloned()
+                    } else {
+                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                            Ok(user_key) => {
+                                match vault_mgr.create_ssh_key(
+                                    &name,
+                                    &keypair,
+                                    notes.as_deref(),
+                                    folder.as_deref(),
+                                    &user_key,
+                                ) {
+                                    Ok(item) => Some(json!(item)),
+                                    Err(e) => {
+                                        eprintln!("Error importing SSH key cipher: {}", e);
+                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Authentication required: {}", e);
+                                println!("{}", json!({ "ok": false, "error": e }));
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    };
+
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "item": item_val,
+                        }))
+                        .unwrap()
+                    );
+                    ExitCode::SUCCESS
+                }
+
+                SshKeyAction::Export {
+                    query,
+                    out_dir,
+                    private_key_file,
+                    public_key_file,
+                    stdout,
+                    public_only,
+                    private_only: _,
+                } => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let daemon_res = send_daemon_request(&json!({
+                        "action": "get_ssh_key",
+                        "query": query
+                    }));
+
+                    let item: Option<omawarden::vault::VaultItem> = if let Some(res) =
+                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                    {
+                        res.get("item")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    } else if let Ok(user_key) =
+                        ensure_unlocked_user_key(&vault_mgr, &cfg.server_url)
+                    {
+                        let storage = vault_mgr.storage_mgr.load();
+                        let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                            &storage.ciphers,
+                            &storage.folders,
+                            &storage.organizations,
+                            &user_key,
+                            storage.enc_private_key.as_deref(),
+                        );
+                        items.into_iter().find(|i| {
+                            i.type_name == "ssh_key"
+                                && (i.id == query
+                                    || i.name.eq_ignore_ascii_case(&query)
+                                    || i.name.to_lowercase().contains(&query.to_lowercase()))
+                        })
+                    } else {
+                        vault_mgr.find_ssh_key(&query)
+                    };
+
+                    let ssh_item = match item {
+                        Some(i) => i,
+                        None => {
+                            eprintln!("Error: SSH key item '{}' not found or vault locked.", query);
+                            println!(
+                                "{}",
+                                json!({ "ok": false, "error": format!("SSH key item '{}' not found", query) })
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    let ssh_meta = match ssh_item.ssh_key {
+                        Some(s) => s,
+                        None => {
+                            eprintln!("Error: Item '{}' has no SSH key metadata.", ssh_item.name);
+                            println!(
+                                "{}",
+                                json!({ "ok": false, "error": "Item has no SSH key metadata" })
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    if stdout {
+                        if public_only {
+                            if let Some(ref pubk) = ssh_meta.public_key {
+                                println!("{}", pubk);
+                            }
+                        } else if let Some(ref privk) = ssh_meta.private_key {
+                            print!("{}", privk);
+                            if !privk.ends_with('\n') {
+                                println!();
+                            }
+                        }
+                        return ExitCode::SUCCESS;
+                    }
+
+                    let target_dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
+                    let priv_filename = private_key_file.unwrap_or_else(|| {
+                        let safe_name = ssh_item.name.to_lowercase().replace([' ', '/'], "_");
+                        if safe_name.is_empty() {
+                            "id_ssh_key".to_string()
+                        } else {
+                            safe_name
+                        }
+                    });
+                    let pub_filename =
+                        public_key_file.unwrap_or_else(|| format!("{}.pub", priv_filename));
+
+                    let priv_content = ssh_meta.private_key.unwrap_or_default();
+                    let pub_content = ssh_meta.public_key.unwrap_or_default();
+
+                    match write_keypair_files_named(
+                        &target_dir,
+                        &priv_filename,
+                        &pub_filename,
+                        &priv_content,
+                        &pub_content,
+                    ) {
+                        Ok((priv_p, pub_p)) => {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": true,
+                                    "name": ssh_item.name,
+                                    "private_key_path": priv_p.to_string_lossy(),
+                                    "public_key_path": pub_p.to_string_lossy(),
+                                }))
+                                .unwrap()
+                            );
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("Error writing export files: {}", e);
+                            println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+fn ensure_unlocked_user_key(
+    vault_mgr: &VaultManager,
+    _server_url: &str,
+) -> Result<omawarden::crypto::SymmetricCryptoKey, String> {
+    if let Some(key) = vault_mgr.get_user_key() {
+        return Ok(key);
+    }
+
+    let (pwd, _) = read_auth_payload();
+    if pwd.is_empty() {
+        return Err("Master password required to unlock vault".to_string());
+    }
+
+    let st = vault_mgr.storage_mgr.load();
+    let user_key = vault_mgr
+        .storage_mgr
+        .unlock_user_key(&pwd, &st)
+        .map_err(|e| format!("Unlock failed: {:?}", e))?;
+
+    let _ = send_daemon_request(&json!({ "action": "unlock", "password": pwd }));
+
+    Ok(user_key)
 }
