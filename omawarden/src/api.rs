@@ -423,6 +423,18 @@ pub fn decrypt_sync_ciphers_with_context(
             .to_string();
         let item_type = c.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
         let favorite = c.get("favorite").and_then(|v| v.as_bool()).unwrap_or(false);
+        let created_at = c
+            .get("creationDate")
+            .or_else(|| c.get("creation_date"))
+            .or_else(|| c.get("created_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let updated_at = c
+            .get("revisionDate")
+            .or_else(|| c.get("revision_date"))
+            .or_else(|| c.get("updated_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Folder metadata
         let folder_id = c
@@ -740,6 +752,8 @@ pub fn decrypt_sync_ciphers_with_context(
             "type": item_type,
             "notes": notes,
             "favorite": favorite,
+            "created_at": created_at,
+            "updated_at": updated_at,
             "login": login_val,
             "card": card_val,
             "identity": identity_val,
@@ -774,6 +788,8 @@ pub fn decrypt_sync_ciphers_with_context(
                 sub_title,
                 notes,
                 favorite,
+                created_at,
+                updated_at,
                 folder_id,
                 folder_name,
                 organization_id: org_id_opt,
@@ -955,6 +971,8 @@ pub fn decrypt_sync_ciphers_with_context(
             sub_title,
             notes,
             favorite,
+            created_at,
+            updated_at,
             folder_id,
             folder_name,
             organization_id: org_id_opt,
@@ -1344,5 +1362,33 @@ mod tests {
             .get("passkey_created_at")
             .unwrap()
             .is_null());
+    }
+
+    #[test]
+    fn test_decrypt_ciphers_with_timestamps() {
+        let raw_user_key = [15u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![json!({
+            "id": "cipher-timestamps",
+            "type": 1,
+            "name": encrypt_test_string("Item With Timestamps", &user_key),
+            "creationDate": "2024-01-15T08:20:00.000Z",
+            "revisionDate": "2024-06-20T11:45:00.000Z",
+            "login": {
+                "username": encrypt_test_string("alice", &user_key),
+            }
+        })];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].created_at.as_deref(),
+            Some("2024-01-15T08:20:00.000Z")
+        );
+        assert_eq!(
+            items[0].updated_at.as_deref(),
+            Some("2024-06-20T11:45:00.000Z")
+        );
     }
 }

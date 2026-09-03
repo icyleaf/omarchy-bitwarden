@@ -31,6 +31,10 @@ pub struct VaultItem {
     pub notes: Option<String>,
     pub favorite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_name: Option<String>,
@@ -623,6 +627,18 @@ impl VaultManager {
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect::<Vec<_>>()
                 });
+            let created_at = raw
+                .get("created_at")
+                .or_else(|| raw.get("creationDate"))
+                .or_else(|| raw.get("creation_date"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let updated_at = raw
+                .get("updated_at")
+                .or_else(|| raw.get("revisionDate"))
+                .or_else(|| raw.get("revision_date"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             if let Some(ssh_meta) = detect_ssh_key_metadata(raw) {
                 let type_name = "ssh_key".to_string();
@@ -655,6 +671,8 @@ impl VaultManager {
                     sub_title,
                     notes,
                     favorite,
+                    created_at,
+                    updated_at,
                     folder_id,
                     folder_name: None,
                     organization_id,
@@ -708,6 +726,8 @@ impl VaultManager {
                 sub_title,
                 notes,
                 favorite,
+                created_at,
+                updated_at,
                 folder_id,
                 folder_name: None,
                 organization_id,
