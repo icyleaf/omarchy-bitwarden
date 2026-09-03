@@ -116,7 +116,7 @@ ScrollView {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
   }
 
-  function formatPasskeyDate(dateStr) {
+  function formatDateTime(dateStr) {
     if (!dateStr) return ""
     try {
       var d = new Date(dateStr)
@@ -640,7 +640,7 @@ ScrollView {
 
           Text {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.passkey_created_at)
-            text: "Created " + (inspectorRoot.item && inspectorRoot.item.login ? inspectorRoot.formatPasskeyDate(inspectorRoot.item.login.passkey_created_at) : "")
+            text: "Created " + (inspectorRoot.item && inspectorRoot.item.login ? inspectorRoot.formatDateTime(inspectorRoot.item.login.passkey_created_at) : "")
             color: Qt.darker(inspectorRoot.foreground, 1.4)
             font.pixelSize: 11
             elide: Text.ElideRight
@@ -1103,6 +1103,67 @@ ScrollView {
           }
         }
       }
+
+      // --------------------------------------------------
+      // ITEM HISTORY SECTION
+      // --------------------------------------------------
+      ColumnLayout {
+        visible: Boolean(inspectorRoot.item && (inspectorRoot.item.created_at || inspectorRoot.item.updated_at))
+        Layout.fillWidth: true
+        spacing: 8
+
+        Text {
+          text: "Item history"
+          color: Qt.darker(inspectorRoot.foreground, 1.5)
+          font.pixelSize: 11
+          font.weight: Font.Medium
+        }
+
+        // Created At
+        RowLayout {
+          visible: Boolean(inspectorRoot.item && inspectorRoot.item.created_at)
+          Layout.fillWidth: true
+          spacing: 8
+
+          Text {
+            text: "Created:"
+            color: Qt.darker(inspectorRoot.foreground, 1.5)
+            font.pixelSize: 11
+            Layout.preferredWidth: 80
+          }
+
+          Text {
+            text: (inspectorRoot.item && inspectorRoot.item.created_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.created_at) : ""
+            color: inspectorRoot.foreground
+            font.pixelSize: 11
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
+        }
+
+        // Updated At
+        RowLayout {
+          visible: Boolean(inspectorRoot.item && inspectorRoot.item.updated_at)
+          Layout.fillWidth: true
+          spacing: 8
+
+          Text {
+            text: "Updated:"
+            color: Qt.darker(inspectorRoot.foreground, 1.5)
+            font.pixelSize: 11
+            Layout.preferredWidth: 80
+          }
+
+          Text {
+            text: (inspectorRoot.item && inspectorRoot.item.updated_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.updated_at) : ""
+            color: inspectorRoot.foreground
+            font.pixelSize: 11
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
+        }
+      }
     }
   }
 }
+
