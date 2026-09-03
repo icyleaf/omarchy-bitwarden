@@ -14,7 +14,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -258,6 +258,9 @@ enum SshKeyAction {
 
 fn read_secret_stdin() -> String {
     let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return String::new();
+    }
     let mut buffer = String::new();
     if stdin.lock().read_line(&mut buffer).is_ok() {
         return buffer.trim_end_matches(&['\r', '\n'][..]).to_string();
@@ -288,6 +291,9 @@ fn read_clipboard_stdin() -> String {
 
 fn read_auth_payload() -> (String, Option<String>) {
     let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return (String::new(), None);
+    }
     let mut raw = String::new();
     let _ = stdin.lock().read_line(&mut raw);
     let raw = raw.trim();
@@ -452,7 +458,15 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::Unlock => {
-                    let pwd = read_secret_stdin();
+                    let pwd = if io::stdin().is_terminal() {
+                        eprint!("Enter Master Password: ");
+                        let _ = io::stderr().flush();
+                        let mut buf = String::new();
+                        let _ = io::stdin().read_line(&mut buf);
+                        buf.trim_end_matches(&['\r', '\n'][..]).to_string()
+                    } else {
+                        read_secret_stdin()
+                    };
                     omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -528,7 +542,6 @@ fn main() -> ExitCode {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if !is_unlocked && !vault_mgr.is_unlocked() {
-                        eprintln!("Error: Vault is locked. Please unlock using 'omawarden auth unlock' first.");
                         println!(
                             "{}",
                             json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
@@ -549,7 +562,6 @@ fn main() -> ExitCode {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if !is_unlocked && !vault_mgr.is_unlocked() {
-                        eprintln!("Error: Vault is locked. Please unlock using 'omawarden auth unlock' first.");
                         println!(
                             "{}",
                             json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
@@ -666,7 +678,6 @@ fn main() -> ExitCode {
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
                         Err(e) => {
-                            eprintln!("Error generating SSH key: {}", e);
                             println!("{}", json!({ "ok": false, "error": e }));
                             return ExitCode::FAILURE;
                         }
@@ -699,14 +710,12 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        eprintln!("Error creating SSH key cipher: {}", e);
                                         println!("{}", json!({ "ok": false, "error": e }));
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Authentication required: {}", e);
                                 println!("{}", json!({ "ok": false, "error": e }));
                                 return ExitCode::FAILURE;
                             }
@@ -728,9 +737,11 @@ fn main() -> ExitCode {
                                 });
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "Warning: Failed to write exported files to {:?}: {}",
-                                    dest_dir, e
+                                omawarden::log_warn!(
+                                    "omawarden:ssh",
+                                    "Failed to write exported files to {:?}: {}",
+                                    dest_dir,
+                                    e
                                 );
                             }
                         }
@@ -765,7 +776,6 @@ fn main() -> ExitCode {
                         match std::fs::read_to_string(p) {
                             Ok(c) => c,
                             Err(e) => {
-                                eprintln!("Error reading private key file {:?}: {}", p, e);
                                 println!("{}", json!({ "ok": false, "error": e.to_string() }));
                                 return ExitCode::FAILURE;
                             }
@@ -777,7 +787,6 @@ fn main() -> ExitCode {
                     let mut keypair = match parse_private_key(&raw_priv) {
                         Ok(k) => k,
                         Err(e) => {
-                            eprintln!("Error parsing private key: {}", e);
                             println!("{}", json!({ "ok": false, "error": e }));
                             return ExitCode::FAILURE;
                         }
@@ -819,14 +828,12 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        eprintln!("Error importing SSH key cipher: {}", e);
                                         println!("{}", json!({ "ok": false, "error": e }));
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Authentication required: {}", e);
                                 println!("{}", json!({ "ok": false, "error": e }));
                                 return ExitCode::FAILURE;
                             }
@@ -893,7 +900,6 @@ fn main() -> ExitCode {
                                 })
                             }
                             Err(e) => {
-                                eprintln!("Error: {}", e);
                                 println!("{}", json!({ "ok": false, "error": e }));
                                 return ExitCode::FAILURE;
                             }
@@ -903,7 +909,6 @@ fn main() -> ExitCode {
                     let ssh_item = match item {
                         Some(i) => i,
                         None => {
-                            eprintln!("Error: SSH key item '{}' not found in vault.", query);
                             println!(
                                 "{}",
                                 json!({ "ok": false, "error": format!("SSH key item '{}' not found in vault", query) })
@@ -915,7 +920,6 @@ fn main() -> ExitCode {
                     let ssh_meta = match ssh_item.ssh_key {
                         Some(s) => s,
                         None => {
-                            eprintln!("Error: Item '{}' has no SSH key metadata.", ssh_item.name);
                             println!(
                                 "{}",
                                 json!({ "ok": false, "error": "Item has no SSH key metadata" })
@@ -974,7 +978,6 @@ fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
-                            eprintln!("Error writing export files: {}", e);
                             println!("{}", json!({ "ok": false, "error": e.to_string() }));
                             ExitCode::FAILURE
                         }
