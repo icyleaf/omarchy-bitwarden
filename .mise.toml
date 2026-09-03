@@ -15,7 +15,13 @@ run = "cd omawarden && cargo build --release && mkdir -p ../bin && cp -f target/
 
 [tasks.dev-update-omarchy-plugin]
 description = "Update the Omarchy plugin in development mode"
-run = "cd ~/.config/omarchy/plugins/icyleaf.bitwarden && git pull"
+run = """
+BRANCH=$(git branch --show-current)
+cd ~/.config/omarchy/plugins/icyleaf.bitwarden
+git fetch origin
+git checkout "$BRANCH"
+git merge "origin/$BRANCH"
+"""
 
 [tasks.dev-restart-omarchy]
 description = "Restart the Omarchy plugin in development mode"
