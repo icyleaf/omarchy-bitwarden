@@ -702,8 +702,9 @@ Item {
         actions.push({ label: "Copy Expiration (" + expStr + ")", icon: "\uf073", shortcut: "", action: function() { root.copyToClipboard(expStr, false, "expiration") } })
       }
     } else if (item.type_name === "ssh_key" && item.ssh_key) {
-      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
       if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "\uf084", shortcut: "↵", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
+      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
+      if (item.ssh_key.fingerprint) actions.push({ label: "Copy Fingerprint", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.fingerprint, false, "fingerprint") } })
       if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "\uf023", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
     } else if (item.type_name === "identity" && item.identity) {
       var idFullName = ((item.identity.firstName || "") + " " + (item.identity.lastName || "")).trim()
