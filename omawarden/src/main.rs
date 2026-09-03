@@ -520,12 +520,42 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let st = send_daemon_request(&json!({ "action": "status" }));
+                    let is_unlocked = st
+                        .as_ref()
+                        .and_then(|v| v.get("is_unlocked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !is_unlocked && !vault_mgr.is_unlocked() {
+                        eprintln!("Error: Vault is locked. Please unlock using 'omawarden auth unlock' first.");
+                        println!(
+                            "{}",
+                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                        );
+                        return ExitCode::FAILURE;
+                    }
                     let items = vault_mgr.get_items();
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let st = send_daemon_request(&json!({ "action": "status" }));
+                    let is_unlocked = st
+                        .as_ref()
+                        .and_then(|v| v.get("is_unlocked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !is_unlocked && !vault_mgr.is_unlocked() {
+                        eprintln!("Error: Vault is locked. Please unlock using 'omawarden auth unlock' first.");
+                        println!(
+                            "{}",
+                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                        );
+                        return ExitCode::FAILURE;
+                    }
                     let results = vault_mgr.search_items(&query, category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
@@ -824,44 +854,59 @@ fn main() -> ExitCode {
                     private_only: _,
                 } => {
                     omawarden::daemon::ensure_daemon_running();
-                    let daemon_res = send_daemon_request(&json!({
-                        "action": "get_ssh_key",
-                        "query": query
-                    }));
+                    let st = send_daemon_request(&json!({ "action": "status" }));
+                    let is_unlocked = st
+                        .as_ref()
+                        .and_then(|v| v.get("is_unlocked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
 
-                    let item: Option<omawarden::vault::VaultItem> = if let Some(res) =
-                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
-                    {
-                        res.get("item")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    } else if let Ok(user_key) =
-                        ensure_unlocked_user_key(&vault_mgr, &cfg.server_url)
-                    {
-                        let storage = vault_mgr.storage_mgr.load();
-                        let items = omawarden::api::decrypt_sync_ciphers_with_context(
-                            &storage.ciphers,
-                            &storage.folders,
-                            &storage.organizations,
-                            &user_key,
-                            storage.enc_private_key.as_deref(),
-                        );
-                        items.into_iter().find(|i| {
-                            i.type_name == "ssh_key"
-                                && (i.id == query
-                                    || i.name.eq_ignore_ascii_case(&query)
-                                    || i.name.to_lowercase().contains(&query.to_lowercase()))
-                        })
+                    let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                        let daemon_res = send_daemon_request(&json!({
+                            "action": "get_ssh_key",
+                            "query": query
+                        }));
+                        daemon_res
+                            .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                            .and_then(|res| {
+                                res.get("item")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            })
                     } else {
-                        vault_mgr.find_ssh_key(&query)
+                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                            Ok(user_key) => {
+                                let storage = vault_mgr.storage_mgr.load();
+                                let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                                    &storage.ciphers,
+                                    &storage.folders,
+                                    &storage.organizations,
+                                    &user_key,
+                                    storage.enc_private_key.as_deref(),
+                                );
+                                items.into_iter().find(|i| {
+                                    i.type_name == "ssh_key"
+                                        && (i.id == query
+                                            || i.name.eq_ignore_ascii_case(&query)
+                                            || i.name
+                                                .to_lowercase()
+                                                .contains(&query.to_lowercase()))
+                                })
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                println!("{}", json!({ "ok": false, "error": e }));
+                                return ExitCode::FAILURE;
+                            }
+                        }
                     };
 
                     let ssh_item = match item {
                         Some(i) => i,
                         None => {
-                            eprintln!("Error: SSH key item '{}' not found or vault locked.", query);
+                            eprintln!("Error: SSH key item '{}' not found in vault.", query);
                             println!(
                                 "{}",
-                                json!({ "ok": false, "error": format!("SSH key item '{}' not found", query) })
+                                json!({ "ok": false, "error": format!("SSH key item '{}' not found in vault", query) })
                             );
                             return ExitCode::FAILURE;
                         }
@@ -948,12 +993,16 @@ fn ensure_unlocked_user_key(
         return Ok(key);
     }
 
-    let (pwd, _) = read_auth_payload();
-    if pwd.is_empty() {
-        return Err("Master password required to unlock vault".to_string());
+    let st = vault_mgr.storage_mgr.load();
+    if st.enc_user_key.is_none() {
+        return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
     }
 
-    let st = vault_mgr.storage_mgr.load();
+    let (pwd, _) = read_auth_payload();
+    if pwd.is_empty() {
+        return Err("Vault is locked. Please unlock the vault first using 'omawarden auth unlock' or provide Master Password.".to_string());
+    }
+
     let user_key = vault_mgr
         .storage_mgr
         .unlock_user_key(&pwd, &st)
