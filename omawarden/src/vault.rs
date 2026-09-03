@@ -326,7 +326,7 @@ impl VaultManager {
             .storage_mgr
             .unlock_user_key(password, &fresh_storage)
             .map_err(|e| {
-                crate::log_error!("omawarden:vault", "Unlock user key failed: {:?}", e);
+                crate::log_warn!("omawarden:vault", "Unlock user key failed: {:?}", e);
                 format!("Unlock failed: {:?}", e)
             })?;
 

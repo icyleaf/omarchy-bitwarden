@@ -164,7 +164,7 @@ impl AuthManager {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_error!("omawarden:auth", "Login failed for {}: {}", email, err_msg);
+                crate::log_warn!("omawarden:auth", "Login failed for {}: {}", email, err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -235,7 +235,7 @@ impl AuthManager {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_error!("omawarden:auth", "API key login failed: {}", err_msg);
+                crate::log_warn!("omawarden:auth", "API key login failed: {}", err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -286,7 +286,7 @@ impl AuthManager {
         crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
         let storage = self.storage_mgr.load();
         if storage.enc_user_key.is_none() {
-            crate::log_error!("omawarden:auth", "Account is not logged in.");
+            crate::log_warn!("omawarden:auth", "Account is not logged in.");
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -325,7 +325,7 @@ impl AuthManager {
             }
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_error!("omawarden:auth", "Unlock failed: {}", err_msg);
+                crate::log_warn!("omawarden:auth", "Unlock failed: {}", err_msg);
                 AuthResult {
                     ok: false,
                     status: Some("locked".to_string()),

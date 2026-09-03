@@ -1810,7 +1810,7 @@ Item {
             root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Unlock failed."
-            root.logError("omarchy:auth", root.errorMessage)
+            root.logWarn("omarchy:auth", root.errorMessage)
           }
         } catch (e) {
           root.errorMessage = "Failed to parse unlock response."
@@ -1862,7 +1862,7 @@ Item {
             root.syncVault(true, true)
           } else {
             root.errorMessage = data.error || "Login failed."
-            root.logError("omarchy:auth", root.errorMessage)
+            root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
             if (errLower.indexOf("two-step") !== -1 || errLower.indexOf("two-factor") !== -1 || errLower.indexOf("code") !== -1) {
               root.show2FAField = true
