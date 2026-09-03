@@ -116,6 +116,22 @@ ScrollView {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
   }
 
+  function formatPasskeyDate(dateStr) {
+    if (!dateStr) return ""
+    try {
+      var d = new Date(dateStr)
+      if (!isNaN(d.getTime())) {
+        var year = d.getFullYear()
+        var month = String(d.getMonth() + 1).padStart(2, '0')
+        var day = String(d.getDate()).padStart(2, '0')
+        var hours = String(d.getHours()).padStart(2, '0')
+        var minutes = String(d.getMinutes()).padStart(2, '0')
+        return year + "-" + month + "-" + day + " " + hours + ":" + minutes
+      }
+    } catch (e) {}
+    return String(dateStr).substring(0, 16).replace("T", " ")
+  }
+
   ColumnLayout {
     width: inspectorRoot.width - 16
     spacing: 12
@@ -606,6 +622,29 @@ ScrollView {
               width: parent.width * ((inspectorRoot.currentTotp.ttl || 30) / (inspectorRoot.currentTotp.period || 30))
               color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.accent : "#f87171"
             }
+          }
+        }
+
+        // Passkey Status & Creation Date
+        RowLayout {
+          visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.has_passkey)
+          Layout.fillWidth: true
+          spacing: 8
+
+          Text {
+            text: "Passkey:"
+            color: Qt.darker(inspectorRoot.foreground, 1.5)
+            font.pixelSize: 11
+            Layout.preferredWidth: 80
+          }
+
+          Text {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.passkey_created_at)
+            text: "Created " + (inspectorRoot.item && inspectorRoot.item.login ? inspectorRoot.formatPasskeyDate(inspectorRoot.item.login.passkey_created_at) : "")
+            color: Qt.darker(inspectorRoot.foreground, 1.4)
+            font.pixelSize: 11
+            elide: Text.ElideRight
+            Layout.fillWidth: true
           }
         }
       }
