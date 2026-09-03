@@ -20,7 +20,7 @@ BRANCH=$(git branch --show-current)
 cd ~/.config/omarchy/plugins/icyleaf.bitwarden
 git fetch origin
 git checkout "$BRANCH"
-git merge --no-edit "origin/$BRANCH"
+git reset --hard "origin/$BRANCH"
 """
 
 [tasks.dev-restart-omarchy]

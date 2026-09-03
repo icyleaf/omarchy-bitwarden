@@ -17,6 +17,8 @@ ScrollView {
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
+  readonly property int keyPixelSize: 10
+  readonly property int valuePixelSize: 12
 
   onItemChanged: {
     showCardNumberRevealed = false
@@ -233,7 +235,7 @@ ScrollView {
         RowLayout {
           Layout.fillWidth: true
           Text {
-            text: "Text Content Preview:"
+            text: "Text Content Preview"
             color: Qt.darker(inspectorRoot.foreground, 1.4)
             font.pixelSize: 11
           }
@@ -348,7 +350,7 @@ ScrollView {
     ColumnLayout {
       visible: inspectorRoot.activeAttachmentPreview === null && inspectorRoot.item !== null
       Layout.fillWidth: true
-      spacing: 12
+      spacing: 8
 
       // Header: Icon + Name + Badges
       RowLayout {
@@ -377,7 +379,7 @@ ScrollView {
             visible: !inspFaviconImg.visible
             text: inspectorRoot.getItemIcon(inspectorRoot.item)
             font.family: inspectorRoot.fontFamily
-            font.pixelSize: 18
+            font.pixelSize: 14
             color: Qt.darker(inspectorRoot.foreground, 1.3)
           }
         }
@@ -393,7 +395,7 @@ ScrollView {
             Text {
               text: inspectorRoot.item ? (inspectorRoot.item.name || "Untitled") : ""
               color: inspectorRoot.foreground
-              font.pixelSize: 14
+              font.pixelSize: 12
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
@@ -479,172 +481,247 @@ ScrollView {
         }
       }
 
-      Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.borderColor }
-
       // --------------------------------------------------
       // LOGIN CREDENTIALS SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.login)
         Layout.fillWidth: true
-        spacing: 8
+        implicitHeight: loginColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        // Username
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.username)
-          Layout.fillWidth: true
+        ColumnLayout {
+          id: loginColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
           spacing: 8
 
-          Text { text: "Username:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.login) ? (inspectorRoot.item.login.username || "") : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            font.weight: Font.Medium
-            elide: Text.ElideRight
-            Layout.fillWidth: true
-          }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy username"
-            onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.username, false, "username")
-          }
-        }
-
-        // Password
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.password)
-          Layout.fillWidth: true
-          spacing: 8
-
-          Text { text: "Password:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.login.password || "") : "••••••••••••••••"
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            font.family: inspectorRoot.showPasswordRevealed ? "monospace" : "sans-serif"
-            font.weight: Font.Medium
-            elide: Text.ElideRight
-            Layout.fillWidth: true
-          }
-          GhostIconButton {
-            iconText: inspectorRoot.showPasswordRevealed ? "\uf070" : "\uf06e"
-            tooltip: inspectorRoot.showPasswordRevealed ? "Hide password" : "Show password"
-            onClicked: inspectorRoot.togglePasswordRevealed()
-          }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy password"
-            onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.password, true, "password")
-          }
-        }
-
-        // Websites / URIs list
-        Repeater {
-          model: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.uris) ? inspectorRoot.item.login.uris : []
-
+          // Username
           RowLayout {
-            id: uriRowItem
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.username)
             Layout.fillWidth: true
             spacing: 8
 
-            property string rawUri: (typeof modelData === "string") ? modelData : (modelData && modelData.uri ? modelData.uri : "")
-
-            Text { text: (index === 0 ? "Website:" : ""); color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-            Text {
-              text: uriRowItem.rawUri
-              color: inspectorRoot.foreground
-              font.pixelSize: 11
-              font.weight: Font.Medium
-              elide: Text.ElideRight
+            ColumnLayout {
               Layout.fillWidth: true
-            }
-
-            GhostIconButton {
-              iconText: "\uf08e"
-              tooltip: "Open website"
-              onClicked: {
-                var u = uriRowItem.rawUri
-                if (u && !u.match(/^https?:\/\//i)) u = "https://" + u
-                Qt.openUrlExternally(u)
+              spacing: 2
+              Text { text: "Username"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.login) ? (inspectorRoot.item.login.username || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
               }
             }
 
             GhostIconButton {
               iconText: "\uf0c5"
-              tooltip: "Copy website URL"
-              onClicked: inspectorRoot.copyRequested(uriRowItem.rawUri, false, "website URL")
+              tooltip: "Copy username"
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.username, false, "username")
             }
           }
-        }
 
-        // TOTP Countdown & Verification Code
-        ColumnLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
-          Layout.fillWidth: true
-          spacing: 4
+          // Divider (if username and password)
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.username && inspectorRoot.item.login.password)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
 
+          // Password
           RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.password)
             Layout.fillWidth: true
             spacing: 8
 
-            Text { text: "TOTP Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-            Text {
-              text: inspectorRoot.currentTotp.code || "Generating..."
-              color: inspectorRoot.accent
-              font.pixelSize: 13
-              font.family: "monospace"
-              font.weight: Font.Bold
+            ColumnLayout {
               Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Password"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.login.password || "") : "••••••••••••••••"
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: inspectorRoot.showPasswordRevealed ? "monospace" : "sans-serif"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
             }
-            Text {
-              text: (inspectorRoot.currentTotp.ttl || 30) + "s"
-              color: (inspectorRoot.currentTotp.ttl > 5) ? Qt.darker(inspectorRoot.foreground, 1.5) : "#f87171"
-              font.pixelSize: 10
+
+            GhostIconButton {
+              iconText: inspectorRoot.showPasswordRevealed ? "\uf070" : "\uf06e"
+              tooltip: inspectorRoot.showPasswordRevealed ? "Hide password" : "Show password"
+              onClicked: inspectorRoot.togglePasswordRevealed()
             }
             GhostIconButton {
               iconText: "\uf0c5"
-              tooltip: "Copy TOTP code"
-              onClicked: inspectorRoot.copyRequested(inspectorRoot.currentTotp.code, true, "TOTP code")
+              tooltip: "Copy password"
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.login.password, true, "password")
             }
           }
 
-          // Progress Bar
+          // Divider (if password/username and uris)
           Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.password || inspectorRoot.item.login.username) && inspectorRoot.item.login.uris && inspectorRoot.item.login.uris.length > 0)
             Layout.fillWidth: true
-            height: 3
-            radius: 2
-            color: Qt.rgba(1, 1, 1, 0.1)
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
 
-            Rectangle {
-              height: parent.height
-              radius: 2
-              width: parent.width * ((inspectorRoot.currentTotp.ttl || 30) / (inspectorRoot.currentTotp.period || 30))
-              color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.accent : "#f87171"
+          // Websites / URIs list
+          Repeater {
+            model: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.uris) ? inspectorRoot.item.login.uris : []
+
+            ColumnLayout {
+              id: uriWrapper
+              Layout.fillWidth: true
+              spacing: 8
+
+              property string rawUri: (typeof modelData === "string") ? modelData : (modelData && modelData.uri ? modelData.uri : "")
+
+              Rectangle {
+                visible: index > 0
+                Layout.fillWidth: true
+                height: 1
+                color: Qt.rgba(255, 255, 255, 0.05)
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 2
+                  Text { text: "Website"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                  Text {
+                    text: uriWrapper.rawUri
+                    color: inspectorRoot.foreground
+                    font.pixelSize: inspectorRoot.valuePixelSize
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+                }
+
+                GhostIconButton {
+                  iconText: "\uf08e"
+                  tooltip: "Open website"
+                  onClicked: {
+                    var u = uriWrapper.rawUri
+                    if (u && !u.match(/^https?:\/\//i)) u = "https://" + u
+                    Qt.openUrlExternally(u)
+                  }
+                }
+
+                GhostIconButton {
+                  iconText: "\uf0c5"
+                  tooltip: "Copy website URL"
+                  onClicked: inspectorRoot.copyRequested(uriWrapper.rawUri, false, "website URL")
+                }
+              }
             }
           }
-        }
 
-        // Passkey Status & Creation Date
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.has_passkey)
-          Layout.fillWidth: true
-          spacing: 8
-
-          Text {
-            text: "Passkey:"
-            color: Qt.darker(inspectorRoot.foreground, 1.5)
-            font.pixelSize: 11
-            Layout.preferredWidth: 80
+          // Divider (if totp)
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
           }
 
-          Text {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.passkey_created_at)
-            text: "Created " + (inspectorRoot.item && inspectorRoot.item.login ? inspectorRoot.formatDateTime(inspectorRoot.item.login.passkey_created_at) : "")
-            color: Qt.darker(inspectorRoot.foreground, 1.4)
-            font.pixelSize: 11
-            elide: Text.ElideRight
+          // TOTP Countdown & Verification Code
+          ColumnLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
             Layout.fillWidth: true
+            spacing: 4
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                RowLayout {
+                  spacing: 6
+                  Text { text: "TOTP Code"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                  Text {
+                    text: (inspectorRoot.currentTotp.ttl || 30) + "s"
+                    color: (inspectorRoot.currentTotp.ttl > 5) ? Qt.darker(inspectorRoot.foreground, 1.5) : "#f87171"
+                    font.pixelSize: inspectorRoot.keyPixelSize
+                  }
+                }
+
+                Text {
+                  text: inspectorRoot.currentTotp.code || "Generating..."
+                  color: inspectorRoot.accent
+                  font.pixelSize: 14
+                  font.family: "monospace"
+                  font.weight: Font.Bold
+                  Layout.fillWidth: true
+                }
+              }
+
+              GhostIconButton {
+                iconText: "\uf0c5"
+                tooltip: "Copy TOTP code"
+                onClicked: inspectorRoot.copyRequested(inspectorRoot.currentTotp.code, true, "TOTP code")
+              }
+            }
+
+            // Progress Bar
+            Rectangle {
+              Layout.fillWidth: true
+              height: 3
+              radius: 2
+              color: Qt.rgba(1, 1, 1, 0.1)
+
+              Rectangle {
+                height: parent.height
+                radius: 2
+                width: parent.width * ((inspectorRoot.currentTotp.ttl || 30) / (inspectorRoot.currentTotp.period || 30))
+                color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.accent : "#f87171"
+              }
+            }
+          }
+
+          // Divider (if passkey)
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.has_passkey)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          // Passkey Status & Creation Date
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.has_passkey)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+
+              Text { text: "Passkey"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.passkey_created_at) ? ("Created " + inspectorRoot.formatDateTime(inspectorRoot.item.login.passkey_created_at)) : "Stored in vault"
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
           }
         }
       }
@@ -652,97 +729,193 @@ ScrollView {
       // --------------------------------------------------
       // CARD DETAILS SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.card)
         Layout.fillWidth: true
-        spacing: 8
+        implicitHeight: cardColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        // Cardholder
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName)
-          Layout.fillWidth: true
+        ColumnLayout {
+          id: cardColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
           spacing: 8
-          Text { text: "Cardholder:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.cardholderName || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy cardholder"
-            onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.cardholderName, false, "cardholder name")
-          }
-        }
 
-        // Card Brand
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.brand)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Brand:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.brand || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-        }
-
-        // Card Number (Protected)
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Card Number:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? (inspectorRoot.item.card.number || "") : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            font.family: "monospace"
-            font.weight: Font.Medium
+          // Cardholder
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName)
             Layout.fillWidth: true
-          }
-          GhostIconButton {
-            iconText: inspectorRoot.showCardNumberRevealed ? "\uf070" : "\uf06e"
-            tooltip: inspectorRoot.showCardNumberRevealed ? "Hide card number" : "Show card number"
-            onClicked: inspectorRoot.showCardNumberRevealed = !inspectorRoot.showCardNumberRevealed
-          }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy card number"
-            onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number")
-          }
-        }
+            spacing: 8
 
-        // Expires
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Expires:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + " / " + (inspectorRoot.item.card.expYear || "")) : ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy expiration date"
-            onClicked: inspectorRoot.copyRequested((inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || ""), false, "expiration date")
-          }
-        }
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Cardholder"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.cardholderName || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
 
-        // Security Code / CVV (Protected)
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Security Code:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardCodeRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            font.family: "monospace"
-            font.weight: Font.Medium
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy cardholder"
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.cardholderName, false, "cardholder name")
+            }
+          }
+
+          // Divider
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName && inspectorRoot.item.card.brand)
             Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
           }
-          GhostIconButton {
-            iconText: inspectorRoot.showCardCodeRevealed ? "\uf070" : "\uf06e"
-            tooltip: inspectorRoot.showCardCodeRevealed ? "Hide CVV" : "Show CVV"
-            onClicked: inspectorRoot.showCardCodeRevealed = !inspectorRoot.showCardCodeRevealed
+
+          // Card Brand
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.brand)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Brand"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.brand || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
           }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy CVV"
-            onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV")
+
+          // Divider
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          // Card Number (Protected)
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Card Number"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? (inspectorRoot.item.card.number || "") : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: inspectorRoot.showCardNumberRevealed ? "\uf070" : "\uf06e"
+              tooltip: inspectorRoot.showCardNumberRevealed ? "Hide card number" : "Show card number"
+              onClicked: inspectorRoot.showCardNumberRevealed = !inspectorRoot.showCardNumberRevealed
+            }
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy card number"
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number")
+            }
+          }
+
+          // Divider
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          // Expires
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Expires"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + " / " + (inspectorRoot.item.card.expYear || "")) : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy expiration date"
+              onClicked: inspectorRoot.copyRequested((inspectorRoot.item.card.expMonth || "") + "/" + (inspectorRoot.item.card.expYear || ""), false, "expiration date")
+            }
+          }
+
+          // Divider
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          // Security Code / CVV (Protected)
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Security Code"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardCodeRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: inspectorRoot.showCardCodeRevealed ? "\uf070" : "\uf06e"
+              tooltip: inspectorRoot.showCardCodeRevealed ? "Hide CVV" : "Show CVV"
+              onClicked: inspectorRoot.showCardCodeRevealed = !inspectorRoot.showCardCodeRevealed
+            }
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy CVV"
+              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.code, true, "CVV")
+            }
           }
         }
       }
@@ -750,76 +923,292 @@ ScrollView {
       // --------------------------------------------------
       // IDENTITY DETAILS SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity)
         Layout.fillWidth: true
-        spacing: 8
+        implicitHeight: identityColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.firstName || inspectorRoot.item.identity.lastName))
-          Layout.fillWidth: true
+        ColumnLayout {
+          id: identityColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
           spacing: 8
-          Text { text: "Full Name:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ") : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.firstName || inspectorRoot.item.identity.lastName))
             Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Full Name"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy full name"
+              onClicked: {
+                var n = [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ")
+                inspectorRoot.copyRequested(n, false, "full name")
+              }
+            }
           }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy full name"
-            onClicked: {
-              var n = [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ")
-              inspectorRoot.copyRequested(n, false, "full name")
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Email"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.email || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy email"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") }
+            }
+          }
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Phone"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.phone || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy phone"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.phone, false, "phone number") }
+            }
+          }
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Address"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy address"
+              onClicked: {
+                var a = [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
+                inspectorRoot.copyRequested(a, false, "address")
+              }
             }
           }
         }
+      }
 
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Email:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.email || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy email"
-            onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.email, false, "email") }
-          }
-        }
+      // --------------------------------------------------
+      // SSH KEY SECTION
+      // --------------------------------------------------
+      Rectangle {
+        visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key)
+        Layout.fillWidth: true
+        implicitHeight: sshKeyColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
-          Layout.fillWidth: true
+        ColumnLayout {
+          id: sshKeyColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
           spacing: 8
-          Text { text: "Phone:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.phone || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy phone"
-            onClicked: { if (inspectorRoot.item && inspectorRoot.item.identity) inspectorRoot.copyRequested(inspectorRoot.item.identity.phone, false, "phone number") }
-          }
-        }
 
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Address:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            elide: Text.ElideRight
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.key_type)
             Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Key Type"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.key_type || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
           }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy address"
-            onClicked: {
-              var a = [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
-              inspectorRoot.copyRequested(a, false, "address")
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Fingerprint"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.fingerprint || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy fingerprint"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.fingerprint, false, "fingerprint") }
+            }
+          }
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Public Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: "Available"
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy public key"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
+            }
+          }
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Private Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: inspectorRoot.showPrivateKeyRevealed ? "Revealed" : "Encrypted (Hidden)"
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.weight: Font.Medium
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: inspectorRoot.showPrivateKeyRevealed ? "\uf070" : "\uf06e"
+              tooltip: inspectorRoot.showPrivateKeyRevealed ? "Hide private key" : "Show private key"
+              onClicked: inspectorRoot.togglePrivateKeyRevealed()
+            }
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy private key"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
             }
           }
         }
@@ -828,43 +1217,42 @@ ScrollView {
       // --------------------------------------------------
       // SECURE NOTE SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.notes)
         Layout.fillWidth: true
-        spacing: 6
+        implicitHeight: notesColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        RowLayout {
-          Layout.fillWidth: true
-          Text { text: "Notes:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11 }
-          Item { Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy notes"
-            onClicked: { if (inspectorRoot.item) inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") }
-          }
-        }
+        ColumnLayout {
+          id: notesColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
+          spacing: 8
 
-        Rectangle {
-          Layout.fillWidth: true
-          implicitHeight: Math.min(notesText.implicitHeight + 16, 160)
-          radius: 4
-          color: Qt.rgba(0, 0, 0, 0.25)
-          border.color: inspectorRoot.borderColor
-          border.width: 1
-
-          ScrollView {
-            anchors.fill: parent
-            anchors.margins: 8
-            clip: true
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-            Text {
-              id: notesText
-              text: inspectorRoot.item ? (inspectorRoot.item.notes || "") : ""
-              color: inspectorRoot.foreground
-              font.pixelSize: 11
-              wrapMode: Text.WrapAnywhere
+          RowLayout {
+            Layout.fillWidth: true
+            Text { text: "Notes"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+            Item { Layout.fillWidth: true }
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy notes"
+              onClicked: { if (inspectorRoot.item) inspectorRoot.copyRequested(inspectorRoot.item.notes, false, "notes") }
             }
+          }
+
+          Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(255, 255, 255, 0.05) }
+
+          Text {
+            Layout.fillWidth: true
+            text: inspectorRoot.item ? (inspectorRoot.item.notes || "") : ""
+            color: inspectorRoot.foreground
+            font.pixelSize: inspectorRoot.valuePixelSize
+            lineHeight: 1.35
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
           }
         }
       }
@@ -874,19 +1262,19 @@ ScrollView {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.type_name === "note" && !inspectorRoot.item.notes && (!inspectorRoot.item.fields || inspectorRoot.item.fields.length === 0) && (!inspectorRoot.item.attachments || inspectorRoot.item.attachments.length === 0))
         Layout.fillWidth: true
         height: 60
-        radius: 4
+        radius: 6
         color: Qt.rgba(0, 0, 0, 0.15)
         border.color: inspectorRoot.borderColor
         border.width: 1
 
         RowLayout {
           anchors.centerIn: parent
-          spacing: 4
+          spacing: 6
           Text {
             text: "\uf0f6"
             font.family: inspectorRoot.fontFamily
             color: Qt.darker(inspectorRoot.foreground, 1.8)
-            font.pixelSize: 11
+            font.pixelSize: 12
           }
           Text {
             text: "This secure note has no text or custom fields."
@@ -897,70 +1285,87 @@ ScrollView {
       }
 
       // --------------------------------------------------
-      // CUSTOM FIELDS SECTION (Weakened subtle borders)
+      // CUSTOM FIELDS SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.fields && inspectorRoot.item.fields.length > 0)
         Layout.fillWidth: true
-        spacing: 6
+        implicitHeight: customFieldsColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        Text {
-          text: "Custom Fields (" + (inspectorRoot.item && inspectorRoot.item.fields ? inspectorRoot.item.fields.length : 0) + "):"
-          color: Qt.darker(inspectorRoot.foreground, 1.5)
-          font.pixelSize: 11
-        }
+        ColumnLayout {
+          id: customFieldsColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
+          spacing: 8
 
-        Repeater {
-          model: (inspectorRoot.item && inspectorRoot.item.fields) ? inspectorRoot.item.fields : []
+          Text {
+            text: "Custom Fields"
+            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            font.pixelSize: inspectorRoot.keyPixelSize
+          }
 
-          Rectangle {
-            id: customFieldCard
-            Layout.fillWidth: true
-            height: 36
-            radius: 4
-            color: Qt.rgba(0, 0, 0, 0.15)
-            border.color: Qt.rgba(1, 1, 1, 0.04)
-            border.width: 1
+          Repeater {
+            model: (inspectorRoot.item && inspectorRoot.item.fields) ? inspectorRoot.item.fields : []
 
-            property bool isHiddenField: Boolean(modelData && modelData.type === 1)
-            property bool isRevealed: false
-
-            RowLayout {
-              anchors.fill: parent
-              anchors.leftMargin: 10
-              anchors.rightMargin: 10
+            ColumnLayout {
+              id: customFieldRow
+              Layout.fillWidth: true
               spacing: 8
 
-              Text {
-                text: (modelData.name || "Field") + ":"
-                color: Qt.darker(inspectorRoot.foreground, 1.5)
-                font.pixelSize: 11
-                Layout.preferredWidth: Math.min(implicitWidth, 120)
-                elide: Text.ElideRight
-              }
+              property bool isHiddenField: Boolean(modelData && modelData.type === 1)
+              property bool isRevealed: false
 
-              Text {
-                text: (modelData.type === 1 && !customFieldCard.isRevealed) ? "••••••••••••••••" : (modelData.value || "")
-                color: inspectorRoot.foreground
-                font.pixelSize: 11
-                font.family: (modelData.type === 1) ? "monospace" : "sans-serif"
-                elide: Text.ElideRight
+              Rectangle {
                 Layout.fillWidth: true
+                height: 1
+                color: Qt.rgba(255, 255, 255, 0.05)
               }
 
-              // Ghost Reveal Button (for hidden custom fields)
-              GhostIconButton {
-                visible: modelData.type === 1
-                iconText: customFieldCard.isRevealed ? "\uf070" : "\uf06e"
-                tooltip: customFieldCard.isRevealed ? "Hide field" : "Show field"
-                onClicked: customFieldCard.isRevealed = !customFieldCard.isRevealed
-              }
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
 
-              // Ghost Copy Button
-              GhostIconButton {
-                iconText: "\uf0c5"
-                tooltip: "Copy field value"
-                onClicked: inspectorRoot.copyRequested(modelData.value || "", modelData.type === 1, modelData.name || "field")
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 2
+
+                  Text {
+                    text: modelData.name || "Field"
+                    color: Qt.darker(inspectorRoot.foreground, 1.6)
+                    font.pixelSize: inspectorRoot.keyPixelSize
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+
+                  Text {
+                    text: (modelData.type === 1 && !customFieldRow.isRevealed) ? "••••••••••••••••" : (modelData.value || "")
+                    color: inspectorRoot.foreground
+                    font.pixelSize: inspectorRoot.valuePixelSize
+                    font.family: (modelData.type === 1 && !customFieldRow.isRevealed) ? "monospace" : "sans-serif"
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+                }
+
+                // Ghost Reveal Button (for hidden custom fields)
+                GhostIconButton {
+                  visible: modelData.type === 1
+                  iconText: customFieldRow.isRevealed ? "\uf070" : "\uf06e"
+                  tooltip: customFieldRow.isRevealed ? "Hide field" : "Show field"
+                  onClicked: customFieldRow.isRevealed = !customFieldRow.isRevealed
+                }
+
+                // Ghost Copy Button
+                GhostIconButton {
+                  iconText: "\uf0c5"
+                  tooltip: "Copy field value"
+                  onClicked: inspectorRoot.copyRequested(modelData.value || "", modelData.type === 1, modelData.name || "field")
+                }
               }
             }
           }
@@ -968,136 +1373,86 @@ ScrollView {
       }
 
       // --------------------------------------------------
-      // SSH KEY SECTION
-      // --------------------------------------------------
-      ColumnLayout {
-        visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key)
-        Layout.fillWidth: true
-        spacing: 6
-
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.key_type)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Key Type:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.key_type || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-        }
-
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Fingerprint:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.fingerprint || "") : ""; color: inspectorRoot.foreground; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy fingerprint"
-            onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.fingerprint, false, "fingerprint") }
-          }
-        }
-
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Public Key:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: "Available"; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy public key"
-            onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
-          }
-        }
-
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
-          Layout.fillWidth: true
-          spacing: 8
-          Text { text: "Private Key:"; color: Qt.darker(inspectorRoot.foreground, 1.5); font.pixelSize: 11; Layout.preferredWidth: 80 }
-          Text { text: inspectorRoot.showPrivateKeyRevealed ? "Revealed" : "Encrypted (Hidden)"; color: inspectorRoot.foreground; font.pixelSize: 11; Layout.fillWidth: true }
-          GhostIconButton {
-            iconText: inspectorRoot.showPrivateKeyRevealed ? "\uf070" : "\uf06e"
-            tooltip: inspectorRoot.showPrivateKeyRevealed ? "Hide private key" : "Show private key"
-            onClicked: inspectorRoot.togglePrivateKeyRevealed()
-          }
-          GhostIconButton {
-            iconText: "\uf0c5"
-            tooltip: "Copy private key"
-            onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
-          }
-        }
-      }
-
-      // --------------------------------------------------
       // ATTACHMENTS LIST SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && inspectorRoot.item.attachments && inspectorRoot.item.attachments.length > 0)
         Layout.fillWidth: true
-        spacing: 6
+        implicitHeight: attachmentsColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        Text {
-          text: "Attachments (" + (inspectorRoot.item ? (inspectorRoot.item.attachments ? inspectorRoot.item.attachments.length : 0) : 0) + "):"
-          color: Qt.darker(inspectorRoot.foreground, 1.5)
-          font.pixelSize: 11
-        }
+        ColumnLayout {
+          id: attachmentsColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
+          spacing: 8
 
-        Repeater {
-          model: (inspectorRoot.item && inspectorRoot.item.attachments) ? inspectorRoot.item.attachments : []
+          Text {
+            text: "Attachments (" + (inspectorRoot.item ? (inspectorRoot.item.attachments ? inspectorRoot.item.attachments.length : 0) : 0) + ")"
+            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            font.pixelSize: inspectorRoot.keyPixelSize
+          }
 
-          Rectangle {
-            Layout.fillWidth: true
-            height: 38
-            radius: 4
-            color: Qt.rgba(0, 0, 0, 0.2)
-            border.color: inspectorRoot.borderColor
-            border.width: 1
+          Repeater {
+            model: (inspectorRoot.item && inspectorRoot.item.attachments) ? inspectorRoot.item.attachments : []
 
-            RowLayout {
-              anchors.fill: parent
-              anchors.leftMargin: 8
-              anchors.rightMargin: 8
+            ColumnLayout {
+              Layout.fillWidth: true
               spacing: 8
 
-              Text {
-                text: inspectorRoot.getAttachmentIcon(modelData.fileName)
-                font.family: inspectorRoot.fontFamily
-                font.pixelSize: 14
-                color: Qt.darker(inspectorRoot.foreground, 1.4)
-              }
-
-              ColumnLayout {
+              Rectangle {
                 Layout.fillWidth: true
-                spacing: 1
+                height: 1
+                color: Qt.rgba(255, 255, 255, 0.05)
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
 
                 Text {
-                  text: modelData.fileName || "attachment"
-                  color: inspectorRoot.foreground
-                  font.pixelSize: 11
-                  font.weight: Font.Medium
-                  elide: Text.ElideRight
+                  text: inspectorRoot.getAttachmentIcon(modelData.fileName)
+                  font.family: inspectorRoot.fontFamily
+                  font.pixelSize: 14
+                  color: Qt.darker(inspectorRoot.foreground, 1.4)
+                }
+
+                ColumnLayout {
                   Layout.fillWidth: true
-                }
-                Text {
-                  text: modelData.sizeName || inspectorRoot.formatFileSize(modelData.size)
-                  color: Qt.darker(inspectorRoot.foreground, 1.8)
-                  font.pixelSize: 10
-                }
-              }
+                  spacing: 1
 
-              // View / Preview Ghost Button (Only for previewable attachments)
-              GhostIconButton {
-                visible: inspectorRoot.isAttachmentPreviewable(modelData.fileName)
-                iconText: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "\uf021" : "\uf06e"
-                tooltip: "Preview attachment"
-                onClicked: inspectorRoot.viewAttachmentRequested(inspectorRoot.item, modelData)
-              }
+                  Text {
+                    text: modelData.fileName || "attachment"
+                    color: inspectorRoot.foreground
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+                  Text {
+                    text: modelData.sizeName || inspectorRoot.formatFileSize(modelData.size)
+                    color: Qt.darker(inspectorRoot.foreground, 1.8)
+                    font.pixelSize: 10
+                  }
+                }
 
-              // Download Ghost Button
-              GhostIconButton {
-                iconText: "\uf019"
-                tooltip: "Download attachment"
-                onClicked: inspectorRoot.downloadAttachmentRequested(inspectorRoot.item, modelData)
+                // View / Preview Ghost Button (Only for previewable attachments)
+                GhostIconButton {
+                  visible: inspectorRoot.isAttachmentPreviewable(modelData.fileName)
+                  iconText: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "\uf021" : "\uf06e"
+                  tooltip: "Preview attachment"
+                  onClicked: inspectorRoot.viewAttachmentRequested(inspectorRoot.item, modelData)
+                }
+
+                // Download Ghost Button
+                GhostIconButton {
+                  iconText: "\uf019"
+                  tooltip: "Download attachment"
+                  onClicked: inspectorRoot.downloadAttachmentRequested(inspectorRoot.item, modelData)
+                }
               }
             }
           }
@@ -1107,59 +1462,90 @@ ScrollView {
       // --------------------------------------------------
       // ITEM HISTORY SECTION
       // --------------------------------------------------
-      ColumnLayout {
+      Rectangle {
         visible: Boolean(inspectorRoot.item && (inspectorRoot.item.created_at || inspectorRoot.item.updated_at))
         Layout.fillWidth: true
-        spacing: 8
+        implicitHeight: historyColumnLayout.implicitHeight + 20
+        radius: 6
+        color: Qt.rgba(0, 0, 0, 0.2)
+        border.color: inspectorRoot.borderColor
+        border.width: 1
 
-        Text {
-          text: "Item history"
-          color: Qt.darker(inspectorRoot.foreground, 1.5)
-          font.pixelSize: 11
-          font.weight: Font.Medium
-        }
-
-        // Created At
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.created_at)
-          Layout.fillWidth: true
+        ColumnLayout {
+          id: historyColumnLayout
+          anchors.fill: parent
+          anchors.margins: 10
           spacing: 8
 
           Text {
-            text: "Created:"
-            color: Qt.darker(inspectorRoot.foreground, 1.5)
-            font.pixelSize: 11
-            Layout.preferredWidth: 80
+            text: "Item history"
+            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            font.pixelSize: inspectorRoot.keyPixelSize
           }
 
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.created_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.created_at) : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            elide: Text.ElideRight
+          // Created At
+          ColumnLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.created_at)
             Layout.fillWidth: true
+            spacing: 8
+
+            Rectangle {
+              Layout.fillWidth: true
+              height: 1
+              color: Qt.rgba(255, 255, 255, 0.05)
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text { text: "Created"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text {
+                  text: (inspectorRoot.item && inspectorRoot.item.created_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.created_at) : ""
+                  color: inspectorRoot.foreground
+                  font.pixelSize: inspectorRoot.valuePixelSize
+                  font.weight: Font.Medium
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
+                }
+              }
+            }
           }
-        }
 
-        // Updated At
-        RowLayout {
-          visible: Boolean(inspectorRoot.item && inspectorRoot.item.updated_at)
-          Layout.fillWidth: true
-          spacing: 8
-
-          Text {
-            text: "Updated:"
-            color: Qt.darker(inspectorRoot.foreground, 1.5)
-            font.pixelSize: 11
-            Layout.preferredWidth: 80
-          }
-
-          Text {
-            text: (inspectorRoot.item && inspectorRoot.item.updated_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.updated_at) : ""
-            color: inspectorRoot.foreground
-            font.pixelSize: 11
-            elide: Text.ElideRight
+          // Updated At
+          ColumnLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.updated_at)
             Layout.fillWidth: true
+            spacing: 8
+
+            Rectangle {
+              visible: Boolean(inspectorRoot.item && inspectorRoot.item.created_at)
+              Layout.fillWidth: true
+              height: 1
+              color: Qt.rgba(255, 255, 255, 0.05)
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text { text: "Updated"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text {
+                  text: (inspectorRoot.item && inspectorRoot.item.updated_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.updated_at) : ""
+                  color: inspectorRoot.foreground
+                  font.pixelSize: inspectorRoot.valuePixelSize
+                  font.weight: Font.Medium
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
+                }
+              }
+            }
           }
         }
       }
