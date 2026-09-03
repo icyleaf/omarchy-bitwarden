@@ -1064,7 +1064,7 @@ mod tests {
 
         let vault_mgr = VaultManager::new("https://vault.example.com", Some(storage_mgr), None);
         assert!(!vault_mgr.is_unlocked());
-        assert_eq!(vault_mgr.get_items().len(), 0);
+        assert_eq!(vault_mgr.decrypted_items.read().unwrap().len(), 0);
 
         let st = vault_mgr.get_status();
         assert_eq!(
