@@ -14,7 +14,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -430,7 +430,13 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 AuthAction::LoginPassword { email } => {
-                    let (pwd, code_val) = read_auth_payload();
+                    let (pwd, code_val) = if io::stdin().is_terminal() {
+                        let p = rpassword::prompt_password("Enter Master Password: ")
+                            .unwrap_or_default();
+                        (p, None)
+                    } else {
+                        read_auth_payload()
+                    };
                     let res = auth_mgr.login_password(&email, &pwd, code_val.as_deref());
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
@@ -440,15 +446,20 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::LoginApikey { client_id } => {
-                    let raw_secret = read_secret_stdin();
-                    let mut actual_secret = raw_secret.clone();
-                    if raw_secret.starts_with('{') && raw_secret.ends_with('}') {
-                        if let Ok(val) = serde_json::from_str::<Value>(&raw_secret) {
-                            if let Some(s) = val.get("client_secret").and_then(|v| v.as_str()) {
-                                actual_secret = s.to_string();
+                    let actual_secret = if io::stdin().is_terminal() {
+                        rpassword::prompt_password("Enter Client Secret: ").unwrap_or_default()
+                    } else {
+                        let raw_secret = read_secret_stdin();
+                        let mut secret = raw_secret.clone();
+                        if raw_secret.starts_with('{') && raw_secret.ends_with('}') {
+                            if let Ok(val) = serde_json::from_str::<Value>(&raw_secret) {
+                                if let Some(s) = val.get("client_secret").and_then(|v| v.as_str()) {
+                                    secret = s.to_string();
+                                }
                             }
                         }
-                    }
+                        secret
+                    };
                     let res = auth_mgr.login_apikey(&client_id, &actual_secret);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
@@ -459,11 +470,7 @@ fn main() -> ExitCode {
                 }
                 AuthAction::Unlock => {
                     let pwd = if io::stdin().is_terminal() {
-                        eprint!("Enter Master Password: ");
-                        let _ = io::stderr().flush();
-                        let mut buf = String::new();
-                        let _ = io::stdin().read_line(&mut buf);
-                        buf.trim_end_matches(&['\r', '\n'][..]).to_string()
+                        rpassword::prompt_password("Enter Master Password: ").unwrap_or_default()
                     } else {
                         read_secret_stdin()
                     };

@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["full"] }
 libc = "0.2"
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "crypto", "alloc"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+rpassword = "7.3"
 
 [dev-dependencies]
 tempfile = "3.17"
