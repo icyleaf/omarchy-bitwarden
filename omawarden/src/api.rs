@@ -508,11 +508,34 @@ pub fn decrypt_sync_ciphers_with_context(
                         }
                     }
 
+                    let mut has_passkey = false;
+                    let mut passkey_created_at: Option<String> = None;
+                    if let Some(fido2_arr) = login_obj
+                        .get("fido2Credentials")
+                        .or_else(|| login_obj.get("fido2_credentials"))
+                        .and_then(|v| v.as_array())
+                    {
+                        if !fido2_arr.is_empty() {
+                            has_passkey = true;
+                            if let Some(first_fido) = fido2_arr.first() {
+                                if let Some(created) = first_fido
+                                    .get("creationDate")
+                                    .or_else(|| first_fido.get("creation_date"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    passkey_created_at = Some(created.to_string());
+                                }
+                            }
+                        }
+                    }
+
                     login_val = Some(json!({
                         "username": user,
                         "password": pwd,
                         "totp": totp,
                         "uris": uris_decrypted,
+                        "has_passkey": has_passkey,
+                        "passkey_created_at": passkey_created_at,
                     }));
                 }
             }
@@ -1266,5 +1289,60 @@ mod tests {
         assert_eq!(items[0].sub_title, "Shen Wang");
         let id_obj = items[0].identity.as_ref().unwrap();
         assert_eq!(id_obj.get("company").unwrap(), "LZSH Org");
+    }
+
+    #[test]
+    fn test_decrypt_login_with_fido2_passkey() {
+        let raw_user_key = [10u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-login-passkey",
+                "type": 1,
+                "name": encrypt_test_string("GitHub Account", &user_key),
+                "login": {
+                    "username": encrypt_test_string("octocat", &user_key),
+                    "password": encrypt_test_string("secret_pass", &user_key),
+                    "fido2Credentials": [
+                        {
+                            "credentialId": "cred-12345",
+                            "keyType": "public-key",
+                            "creationDate": "2024-05-12T14:30:00.000Z",
+                            "userName": "octocat",
+                            "rpId": "github.com"
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "id": "cipher-login-no-passkey",
+                "type": 1,
+                "name": encrypt_test_string("Standard Login", &user_key),
+                "login": {
+                    "username": encrypt_test_string("user1", &user_key),
+                    "password": encrypt_test_string("pass1", &user_key)
+                }
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // Item 1 with passkey
+        let login_with_pk = items[0].login.as_ref().unwrap();
+        assert_eq!(login_with_pk.get("has_passkey").unwrap(), true);
+        assert_eq!(
+            login_with_pk.get("passkey_created_at").unwrap(),
+            "2024-05-12T14:30:00.000Z"
+        );
+
+        // Item 2 without passkey
+        let login_without_pk = items[1].login.as_ref().unwrap();
+        assert_eq!(login_without_pk.get("has_passkey").unwrap(), false);
+        assert!(login_without_pk
+            .get("passkey_created_at")
+            .unwrap()
+            .is_null());
     }
 }
