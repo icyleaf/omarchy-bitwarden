@@ -17,6 +17,7 @@ pub struct SshMetadata {
     pub key_type: String,
     pub private_key: Option<String>,
     pub public_key: Option<String>,
+    pub fingerprint: Option<String>,
     pub passphrase: Option<String>,
 }
 
@@ -210,10 +211,53 @@ pub fn detect_ssh_key_metadata(raw: &Value) -> Option<SshMetadata> {
             key_type,
             private_key,
             public_key,
+            fingerprint: None,
             passphrase,
         })
     } else {
         None
+    }
+}
+
+pub fn parse_ssh_key_fields(
+    private_key: Option<String>,
+    public_key: Option<String>,
+    fingerprint: Option<String>,
+) -> SshMetadata {
+    let mut key_type = "SSH".to_string();
+    if let Some(ref pk) = public_key {
+        if pk.contains("ssh-ed25519") {
+            key_type = "ED25519".to_string();
+        } else if pk.contains("ssh-rsa") {
+            key_type = "RSA".to_string();
+        } else if pk.contains("ecdsa") {
+            key_type = "ECDSA".to_string();
+        } else if pk.contains("ssh-dss") {
+            key_type = "DSA".to_string();
+        }
+    } else if let Some(ref prk) = private_key {
+        if prk.contains("OPENSSH") {
+            key_type = if prk.contains("ed25519") {
+                "ED25519".to_string()
+            } else {
+                "OPENSSH".to_string()
+            };
+        } else if prk.contains("RSA") {
+            key_type = "RSA".to_string();
+        } else if prk.contains("EC") {
+            key_type = "ECDSA".to_string();
+        } else if prk.contains("DSA") {
+            key_type = "DSA".to_string();
+        }
+    }
+
+    SshMetadata {
+        is_ssh_key: true,
+        key_type,
+        private_key,
+        public_key,
+        fingerprint,
+        passphrase: None,
     }
 }
 
@@ -336,10 +380,10 @@ impl VaultManager {
 
         let sync_resp = match sync_resp_res {
             Ok(resp) => resp,
-            Err(ApiError::Http(ref msg)) if msg.contains("401") => {
+            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
                     "omawarden:vault",
-                    "HTTP 401 on sync. Attempting token refresh..."
+                    "HTTP 401/403 on sync. Attempting token refresh..."
                 );
                 if let Some(ref ref_tok) = storage.refresh_token {
                     if let Ok(tok_resp) = client.refresh_token_grant(ref_tok) {
@@ -640,55 +684,6 @@ impl VaultManager {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            if let Some(ssh_meta) = detect_ssh_key_metadata(raw) {
-                let type_name = "ssh_key".to_string();
-                let sub_title = format!("SSH Key ({})", ssh_meta.key_type);
-                let mut search_tokens = vec![
-                    name.to_lowercase(),
-                    "ssh".to_string(),
-                    "ssh key".to_string(),
-                    ssh_meta.key_type.to_lowercase(),
-                ];
-                if let Some(ref pubk) = ssh_meta.public_key {
-                    search_tokens.push(pubk.to_lowercase());
-                }
-                for att in &attachments {
-                    if let Some(fname) = att.get("fileName").and_then(|v| v.as_str()) {
-                        search_tokens.push(fname.to_lowercase());
-                    }
-                }
-                let search_text = search_tokens
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                parsed.push(VaultItem {
-                    id,
-                    name,
-                    item_type,
-                    type_name,
-                    sub_title,
-                    notes,
-                    favorite,
-                    created_at,
-                    updated_at,
-                    folder_id,
-                    folder_name: None,
-                    organization_id,
-                    organization_name: None,
-                    collection_ids,
-                    login: None,
-                    card: None,
-                    identity: None,
-                    ssh_key: Some(ssh_meta),
-                    fields,
-                    attachments,
-                    search_text,
-                });
-                continue;
-            }
-
             let type_name = match item_type {
                 1 => "login",
                 2 => "note",
@@ -717,6 +712,31 @@ impl VaultManager {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
+
+            let ssh_key = if item_type == 5 {
+                if let Some(ssh_data) = raw.get("sshKey").or_else(|| raw.get("ssh_key")) {
+                    let priv_k = ssh_data
+                        .get("privateKey")
+                        .or_else(|| ssh_data.get("private_key"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let pub_k = ssh_data
+                        .get("publicKey")
+                        .or_else(|| ssh_data.get("public_key"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let fp = ssh_data
+                        .get("keyFingerprint")
+                        .or_else(|| ssh_data.get("fingerprint"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Some(parse_ssh_key_fields(priv_k, pub_k, fp))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             parsed.push(VaultItem {
                 id,
@@ -748,7 +768,7 @@ impl VaultManager {
                 } else {
                     None
                 },
-                ssh_key: None,
+                ssh_key,
                 fields,
                 attachments,
                 search_text,
@@ -834,6 +854,49 @@ impl VaultManager {
                     search_tokens.push(fname.to_lowercase());
                     search_tokens.push(lname.to_lowercase());
                     search_tokens.push(full_name.to_lowercase());
+                }
+            }
+            5 => {
+                if let Some(ssh_data) = raw.get("sshKey").or_else(|| raw.get("ssh_key")) {
+                    let pubk = ssh_data
+                        .get("publicKey")
+                        .or_else(|| ssh_data.get("public_key"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let privk = ssh_data
+                        .get("privateKey")
+                        .or_else(|| ssh_data.get("private_key"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let fp = ssh_data
+                        .get("keyFingerprint")
+                        .or_else(|| ssh_data.get("fingerprint"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let mut key_type = "SSH".to_string();
+                    if pubk.contains("ssh-ed25519") || privk.contains("ed25519") {
+                        key_type = "ED25519".to_string();
+                    } else if pubk.contains("ssh-rsa") || privk.contains("RSA") {
+                        key_type = "RSA".to_string();
+                    } else if pubk.contains("ecdsa") || privk.contains("EC") {
+                        key_type = "ECDSA".to_string();
+                    } else if pubk.contains("ssh-dss") || privk.contains("DSA") {
+                        key_type = "DSA".to_string();
+                    }
+                    sub_title = format!("SSH Key ({})", key_type);
+                    search_tokens.push("ssh".to_string());
+                    search_tokens.push("ssh key".to_string());
+                    search_tokens.push(key_type.to_lowercase());
+                    if !pubk.is_empty() {
+                        search_tokens.push(pubk.to_lowercase());
+                    }
+                    if !fp.is_empty() {
+                        search_tokens.push(fp.to_lowercase());
+                    }
+                } else {
+                    sub_title = "SSH Key".to_string();
+                    search_tokens.push("ssh".to_string());
+                    search_tokens.push("ssh key".to_string());
                 }
             }
             2 => {
@@ -1025,14 +1088,24 @@ mod tests {
             json!({
                 "id": "3",
                 "name": "Server Access",
+                "type": 5,
+                "sshKey": {
+                    "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host",
+                    "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+                    "keyFingerprint": "SHA256:abcd1234efgh"
+                }
+            }),
+            json!({
+                "id": "4",
+                "name": "Server Backup Notes",
                 "type": 2,
-                "notes": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+                "notes": "Here is a note with ssh-rsa AAAAB3... that should stay as a note"
             }),
         ];
 
         let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
         let items = vault_mgr.parse_raw_items(&raw_items);
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
 
         assert_eq!(items[0].type_name, "login");
         assert_eq!(items[0].sub_title, "octocat");
@@ -1041,7 +1114,16 @@ mod tests {
         assert_eq!(items[1].sub_title, "Visa •••• 4444");
 
         assert_eq!(items[2].type_name, "ssh_key");
-        assert!(items[2].sub_title.contains("SSH Key"));
+        assert_eq!(items[2].sub_title, "SSH Key (ED25519)");
+        assert!(items[2].ssh_key.is_some());
+        assert_eq!(
+            items[2].ssh_key.as_ref().unwrap().fingerprint.as_deref(),
+            Some("SHA256:abcd1234efgh")
+        );
+
+        assert_eq!(items[3].type_name, "note");
+        assert_eq!(items[3].sub_title, "Secure Note");
+        assert!(items[3].ssh_key.is_none());
 
         let search_gh = vault_mgr.search(&items, "github", None);
         assert_eq!(search_gh.len(), 1);
@@ -1054,6 +1136,10 @@ mod tests {
         let search_ssh = vault_mgr.search(&items, "", Some("ssh_key"));
         assert_eq!(search_ssh.len(), 1);
         assert_eq!(search_ssh[0].id, "3");
+
+        let search_note = vault_mgr.search(&items, "", Some("note"));
+        assert_eq!(search_note.len(), 1);
+        assert_eq!(search_note[0].id, "4");
     }
 
     #[test]

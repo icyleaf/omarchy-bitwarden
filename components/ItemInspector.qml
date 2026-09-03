@@ -1090,27 +1090,73 @@ ScrollView {
           spacing: 8
 
           RowLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.key_type)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
             Layout.fillWidth: true
             spacing: 8
 
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 2
-              Text { text: "Key Type"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Private Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
-                text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.key_type || "") : ""
+                text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.showPrivateKeyRevealed ? (inspectorRoot.item.ssh_key.private_key || "") : "••••••••••••••••") : ""
                 color: inspectorRoot.foreground
                 font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
                 font.weight: Font.Medium
-                elide: Text.ElideRight
+                wrapMode: Text.WrapAnywhere
                 Layout.fillWidth: true
               }
+            }
+
+            GhostIconButton {
+              iconText: inspectorRoot.showPrivateKeyRevealed ? "\uf070" : "\uf06e"
+              tooltip: inspectorRoot.showPrivateKeyRevealed ? "Hide private key" : "Show private key"
+              onClicked: inspectorRoot.togglePrivateKeyRevealed()
+            }
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy private key"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
             }
           }
 
           Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.fingerprint)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key && (inspectorRoot.item.ssh_key.public_key || inspectorRoot.item.ssh_key.fingerprint))
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(255, 255, 255, 0.05)
+          }
+
+          RowLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
+            Layout.fillWidth: true
+            spacing: 8
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Text { text: "Public Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text {
+                text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.public_key || "") : ""
+                color: inspectorRoot.foreground
+                font.pixelSize: inspectorRoot.valuePixelSize
+                font.family: "monospace"
+                font.weight: Font.Medium
+                wrapMode: Text.WrapAnywhere
+                Layout.fillWidth: true
+              }
+            }
+
+            GhostIconButton {
+              iconText: "\uf0c5"
+              tooltip: "Copy public key"
+              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
+            }
+          }
+
+          Rectangle {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key && inspectorRoot.item.ssh_key.fingerprint)
             Layout.fillWidth: true
             height: 1
             color: Qt.rgba(255, 255, 255, 0.05)
@@ -1131,7 +1177,7 @@ ScrollView {
                 font.pixelSize: inspectorRoot.valuePixelSize
                 font.family: "monospace"
                 font.weight: Font.Medium
-                elide: Text.ElideRight
+                wrapMode: Text.WrapAnywhere
                 Layout.fillWidth: true
               }
             }
@@ -1140,75 +1186,6 @@ ScrollView {
               iconText: "\uf0c5"
               tooltip: "Copy fingerprint"
               onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.fingerprint, false, "fingerprint") }
-            }
-          }
-
-          Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
-            Layout.fillWidth: true
-            height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
-          }
-
-          RowLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key)
-            Layout.fillWidth: true
-            spacing: 8
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 2
-              Text { text: "Public Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
-              Text {
-                text: "Available"
-                color: inspectorRoot.foreground
-                font.pixelSize: inspectorRoot.valuePixelSize
-                font.weight: Font.Medium
-                Layout.fillWidth: true
-              }
-            }
-
-            GhostIconButton {
-              iconText: "\uf0c5"
-              tooltip: "Copy public key"
-              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.public_key, false, "SSH public key") }
-            }
-          }
-
-          Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
-            Layout.fillWidth: true
-            height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
-          }
-
-          RowLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key)
-            Layout.fillWidth: true
-            spacing: 8
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 2
-              Text { text: "Private Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
-              Text {
-                text: inspectorRoot.showPrivateKeyRevealed ? "Revealed" : "Encrypted (Hidden)"
-                color: inspectorRoot.foreground
-                font.pixelSize: inspectorRoot.valuePixelSize
-                font.weight: Font.Medium
-                Layout.fillWidth: true
-              }
-            }
-
-            GhostIconButton {
-              iconText: inspectorRoot.showPrivateKeyRevealed ? "\uf070" : "\uf06e"
-              tooltip: inspectorRoot.showPrivateKeyRevealed ? "Hide private key" : "Show private key"
-              onClicked: inspectorRoot.togglePrivateKeyRevealed()
-            }
-            GhostIconButton {
-              iconText: "\uf0c5"
-              tooltip: "Copy private key"
-              onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
             }
           }
         }

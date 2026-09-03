@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::crypto::{
     derive_master_key, derive_master_password_hash, EncString, KdfType, SymmetricCryptoKey,
 };
-use crate::vault::{detect_ssh_key_metadata, VaultItem};
+use crate::vault::{parse_ssh_key_fields, SshMetadata, VaultItem};
 
 #[derive(Debug, Clone)]
 pub enum ApiError {
@@ -91,7 +91,26 @@ pub struct BitwardenApiClient {
 impl BitwardenApiClient {
     pub fn new(server_url: &str) -> Self {
         let base = server_url.trim_end_matches('/');
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        default_headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("Bitwarden_Desktop/2025.1.0 (Linux)"),
+        );
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static("bitwarden-client-name"),
+            reqwest::header::HeaderValue::from_static("desktop"),
+        );
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static("bitwarden-client-version"),
+            reqwest::header::HeaderValue::from_static("2025.1.0"),
+        );
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static("device-type"),
+            reqwest::header::HeaderValue::from_static("linux"),
+        );
+
         let client = Client::builder()
+            .default_headers(default_headers)
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
@@ -692,6 +711,27 @@ pub fn decrypt_sync_ciphers_with_context(
             }
         }
 
+        let mut ssh_key_val: Option<SshMetadata> = None;
+        if item_type == 5 {
+            if let Some(ssh_obj) = c.get("sshKey").or_else(|| c.get("SshKey")) {
+                if !ssh_obj.is_null() {
+                    let priv_k = decrypt_cipher_string(
+                        ssh_obj.get("privateKey").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let pub_k = decrypt_cipher_string(
+                        ssh_obj.get("publicKey").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let fp = decrypt_cipher_string(
+                        ssh_obj.get("keyFingerprint").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    ssh_key_val = Some(parse_ssh_key_fields(priv_k, pub_k, fp));
+                }
+            }
+        }
+
         // Decrypt fields if present
         let mut fields_decrypted = Vec::new();
         if let Some(fields_arr) = c.get("fields").and_then(|v| v.as_array()) {
@@ -743,67 +783,6 @@ pub fn decrypt_sync_ciphers_with_context(
                     "url": url,
                 }));
             }
-        }
-
-        // Build raw JSON representation to feed into SSH heuristic scanner
-        let raw_item_json = json!({
-            "id": id,
-            "name": name,
-            "type": item_type,
-            "notes": notes,
-            "favorite": favorite,
-            "created_at": created_at,
-            "updated_at": updated_at,
-            "login": login_val,
-            "card": card_val,
-            "identity": identity_val,
-            "fields": fields_decrypted,
-            "attachments": attachments_decrypted,
-        });
-
-        if let Some(ssh_meta) = detect_ssh_key_metadata(&raw_item_json) {
-            let type_name = "ssh_key".to_string();
-            let sub_title = format!("SSH Key ({})", ssh_meta.key_type);
-            let mut search_tokens = vec![
-                name.to_lowercase(),
-                "ssh".to_string(),
-                "ssh key".to_string(),
-                ssh_meta.key_type.to_lowercase(),
-            ];
-            if let Some(ref pubk) = ssh_meta.public_key {
-                search_tokens.push(pubk.to_lowercase());
-            }
-            for att in &attachments_decrypted {
-                if let Some(fn_str) = att.get("fileName").and_then(|v| v.as_str()) {
-                    search_tokens.push(fn_str.to_lowercase());
-                }
-            }
-            let search_text = search_tokens.join(" ");
-
-            items.push(VaultItem {
-                id,
-                name,
-                item_type,
-                type_name,
-                sub_title,
-                notes,
-                favorite,
-                created_at,
-                updated_at,
-                folder_id,
-                folder_name,
-                organization_id: org_id_opt,
-                organization_name: org_name_opt,
-                collection_ids,
-                login: None,
-                card: None,
-                identity: None,
-                ssh_key: Some(ssh_meta),
-                fields: fields_decrypted,
-                attachments: attachments_decrypted,
-                search_text,
-            });
-            continue;
         }
 
         let type_name = match item_type {
@@ -882,6 +861,13 @@ pub fn decrypt_sync_ciphers_with_context(
                     "Identity".to_string()
                 }
             }
+            5 => {
+                if let Some(ref s) = ssh_key_val {
+                    format!("SSH Key ({})", s.key_type)
+                } else {
+                    "SSH Key".to_string()
+                }
+            }
             _ => {
                 if let Some(ref l) = login_val {
                     l.get("username")
@@ -941,6 +927,19 @@ pub fn decrypt_sync_ciphers_with_context(
                 }
             }
         }
+        if item_type == 5 {
+            search_tokens.push("ssh".to_string());
+            search_tokens.push("ssh key".to_string());
+            if let Some(ref s) = ssh_key_val {
+                search_tokens.push(s.key_type.to_lowercase());
+                if let Some(ref pubk) = s.public_key {
+                    search_tokens.push(pubk.to_lowercase());
+                }
+                if let Some(ref fp) = s.fingerprint {
+                    search_tokens.push(fp.to_lowercase());
+                }
+            }
+        }
         for f in &fields_decrypted {
             if let Some(fn_str) = f.get("name").and_then(|v| v.as_str()) {
                 search_tokens.push(fn_str.to_lowercase());
@@ -981,7 +980,7 @@ pub fn decrypt_sync_ciphers_with_context(
             login: if item_type == 1 { login_val } else { None },
             card: if item_type == 3 { card_val } else { None },
             identity: if item_type == 4 { identity_val } else { None },
-            ssh_key: None,
+            ssh_key: if item_type == 5 { ssh_key_val } else { None },
             fields: fields_decrypted,
             attachments: attachments_decrypted,
             search_text,
@@ -1362,6 +1361,59 @@ mod tests {
             .get("passkey_created_at")
             .unwrap()
             .is_null());
+    }
+
+    #[test]
+    fn test_decrypt_ssh_key_cipher_type_5() {
+        let raw_user_key = [16u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-ssh-5",
+                "type": 5,
+                "name": encrypt_test_string("Production Server Key", &user_key),
+                "sshKey": {
+                    "publicKey": encrypt_test_string("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... dev@server", &user_key),
+                    "privateKey": encrypt_test_string("-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----", &user_key),
+                    "keyFingerprint": encrypt_test_string("SHA256:fingerprint123456", &user_key)
+                }
+            }),
+            json!({
+                "id": "cipher-note-2",
+                "type": 2,
+                "name": encrypt_test_string("Regular Note", &user_key),
+                "notes": encrypt_test_string("Just some text with ssh-rsa AAAAB3NzaC1yc2E... in it", &user_key)
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // Cipher Type 5
+        assert_eq!(items[0].type_name, "ssh_key");
+        assert_eq!(items[0].sub_title, "SSH Key (ED25519)");
+        let ssh_meta = items[0].ssh_key.as_ref().unwrap();
+        assert_eq!(ssh_meta.key_type, "ED25519");
+        assert!(ssh_meta
+            .public_key
+            .as_ref()
+            .unwrap()
+            .starts_with("ssh-ed25519"));
+        assert!(ssh_meta
+            .private_key
+            .as_ref()
+            .unwrap()
+            .contains("BEGIN OPENSSH"));
+        assert_eq!(
+            ssh_meta.fingerprint.as_deref(),
+            Some("SHA256:fingerprint123456")
+        );
+
+        // Cipher Type 2 (Note) remains Note!
+        assert_eq!(items[1].type_name, "note");
+        assert_eq!(items[1].sub_title, "Secure Note");
+        assert!(items[1].ssh_key.is_none());
     }
 
     #[test]
