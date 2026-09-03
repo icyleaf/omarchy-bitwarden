@@ -92,6 +92,9 @@ Item {
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
   property var currentAvailableActions: []
+  property bool showSshKeyModal: false
+  property string sshKeyModalMode: "create"
+  property var sshKeyModalItem: null
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -151,6 +154,7 @@ Item {
     root.statusMessage = ""
     root.currentView = "auto"
     root.showActionPalette = false
+    root.showSshKeyModal = false
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.activeAttachmentPreview = null
@@ -176,6 +180,7 @@ Item {
   function close() {
     root.opened = false
     root.showActionPalette = false
+    root.showSshKeyModal = false
   }
 
   function dismiss() {
@@ -519,11 +524,13 @@ Item {
     if (root.showActionPalette) {
       root.updateAvailableActions()
     } else {
-      Qt.callLater(function() {
-        if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
-          searchHeader.searchField.forceActiveFocus()
-        }
-      })
+      root.restoreSearchFocus()
+    }
+  }
+
+  onShowSshKeyModalChanged: {
+    if (!root.showSshKeyModal) {
+      root.restoreSearchFocus()
     }
   }
 
@@ -613,6 +620,9 @@ Item {
       uName = item.login.username
     } else if (item.type_name === "identity" && item.identity && item.identity.username) {
       uName = item.identity.username
+    } else if (item.type_name === "ssh_key" && item.ssh_key && item.ssh_key.public_key) {
+      root.copyToClipboard(item.ssh_key.public_key, false, "SSH public key")
+      return
     }
     if (uName) {
       root.copyToClipboard(uName, false, "username")
@@ -648,8 +658,14 @@ Item {
   }
 
   function getAvailableActions(item) {
-    if (!item) return []
     var actions = []
+    if (!item) {
+      actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
+      actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
+      actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
+      actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
+      return actions
+    }
 
     if (item.type_name === "login" && item.login) {
       if (item.login.password) {
@@ -702,10 +718,18 @@ Item {
         actions.push({ label: "Copy Expiration (" + expStr + ")", icon: "\uf073", shortcut: "", action: function() { root.copyToClipboard(expStr, false, "expiration") } })
       }
     } else if (item.type_name === "ssh_key" && item.ssh_key) {
-      if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "\uf084", shortcut: "↵", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "private key") } })
-      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "public key") } })
+      if (item.ssh_key.private_key) actions.push({ label: "Copy Private Key", icon: "\uf084", shortcut: "↵", action: function() { root.copyToClipboard(item.ssh_key.private_key, true, "SSH private key") } })
+      if (item.ssh_key.public_key) actions.push({ label: "Copy Public Key", icon: "\uf084", shortcut: "Ctrl+U", action: function() { root.copyToClipboard(item.ssh_key.public_key, false, "SSH public key") } })
       if (item.ssh_key.fingerprint) actions.push({ label: "Copy Fingerprint", icon: "\uf084", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.fingerprint, false, "fingerprint") } })
       if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "\uf023", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
+      actions.push({
+        label: "Export to ~/.ssh",
+        icon: "\uf019",
+        shortcut: "Ctrl+E",
+        action: function() {
+          root.openSshKeyModal("export", item)
+        }
+      })
     } else if (item.type_name === "identity" && item.identity) {
       var idFullName = ((item.identity.firstName || "") + " " + (item.identity.lastName || "")).trim()
       if (idFullName) actions.push({ label: "Copy Full Name (" + idFullName + ")", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(idFullName, false, "full name") } })
@@ -795,6 +819,8 @@ Item {
     }
 
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
+    actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
+    actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
     actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
     actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
 
@@ -835,6 +861,69 @@ Item {
     }
     attachmentProc.command = cmd
     attachmentProc.running = true
+  }
+
+  function openSshKeyModal(mode, item) {
+    root.sshKeyModalMode = mode || "create"
+    root.sshKeyModalItem = item || null
+    root.showSshKeyModal = true
+  }
+
+  function handleSshKeyCreate(payload) {
+    if (!payload || !payload.name) return
+    root.isBusy = true
+    if (sshKeyModalComponent) sshKeyModalComponent.isBusy = true
+    var cmd = [root.helperPath, "ssh-key", "create", "--name", payload.name, "--algorithm", payload.algorithm || "ed25519"]
+    if (payload.comment) {
+      cmd.push("--comment", payload.comment)
+    }
+    if (payload.notes) {
+      cmd.push("--notes", payload.notes)
+    }
+    if (payload.exportToLocal && payload.outDir) {
+      cmd.push("--out-dir", payload.outDir)
+    }
+    sshKeyActionProc.actionType = "create"
+    sshKeyActionProc.actionName = payload.name
+    sshKeyActionProc.command = cmd
+    sshKeyActionProc.running = true
+  }
+
+  function handleSshKeyImport(payload) {
+    if (!payload || !payload.name || !payload.privateKeyPath) return
+    root.isBusy = true
+    if (sshKeyModalComponent) sshKeyModalComponent.isBusy = true
+    var cmd = [root.helperPath, "ssh-key", "import", "--name", payload.name, "--private-key", payload.privateKeyPath]
+    if (payload.publicKeyPath) {
+      cmd.push("--public-key", payload.publicKeyPath)
+    }
+    if (payload.notes) {
+      cmd.push("--notes", payload.notes)
+    }
+    sshKeyActionProc.actionType = "import"
+    sshKeyActionProc.actionName = payload.name
+    sshKeyActionProc.command = cmd
+    sshKeyActionProc.running = true
+  }
+
+  function handleSshKeyExport(payload) {
+    if (!payload || !payload.item) return
+    root.isBusy = true
+    if (sshKeyModalComponent) sshKeyModalComponent.isBusy = true
+    var cmd = [root.helperPath, "ssh-key", "export", payload.item.id || payload.item.name]
+    if (payload.outDir) {
+      cmd.push("--out-dir", payload.outDir)
+    }
+    if (payload.privateKeyFile) {
+      cmd.push("--private-key-file", payload.privateKeyFile)
+    }
+    if (payload.publicKeyFile) {
+      cmd.push("--public-key-file", payload.publicKeyFile)
+    }
+    sshKeyActionProc.actionType = "export"
+    sshKeyActionProc.actionName = payload.item.name
+    sshKeyActionProc.command = cmd
+    sshKeyActionProc.running = true
   }
 
   function saveSettings(settings) {
@@ -995,6 +1084,17 @@ Item {
     }
   }
 
+  function restoreSearchFocus() {
+    Qt.callLater(function() {
+      if (root.opened && root.effectiveView === "search") {
+        if (focusRoot) focusRoot.forceActiveFocus()
+        if (searchHeader) searchHeader.focusSearch()
+      } else if (root.opened && (root.effectiveView === "unlock" || root.effectiveView === "login") && authViewComponent && authViewComponent.unlockInput) {
+        authViewComponent.unlockInput.forceActiveFocus()
+      }
+    })
+  }
+
   // ======================================================
   // FLOATING OVERLAY WINDOW
   // ======================================================
@@ -1009,76 +1109,7 @@ Item {
 
     onVisibleChanged: {
       if (visible) {
-        Qt.callLater(function() {
-          if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
-            searchHeader.searchField.forceActiveFocus()
-          } else if (authViewComponent && authViewComponent.unlockInput) {
-            authViewComponent.unlockInput.forceActiveFocus()
-          }
-        })
-      }
-    }
-
-    Shortcut {
-      sequence: "Ctrl+K"
-      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null
-      onActivated: {
-        root.actionPaletteIndex = 0
-        root.showActionPalette = true
-      }
-    }
-
-    Shortcut {
-      sequence: "Ctrl+U"
-      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
-      onActivated: root.copyItemUsername(root.selectedItem)
-    }
-
-    Shortcut {
-      sequence: "Ctrl+T"
-      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
-      onActivated: root.copyItemTotp(root.selectedItem)
-    }
-
-    Shortcut {
-      sequence: "Ctrl+O"
-      enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette
-      onActivated: root.openFirstWebsite(root.selectedItem)
-    }
-
-    Shortcut {
-      sequence: "Ctrl+L"
-      enabled: root.opened && root.authState.status === "unlocked"
-      onActivated: root.doLock()
-    }
-
-    Shortcut {
-      sequence: "Ctrl+R"
-      enabled: root.opened && root.authState.status === "unlocked" && !root.isBusy
-      onActivated: root.syncVault(false, true)
-    }
-
-    Shortcut {
-      sequence: "Ctrl+,"
-      enabled: root.opened
-      onActivated: {
-        root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
-      }
-    }
-
-    Shortcut {
-      sequence: "Escape"
-      enabled: root.opened
-      onActivated: {
-        if (root.showActionPalette) {
-          root.showActionPalette = false
-        } else if (root.activeAttachmentPreview !== null) {
-          root.activeAttachmentPreview = null
-        } else if (root.effectiveView === "settings") {
-          root.currentView = "auto"
-        } else {
-          root.dismiss()
-        }
+        root.restoreSearchFocus()
       }
     }
 
@@ -1087,8 +1118,89 @@ Item {
       anchors.fill: parent
       focus: true
 
+      Shortcut {
+        sequence: "Ctrl+K"
+        enabled: root.opened && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal
+        onActivated: {
+          root.actionPaletteIndex = 0
+          root.showActionPalette = true
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+U"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal
+        onActivated: root.copyItemUsername(root.selectedItem)
+      }
+
+      Shortcut {
+        sequence: "Ctrl+T"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal
+        onActivated: root.copyItemTotp(root.selectedItem)
+      }
+
+      Shortcut {
+        sequence: "Ctrl+O"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal
+        onActivated: root.openFirstWebsite(root.selectedItem)
+      }
+
+      Shortcut {
+        sequence: "Ctrl+E"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.showActionPalette && !root.showSshKeyModal
+        onActivated: {
+          root.openSshKeyModal("export", root.selectedItem)
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+L"
+        enabled: root.opened && root.authState.status === "unlocked" && !root.showSshKeyModal
+        onActivated: root.doLock()
+      }
+
+      Shortcut {
+        sequence: "Ctrl+R"
+        enabled: root.opened && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal
+        onActivated: root.syncVault(false, true)
+      }
+
+      Shortcut {
+        sequence: "Ctrl+,"
+        enabled: root.opened && !root.showSshKeyModal
+        onActivated: {
+          root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
+        }
+      }
+
+      Shortcut {
+        sequence: "Escape"
+        enabled: root.opened
+        onActivated: {
+          if (root.showSshKeyModal) {
+            root.showSshKeyModal = false
+          } else if (root.showActionPalette) {
+            root.showActionPalette = false
+          } else if (root.activeAttachmentPreview !== null) {
+            root.activeAttachmentPreview = null
+          } else if (root.effectiveView === "settings") {
+            root.currentView = "auto"
+          } else {
+            root.dismiss()
+          }
+        }
+      }
+
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
+        if (root.showSshKeyModal) {
+          if (event.key === Qt.Key_Escape) {
+            root.showSshKeyModal = false
+            event.accepted = true
+          }
+          return
+        }
+
         if (root.showActionPalette) {
           if (event.key === Qt.Key_Escape) {
             root.showActionPalette = false
@@ -1153,6 +1265,8 @@ Item {
           borderColor: root.borderColor
           onSearchQueryChanged: root.searchQuery = searchQuery
           onCategorySelected: function(cat) { root.activeCategory = cat }
+          onCreateSshKeyRequested: { root.openSshKeyModal("create", null) }
+          onImportSshKeyRequested: { root.openSshKeyModal("import", null) }
           onClearSearchRequested: {
             root.searchQuery = ""
             root.filterVaultItems()
@@ -1220,6 +1334,7 @@ Item {
                 onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
+                onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
                 onClosePreviewRequested: { root.activeAttachmentPreview = null }
                 onTogglePasswordRevealed: { root.showPasswordRevealed = !root.showPasswordRevealed }
                 onTogglePrivateKeyRevealed: { root.showPrivateKeyRevealed = !root.showPrivateKeyRevealed }
@@ -1356,12 +1471,81 @@ Item {
         }
         onCloseRequested: { root.showActionPalette = false }
       }
+
+      // 6. SSH Key Management Modal Overlay (Create, Import, Export)
+      SshKeyModal {
+        id: sshKeyModalComponent
+        active: root.showSshKeyModal
+        mode: root.sshKeyModalMode
+        item: root.sshKeyModalItem
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        borderColor: root.borderColor
+        onCreateRequested: function(payload) { root.handleSshKeyCreate(payload) }
+        onImportRequested: function(payload) { root.handleSshKeyImport(payload) }
+        onExportRequested: function(payload) { root.handleSshKeyExport(payload) }
+        onCloseRequested: { root.showSshKeyModal = false }
+      }
     }
   }
 
   // ======================================================
   // QUICKSHELL IO BACKGROUND PROCESSES
   // ======================================================
+  Process {
+    id: sshKeyActionProc
+    property string actionType: "create"
+    property string actionName: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isBusy = false
+        if (sshKeyModalComponent) sshKeyModalComponent.isBusy = false
+        var raw = text.trim()
+        var jsonRes = null
+        try {
+          if (raw) jsonRes = JSON.parse(raw)
+        } catch (e) {}
+
+        if (jsonRes && jsonRes.ok) {
+          root.showSshKeyModal = false
+          if (sshKeyActionProc.actionType === "create") {
+            root.statusMessage = "SSH key '" + sshKeyActionProc.actionName + "' generated successfully."
+            root.loadVaultItems()
+          } else if (sshKeyActionProc.actionType === "import") {
+            root.statusMessage = "SSH key '" + sshKeyActionProc.actionName + "' imported successfully."
+            root.loadVaultItems()
+          } else if (sshKeyActionProc.actionType === "export") {
+            root.statusMessage = "SSH key '" + sshKeyActionProc.actionName + "' exported to local directory."
+          }
+        } else {
+          var errMsg = (jsonRes && jsonRes.error) ? jsonRes.error : "SSH key operation failed."
+          if (sshKeyModalComponent && root.showSshKeyModal) {
+            sshKeyModalComponent.errorMessage = errMsg
+          } else {
+            root.errorMessage = errMsg
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:ssh")
+    }
+    onExited: function(exitCode) {
+      root.isBusy = false
+      if (sshKeyModalComponent) sshKeyModalComponent.isBusy = false
+      if (exitCode !== 0 && (!sshKeyModalComponent || !sshKeyModalComponent.errorMessage)) {
+        if (sshKeyModalComponent && root.showSshKeyModal) {
+          sshKeyModalComponent.errorMessage = "Process exited with error code " + exitCode
+        } else {
+          root.errorMessage = "Process exited with error code " + exitCode
+        }
+      }
+    }
+  }
   Process {
     id: configGetProc
     command: []

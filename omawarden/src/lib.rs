@@ -9,6 +9,7 @@ pub mod health;
 pub mod hook;
 pub mod keyring;
 pub mod logging;
+pub mod ssh;
 pub mod storage;
 pub mod totp;
 pub mod vault;

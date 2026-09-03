@@ -18,6 +18,12 @@ ColumnLayout {
 
   signal categorySelected(string category)
   signal clearSearchRequested()
+  signal createSshKeyRequested()
+  signal importSshKeyRequested()
+
+  function focusSearch() {
+    searchInputField.forceActiveFocus()
+  }
 
   spacing: 6
   Layout.fillWidth: true
@@ -25,7 +31,7 @@ ColumnLayout {
   onVisibleChanged: {
     if (visible) {
       Qt.callLater(function() {
-        searchInputField.forceActiveFocus()
+        focusSearch()
       })
     }
   }
@@ -67,7 +73,6 @@ ColumnLayout {
           font.pixelSize: 12
           selectByMouse: true
           clip: true
-          activeFocusOnTab: true
         }
 
         Text {
@@ -106,17 +111,88 @@ ColumnLayout {
     }
   }
 
-  // 2. Category Tab Bar
-  CategoryTabBar {
-    id: catBar
-    categoryList: searchHeaderRoot.categoryList
-    activeCategory: searchHeaderRoot.activeCategory
-    rawVaultItems: searchHeaderRoot.rawVaultItems
-    foreground: searchHeaderRoot.foreground
-    accent: searchHeaderRoot.accent
-    borderColor: searchHeaderRoot.borderColor
-    onCategorySelected: function(cat) {
-      searchHeaderRoot.categorySelected(cat)
+  // 2. Category Tab Bar & Action Buttons
+  RowLayout {
+    Layout.fillWidth: true
+    spacing: 8
+
+    CategoryTabBar {
+      id: catBar
+      categoryList: searchHeaderRoot.categoryList
+      activeCategory: searchHeaderRoot.activeCategory
+      rawVaultItems: searchHeaderRoot.rawVaultItems
+      foreground: searchHeaderRoot.foreground
+      accent: searchHeaderRoot.accent
+      borderColor: searchHeaderRoot.borderColor
+      onCategorySelected: function(cat) {
+        searchHeaderRoot.categorySelected(cat)
+      }
+    }
+
+    Item { Layout.fillWidth: true }
+
+    // SSH Key Category Actions
+    RowLayout {
+      visible: searchHeaderRoot.activeCategory === "ssh_key"
+      spacing: 6
+
+      Rectangle {
+        implicitWidth: 24
+        implicitHeight: 24
+        radius: 4
+        color: createMouse.containsMouse ? Qt.rgba(searchHeaderRoot.accent.r, searchHeaderRoot.accent.g, searchHeaderRoot.accent.b, 0.25) : Qt.rgba(0, 0, 0, 0.25)
+        border.color: createMouse.containsMouse ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
+        border.width: 1
+
+        Text {
+          anchors.centerIn: parent
+          text: "\uf067"
+          font.family: searchHeaderRoot.fontFamily
+          font.pixelSize: 11
+          color: createMouse.containsMouse ? searchHeaderRoot.accent : Qt.darker(searchHeaderRoot.foreground, 1.2)
+        }
+
+        MouseArea {
+          id: createMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: searchHeaderRoot.createSshKeyRequested()
+
+          ToolTip.visible: containsMouse
+          ToolTip.delay: 300
+          ToolTip.text: "Generate SSH Key"
+        }
+      }
+
+      Rectangle {
+        implicitWidth: 24
+        implicitHeight: 24
+        radius: 4
+        color: importMouse.containsMouse ? Qt.rgba(searchHeaderRoot.accent.r, searchHeaderRoot.accent.g, searchHeaderRoot.accent.b, 0.25) : Qt.rgba(0, 0, 0, 0.25)
+        border.color: importMouse.containsMouse ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
+        border.width: 1
+
+        Text {
+          anchors.centerIn: parent
+          text: "\uf093"
+          font.family: searchHeaderRoot.fontFamily
+          font.pixelSize: 11
+          color: importMouse.containsMouse ? searchHeaderRoot.accent : Qt.darker(searchHeaderRoot.foreground, 1.2)
+        }
+
+        MouseArea {
+          id: importMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: searchHeaderRoot.importSshKeyRequested()
+
+          ToolTip.visible: containsMouse
+          ToolTip.delay: 300
+          ToolTip.text: "Import SSH Key"
+        }
+      }
     }
   }
 }

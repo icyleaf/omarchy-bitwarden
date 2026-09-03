@@ -213,6 +213,47 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             let category = req.get("category").and_then(|v| v.as_str());
             json!(state.vault_mgr.search_items(query, category))
         }
+        "ssh_key_create" => {
+            if let Some(user_key) = state.vault_mgr.get_user_key() {
+                let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let priv_k = req
+                    .get("private_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let pub_k = req.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
+                let fp = req
+                    .get("fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let notes = req.get("notes").and_then(|v| v.as_str());
+                let folder_id = req.get("folder_id").and_then(|v| v.as_str());
+
+                let ssh_data = crate::ssh::GeneratedSshKey {
+                    algorithm_name: String::new(),
+                    private_key: priv_k.to_string(),
+                    public_key: pub_k.to_string(),
+                    fingerprint: fp.to_string(),
+                };
+
+                match state
+                    .vault_mgr
+                    .create_ssh_key(name, &ssh_data, notes, folder_id, &user_key)
+                {
+                    Ok(item) => json!({ "ok": true, "item": item }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            } else {
+                json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
+            }
+        }
+        "get_ssh_key" => {
+            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(item) = state.vault_mgr.find_ssh_key(query) {
+                json!({ "ok": true, "item": item })
+            } else {
+                json!({ "ok": false, "error": format!("SSH key item '{}' not found", query) })
+            }
+        }
         "get_attachment_key" => {
             let item_id = req.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
             let attachment_id = req
