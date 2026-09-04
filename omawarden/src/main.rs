@@ -61,18 +61,17 @@ enum Commands {
         action: VaultAction,
     },
     #[command(
-        about = "[Deprecated] Low-level Wayland clipboard integration (use 'omawarden copy' instead)"
-    )]
-    Clipboard {
-        #[command(subcommand)]
-        action: ClipboardAction,
-    },
-    #[command(
-        about = "Copy a vault item field directly to Wayland clipboard without revealing secrets"
+        about = "Wayland clipboard operations (copy vault item field, pipe stdin, or clear)"
     )]
     Copy {
-        #[arg(index = 1, required = true, help = "Vault item ID or name query")]
-        query: String,
+        #[arg(index = 1, help = "Vault item ID or name query")]
+        query: Option<String>,
+        #[arg(long, help = "Clear Wayland clipboard immediately")]
+        clear: bool,
+        #[arg(long, help = "Read text to copy from standard input")]
+        stdin: bool,
+        #[arg(long, help = "Mark STDIN text as sensitive with auto-clear")]
+        sensitive: bool,
         #[arg(long, help = "Copy password (default for login items)")]
         password: bool,
         #[arg(long, help = "Copy username")]
@@ -181,21 +180,6 @@ enum VaultAction {
         #[arg(long = "filter")]
         category: Option<String>,
     },
-}
-
-#[derive(Subcommand)]
-enum ClipboardAction {
-    #[command(
-        about = "[Deprecated] Copy raw text to clipboard from stdin (use 'omawarden copy' instead)"
-    )]
-    Copy {
-        #[arg(long)]
-        sensitive: bool,
-        #[arg(long)]
-        timeout: Option<i64>,
-    },
-    #[command(about = "Clear clipboard immediately")]
-    Clear,
 }
 
 #[derive(Subcommand)]
@@ -633,40 +617,11 @@ fn main() -> ExitCode {
             }
         }
 
-        Commands::Clipboard { action } => {
-            let clip_mgr = ClipboardManager::default();
-            match action {
-                ClipboardAction::Copy { sensitive, timeout } => {
-                    let text_val = read_clipboard_stdin();
-                    let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-                    let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
-                    );
-                    if ok {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
-                    }
-                }
-                ClipboardAction::Clear => {
-                    let ok = clip_mgr.clear();
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
-                    );
-                    if ok {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
-                    }
-                }
-            }
-        }
-
         Commands::Copy {
             query,
+            clear,
+            stdin,
+            sensitive,
             password,
             username,
             totp,
@@ -687,6 +642,54 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+
+            if clear {
+                let ok = clip_mgr.clear();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "ok": ok })).unwrap()
+                );
+                return if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+
+            if stdin {
+                let text_val = read_clipboard_stdin();
+                let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
+                let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": ok,
+                        "copied": "stdin",
+                        "timeout": if sensitive { timeout_val } else { 0 }
+                    }))
+                    .unwrap()
+                );
+                return if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+
+            let query = match query {
+                Some(q) if !q.trim().is_empty() => q,
+                _ => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": "Missing item query or action flag (--clear / --stdin). See 'omawarden copy --help'."
+                        }))
+                        .unwrap()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
 
             omawarden::daemon::ensure_daemon_running();
             let st = send_daemon_request(&json!({ "action": "status" }));

@@ -567,7 +567,7 @@ Item {
       return
     }
     root.logInfo("omarchy:clipboard", "Copying " + (label || "item") + " to clipboard (sensitive: " + isSensitive + ")")
-    var cmd = [root.helperPath, "clipboard", "copy"]
+    var cmd = [root.helperPath, "copy", "--stdin"]
     if (isSensitive) {
       cmd.push("--sensitive")
     }
