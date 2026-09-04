@@ -53,34 +53,18 @@ Ensure the following tools are available on your system:
 
 ## Installation & Setup
 
-1. **Clone or Link to Omarchy Plugins Directory**:
+1. **Install Plugin via Omarchy CLI**:
 
 ```bash
-git clone https://github.com/icyleaf/omarchy-bitwarden.git ~/.config/omarchy/plugins/icyleaf.bitwarden
+omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 ```
 
-2. **Reload Omarchy Shell Plugins**:
-
-```bash
-omarchy-shell shell rescanPlugins
-```
-
-3. **Toggle Overlay**:
-
-```bash
-omarchy-shell shell toggle icyleaf.bitwarden
-```
-
-4. **Bind a Global Hotkey** (in `~/.config/hypr/bindings.lua`):
+2. **Bind Global Hotkey & Window Rule** (in `~/.config/hypr/bindings.lua`):
 
 ```lua
 -- ~/.config/hypr/bindings.lua
 o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
-```
 
-5. **Set window rule** (in `~/.config/hypr/bindings.lua`):
-
-```lua
 o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
   float = true,
   center = true,
@@ -88,12 +72,19 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
 })
 ```
 
-## Uninstall
+## Update & Uninstall
+
+- **Update Plugin**:
+
+```bash
+omarchy plugin update icyleaf.bitwarden
+```
+
+- **Uninstall Plugin**:
 
 ```bash
 killall omawarden
 omarchy plugin remove icyleaf.bitwarden
-rm -rf ~/.config/omarchy/plugins/icyleaf.bitwarden
 rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
