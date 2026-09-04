@@ -246,6 +246,15 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
             }
         }
+        "get_item" => {
+            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let category = req.get("category").and_then(|v| v.as_str());
+            if let Some(item) = state.vault_mgr.find_item(query, category) {
+                json!({ "ok": true, "item": item })
+            } else {
+                json!({ "ok": false, "error": format!("Item '{}' not found in vault", query) })
+            }
+        }
         "get_ssh_key" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(item) = state.vault_mgr.find_ssh_key(query) {
