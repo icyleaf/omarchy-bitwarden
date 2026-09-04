@@ -525,19 +525,37 @@ fn main() -> ExitCode {
                 VaultAction::Sync => {
                     omawarden::daemon::ensure_daemon_running();
                     let resp = send_daemon_request(&json!({ "action": "sync" }));
-                    let ok = resp
-                        .as_ref()
-                        .and_then(|v| v.get("ok"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or_else(|| vault_mgr.sync().is_ok());
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
-                    );
-                    if ok {
-                        ExitCode::SUCCESS
+                    if let Some(resp_val) = resp {
+                        let ok = resp_val
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
+                        if ok {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
                     } else {
-                        ExitCode::FAILURE
+                        match vault_mgr.sync() {
+                            Ok(_) => {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({ "ok": true })).unwrap()
+                                );
+                                ExitCode::SUCCESS
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(
+                                        &json!({ "ok": false, "error": e })
+                                    )
+                                    .unwrap()
+                                );
+                                ExitCode::FAILURE
+                            }
+                        }
                     }
                 }
                 VaultAction::List { category } => {
