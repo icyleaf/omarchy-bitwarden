@@ -21,7 +21,20 @@ impl ClipboardManager {
         Self { wl_copy_path: path }
     }
 
+    pub fn is_available(&self) -> bool {
+        which::which(&self.wl_copy_path).is_ok()
+    }
+
     pub fn copy(&self, text: &str, sensitive: bool, timeout_seconds: i64) -> bool {
+        if !self.is_available() {
+            crate::log_warn!(
+                "omawarden:clipboard",
+                "Wayland clipboard utility '{}' not found in PATH. Please install 'wl-clipboard'.",
+                self.wl_copy_path
+            );
+            return false;
+        }
+
         let mut child = match Command::new(&self.wl_copy_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

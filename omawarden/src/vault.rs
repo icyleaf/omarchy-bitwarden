@@ -717,36 +717,57 @@ impl VaultManager {
         Ok(decrypted_item)
     }
 
-    pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
+    pub fn find_item(&self, query: &str, category: Option<&str>) -> Option<VaultItem> {
         let items = self.get_items();
-        let target = id_or_name.trim();
+        let target = query.trim();
+        if target.is_empty() {
+            return None;
+        }
+
+        let cat_filter = category.map(|c| c.to_lowercase());
 
         // 1. Exact ID match
-        if let Some(item) = items
-            .iter()
-            .find(|i| i.type_name == "ssh_key" && i.id == target)
-        {
+        if let Some(item) = items.iter().find(|i| {
+            if let Some(ref c) = cat_filter {
+                if &i.type_name != c {
+                    return false;
+                }
+            }
+            i.id == target
+        }) {
             return Some(item.clone());
         }
 
         // 2. Exact Name match (case-insensitive)
-        if let Some(item) = items
-            .iter()
-            .find(|i| i.type_name == "ssh_key" && i.name.eq_ignore_ascii_case(target))
-        {
+        if let Some(item) = items.iter().find(|i| {
+            if let Some(ref c) = cat_filter {
+                if &i.type_name != c {
+                    return false;
+                }
+            }
+            i.name.eq_ignore_ascii_case(target)
+        }) {
             return Some(item.clone());
         }
 
         // 3. Name contains query (case-insensitive)
         let lower = target.to_lowercase();
-        if let Some(item) = items
-            .iter()
-            .find(|i| i.type_name == "ssh_key" && i.name.to_lowercase().contains(&lower))
-        {
+        if let Some(item) = items.iter().find(|i| {
+            if let Some(ref c) = cat_filter {
+                if &i.type_name != c {
+                    return false;
+                }
+            }
+            i.name.to_lowercase().contains(&lower)
+        }) {
             return Some(item.clone());
         }
 
         None
+    }
+
+    pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
+        self.find_item(id_or_name, Some("ssh_key"))
     }
 
     pub fn get_status(&self) -> Value {
@@ -1359,5 +1380,16 @@ mod tests {
         // Not found
         let not_found = vault_mgr.find_ssh_key("nonexistent-key");
         assert!(not_found.is_none());
+
+        // Generic find_item test
+        let found_gen = vault_mgr.find_item("Deploy Key", None);
+        assert!(found_gen.is_some());
+        assert_eq!(found_gen.unwrap().id, "item-uuid-1");
+
+        let found_cat = vault_mgr.find_item("Deploy Key", Some("ssh_key"));
+        assert!(found_cat.is_some());
+
+        let not_found_cat = vault_mgr.find_item("Deploy Key", Some("login"));
+        assert!(not_found_cat.is_none());
     }
 }

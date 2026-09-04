@@ -561,15 +561,24 @@ Item {
 
   function copyToClipboard(text, isSensitive, label) {
     if (!text) return
+    if (root.cliHealth && root.cliHealth.clipboard_available === false) {
+      root.errorMessage = "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
+      root.logWarn("omarchy:clipboard", root.errorMessage)
+      return
+    }
     root.logInfo("omarchy:clipboard", "Copying " + (label || "item") + " to clipboard (sensitive: " + isSensitive + ")")
     var cmd = [root.helperPath, "clipboard", "copy"]
     if (isSensitive) {
       cmd.push("--sensitive")
     }
+    var ttl = (root.config && root.config.clipboard_clear_seconds) || 30
+    if (ttl) {
+      cmd.push("--timeout", String(ttl))
+    }
     clipCopyProc.secret = JSON.stringify({ text: String(text) })
     clipCopyProc.command = cmd
     clipCopyProc.running = true
-    root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? " (clears in 30s)" : "") + "."
+    root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? (" (clears in " + ttl + "s)") : "") + "."
   }
 
   function executePrimaryAction(item) {
