@@ -1311,6 +1311,7 @@ Item {
           activeCategory: root.activeCategory
           rawVaultItems: root.rawVaultItems
           fontFamily: root.fontFamily
+          background: root.background
           foreground: root.foreground
           accent: root.accent
           borderColor: root.borderColor
