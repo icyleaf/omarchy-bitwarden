@@ -569,7 +569,11 @@ fn main() -> ExitCode {
                     if !is_unlocked && !vault_mgr.is_unlocked() {
                         println!(
                             "{}",
-                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                            }))
+                            .unwrap()
                         );
                         return ExitCode::FAILURE;
                     }
@@ -589,7 +593,11 @@ fn main() -> ExitCode {
                     if !is_unlocked && !vault_mgr.is_unlocked() {
                         println!(
                             "{}",
-                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                            }))
+                            .unwrap()
                         );
                         return ExitCode::FAILURE;
                     }
@@ -703,7 +711,11 @@ fn main() -> ExitCode {
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                    .unwrap()
+                            );
                             return ExitCode::FAILURE;
                         }
                     };
@@ -735,13 +747,27 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": e
+                                            }))
+                                            .unwrap()
+                                        );
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -801,7 +827,14 @@ fn main() -> ExitCode {
                         match std::fs::read_to_string(p) {
                             Ok(c) => c,
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e.to_string()
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -812,7 +845,11 @@ fn main() -> ExitCode {
                     let mut keypair = match parse_private_key(&raw_priv) {
                         Ok(k) => k,
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                    .unwrap()
+                            );
                             return ExitCode::FAILURE;
                         }
                     };
@@ -853,13 +890,27 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": e
+                                            }))
+                                            .unwrap()
+                                        );
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -925,7 +976,14 @@ fn main() -> ExitCode {
                                 })
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -936,7 +994,11 @@ fn main() -> ExitCode {
                         None => {
                             println!(
                                 "{}",
-                                json!({ "ok": false, "error": format!("SSH key item '{}' not found in vault", query) })
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": format!("SSH key item '{}' not found in vault", query)
+                                }))
+                                .unwrap()
                             );
                             return ExitCode::FAILURE;
                         }
@@ -947,7 +1009,11 @@ fn main() -> ExitCode {
                         None => {
                             println!(
                                 "{}",
-                                json!({ "ok": false, "error": "Item has no SSH key metadata" })
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Item has no SSH key metadata"
+                                }))
+                                .unwrap()
                             );
                             return ExitCode::FAILURE;
                         }
@@ -1003,7 +1069,14 @@ fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": e.to_string()
+                                }))
+                                .unwrap()
+                            );
                             ExitCode::FAILURE
                         }
                     }
