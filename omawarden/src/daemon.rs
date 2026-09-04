@@ -287,11 +287,46 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             }
         }
         "totp" => {
-            let secret = req.get("secret").and_then(|v| v.as_str()).unwrap_or("");
-            if let Some(res) = crate::totp::generate_totp(secret, None, 6, 30) {
-                json!({ "ok": true, "code": res.code, "ttl": res.ttl, "period": res.period })
+            let secret = req.get("secret").and_then(|v| v.as_str());
+            let query = req
+                .get("query")
+                .or_else(|| req.get("id"))
+                .and_then(|v| v.as_str());
+
+            if let Some(q) = query {
+                if let Some(item) = state.vault_mgr.find_item(q, None) {
+                    let totp_seed = item
+                        .login
+                        .as_ref()
+                        .and_then(|l| l.get("totp"))
+                        .and_then(|v| v.as_str());
+                    if let Some(seed) = totp_seed {
+                        if let Some(res) = crate::totp::generate_totp(seed, None, 6, 30) {
+                            json!({
+                                "ok": true,
+                                "code": res.code,
+                                "ttl": res.ttl,
+                                "period": res.period,
+                                "id": item.id,
+                                "name": item.name
+                            })
+                        } else {
+                            json!({ "ok": false, "error": "Item has invalid TOTP configuration" })
+                        }
+                    } else {
+                        json!({ "ok": false, "error": format!("Item '{}' has no TOTP configured", item.name) })
+                    }
+                } else {
+                    json!({ "ok": false, "error": format!("Item '{}' not found in vault", q) })
+                }
+            } else if let Some(sec) = secret {
+                if let Some(res) = crate::totp::generate_totp(sec, None, 6, 30) {
+                    json!({ "ok": true, "code": res.code, "ttl": res.ttl, "period": res.period })
+                } else {
+                    json!({ "ok": false, "error": "Invalid TOTP secret" })
+                }
             } else {
-                json!({ "ok": false, "error": "Invalid TOTP secret" })
+                json!({ "ok": false, "error": "Missing TOTP secret or item query" })
             }
         }
         "copy" => {
@@ -341,5 +376,68 @@ mod tests {
         assert!(res.is_some());
         let totp_res = res.unwrap();
         assert_eq!(totp_res.code.len(), 6);
+    }
+
+    #[test]
+    fn test_daemon_totp_action_with_item_query() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+
+        let state = DaemonState::new(storage_mgr, 15);
+        let test_item = crate::vault::VaultItem {
+            id: "item-totp-123".to_string(),
+            name: "Github 2FA".to_string(),
+            item_type: 1,
+            type_name: "login".to_string(),
+            sub_title: "user@github.com".to_string(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: Some(serde_json::json!({
+                "username": "user",
+                "totp": "JBSWY3DPEHPK3PXP"
+            })),
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![],
+            attachments: vec![],
+            search_text: "github 2fa user".to_string(),
+        };
+
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        state
+            .vault_mgr
+            .decrypted_items
+            .write()
+            .unwrap()
+            .push(test_item);
+
+        // Find by ID
+        let found = state.vault_mgr.find_item("item-totp-123", None);
+        assert!(found.is_some());
+        let seed = found
+            .unwrap()
+            .login
+            .unwrap()
+            .get("totp")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        let res = crate::totp::generate_totp(&seed, None, 6, 30);
+        assert!(res.is_some());
+        assert_eq!(res.unwrap().code.len(), 6);
+
+        // Find by Name
+        let found_name = state.vault_mgr.find_item("Github", None);
+        assert!(found_name.is_some());
     }
 }

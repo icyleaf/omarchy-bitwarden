@@ -538,10 +538,10 @@ Item {
 
   function updateTotpForSelected() {
     var item = root.selectedItem
-    if (item && item.login && item.login.totp) {
+    if (item && item.login && (item.login.totp || item.login.has_totp)) {
       totpGenProc.running = false
-      totpGenProc.secret = item.login.totp
-      totpGenProc.command = [root.helperPath, "totp", "generate"]
+      totpGenProc.secret = ""
+      totpGenProc.command = [root.helperPath, "totp", item.id]
       totpGenProc.running = true
     } else {
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
