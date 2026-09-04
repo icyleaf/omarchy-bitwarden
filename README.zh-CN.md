@@ -53,34 +53,18 @@
 
 ## 安装与配置
 
-1. **克隆或软链接至 Omarchy 插件目录**：
+1. **通过 Omarchy CLI 一键安装并启用**：
 
 ```bash
-git clone https://github.com/icyleaf/omarchy-bitwarden.git ~/.config/omarchy/plugins/icyleaf.bitwarden
+omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 ```
 
-2. **重新扫描并加载 Omarchy Shell 插件**：
-
-```bash
-omarchy-shell shell rescanPlugins
-```
-
-3. **测试唤出覆盖层**：
-
-```bash
-omarchy-shell shell toggle icyleaf.bitwarden
-```
-
-4. **绑定全局快捷键**（在 `~/.config/hypr/bindings.lua` 中配置）：
+2. **配置全局快捷键与窗口规则**（在 `~/.config/hypr/bindings.lua` 中配置）：
 
 ```lua
 -- ~/.config/hypr/bindings.lua
 o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
-```
 
-5. **配置窗口规则**（在 `~/.config/hypr/bindings.lua` 中配置）：
-
-```lua
 o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
   float = true,
   center = true,
@@ -88,12 +72,19 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
 })
 ```
 
-## 卸载
+## 更新与卸载
+
+- **更新插件**：
+
+```bash
+omarchy plugin update icyleaf.bitwarden
+```
+
+- **卸载插件**：
 
 ```bash
 killall omawarden
 omarchy plugin remove icyleaf.bitwarden
-rm -rf ~/.config/omarchy/plugins/icyleaf.bitwarden
 rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
