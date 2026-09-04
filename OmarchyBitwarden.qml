@@ -541,7 +541,7 @@ Item {
     if (item && item.login && (item.login.totp || item.login.has_totp)) {
       totpGenProc.running = false
       totpGenProc.secret = ""
-      totpGenProc.command = [root.helperPath, "totp", "generate", item.id]
+      totpGenProc.command = [root.helperPath, "totp", item.id]
       totpGenProc.running = true
     } else {
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
