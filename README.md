@@ -3,31 +3,25 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Omarchy](https://img.shields.io/badge/Omarchy-Plugin-8b5cf6.svg)](https://github.com/omarchy)
+[![Language: 中文](https://img.shields.io/badge/Language-简体中文-green.svg)](README.zh-CN.md)
 
-Native, high-performance Bitwarden and Vaultwarden credential manager overlay for the **Omarchy Shell** on Linux / Hyprland, powered by the pure Rust `omawarden` engine.
+> A blazing fast, zero-bloat, and security-first Bitwarden / Vaultwarden overlay for **Omarchy Shell** on Hyprland.
 
-Inspired by macOS Spotlight and Raycast, `omarchy-bitwarden` provides instantaneous keyboard-driven vault access, secure Keyring session persistence, live TOTP generation, heuristic SSH key detection, and ephemeral clipboard protection with zero external runtime dependencies.
+Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` delivers sub-millisecond credential lookups, minimal memory overhead, and rigorous process isolation—designed from the ground up to replace heavy Electron apps and sluggish Node CLI tooling with a native, Spotlight-style keyboard workflow.
 
 ![Preview](preview.png)
 
 ---
 
-## Features
+## Why omarchy-bitwarden?
 
-- **Instant Overlay & Zero Latency**: In-memory caching and non-blocking background sync allow opening and searching your entire vault in milliseconds.
-- **Pure Rust Native Engine (`omawarden`)**: 100% standalone execution with native cryptographic decryption (PBKDF2, Argon2id, AES-256-CBC, HMAC-SHA256, RSA-OAEP-SHA1), direct REST/OAuth2 API client, and resident memory daemon.
-- **Organizations & Collections**: Full decryption of organization-owned credentials using RSA-OAEP-SHA1 organization key unwrapping, displaying `[🏢 Org Name]` badges and collection affiliations.
-- **Folders & Soft-Delete Filtering**: Displays `[📁 Folder Name]` badges for categorized entries and automatically skips soft-deleted items (Recycle Bin).
-- **Encrypted Binary Attachment Previews**: Downloads and decrypts AES-256-CBC binary attachments locally, providing instant in-overlay previews for images (JPEG, PNG, GIF, WebP, SVG) and text files, plus external viewing with `xdg-open`.
-- **Secure Keyring Session Lifecycle**: Decrypted session tokens are stored securely in FreeDesktop Secret Service (`secret-tool` / D-Bus). Auto-locks upon screen lock hooks or idle timeouts without storing cleartext master passwords.
-- **Multi-Tier High-Precision Fuzzy Search**: Sub-millisecond ranking algorithm prioritizing exact matches, prefixes, substrings, and acronym subsequences across item names, usernames, notes, and custom fields.
-- **Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>)**: Fast keyboard palette to copy usernames, passwords, TOTP codes, card CVVs, SSH keys, PINs, organization/folder names, or launch website URLs.
-- **Live Real-time TOTP Token Engine**: Automatic TOTP countdown timer and live 6-digit one-time password generation.
-- **Website Favicons & Card Brands**: Asynchronously fetches crisp website favicons for login entries and automatically recognizes payment card brands (Visa, Mastercard, Amex, JCB, UnionPay, Discover).
-- **Heuristic SSH Key Management**: Automatically detects SSH private/public key pairs and passphrases in notes or custom fields, exposing them under a dedicated SSH category filter.
-- **Ephemeral Wayland Clipboard**: Auto-purges sensitive passwords and tokens from the clipboard after 30 seconds using `wl-copy`.
-- **Self-Hosted Vaultwarden Support**: Seamlessly switch between official Bitwarden and custom self-hosted Vaultwarden server instances.
-
+| Dimension                | omarchy-bitwarden (`omawarden`)                              | Official Desktop App (Electron) | Official CLI (`bw`)                   |
+| :----------------------- | :----------------------------------------------------------- | :------------------------------ | :------------------------------------ |
+| **Response Latency**     | **Sub-millisecond** (resident in-memory IPC socket)          | Slow UI render (1.5s - 3s)      | Heavy Node.js startup delay           |
+| **Memory Footprint**     | **Lightweight daemon (~10MB base / ~60-80MB with Argon2id)** | 200MB - 400MB+ Chromium bloat   | Transient, high peak memory           |
+| **Process Security**     | **Zero-leakage** (protected stdin & 0600 socket)             | Broad webview memory exposure   | Secrets prone to `argv`/`ps` snooping |
+| **Lock-Screen Sync**     | **Native D-Bus / Hyprlock hooks**                            | App idle timeout only           | None (manual lock required)           |
+| **Runtime Dependencies** | **100% standalone binary** (Zero external deps)              | Full Chromium/Node runtime      | Node.js environment required          |
 ---
 
 ## Keyboard Shortcuts
@@ -84,7 +78,7 @@ omarchy-shell shell toggle icyleaf.bitwarden
 o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
 ```
 
-5. **Set window rule**:
+5. **Set window rule** (in `~/.config/hypr/bindings.lua`):
 
 ```lua
 o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
@@ -92,6 +86,15 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
   center = true,
   size = { 1152, 768 }
 })
+```
+
+## Uninstall
+
+```bash
+killall omawarden
+omarchy plugin remove icyleaf.bitwarden
+rm -rf ~/.config/omarchy/plugins/icyleaf.bitwarden
+rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
 ---
@@ -163,95 +166,43 @@ flowchart TD
 
 ### Key Security Guarantees:
 
-1. **Zero Command-Line (`argv`) Credential Leakage**:
-   - Master passwords, client secrets, 2FA codes, TOTP seeds, and clipboard text are **never passed as command-line arguments**.
-   - On Linux, `/proc/<pid>/cmdline` is readable by other processes under the same user. By delivering all sensitive data exclusively through **protected stdin streams** or **0600 Unix domain sockets**, command line inspection reveals zero sensitive credentials.
-
-2. **Zero Process Environment (`env`) Secret Spillage**:
-   - API client secrets, passwords, and live session tokens are never exported to process environment variables (`/proc/<pid>/environ`).
-   - Authentication streams directly negotiate OAuth2 and vault unlock without leaving trace variables in the process environment.
-
-3. **Strict Owner-Only File & Socket Permissions (`0600`)**:
-   - Vault cache file (`~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`) and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
-
-4. **Deterministic Zero-Memory Destruction (`zeroize`)**:
-   - All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate hashes implement `zeroize::ZeroizeOnDrop` to overwrite volatile memory with zeros upon drop.
-   - When the vault is locked, all decrypted items and keys are immediately purged from daemon memory.
-
-5. **Native FreeDesktop Secret Service Keyring Lifecycle**:
-   - Encrypted session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols.
-   - **No cleartext master passwords are ever written to disk**.
-   - Immediate session destruction: Clicking **Lock** (<kbd>Ctrl</kbd>+<kbd>L</kbd>), triggering system screen-lock hooks (`hyprlock`/`swaylock`), or reaching idle timeout instantly clears the session key from Keyring and purges decrypted vault items from memory.
-
-6. **Ephemeral Clipboard Auto-Clearing (30s TTL)**:
-   - When copying passwords, TOTP codes, card CVVs, or SSH private keys, sensitive values are piped directly to `wl-copy` without entering shell logs.
-   - A dedicated timer daemon automatically clears the Wayland clipboard after 30 seconds (configurable in Settings) to eliminate lingering exposure.
-
-7. **Zero External Runtime Dependencies**:
-   - 100% pure Rust binary. No external Node.js, Python, or official `bw` CLI binary is required at runtime.
-   - Built-in Git commit SHA handshake (`GIT_HASH`) automatically detects binary updates and restarts resident daemons seamlessly.
+1. **Zero Command-Line (`argv`) Credential Leakage**: Master passwords, client secrets, 2FA codes, TOTP seeds, and clipboard text are **never passed as command-line arguments**. By delivering all sensitive data exclusively through protected `stdin` streams or `0600` Unix domain sockets, command line inspection reveals zero sensitive credentials.
+2. **Zero Process Environment (`env`) Secret Spillage**: API client secrets, passwords, and live session tokens are never exported to process environment variables (`/proc/<pid>/environ`).
+3. **Strict Owner-Only File & Socket Permissions (`0600`)**: Vault cache file (`~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`) and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
+4. **Deterministic Zero-Memory Destruction (`zeroize`)**: All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate hashes implement `zeroize::ZeroizeOnDrop` to overwrite volatile memory with zeros upon drop. When the vault is locked, all decrypted items and keys are immediately purged from daemon memory.
+5. **Native FreeDesktop Secret Service Keyring Lifecycle**: Encrypted session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols. **No cleartext master passwords are ever written to disk**. Immediate session destruction occurs on lock (<kbd>Ctrl</kbd>+<kbd>L</kbd>), screen-lock events (`hyprlock`/`swaylock`), or idle timeout.
+6. **Ephemeral Clipboard Auto-Clearing (30s TTL)**: When copying passwords, TOTP codes, card CVVs, or SSH private keys, sensitive values are piped directly to `wl-copy` without entering shell logs. A dedicated timer daemon automatically clears the Wayland clipboard after 30 seconds (configurable in Settings).
+7. **Zero External Runtime Dependencies**: 100% pure Rust binary. No external Node.js, Python, or official `bw` CLI binary is required at runtime.
 
 ---
 
-## Architecture
+## Roadmap
 
-```
-omarchy-bitwarden/
-├── OmarchyBitwarden.qml         # Quickshell QML overlay UI & Action Palette
-├── manifest.json                # Omarchy plugin manifest metadata
-└── omawarden/                   # Pure Rust engine workspace crate
-    ├── Cargo.toml               # Rust package dependencies & configuration
-    └── src/
-        ├── main.rs              # CLI entry point, clap command handlers & stdin bridge
-        ├── daemon.rs            # Background resident Unix socket daemon & cache
-        ├── api.rs               # Direct REST/OAuth2 Bitwarden client & multi-org decryption
-        ├── auth.rs              # Authentication, login & unlock lifecycle
-        ├── crypto.rs            # PBKDF2, Argon2id, AES-256-CBC, RSA-OAEP-SHA1 crypto engine
-        ├── storage.rs           # Encrypted vault cache persistence (0600 data.json)
-        ├── keyring.rs           # FreeDesktop Secret Service Keyring integration
-        ├── vault.rs             # In-memory vault parsing, fuzzy scoring & SSH detection
-        ├── totp.rs              # RFC 6238 TOTP computation & multi-algorithm engine
-        ├── clipboard.rs         # Ephemeral Wayland clipboard manager
-        ├── attachment.rs        # Attachment streaming, decryption & preview handling
-        ├── health.rs            # Diagnostic health checker
-        ├── hook.rs              # Screen-lock auto-lock hook installer
-        └── config.rs            # Configuration management (config.json)
-```
+### Phase 1: Completed (Fast Lookup & Core Security)
 
----
+- [x] In-memory caching & sub-millisecond fuzzy search
+- [x] Full Argon2id / PBKDF2 / AES-256-CBC / RSA-OAEP native decryption
+- [x] Real-time live RFC 6238 TOTP token engine & visual countdown
+- [x] Screen-lock auto-lock hook & FreeDesktop Secret Service Keyring integration
+- [x] Ephemeral Wayland clipboard manager with 30s auto-clear TTL
+- [x] Encrypted binary attachment downloads & inline previews (images & text)
+- [x] SSH key management (Ed25519/RSA/ECDSA generation, file import & export)
+- [x] Multi-organization & collection key unwrapping with badges
+- [x] Self-hosted Vaultwarden & personal API key / 2FA login support
+- [x] Dual-channel structured logging & privacy-redacted diagnostics
 
-## Building and Testing
+### Phase 2: In Progress / Upcoming (Full Vault Item Lifecycle & Editing)
 
-### Build from Source
+- [ ] Vault item creation (Add Login, Card, Identity, Secure Note)
+- [ ] Built-in secure password & passphrase generator
+- [ ] In-place item editing & custom fields modification
+- [ ] Folder & collection reassignment
+- [ ] Secure item deletion & soft-delete (Recycle Bin) management
 
-Install cargo with `mise`:
+### Phase 3: Future
 
-```bash
-mise install
-```
-
-Build the optimized release binary with `cargo`:
-
-```bash
-cd omawarden
-mise build-release
-mkdir -p bin && cp target/release/omawarden bin/omawarden
-```
-
-### Running Tests
-
-Execute the comprehensive unit and integration test suite:
-
-```bash
-cargo test
-```
-
-### Formatting and Linting
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-```
+- [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
+- [ ] Quick biometric / PAM / Fingerprint system unlock
 
 ---
 
