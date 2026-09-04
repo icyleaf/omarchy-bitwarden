@@ -20,6 +20,11 @@ ColumnLayout {
   signal clearSearchRequested()
   signal createSshKeyRequested()
   signal importSshKeyRequested()
+  signal copyUsernameRequested()
+  signal copyTotpRequested()
+  signal openUrlRequested()
+  signal actionPaletteRequested()
+  signal exportSshKeyRequested()
 
   function focusSearch() {
     searchInputField.forceActiveFocus()
@@ -73,6 +78,28 @@ ColumnLayout {
           font.pixelSize: 12
           selectByMouse: true
           clip: true
+
+          Keys.priority: Keys.BeforeItem
+          Keys.onPressed: function(event) {
+            if (event.modifiers & Qt.ControlModifier) {
+              if (event.key === Qt.Key_U) {
+                searchHeaderRoot.copyUsernameRequested()
+                event.accepted = true
+              } else if (event.key === Qt.Key_T) {
+                searchHeaderRoot.copyTotpRequested()
+                event.accepted = true
+              } else if (event.key === Qt.Key_O) {
+                searchHeaderRoot.openUrlRequested()
+                event.accepted = true
+              } else if (event.key === Qt.Key_K) {
+                searchHeaderRoot.actionPaletteRequested()
+                event.accepted = true
+              } else if (event.key === Qt.Key_E) {
+                searchHeaderRoot.exportSshKeyRequested()
+                event.accepted = true
+              }
+            }
+          }
         }
 
         Text {

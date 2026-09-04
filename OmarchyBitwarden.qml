@@ -627,14 +627,19 @@ Item {
     var uName = ""
     if (item.type_name === "login" && item.login && item.login.username) {
       uName = item.login.username
-    } else if (item.type_name === "identity" && item.identity && item.identity.username) {
-      uName = item.identity.username
+    } else if (item.type_name === "identity" && item.identity) {
+      uName = item.identity.username || item.identity.email || ""
+    } else if (item.type_name === "card" && item.card && item.card.cardholderName) {
+      uName = item.card.cardholderName
     } else if (item.type_name === "ssh_key" && item.ssh_key && item.ssh_key.public_key) {
       root.copyToClipboard(item.ssh_key.public_key, false, "SSH public key")
       return
     }
     if (uName) {
       root.copyToClipboard(uName, false, "username")
+    } else {
+      root.errorMessage = "No username found for '" + item.name + "'."
+      root.logWarn("omarchy:clipboard", root.errorMessage)
     }
   }
 
@@ -1248,6 +1253,33 @@ Item {
             root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
           }
           event.accepted = true
+        } else if (event.modifiers & Qt.ControlModifier) {
+          if (event.key === Qt.Key_U && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
+            root.copyItemUsername(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal) {
+            root.actionPaletteIndex = 0
+            root.showActionPalette = true
+            event.accepted = true
+          } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
+            root.copyItemTotp(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
+            root.openFirstWebsite(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.showActionPalette && !root.showSshKeyModal) {
+            root.openSshKeyModal("export", root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_L && root.authState.status === "unlocked" && !root.showSshKeyModal) {
+            root.doLock()
+            event.accepted = true
+          } else if (event.key === Qt.Key_R && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal) {
+            root.syncVault(false, true)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Comma && !root.showSshKeyModal) {
+            root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
+            event.accepted = true
+          }
         }
       }
 
@@ -1279,6 +1311,30 @@ Item {
           onClearSearchRequested: {
             root.searchQuery = ""
             root.filterVaultItems()
+          }
+          onCopyUsernameRequested: {
+            if (root.selectedItem) {
+              root.copyItemUsername(root.selectedItem)
+            }
+          }
+          onCopyTotpRequested: {
+            if (root.selectedItem) {
+              root.copyItemTotp(root.selectedItem)
+            }
+          }
+          onOpenUrlRequested: {
+            if (root.selectedItem) {
+              root.openFirstWebsite(root.selectedItem)
+            }
+          }
+          onActionPaletteRequested: {
+            root.actionPaletteIndex = 0
+            root.showActionPalette = true
+          }
+          onExportSshKeyRequested: {
+            if (root.selectedItem && root.selectedItem.type_name === "ssh_key") {
+              root.openSshKeyModal("export", root.selectedItem)
+            }
           }
         }
 
