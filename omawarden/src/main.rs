@@ -184,14 +184,14 @@ enum VaultAction {
 
 #[derive(Subcommand)]
 enum TotpAction {
-    #[command(
-        about = "Generate TOTP code from secret or otpauth URI (supports stdin and --secret)"
-    )]
+    #[command(about = "Generate TOTP code from vault item ID/name, secret, or otpauth URI")]
     Generate {
-        #[arg(index = 1)]
-        positional_secret: Option<String>,
-        #[arg(long)]
+        #[arg(index = 1, help = "Vault item ID, name query, secret, or otpauth URI")]
+        query: Option<String>,
+        #[arg(long, help = "Explicit TOTP secret or otpauth URI")]
         secret: Option<String>,
+        #[arg(long, help = "Copy generated code directly to clipboard")]
+        copy: bool,
     },
 }
 
@@ -921,23 +921,169 @@ fn main() -> ExitCode {
 
         Commands::Totp { action } => match action {
             TotpAction::Generate {
-                positional_secret,
+                query,
                 secret,
+                copy,
             } => {
-                let secret_val = secret
-                    .or(positional_secret)
-                    .unwrap_or_else(read_secret_stdin);
-                match generate_totp(&secret_val, None, 6, 30) {
+                let clip_mgr = ClipboardManager::default();
+
+                let (totp_res, item_info) = if let Some(sec) = secret {
+                    (generate_totp(&sec, None, 6, 30), None)
+                } else if let Some(q) = query {
+                    let is_uri =
+                        q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
+                    if is_uri {
+                        (generate_totp(&q, None, 6, 30), None)
+                    } else {
+                        omawarden::daemon::ensure_daemon_running();
+                        let st = send_daemon_request(&json!({ "action": "status" }));
+                        let is_unlocked = st
+                            .as_ref()
+                            .and_then(|v| v.get("is_unlocked"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+                        let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                            let daemon_res = send_daemon_request(&json!({
+                                "action": "get_item",
+                                "query": q
+                            }));
+                            daemon_res
+                                .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                                .and_then(|res| {
+                                    res.get("item")
+                                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                })
+                        } else {
+                            match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                                Ok(user_key) => {
+                                    let storage = vault_mgr.storage_mgr.load();
+                                    let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                                        &storage.ciphers,
+                                        &storage.folders,
+                                        &storage.organizations,
+                                        &user_key,
+                                        storage.enc_private_key.as_deref(),
+                                    );
+                                    let lower = q.to_lowercase();
+                                    items.into_iter().find(|i| {
+                                        i.id == q
+                                            || i.name.eq_ignore_ascii_case(&q)
+                                            || i.name.to_lowercase().contains(&lower)
+                                    })
+                                }
+                                Err(_) => None,
+                            }
+                        };
+
+                        if let Some(it) = item {
+                            let seed = it
+                                .login
+                                .as_ref()
+                                .and_then(|l| l.get("totp"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            (generate_totp(seed, None, 6, 30), Some((it.id, it.name)))
+                        } else {
+                            (generate_totp(&q, None, 6, 30), None)
+                        }
+                    }
+                } else {
+                    let stdin_val = read_secret_stdin();
+                    if stdin_val.is_empty() {
+                        (None, None)
+                    } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
+                        if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
+                            (generate_totp(sec, None, 6, 30), None)
+                        } else if let Some(q) = val
+                            .get("query")
+                            .or_else(|| val.get("id"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let daemon_res = send_daemon_request(&json!({
+                                "action": "totp",
+                                "query": q
+                            }));
+                            if let Some(res) = daemon_res {
+                                if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                    let code = res
+                                        .get("code")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
+                                    let period =
+                                        res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
+                                    let name =
+                                        res.get("name").and_then(|v| v.as_str()).map(String::from);
+                                    let id =
+                                        res.get("id").and_then(|v| v.as_str()).map(String::from);
+                                    (
+                                        Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                        if let (Some(id), Some(name)) = (id, name) {
+                                            Some((id, name))
+                                        } else {
+                                            None
+                                        },
+                                    )
+                                } else {
+                                    (None, None)
+                                }
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (generate_totp(&stdin_val, None, 6, 30), None)
+                        }
+                    } else {
+                        (generate_totp(&stdin_val, None, 6, 30), None)
+                    }
+                };
+
+                match totp_res {
                     Some(res) => {
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
-                        ExitCode::SUCCESS
+                        if copy {
+                            let ok = clip_mgr.copy(&res.code, true, 30);
+                            let mut resp = json!({
+                                "ok": ok,
+                                "code": res.code,
+                                "ttl": res.ttl,
+                                "period": res.period,
+                                "copied": true
+                            });
+                            if let Some((id, name)) = item_info {
+                                resp["id"] = json!(id);
+                                resp["name"] = json!(name);
+                            }
+                            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                            if ok {
+                                ExitCode::SUCCESS
+                            } else {
+                                ExitCode::FAILURE
+                            }
+                        } else {
+                            let mut resp = json!({
+                                "ok": true,
+                                "code": res.code,
+                                "ttl": res.ttl,
+                                "period": res.period
+                            });
+                            if let Some((id, name)) = item_info {
+                                resp["id"] = json!(id);
+                                resp["name"] = json!(name);
+                            }
+                            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                            ExitCode::SUCCESS
+                        }
                     }
                     None => {
                         println!(
                             "{}",
-                            serde_json::to_string_pretty(
-                                &serde_json::json!({ "error": "Invalid TOTP secret" })
-                            )
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Failed to generate TOTP: item not found or secret is invalid"
+                            }))
                             .unwrap()
                         );
                         ExitCode::FAILURE
