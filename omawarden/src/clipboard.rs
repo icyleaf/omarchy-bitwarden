@@ -35,7 +35,12 @@ impl ClipboardManager {
             return false;
         }
 
-        let mut child = match Command::new(&self.wl_copy_path)
+        let mut cmd = Command::new(&self.wl_copy_path);
+        if sensitive {
+            cmd.arg("--sensitive");
+        }
+
+        let mut child = match cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -127,11 +132,14 @@ mod tests {
     fn test_mock_clipboard_copy_and_clear() {
         let dir = tempdir().unwrap();
         let clip_file = dir.path().join("clipboard.txt");
+        let args_file = dir.path().join("args.txt");
         let mock_wl = dir.path().join("mock-wl-copy");
 
         let script = format!(
             r#"#!/bin/sh
 CF="{}"
+AF="{}"
+echo "$*" > "$AF"
 if [ "$1" = "--clear" ]; then
     rm -f "$CF"
     exit 0
@@ -140,7 +148,8 @@ else
     exit 0
 fi
 "#,
-            clip_file.display()
+            clip_file.display(),
+            args_file.display()
         );
 
         fs::write(&mock_wl, script).unwrap();
@@ -150,12 +159,20 @@ fi
 
         let mgr = ClipboardManager::new(mock_wl.to_str().unwrap());
 
-        // Copy text
-        assert!(mgr.copy("super_secret_password", false, 0));
+        // Copy sensitive text -> should pass --sensitive
+        assert!(mgr.copy("super_secret_password", true, 0));
         assert_eq!(
             fs::read_to_string(&clip_file).unwrap(),
             "super_secret_password"
         );
+        let args = fs::read_to_string(&args_file).unwrap();
+        assert!(args.contains("--sensitive"));
+
+        // Copy non-sensitive text -> should NOT pass --sensitive
+        assert!(mgr.copy("public_username", false, 0));
+        assert_eq!(fs::read_to_string(&clip_file).unwrap(), "public_username");
+        let args_non_sensitive = fs::read_to_string(&args_file).unwrap();
+        assert!(!args_non_sensitive.contains("--sensitive"));
 
         // Copy multi-line report
         let multiline_report = "### Title\n\n- item 1\n- item 2\n```\nlog 1\n```\n";
@@ -165,6 +182,8 @@ fi
         // Clear clipboard
         assert!(mgr.clear());
         assert!(!clip_file.exists());
+        let clear_args = fs::read_to_string(&args_file).unwrap();
+        assert!(clear_args.contains("--clear"));
     }
 
     #[test]
