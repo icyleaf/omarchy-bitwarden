@@ -361,6 +361,14 @@ impl VaultManager {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
+        if !self.is_unlocked() {
+            crate::log_warn!(
+                "omawarden:vault",
+                "Cannot sync vault: vault is locked. Please unlock first."
+            );
+            return Err("Vault is locked. Please unlock first.".to_string());
+        }
+
         crate::log_info!(
             "omawarden:vault",
             "Starting vault synchronization with server..."
@@ -1295,6 +1303,12 @@ mod tests {
 
         vault_mgr.lock();
         assert!(!vault_mgr.is_unlocked());
+        let sync_err = vault_mgr.sync();
+        assert!(sync_err.is_err());
+        assert_eq!(
+            sync_err.unwrap_err(),
+            "Vault is locked. Please unlock first."
+        );
     }
 
     #[test]

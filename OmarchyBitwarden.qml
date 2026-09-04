@@ -164,10 +164,6 @@ Item {
     root.refreshConfig()
     root.refreshAuthStatus()
     root.checkUpdates(false)
-    if (root.authState.status === "unlocked") {
-      if (!root.rawVaultItems || root.rawVaultItems.length === 0) root.loadVaultItems()
-      root.syncVault(true, false)
-    }
     Qt.callLater(function() {
       if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
         searchHeader.searchField.forceActiveFocus()
@@ -275,6 +271,10 @@ Item {
   }
 
   function syncVault(isBackground, force) {
+    if (root.authState.status !== "unlocked") {
+      root.logWarn("omarchy:vault", "Cannot sync vault: vault is not unlocked.")
+      return
+    }
     if (vaultSyncProc.running) return
     var now = Date.now()
     if (isBackground && !force) {
@@ -1742,9 +1742,15 @@ Item {
           if (data && data.status) {
             var wasNotUnlocked = (root.authState.status !== "unlocked")
             root.authState = data
-            if (data.status === "unlocked" && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
-              root.loadVaultItems()
-              root.syncVault(true, false)
+            if (data.status === "unlocked") {
+              if (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0) {
+                root.loadVaultItems()
+                root.syncVault(true, false)
+              }
+            } else {
+              root.rawVaultItems = []
+              root.filteredItems = []
+              root.lastVaultItemsRawText = ""
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
