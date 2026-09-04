@@ -11,6 +11,7 @@ ColumnLayout {
   property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
   property var rawVaultItems: []
+  property color background: "#1f2937"
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -161,22 +162,20 @@ ColumnLayout {
     // SSH Key Category Actions
     RowLayout {
       visible: searchHeaderRoot.activeCategory === "ssh_key"
-      spacing: 6
+      spacing: 4
 
       Rectangle {
-        implicitWidth: 24
-        implicitHeight: 24
+        implicitWidth: 18
+        implicitHeight: 18
         radius: 4
-        color: createMouse.containsMouse ? Qt.rgba(searchHeaderRoot.accent.r, searchHeaderRoot.accent.g, searchHeaderRoot.accent.b, 0.25) : Qt.rgba(0, 0, 0, 0.25)
-        border.color: createMouse.containsMouse ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
-        border.width: 1
+        color: createMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
 
         Text {
           anchors.centerIn: parent
           text: "\uf067"
           font.family: searchHeaderRoot.fontFamily
-          font.pixelSize: 11
-          color: createMouse.containsMouse ? searchHeaderRoot.accent : Qt.darker(searchHeaderRoot.foreground, 1.2)
+          font.pixelSize: 10
+          color: createMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
         }
 
         MouseArea {
@@ -193,19 +192,17 @@ ColumnLayout {
       }
 
       Rectangle {
-        implicitWidth: 24
-        implicitHeight: 24
+        implicitWidth: 18
+        implicitHeight: 18
         radius: 4
-        color: importMouse.containsMouse ? Qt.rgba(searchHeaderRoot.accent.r, searchHeaderRoot.accent.g, searchHeaderRoot.accent.b, 0.25) : Qt.rgba(0, 0, 0, 0.25)
-        border.color: importMouse.containsMouse ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
-        border.width: 1
+        color: importMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
 
         Text {
           anchors.centerIn: parent
           text: "\uf093"
           font.family: searchHeaderRoot.fontFamily
-          font.pixelSize: 11
-          color: importMouse.containsMouse ? searchHeaderRoot.accent : Qt.darker(searchHeaderRoot.foreground, 1.2)
+          font.pixelSize: 10
+          color: importMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
         }
 
         MouseArea {
