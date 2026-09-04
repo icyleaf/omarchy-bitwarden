@@ -12,6 +12,10 @@ Item {
   property bool isBusy: false
   property bool updateAvailable: false
   property string latestVersion: ""
+  property string latestReleaseNotes: ""
+  property string latestReleaseUrl: ""
+  property string latestReleaseTitle: ""
+  property bool showReleaseNotes: false
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
   property bool justCheckedLatest: false
@@ -30,6 +34,12 @@ Item {
     if (!isCheckingUpdate && !updateAvailable) {
       justCheckedLatest = true
       latestTimer.restart()
+    }
+  }
+
+  onVisibleChanged: {
+    if (!visible) {
+      showReleaseNotes = false
     }
   }
 
@@ -269,14 +279,18 @@ Item {
             Layout.fillWidth: true
             spacing: 6
 
-            // CLI Engine Badge
+            // Unified Engine Badge & Update Action
             Rectangle {
+              id: engineBadgeBox
               implicitHeight: 24
               implicitWidth: cliBadgeRow.implicitWidth + 14
               radius: 4
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: engineMouse.containsMouse ? Qt.rgba(0, 0, 0, 0.4) : Qt.rgba(0, 0, 0, 0.2)
               border.color: settingsRoot.borderColor
               border.width: 1
+
+              readonly property bool isInstalled: Boolean(settingsRoot.cliHealth.installed)
+              readonly property bool hasUpdate: isInstalled && settingsRoot.updateAvailable && Boolean(settingsRoot.latestVersion)
 
               RowLayout {
                 id: cliBadgeRow
@@ -287,68 +301,74 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"
+                  color: engineBadgeBox.isInstalled ? "#4ade80" : "#f87171"
                 }
 
                 Text {
-                  text: "Engine: " + (settingsRoot.cliHealth.version || (settingsRoot.cliHealth.installed ? "Ready" : "Missing"))
+                  text: "Engine: " + (settingsRoot.cliHealth.version || (engineBadgeBox.isInstalled ? "Ready" : "Missing"))
                   color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
-              }
-            }
 
-            // Update Engine Button (visible when installed and update is available)
-            Rectangle {
-              visible: settingsRoot.cliHealth.installed && settingsRoot.updateAvailable && Boolean(settingsRoot.latestVersion)
-              implicitHeight: 24
-              implicitWidth: upBtnRow.implicitWidth + 14
-              radius: 4
-              color: "#22c55e"
+                // Inline update tag when update is available
+                Rectangle {
+                  visible: engineBadgeBox.hasUpdate
+                  implicitHeight: 16
+                  implicitWidth: updateTagRow.implicitWidth + 8
+                  radius: 3
+                  color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
 
-              RowLayout {
-                id: upBtnRow
-                anchors.centerIn: parent
-                spacing: 4
+                  RowLayout {
+                    id: updateTagRow
+                    anchors.centerIn: parent
+                    spacing: 3
+                    Text {
+                      text: "\uf062"
+                      font.family: settingsRoot.fontFamily
+                      color: "#ffffff"
+                      font.pixelSize: 8
+                    }
+                    Text {
+                      text: "Update to v" + settingsRoot.latestVersion
+                      color: "#ffffff"
+                      font.pixelSize: 9
+                      font.weight: Font.DemiBold
+                    }
+                  }
+                }
 
-                Text {
-                  id: upBtnText
-                  text: settingsRoot.isDownloadingCli ? "Updating..." : ("Update to v" + settingsRoot.latestVersion)
-                  color: "#ffffff"
-                  font.pixelSize: 10
-                  font.weight: Font.Medium
+                // Download pill when missing
+                Rectangle {
+                  visible: !engineBadgeBox.isInstalled
+                  implicitHeight: 16
+                  implicitWidth: dlTagText.implicitWidth + 8
+                  radius: 3
+                  color: settingsRoot.accent
+
+                  Text {
+                    id: dlTagText
+                    anchors.centerIn: parent
+                    text: settingsRoot.isDownloadingCli ? "Downloading..." : "Download"
+                    color: "#ffffff"
+                    font.pixelSize: 9
+                    font.weight: Font.Medium
+                  }
                 }
               }
 
               MouseArea {
+                id: engineMouse
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
+                hoverEnabled: engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled
+                cursorShape: (engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled) ? Qt.PointingHandCursor : Qt.ArrowCursor
                 enabled: !settingsRoot.isDownloadingCli
-                onClicked: settingsRoot.downloadCliRequested()
-              }
-            }
-
-            // Download Engine Button (visible when not installed)
-            Rectangle {
-              visible: !settingsRoot.cliHealth.installed
-              implicitHeight: 24
-              implicitWidth: dlBtnText.implicitWidth + 12
-              radius: 4
-              color: settingsRoot.accent
-
-              Text {
-                id: dlBtnText
-                anchors.centerIn: parent
-                text: settingsRoot.isDownloadingCli ? "Downloading..." : "Download Engine"
-                color: "#ffffff"
-                font.pixelSize: 10
-                font.weight: Font.Medium
-              }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                enabled: !settingsRoot.isDownloadingCli
-                onClicked: settingsRoot.downloadCliRequested()
+                onClicked: {
+                  if (engineBadgeBox.hasUpdate) {
+                    settingsRoot.showReleaseNotes = true
+                  } else if (!engineBadgeBox.isInstalled) {
+                    settingsRoot.downloadCliRequested()
+                  }
+                }
               }
             }
 
@@ -935,6 +955,25 @@ Item {
           }
         }
       }
+    }
+  }
+
+  // Release Notes Modal
+  ReleaseNotesModal {
+    active: settingsRoot.showReleaseNotes
+    version: settingsRoot.latestVersion
+    releaseTitle: settingsRoot.latestReleaseTitle
+    releaseNotes: settingsRoot.latestReleaseNotes
+    releaseUrl: settingsRoot.latestReleaseUrl
+    isDownloadingCli: settingsRoot.isDownloadingCli
+    foreground: settingsRoot.foreground
+    accent: settingsRoot.accent
+    borderColor: settingsRoot.borderColor
+    fontFamily: settingsRoot.fontFamily
+    onCloseRequested: settingsRoot.showReleaseNotes = false
+    onUpdateRequested: {
+      settingsRoot.showReleaseNotes = false
+      settingsRoot.downloadCliRequested()
     }
   }
 }

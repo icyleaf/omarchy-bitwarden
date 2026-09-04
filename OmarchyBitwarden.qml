@@ -63,6 +63,9 @@ Item {
   property string latestVersion: ""
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
+  property string latestReleaseNotes: ""
+  property string latestReleaseUrl: ""
+  property string latestReleaseTitle: ""
   readonly property bool updateAvailable: {
     if (!latestVersion) return false
     var currentVer = (cliHealth && cliHealth.version) ? cliHealth.version : ""
@@ -1183,6 +1186,9 @@ Item {
         sequence: "Ctrl+,"
         enabled: root.opened && !root.showSshKeyModal
         onActivated: {
+          if (settingsView.showReleaseNotes) {
+            settingsView.showReleaseNotes = false
+          }
           root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
         }
       }
@@ -1197,6 +1203,8 @@ Item {
             root.showActionPalette = false
           } else if (root.activeAttachmentPreview !== null) {
             root.activeAttachmentPreview = null
+          } else if (settingsView.visible && settingsView.showReleaseNotes) {
+            settingsView.showReleaseNotes = false
           } else if (root.effectiveView === "settings") {
             root.currentView = "auto"
           } else {
@@ -1226,6 +1234,8 @@ Item {
         if (event.key === Qt.Key_Escape) {
           if (root.activeAttachmentPreview !== null) {
             root.activeAttachmentPreview = null
+          } else if (settingsView.visible && settingsView.showReleaseNotes) {
+            settingsView.showReleaseNotes = false
           } else if (root.effectiveView === "settings") {
             root.currentView = "auto"
           } else {
@@ -1446,6 +1456,7 @@ Item {
 
           // Mode C: Settings View
           SettingsModal {
+            id: settingsView
             anchors.fill: parent
             visible: root.effectiveView === "settings"
             config: root.config
@@ -1455,6 +1466,9 @@ Item {
             isBusy: root.isBusy
             updateAvailable: root.updateAvailable
             latestVersion: root.latestVersion
+            latestReleaseNotes: root.latestReleaseNotes
+            latestReleaseUrl: root.latestReleaseUrl
+            latestReleaseTitle: root.latestReleaseTitle
             isCheckingUpdate: root.isCheckingUpdate
             updateCheckStatus: root.updateCheckStatus
             fontFamily: root.fontFamily
@@ -1496,6 +1510,9 @@ Item {
           onSyncTriggered: { root.syncVault(false, true) }
           onLockTriggered: { root.doLock() }
           onSettingsTriggered: {
+            if (settingsView.showReleaseNotes) {
+              settingsView.showReleaseNotes = false
+            }
             root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
           }
           onDownloadCliTriggered: { root.downloadCli() }
@@ -1773,6 +1790,9 @@ Item {
             var rawTag = data.tag
             var cleanTag = String(rawTag).replace(/^omawarden-|^v/i, "").trim()
             root.latestVersion = cleanTag
+            root.latestReleaseNotes = data.body || ""
+            root.latestReleaseUrl = data.url || (rawTag ? ("https://github.com/icyleaf/omarchy-bitwarden/releases/tag/" + rawTag) : "")
+            root.latestReleaseTitle = data.name || (cleanTag ? ("omawarden v" + cleanTag) : "")
             var currentVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
             if (currentVer && root.compareSemVer(cleanTag, currentVer) > 0) {
               root.updateCheckStatus = "Update available: v" + cleanTag
