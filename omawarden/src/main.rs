@@ -60,7 +60,9 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
-    #[command(about = "Wayland clipboard integration")]
+    #[command(
+        about = "[Deprecated] Low-level Wayland clipboard integration (use 'omawarden copy' instead)"
+    )]
     Clipboard {
         #[command(subcommand)]
         action: ClipboardAction,
@@ -183,7 +185,9 @@ enum VaultAction {
 
 #[derive(Subcommand)]
 enum ClipboardAction {
-    #[command(about = "Copy text to clipboard (text read securely from stdin)")]
+    #[command(
+        about = "[Deprecated] Copy raw text to clipboard from stdin (use 'omawarden copy' instead)"
+    )]
     Copy {
         #[arg(long)]
         sensitive: bool,
