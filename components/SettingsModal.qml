@@ -14,10 +14,24 @@ Item {
   property string latestVersion: ""
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
+  property bool justCheckedLatest: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
+
+  Timer {
+    id: latestTimer
+    interval: 2500
+    onTriggered: settingsRoot.justCheckedLatest = false
+  }
+
+  onIsCheckingUpdateChanged: {
+    if (!isCheckingUpdate && !updateAvailable) {
+      justCheckedLatest = true
+      latestTimer.restart()
+    }
+  }
 
   property string activeTab: "general" // "general" | "logs"
   property string logFilter: "all" // "all" | "error" | "warn"
@@ -206,7 +220,7 @@ Item {
         // 1. Engine Diagnostic Health Badges
         ColumnLayout {
           Layout.fillWidth: true
-          spacing: 6
+          spacing: 8
 
           RowLayout {
             Layout.fillWidth: true
@@ -225,8 +239,8 @@ Item {
               Text {
                 id: chkUpText
                 anchors.centerIn: parent
-                text: settingsRoot.isCheckingUpdate ? "Checking..." : "Check Update"
-                color: settingsRoot.accent
+                text: settingsRoot.isCheckingUpdate ? "Checking..." : (settingsRoot.justCheckedLatest ? "Latest" : "Check Update")
+                color: settingsRoot.justCheckedLatest ? "#4ade80" : settingsRoot.accent
                 font.pixelSize: 10
               }
               MouseArea {
@@ -251,79 +265,6 @@ Item {
             }
           }
 
-          // Update Available Banner & Action
-          Rectangle {
-            visible: settingsRoot.updateAvailable && Boolean(settingsRoot.latestVersion)
-            Layout.fillWidth: true
-            implicitHeight: updateRow.implicitHeight + 16
-            radius: 5
-            color: Qt.rgba(0.2, 0.8, 0.4, 0.12)
-            border.color: "#4ade80"
-            border.width: 1
-
-            RowLayout {
-              id: updateRow
-              anchors.fill: parent
-              anchors.margins: 8
-              spacing: 8
-
-              Text {
-                text: "\uf005"
-                font.family: settingsRoot.fontFamily
-                color: "#4ade80"
-                font.pixelSize: 14
-              }
-
-              ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-                Text {
-                  text: "New omawarden engine available: v" + settingsRoot.latestVersion
-                  color: "#4ade80"
-                  font.pixelSize: 11
-                  font.weight: Font.DemiBold
-                }
-                Text {
-                  text: "Current installed version: " + (settingsRoot.cliHealth.version || "unknown")
-                  color: Qt.darker(settingsRoot.foreground, 1.6)
-                  font.pixelSize: 10
-                }
-              }
-
-              Rectangle {
-                implicitHeight: 26
-                implicitWidth: upBtnText.implicitWidth + 14
-                radius: 4
-                color: "#22c55e"
-
-                Text {
-                  id: upBtnText
-                  anchors.centerIn: parent
-                  text: settingsRoot.isDownloadingCli ? "Updating..." : ("Update to v" + settingsRoot.latestVersion)
-                  color: "#ffffff"
-                  font.pixelSize: 10
-                  font.weight: Font.Medium
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  enabled: !settingsRoot.isDownloadingCli
-                  onClicked: settingsRoot.downloadCliRequested()
-                }
-              }
-            }
-          }
-
-          // Update Check Status Feedback
-          Text {
-            visible: !settingsRoot.updateAvailable && Boolean(settingsRoot.updateCheckStatus)
-            text: settingsRoot.updateCheckStatus
-            color: Qt.darker(settingsRoot.foreground, 1.6)
-            font.pixelSize: 10
-            font.weight: Font.Medium
-          }
-
           RowLayout {
             Layout.fillWidth: true
             spacing: 6
@@ -331,27 +272,63 @@ Item {
             // CLI Engine Badge
             Rectangle {
               implicitHeight: 24
-              implicitWidth: cliBadgeRow.implicitWidth + 10
+              implicitWidth: cliBadgeRow.implicitWidth + 14
               radius: 4
-              color: settingsRoot.cliHealth.installed ? Qt.rgba(0.2, 0.8, 0.4, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.15)
-              border.color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"
+              color: Qt.rgba(0, 0, 0, 0.2)
+              border.color: settingsRoot.borderColor
               border.width: 1
 
               RowLayout {
                 id: cliBadgeRow
                 anchors.centerIn: parent
-                spacing: 4
-                Text {
-                  text: settingsRoot.cliHealth.installed ? "\uf00c" : "\uf00d"
-                  font.family: settingsRoot.fontFamily
+                spacing: 6
+
+                Rectangle {
+                  implicitWidth: 6
+                  implicitHeight: 6
+                  radius: 3
                   color: settingsRoot.cliHealth.installed ? "#4ade80" : "#f87171"
+                }
+
+                Text {
+                  text: "Engine: " + (settingsRoot.cliHealth.version || (settingsRoot.cliHealth.installed ? "Ready" : "Missing"))
+                  color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
-                Text { text: "Engine: " + (settingsRoot.cliHealth.version || (settingsRoot.cliHealth.installed ? "Ready" : "Missing")); color: settingsRoot.foreground; font.pixelSize: 10 }
               }
             }
 
-            // Download Engine Button
+            // Update Engine Button (visible when installed and update is available)
+            Rectangle {
+              visible: settingsRoot.cliHealth.installed && settingsRoot.updateAvailable && Boolean(settingsRoot.latestVersion)
+              implicitHeight: 24
+              implicitWidth: upBtnRow.implicitWidth + 14
+              radius: 4
+              color: "#22c55e"
+
+              RowLayout {
+                id: upBtnRow
+                anchors.centerIn: parent
+                spacing: 4
+
+                Text {
+                  id: upBtnText
+                  text: settingsRoot.isDownloadingCli ? "Updating..." : ("Update to v" + settingsRoot.latestVersion)
+                  color: "#ffffff"
+                  font.pixelSize: 10
+                  font.weight: Font.Medium
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                enabled: !settingsRoot.isDownloadingCli
+                onClicked: settingsRoot.downloadCliRequested()
+              }
+            }
+
+            // Download Engine Button (visible when not installed)
             Rectangle {
               visible: !settingsRoot.cliHealth.installed
               implicitHeight: 24
@@ -378,46 +355,58 @@ Item {
             // Keyring Badge
             Rectangle {
               implicitHeight: 24
-              implicitWidth: krBadgeRow.implicitWidth + 10
+              implicitWidth: krBadgeRow.implicitWidth + 14
               radius: 4
-              color: settingsRoot.cliHealth.keyring_available ? Qt.rgba(0.2, 0.8, 0.4, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.15)
-              border.color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+              color: Qt.rgba(0, 0, 0, 0.2)
+              border.color: settingsRoot.borderColor
               border.width: 1
 
               RowLayout {
                 id: krBadgeRow
                 anchors.centerIn: parent
-                spacing: 4
-                Text {
-                  text: settingsRoot.cliHealth.keyring_available ? "\uf00c" : "\uf00d"
-                  font.family: settingsRoot.fontFamily
+                spacing: 6
+
+                Rectangle {
+                  implicitWidth: 6
+                  implicitHeight: 6
+                  radius: 3
                   color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                }
+
+                Text {
+                  text: "Keyring: " + (settingsRoot.cliHealth.keyring_available ? "Ready" : "Unavailable")
+                  color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
-                Text { text: "Keyring: " + (settingsRoot.cliHealth.keyring_available ? "Ready" : "Unavailable"); color: settingsRoot.foreground; font.pixelSize: 10 }
               }
             }
 
             // Clipboard Badge
             Rectangle {
               implicitHeight: 24
-              implicitWidth: clipBadgeRow.implicitWidth + 10
+              implicitWidth: clipBadgeRow.implicitWidth + 14
               radius: 4
-              color: settingsRoot.cliHealth.clipboard_available ? Qt.rgba(0.2, 0.8, 0.4, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.15)
-              border.color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+              color: Qt.rgba(0, 0, 0, 0.2)
+              border.color: settingsRoot.borderColor
               border.width: 1
 
               RowLayout {
                 id: clipBadgeRow
                 anchors.centerIn: parent
-                spacing: 4
-                Text {
-                  text: settingsRoot.cliHealth.clipboard_available ? "\uf00c" : "\uf00d"
-                  font.family: settingsRoot.fontFamily
+                spacing: 6
+
+                Rectangle {
+                  implicitWidth: 6
+                  implicitHeight: 6
+                  radius: 3
                   color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                }
+
+                Text {
+                  text: "Clipboard: " + (settingsRoot.cliHealth.clipboard_available ? "Ready" : "Missing")
+                  color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
-                Text { text: "Clipboard: " + (settingsRoot.cliHealth.clipboard_available ? "Ready" : "Missing"); color: settingsRoot.foreground; font.pixelSize: 10 }
               }
             }
           }
