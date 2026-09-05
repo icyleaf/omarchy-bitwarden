@@ -95,6 +95,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -102,13 +104,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate Changelog with git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag ${{ github.ref_name }} --include-path "omawarden/**" --strip header
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "${{ github.ref_name }}"
+          body_path: CHANGELOG.md
           files: |
             artifacts/*.tar.gz
             artifacts/*.sha256
           draft: false
           prerelease: false
-          generate_release_notes: true
+
