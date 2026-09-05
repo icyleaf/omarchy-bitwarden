@@ -687,24 +687,125 @@ Item {
     }
   }
 
-  function openFirstWebsite(item) {
-    if (!item) return
-    var targetUri = ""
-    if (item.type_name === "login" && item.login && item.login.uris && item.login.uris.length > 0) {
-      for (var u = 0; u < item.login.uris.length; u++) {
-        var uriObj = item.login.uris[u]
-        var uriStr = (typeof uriObj === "string") ? uriObj : (uriObj && uriObj.uri ? uriObj.uri : "")
-        if (uriStr) {
-          targetUri = uriStr
-          break
-        }
+  function isAppScheme(uri) {
+    if (!uri) return false
+    var str = String(uri).trim()
+    var match = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/i)
+    if (match) {
+      var scheme = match[1].toLowerCase()
+      return scheme !== "http" && scheme !== "https"
+    }
+    return false
+  }
+
+  function formatSchemeHost(uri) {
+    if (!uri) return ""
+    var str = String(uri).trim()
+    var schemeMatch = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/i)
+    if (schemeMatch) {
+      var scheme = schemeMatch[1].toLowerCase()
+      var rest = schemeMatch[2]
+      var atIdx = rest.indexOf("@")
+      if (atIdx !== -1) {
+        rest = rest.substring(atIdx + 1)
+      }
+      var endMatch = rest.match(/^([^/?#]+)/)
+      var host = endMatch ? endMatch[1] : rest
+      return scheme + "://" + host
+    }
+    var singleColonMatch = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$/i)
+    if (singleColonMatch) {
+      var s = singleColonMatch[1].toLowerCase()
+      if (s !== "http" && s !== "https") {
+        var r = singleColonMatch[2]
+        var em = r.match(/^([^/?#]+)/)
+        return s + ":" + (em ? em[1] : r)
       }
     }
-    if (targetUri) {
-      if (!targetUri.match(/^https?:\/\//i)) {
-        targetUri = "https://" + targetUri
+    var clean = str.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//i, "")
+    var at = clean.indexOf("@")
+    if (at !== -1) {
+      clean = clean.substring(at + 1)
+    }
+    var m = clean.match(/^([^/?#]+)/)
+    var hostOnly = m ? m[1] : clean
+    return "https://" + hostOnly
+  }
+
+  function getProcessedUris(item) {
+    if (!item || !item.login || !item.login.uris || item.login.uris.length === 0) return []
+
+    var webList = []
+    var appList = []
+
+    for (var i = 0; i < item.login.uris.length; i++) {
+      var uObj = item.login.uris[i]
+      var raw = (typeof uObj === "string") ? uObj : (uObj && uObj.uri ? uObj.uri : "")
+      if (!raw) continue
+      var rawTrimmed = String(raw).trim()
+      if (!rawTrimmed) continue
+
+      var isApp = isAppScheme(rawTrimmed)
+      var formatted = formatSchemeHost(rawTrimmed)
+
+      var entry = {
+        isApp: isApp,
+        label: isApp ? "App Scheme" : "Website",
+        displayUri: formatted,
+        rawUri: rawTrimmed,
+        targetUri: rawTrimmed
       }
-      Qt.openUrlExternally(targetUri)
+
+      if (isApp) {
+        appList.push(entry)
+      } else {
+        webList.push(entry)
+      }
+    }
+
+    var resultWeb = []
+    var seenWeb = {}
+    for (var w = 0; w < webList.length; w++) {
+      var keyW = webList[w].displayUri
+      if (!seenWeb[keyW]) {
+        seenWeb[keyW] = true
+        resultWeb.push(webList[w])
+      }
+    }
+
+    var resultApp = []
+    var seenApp = {}
+    for (var a = 0; a < appList.length; a++) {
+      var keyA = appList[a].displayUri
+      if (!seenApp[keyA]) {
+        seenApp[keyA] = true
+        resultApp.push(appList[a])
+      }
+    }
+
+    return resultWeb.concat(resultApp)
+  }
+
+  function openFirstWebsite(item) {
+    if (!item) return
+    var processed = root.getProcessedUris(item)
+    if (!processed || processed.length === 0) return
+    var targetEntry = null
+    for (var i = 0; i < processed.length; i++) {
+      if (!processed[i].isApp) {
+        targetEntry = processed[i]
+        break
+      }
+    }
+    if (!targetEntry && processed.length > 0) {
+      targetEntry = processed[0]
+    }
+    if (targetEntry && targetEntry.targetUri) {
+      var openUrl = targetEntry.targetUri
+      if (!targetEntry.isApp && !openUrl.match(/^https?:\/\//i)) {
+        openUrl = "https://" + openUrl
+      }
+      Qt.openUrlExternally(openUrl)
     }
   }
 
@@ -738,24 +839,25 @@ Item {
           }
         })
       }
-      if (item.login.uris && item.login.uris.length > 0) {
+      var processedUris = root.getProcessedUris(item)
+      if (processedUris && processedUris.length > 0) {
         var hasAssignedUrlShortcut = false
-        for (var u = 0; u < item.login.uris.length; u++) {
-          var uriObj = item.login.uris[u]
-          var uriStr = (typeof uriObj === "string") ? uriObj : (uriObj && uriObj.uri ? uriObj.uri : "")
-          if (uriStr) {
-            (function(targetUri, isFirstUri) {
+        for (var u = 0; u < processedUris.length; u++) {
+          var uriEntry = processedUris[u]
+          if (uriEntry && uriEntry.targetUri) {
+            (function(entry, isFirstUri) {
+              var actionLabel = (entry.isApp ? "Open App Scheme (" : "Open Website (") + entry.displayUri + ")"
               actions.push({
-                label: "Open URL (" + targetUri + ")",
+                label: actionLabel,
                 icon: "\uf08e",
                 shortcut: isFirstUri ? "Ctrl+O" : "",
                 action: function() {
-                  var openUrl = targetUri
-                  if (!openUrl.match(/^https?:\/\//i)) openUrl = "https://" + openUrl
+                  var openUrl = entry.targetUri
+                  if (!entry.isApp && !openUrl.match(/^https?:\/\//i)) openUrl = "https://" + openUrl
                   Qt.openUrlExternally(openUrl)
                 }
               })
-            })(uriStr, !hasAssignedUrlShortcut)
+            })(uriEntry, !hasAssignedUrlShortcut)
             hasAssignedUrlShortcut = true
           }
         }
