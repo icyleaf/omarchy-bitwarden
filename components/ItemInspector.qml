@@ -51,8 +51,53 @@ ScrollView {
     }
   }
 
-  function getHostname(uri) {
+  function isAppScheme(uri) {
+    if (!uri) return false
+    var str = String(uri).trim()
+    var match = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/i)
+    if (match) {
+      var scheme = match[1].toLowerCase()
+      return scheme !== "http" && scheme !== "https"
+    }
+    return false
+  }
+
+  function formatSchemeHost(uri) {
     if (!uri) return ""
+    var str = String(uri).trim()
+    var schemeMatch = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/i)
+    if (schemeMatch) {
+      var scheme = schemeMatch[1].toLowerCase()
+      var rest = schemeMatch[2]
+      var atIdx = rest.indexOf("@")
+      if (atIdx !== -1) {
+        rest = rest.substring(atIdx + 1)
+      }
+      var endMatch = rest.match(/^([^/?#]+)/)
+      var host = endMatch ? endMatch[1] : rest
+      return scheme + "://" + host
+    }
+    var singleColonMatch = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$/i)
+    if (singleColonMatch) {
+      var s = singleColonMatch[1].toLowerCase()
+      if (s !== "http" && s !== "https") {
+        var r = singleColonMatch[2]
+        var em = r.match(/^([^/?#]+)/)
+        return s + ":" + (em ? em[1] : r)
+      }
+    }
+    var clean = str.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//i, "")
+    var at = clean.indexOf("@")
+    if (at !== -1) {
+      clean = clean.substring(at + 1)
+    }
+    var m = clean.match(/^([^/?#]+)/)
+    var hostOnly = m ? m[1] : clean
+    return "https://" + hostOnly
+  }
+
+  function getHostname(uri) {
+    if (!uri || isAppScheme(uri)) return ""
     var str = String(uri).trim()
     var match = str.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?#]+)/i)
     return match ? match[1] : ""
@@ -65,12 +110,67 @@ ScrollView {
     for (var i = 0; i < item.login.uris.length; i++) {
       var u = item.login.uris[i]
       var uriStr = (typeof u === "string") ? u : (u && u.uri ? u.uri : "")
+      if (!uriStr || isAppScheme(uriStr)) continue
       var domain = getHostname(uriStr)
       if (domain && domain.indexOf(".") !== -1) {
         return "https://icons.bitwarden.net/" + domain + "/icon.png"
       }
     }
     return ""
+  }
+
+  function getProcessedUris(item) {
+    if (!item || !item.login || !item.login.uris || item.login.uris.length === 0) return []
+
+    var webList = []
+    var appList = []
+
+    for (var i = 0; i < item.login.uris.length; i++) {
+      var uObj = item.login.uris[i]
+      var raw = (typeof uObj === "string") ? uObj : (uObj && uObj.uri ? uObj.uri : "")
+      if (!raw) continue
+      var rawTrimmed = String(raw).trim()
+      if (!rawTrimmed) continue
+
+      var isApp = isAppScheme(rawTrimmed)
+      var formatted = formatSchemeHost(rawTrimmed)
+
+      var entry = {
+        isApp: isApp,
+        label: isApp ? "App Scheme" : "Website",
+        displayUri: formatted,
+        rawUri: rawTrimmed,
+        targetUri: rawTrimmed
+      }
+
+      if (isApp) {
+        appList.push(entry)
+      } else {
+        webList.push(entry)
+      }
+    }
+
+    var resultWeb = []
+    var seenWeb = {}
+    for (var w = 0; w < webList.length; w++) {
+      var keyW = webList[w].displayUri
+      if (!seenWeb[keyW]) {
+        seenWeb[keyW] = true
+        resultWeb.push(webList[w])
+      }
+    }
+
+    var resultApp = []
+    var seenApp = {}
+    for (var a = 0; a < appList.length; a++) {
+      var keyA = appList[a].displayUri
+      if (!seenApp[keyA]) {
+        seenApp[keyA] = true
+        resultApp.push(appList[a])
+      }
+    }
+
+    return resultWeb.concat(resultApp)
   }
 
   function getItemIcon(item) {
@@ -576,22 +676,27 @@ ScrollView {
 
           // Divider (if password/username and uris)
           Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.password || inspectorRoot.item.login.username) && inspectorRoot.item.login.uris && inspectorRoot.item.login.uris.length > 0)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.password || inspectorRoot.item.login.username) && inspectorRoot.getProcessedUris(inspectorRoot.item).length > 0)
             Layout.fillWidth: true
             height: 1
             color: Qt.rgba(255, 255, 255, 0.05)
           }
 
-          // Websites / URIs list
+          // Websites / App Schemes list
           Repeater {
-            model: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.uris) ? inspectorRoot.item.login.uris : []
+            model: inspectorRoot.getProcessedUris(inspectorRoot.item)
 
             ColumnLayout {
               id: uriWrapper
               Layout.fillWidth: true
               spacing: 8
 
-              property string rawUri: (typeof modelData === "string") ? modelData : (modelData && modelData.uri ? modelData.uri : "")
+              property var entryData: modelData
+              property string labelText: (modelData && modelData.label) ? modelData.label : "Website"
+              property string displayUri: (modelData && modelData.displayUri) ? modelData.displayUri : ""
+              property string rawUri: (modelData && modelData.rawUri) ? modelData.rawUri : ""
+              property string targetUri: (modelData && modelData.targetUri) ? modelData.targetUri : ""
+              property bool isApp: Boolean(modelData && modelData.isApp)
 
               Rectangle {
                 visible: index > 0
@@ -607,9 +712,9 @@ ScrollView {
                 ColumnLayout {
                   Layout.fillWidth: true
                   spacing: 2
-                  Text { text: "Website"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                  Text { text: uriWrapper.labelText; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
                   Text {
-                    text: uriWrapper.rawUri
+                    text: uriWrapper.displayUri
                     color: inspectorRoot.foreground
                     font.pixelSize: inspectorRoot.valuePixelSize
                     font.weight: Font.Medium
@@ -620,18 +725,18 @@ ScrollView {
 
                 GhostIconButton {
                   iconText: "\uf08e"
-                  tooltip: "Open website"
+                  tooltip: uriWrapper.isApp ? "Open app scheme" : "Open website"
                   onClicked: {
-                    var u = uriWrapper.rawUri
-                    if (u && !u.match(/^https?:\/\//i)) u = "https://" + u
+                    var u = uriWrapper.targetUri
+                    if (!uriWrapper.isApp && !u.match(/^https?:\/\//i)) u = "https://" + u
                     Qt.openUrlExternally(u)
                   }
                 }
 
                 GhostIconButton {
                   iconText: "\uf0c5"
-                  tooltip: "Copy website URL"
-                  onClicked: inspectorRoot.copyRequested(uriWrapper.rawUri, false, "website URL")
+                  tooltip: uriWrapper.isApp ? "Copy app scheme" : "Copy website URL"
+                  onClicked: inspectorRoot.copyRequested(uriWrapper.displayUri, false, uriWrapper.isApp ? "app scheme" : "website URL")
                 }
               }
             }
