@@ -1,0 +1,91 @@
+# git-cliff ~ configuration file
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+# Template for the changelog body
+# https://keats.github.io/tera/docs/#introduction
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}
+- {% if commit.scope %}**({{ commit.scope }})**: {% endif %}\
+{% if commit.breaking %}[**BREAKING**] {% endif %}\
+{{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}]({{ "https://github.com/icyleaf/omarchy-bitwarden/commit/" ~ commit.id }}))\
+{% endfor %}
+{% endfor %}\n
+"""
+# Template for the changelog footer
+footer = ""
+# Remove the leading and trailing whitespace from the template
+trim = true
+
+[git]
+# Parse the commits based on https://www.conventionalcommits.org
+conventional_commits = true
+# Filter out the commits that are not conventional
+filter_unconventional = false
+# Process each line of a commit as an individual commit
+split_commits = false
+# Regex for preprocessing the commit messages
+commit_preprocessors = [
+  # Standardize "sec: ..." to conventional commit format
+  { pattern = '^sec:\s*(.*)', replace = "sec(security): ${1}" },
+  # Standardize "doc: ..." to "docs: ..."
+  { pattern = '^doc:\s*(.*)', replace = "docs: ${1}" },
+]
+# Regex for parsing and grouping commits (evaluated in order)
+commit_parsers = [
+  # 0. Commits to skip entirely
+  { message = "^Merge pull request", skip = true },
+  { message = "^\\[ImgBot\\]", skip = true },
+  { message = "^bump", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore\\(pr\\)", skip = true },
+  { message = "^chore\\(pull\\)", skip = true },
+  { message = "^test", skip = true },
+
+  # 1. Security (highest priority)
+  { message = "^sec", group = "Security" },
+  { message = "^.*\\(security\\)", group = "Security" },
+  { body = ".*security", group = "Security" },
+
+  # 2. Features (including refactor and performance)
+  { message = "^feat", group = "Features" },
+  { message = "^perf", group = "Features" },
+  { message = "^refactor", group = "Features" },
+
+  # 3. Bug Fixes
+  { message = "^fix", group = "Bug Fixes" },
+
+  # 4. Styling
+  { message = "^style", group = "Styling" },
+
+  # 5. Documentation
+  { message = "^doc", group = "Documentation" },
+
+  # 6. Dependencies
+  { message = "^chore\\(deps.*\\)", group = "Dependencies" },
+  { message = "^deps", group = "Dependencies" },
+
+  # 7. CI & Miscellaneous Tasks
+  { message = "^chore|^ci", group = "Miscellaneous Tasks" },
+
+  # 8. Fallback for unclassified commits
+  { message = ".*", group = "Other" },
+]
+# Protect breaking changes from being skipped due to matching a skipping commit_parser
+protect_breaking_commits = true
+# Filter out the commits that are not matched by commit_parsers
+filter_commits = false
+# Regex for matching git tags
+tag_pattern = "^(omawarden|omarchy-bitwarden)-v?[0-9].*"
+# Regex for skipping tags
+# skip_tags = ""
+# Regex for ignoring tags
+# ignore_tags = ""
+# Sort the tags chronologically
+topo_order = false
+# Sort the commits inside sections by oldest/newest order
+sort_commits = "oldest"
+
+
