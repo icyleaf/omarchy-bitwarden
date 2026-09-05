@@ -19,9 +19,12 @@ Item {
 
   onSelectedIndexChanged: {
     if (selectedIndex >= 0 && items && selectedIndex < items.length) {
-      if (listView.currentIndex !== selectedIndex) {
-        listView.currentIndex = selectedIndex
-      }
+      listView.positionViewAtIndex(selectedIndex, ListView.Contain)
+    }
+  }
+
+  onItemsChanged: {
+    if (selectedIndex >= 0 && items && selectedIndex < items.length) {
       listView.positionViewAtIndex(selectedIndex, ListView.Contain)
     }
   }
@@ -137,14 +140,10 @@ Item {
       }
     }
 
-    onCurrentIndexChanged: {
-      if (currentIndex !== itemListRoot.selectedIndex) {
-        itemListRoot.itemSelected(currentIndex)
-      }
-    }
-
     delegate: Rectangle {
       id: itemDelegate
+      required property int index
+      required property var modelData
       property bool isSelected: index === itemListRoot.selectedIndex
       width: listView.width
       height: 48
@@ -285,11 +284,9 @@ Item {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: {
-          itemListRoot.selectedIndex = index
           itemListRoot.itemSelected(index)
         }
         onDoubleClicked: {
-          itemListRoot.selectedIndex = index
           itemListRoot.itemTriggered(index)
         }
       }
