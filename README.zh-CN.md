@@ -26,19 +26,21 @@
 
 ## 常用快捷键
 
-| 快捷键                         | 功能说明                                                   |
-| :----------------------------- | :--------------------------------------------------------- |
-| <kbd>Enter</kbd>               | 复制主要凭据（密码 / 卡号 / SSH 公钥）                     |
-| <kbd>Ctrl</kbd> + <kbd>U</kbd> | 复制用户名                                                 |
-| <kbd>Ctrl</kbd> + <kbd>T</kbd> | 复制实时 TOTP 动态验证码                                   |
-| <kbd>Ctrl</kbd> + <kbd>O</kbd> | 在系统默认浏览器中打开登录网址                             |
-| <kbd>Ctrl</kbd> + <kbd>K</kbd> | 打开动作面板（复制用户名、TOTP、PIN 码、组织名称等）       |
-| <kbd>Ctrl</kbd> + <kbd>,</kbd> | 打开 / 切换设置面板                                        |
-| <kbd>Ctrl</kbd> + <kbd>L</kbd> | 立即手动锁定密码库                                         |
-| <kbd>Ctrl</kbd> + <kbd>R</kbd> | 触发与 Bitwarden 服务器的手动同步                          |
-| <kbd>↓</kbd> / <kbd>↑</kbd>    | 列表或动作菜单导航（到达边界自动停止）                     |
-| <kbd>Tab</kbd>                 | 切换分类标签（全部、登录、卡片、身份、安全备注、SSH 密钥） |
-| <kbd>Esc</kbd>                 | 关闭动作面板、设置面板或隐藏覆盖层                         |
+| 快捷键                                 | 功能说明                                                   |
+| :------------------------------------- | :--------------------------------------------------------- |
+| <kbd>Enter</kbd>                       | 复制主要凭据（密码 / 卡号 / SSH 公钥）                     |
+| <kbd>Ctrl</kbd> + <kbd>Enter</kbd>     | 复制实时 TOTP 动态验证码                                   |
+| <kbd>Ctrl</kbd> + <kbd>U</kbd>         | 复制用户名                                                 |
+| <kbd>Ctrl</kbd> + <kbd>T</kbd>         | 切换字段/秘密明文与掩码展示（密码、密钥、卡号等）          |
+| <kbd>Ctrl</kbd> + <kbd>H</kbd>         | 查看当前登录项的历史密码记录                               |
+| <kbd>Ctrl</kbd> + <kbd>O</kbd>         | 在系统默认浏览器中打开登录网址                             |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd>         | 打开动作面板（复制用户名、TOTP、PIN 码、密码历史等）       |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd>         | 打开 / 切换设置面板                                        |
+| <kbd>Ctrl</kbd> + <kbd>L</kbd>         | 立即手动锁定密码库                                         |
+| <kbd>Ctrl</kbd> + <kbd>R</kbd>         | 触发与 Bitwarden 服务器的手动同步                          |
+| <kbd>↓</kbd> / <kbd>↑</kbd>            | 列表或动作菜单导航（到达边界自动停止）                     |
+| <kbd>Tab</kbd>                         | 切换分类标签（全部、登录、卡片、身份、安全备注、SSH 密钥） |
+| <kbd>Esc</kbd>                         | 关闭动作面板、历史记录、设置面板或隐藏覆盖层               |
 
 ---
 

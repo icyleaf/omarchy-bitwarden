@@ -91,6 +91,9 @@ Item {
   // Details Inspector State
   property bool showPasswordRevealed: false
   property bool showPrivateKeyRevealed: false
+  property bool showCardNumberRevealed: false
+  property bool showCardCodeRevealed: false
+  property bool showCustomHiddenRevealed: false
   property var currentTotp: ({ code: "", ttl: 30, period: 30 })
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
@@ -98,6 +101,8 @@ Item {
   property bool showSshKeyModal: false
   property string sshKeyModalMode: "create"
   property var sshKeyModalItem: null
+  property bool showPasswordHistoryModal: false
+  property var activePasswordHistoryItem: null
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -180,6 +185,7 @@ Item {
     root.opened = false
     root.showActionPalette = false
     root.showSshKeyModal = false
+    root.showPasswordHistoryModal = false
   }
 
   function dismiss() {
@@ -513,10 +519,32 @@ Item {
   function handleSelectedItemChanged() {
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
+    root.showCardNumberRevealed = false
+    root.showCardCodeRevealed = false
+    root.showCustomHiddenRevealed = false
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
     root.updateTotpForSelected()
     root.updateAvailableActions()
+  }
+
+  function toggleItemRevealed() {
+    if (root.showPasswordHistoryModal) {
+      if (passwordHistoryModalComponent) {
+        passwordHistoryModalComponent.toggleAllRevealed()
+      }
+      return
+    }
+
+    if (root.effectiveView === "search" && root.selectedItem) {
+      var anyRevealed = root.showPasswordRevealed || root.showPrivateKeyRevealed || root.showCardNumberRevealed || root.showCardCodeRevealed || root.showCustomHiddenRevealed
+      var targetState = !anyRevealed
+      root.showPasswordRevealed = targetState
+      root.showPrivateKeyRevealed = targetState
+      root.showCardNumberRevealed = targetState
+      root.showCardCodeRevealed = targetState
+      root.showCustomHiddenRevealed = targetState
+    }
   }
 
   function updateAvailableActions() {
@@ -533,6 +561,12 @@ Item {
 
   onShowSshKeyModalChanged: {
     if (!root.showSshKeyModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
+  onShowPasswordHistoryModalChanged: {
+    if (!root.showPasswordHistoryModal) {
       root.restoreSearchFocus()
     }
   }
@@ -696,7 +730,7 @@ Item {
         actions.push({
           label: totpLabel,
           icon: "\uf017",
-          shortcut: "Ctrl+T",
+          shortcut: "Ctrl+↵",
           action: function() {
             if (root.currentTotp && root.currentTotp.code) {
               root.copyToClipboard(root.currentTotp.code, true, "TOTP code")
@@ -725,6 +759,17 @@ Item {
             hasAssignedUrlShortcut = true
           }
         }
+      }
+      if (item.login.password_history && item.login.password_history.length > 0) {
+        actions.push({
+          label: "Password History (" + item.login.password_history.length + ")",
+          icon: "\uf1da",
+          shortcut: "Ctrl+H",
+          action: function() {
+            root.activePasswordHistoryItem = item
+            root.showPasswordHistoryModal = true
+          }
+        })
       }
     } else if (item.type_name === "card" && item.card) {
       if (item.card.number) actions.push({ label: "Copy Card Number", icon: "\uf09d", shortcut: "↵", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
@@ -835,6 +880,7 @@ Item {
       })
     }
 
+    actions.push({ label: "Toggle Field Visibility", icon: "\uf06e", shortcut: "Ctrl+T", action: function() { root.toggleItemRevealed() } })
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
     actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
@@ -1145,6 +1191,12 @@ Item {
       }
 
       Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal
+        onActivated: root.copyItemTotp(root.selectedItem)
+      }
+
+      Shortcut {
         sequence: "Ctrl+U"
         enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal
         onActivated: root.copyItemUsername(root.selectedItem)
@@ -1152,8 +1204,8 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+T"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal
-        onActivated: root.copyItemTotp(root.selectedItem)
+        enabled: root.opened && (root.showPasswordHistoryModal || (root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal))
+        onActivated: root.toggleItemRevealed()
       }
 
       Shortcut {
@@ -1197,7 +1249,9 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showSshKeyModal) {
+          if (root.showPasswordHistoryModal) {
+            root.showPasswordHistoryModal = false
+          } else if (root.showSshKeyModal) {
             root.showSshKeyModal = false
           } else if (root.showActionPalette) {
             root.showActionPalette = false
@@ -1215,6 +1269,12 @@ Item {
 
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
+        if (event.modifiers & Qt.ControlModifier && (event.key === Qt.Key_T || (event.text && event.text.toLowerCase() === "t"))) {
+          root.toggleItemRevealed()
+          event.accepted = true
+          return
+        }
+
         if (root.showSshKeyModal) {
           if (event.key === Qt.Key_Escape) {
             root.showSshKeyModal = false
@@ -1226,6 +1286,14 @@ Item {
         if (root.showActionPalette) {
           if (event.key === Qt.Key_Escape) {
             root.showActionPalette = false
+            event.accepted = true
+          }
+          return
+        }
+
+        if (root.showPasswordHistoryModal) {
+          if (event.key === Qt.Key_Escape) {
+            root.showPasswordHistoryModal = false
             event.accepted = true
           }
           return
@@ -1264,29 +1332,40 @@ Item {
           }
           event.accepted = true
         } else if (event.modifiers & Qt.ControlModifier) {
-          if (event.key === Qt.Key_U && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
+          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
+            root.copyItemTotp(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_U && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.copyItemUsername(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
             event.accepted = true
-          } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
-            root.copyItemTotp(root.selectedItem)
+          } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
+            root.toggleItemRevealed()
             event.accepted = true
-          } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.openFirstWebsite(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.showActionPalette && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.openSshKeyModal("export", root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_L && root.authState.status === "unlocked" && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_H && root.effectiveView === "search" && root.selectedItem !== null && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
+            if (root.selectedItem.login && root.selectedItem.login.password_history && root.selectedItem.login.password_history.length > 0) {
+              root.activePasswordHistoryItem = root.selectedItem
+              root.showPasswordHistoryModal = true
+            } else {
+              root.statusMessage = "No password history recorded for this item."
+            }
+            event.accepted = true
+          } else if (event.key === Qt.Key_L && root.authState.status === "unlocked" && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.doLock()
             event.accepted = true
-          } else if (event.key === Qt.Key_R && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_R && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.syncVault(false, true)
             event.accepted = true
-          } else if (event.key === Qt.Key_Comma && !root.showSshKeyModal) {
+          } else if (event.key === Qt.Key_Comma && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
             event.accepted = true
           }
@@ -1305,6 +1384,7 @@ Item {
         SearchHeader {
           id: searchHeader
           visible: root.effectiveView === "search"
+          modalsActive: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal
           Layout.preferredHeight: visible ? implicitHeight : 0
           searchQuery: root.searchQuery
           categoryList: root.categoryList
@@ -1401,6 +1481,9 @@ Item {
                 currentTotp: root.currentTotp
                 showPasswordRevealed: root.showPasswordRevealed
                 showPrivateKeyRevealed: root.showPrivateKeyRevealed
+                showCardNumberRevealed: root.showCardNumberRevealed
+                showCardCodeRevealed: root.showCardCodeRevealed
+                showCustomHiddenRevealed: root.showCustomHiddenRevealed
                 activeAttachmentPreview: root.activeAttachmentPreview
                 loadingAttachmentId: root.loadingAttachmentId
                 fontFamily: root.fontFamily
@@ -1414,6 +1497,13 @@ Item {
                 onClosePreviewRequested: { root.activeAttachmentPreview = null }
                 onTogglePasswordRevealed: { root.showPasswordRevealed = !root.showPasswordRevealed }
                 onTogglePrivateKeyRevealed: { root.showPrivateKeyRevealed = !root.showPrivateKeyRevealed }
+                onToggleCardNumberRevealed: { root.showCardNumberRevealed = !root.showCardNumberRevealed }
+                onToggleCardCodeRevealed: { root.showCardCodeRevealed = !root.showCardCodeRevealed }
+                onToggleCustomHiddenRevealed: { root.showCustomHiddenRevealed = !root.showCustomHiddenRevealed }
+                onPasswordHistoryRequested: function(item) {
+                  root.activePasswordHistoryItem = item
+                  root.showPasswordHistoryModal = true
+                }
               }
 
               // Empty Selection State View
@@ -1569,6 +1659,19 @@ Item {
         onImportRequested: function(payload) { root.handleSshKeyImport(payload) }
         onExportRequested: function(payload) { root.handleSshKeyExport(payload) }
         onCloseRequested: { root.showSshKeyModal = false }
+      }
+
+      // 7. Password History Modal Overlay
+      PasswordHistoryModal {
+        id: passwordHistoryModalComponent
+        active: root.showPasswordHistoryModal
+        item: root.activePasswordHistoryItem
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        borderColor: root.borderColor
+        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
+        onCloseRequested: { root.showPasswordHistoryModal = false }
       }
     }
   }

@@ -16,6 +16,7 @@ ColumnLayout {
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
+  property bool modalsActive: false
 
   signal categorySelected(string category)
   signal clearSearchRequested()
@@ -82,12 +83,14 @@ ColumnLayout {
 
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
+            if (searchHeaderRoot.modalsActive) return
+
             if (event.modifiers & Qt.ControlModifier) {
-              if (event.key === Qt.Key_U) {
-                searchHeaderRoot.copyUsernameRequested()
-                event.accepted = true
-              } else if (event.key === Qt.Key_T) {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 searchHeaderRoot.copyTotpRequested()
+                event.accepted = true
+              } else if (event.key === Qt.Key_U) {
+                searchHeaderRoot.copyUsernameRequested()
                 event.accepted = true
               } else if (event.key === Qt.Key_O) {
                 searchHeaderRoot.openUrlRequested()
