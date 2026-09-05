@@ -102,6 +102,15 @@ Rectangle {
                 }
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (event.modifiers & Qt.ControlModifier) {
+                  for (var r = 0; r < filtered.length; r++) {
+                    if (filtered[r].shortcut && (filtered[r].shortcut === "Ctrl+↵" || filtered[r].shortcut.toLowerCase() === "ctrl+enter" || filtered[r].shortcut.toLowerCase() === "ctrl+return")) {
+                      paletteRoot.actionSelected(filtered[r])
+                      event.accepted = true
+                      return
+                    }
+                  }
+                }
                 if (filtered.length > 0 && paletteRoot.selectedIndex >= 0 && paletteRoot.selectedIndex < filtered.length) {
                   paletteRoot.actionSelected(filtered[paletteRoot.selectedIndex])
                 }
@@ -115,6 +124,7 @@ Rectangle {
                 else if (event.key === Qt.Key_E) pressedKey = "Ctrl+E"
                 else if (event.key === Qt.Key_T) pressedKey = "Ctrl+T"
                 else if (event.key === Qt.Key_O) pressedKey = "Ctrl+O"
+                else if (event.key === Qt.Key_H) pressedKey = "Ctrl+H"
 
                 if (pressedKey) {
                   for (var i = 0; i < filtered.length; i++) {

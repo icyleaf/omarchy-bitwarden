@@ -11,6 +11,7 @@ ScrollView {
   property bool showPrivateKeyRevealed: false
   property bool showCardNumberRevealed: false
   property bool showCardCodeRevealed: false
+  property bool showCustomHiddenRevealed: false
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
   property color foreground: "#ffffff"
@@ -23,6 +24,7 @@ ScrollView {
   onItemChanged: {
     showCardNumberRevealed = false
     showCardCodeRevealed = false
+    showCustomHiddenRevealed = false
   }
 
   signal copyRequested(string text, bool isSensitive, string label)
@@ -32,6 +34,10 @@ ScrollView {
   signal closePreviewRequested()
   signal togglePasswordRevealed()
   signal togglePrivateKeyRevealed()
+  signal toggleCardNumberRevealed()
+  signal toggleCardCodeRevealed()
+  signal toggleCustomHiddenRevealed()
+  signal passwordHistoryRequested(var item)
 
   clip: true
   ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -1300,7 +1306,8 @@ ScrollView {
               spacing: 8
 
               property bool isHiddenField: Boolean(modelData && modelData.type === 1)
-              property bool isRevealed: false
+              property bool itemRevealed: false
+              property bool isRevealed: itemRevealed || inspectorRoot.showCustomHiddenRevealed
 
               Rectangle {
                 Layout.fillWidth: true
@@ -1340,7 +1347,13 @@ ScrollView {
                   visible: modelData.type === 1
                   iconText: customFieldRow.isRevealed ? "\uf070" : "\uf06e"
                   tooltip: customFieldRow.isRevealed ? "Hide field" : "Show field"
-                  onClicked: customFieldRow.isRevealed = !customFieldRow.isRevealed
+                  onClicked: {
+                    if (inspectorRoot.showCustomHiddenRevealed) {
+                      customFieldRow.itemRevealed = false
+                    } else {
+                      customFieldRow.itemRevealed = !customFieldRow.itemRevealed
+                    }
+                  }
                 }
 
                 // Ghost Copy Button
@@ -1527,6 +1540,45 @@ ScrollView {
                   elide: Text.ElideRight
                   Layout.fillWidth: true
                 }
+              }
+            }
+          }
+
+          // Password History Entry Button (Only for Login items with history)
+          ColumnLayout {
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.password_history && inspectorRoot.item.login.password_history.length > 0)
+            Layout.fillWidth: true
+            spacing: 8
+
+            Rectangle {
+              Layout.fillWidth: true
+              height: 1
+              color: Qt.rgba(255, 255, 255, 0.05)
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text { text: "Password History"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text {
+                  text: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.password_history) ? (inspectorRoot.item.login.password_history.length + " previous password(s)") : ""
+                  color: inspectorRoot.foreground
+                  font.pixelSize: inspectorRoot.valuePixelSize
+                  font.weight: Font.Medium
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
+                }
+              }
+
+              // View Password History Ghost Button
+              GhostIconButton {
+                iconText: "\uf1da"
+                tooltip: "View password history (Ctrl+H)"
+                onClicked: inspectorRoot.passwordHistoryRequested(inspectorRoot.item)
               }
             }
           }

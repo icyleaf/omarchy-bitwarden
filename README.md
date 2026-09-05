@@ -26,19 +26,21 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 
 ## Keyboard Shortcuts
 
-| Shortcut                       | Description                                                               |
-| :----------------------------- | :------------------------------------------------------------------------ |
-| <kbd>Enter</kbd>               | Copy primary credential (Password / Card Number / Public Key)             |
-| <kbd>Ctrl</kbd> + <kbd>U</kbd> | Copy username                                                             |
-| <kbd>Ctrl</kbd> + <kbd>T</kbd> | Copy live TOTP code                                                       |
-| <kbd>Ctrl</kbd> + <kbd>O</kbd> | Open primary website URL in default browser                               |
-| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Open Action Palette (Copy username, TOTP, PIN, Org Name, etc.)            |
-| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open / Toggle Settings configuration view                                 |
-| <kbd>Ctrl</kbd> + <kbd>L</kbd> | Manually lock the vault immediately                                       |
-| <kbd>Ctrl</kbd> + <kbd>R</kbd> | Trigger manual vault sync with Bitwarden server                           |
-| <kbd>↓</kbd> / <kbd>↑</kbd>    | Navigate item list or action options (stops at boundaries)                |
-| <kbd>Tab</kbd>                 | Switch category filters (All, Logins, Cards, Identities, Notes, SSH Keys) |
-| <kbd>Esc</kbd>                 | Dismiss Action Palette, Settings, or hide the overlay                     |
+| Shortcut                               | Description                                                               |
+| :------------------------------------- | :------------------------------------------------------------------------ |
+| <kbd>Enter</kbd>                       | Copy primary credential (Password / Card Number / Public Key)             |
+| <kbd>Ctrl</kbd> + <kbd>Enter</kbd>     | Copy live TOTP code                                                       |
+| <kbd>Ctrl</kbd> + <kbd>U</kbd>         | Copy username                                                             |
+| <kbd>Ctrl</kbd> + <kbd>T</kbd>         | Toggle field / secret visibility (passwords, keys, card codes, etc.)      |
+| <kbd>Ctrl</kbd> + <kbd>H</kbd>         | Open password history modal for the selected login item                   |
+| <kbd>Ctrl</kbd> + <kbd>O</kbd>         | Open primary website URL in default browser                               |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd>         | Open Action Palette (Copy username, TOTP, PIN, Org Name, History, etc.)    |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd>         | Open / Toggle Settings configuration view                                 |
+| <kbd>Ctrl</kbd> + <kbd>L</kbd>         | Manually lock the vault immediately                                       |
+| <kbd>Ctrl</kbd> + <kbd>R</kbd>         | Trigger manual vault sync with Bitwarden server                           |
+| <kbd>↓</kbd> / <kbd>↑</kbd>            | Navigate item list or action options (stops at boundaries)                |
+| <kbd>Tab</kbd>                         | Switch category filters (All, Logins, Cards, Identities, Notes, SSH Keys) |
+| <kbd>Esc</kbd>                         | Dismiss Action Palette, History modal, Settings, or hide overlay          |
 
 ---
 
