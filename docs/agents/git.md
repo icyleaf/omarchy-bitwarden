@@ -1,6 +1,6 @@
 # Git & Pull Request Workflow
 
-All implementation and bugfix tasks must follow a strict branch-and-PR workflow so that GitHub Release notes and changelogs are populated automatically from merged Pull Requests.
+All implementation and bugfix tasks must follow a strict branch-and-PR workflow so that GitHub Release notes and changelogs are populated automatically by `git-cliff` from commit history and merged Pull Requests.
 
 ## Rules
 
@@ -24,7 +24,23 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      ```
 
 3. **Commit with Conventional Commits**:
-   - Format: `<type>(<scope>): <summary>`
+   - Format: `<type>(<scope>): <summary>` or `<type>(<scope>)!: <summary>` for breaking changes.
+   - **Allowed Types & Release Notes Category Mapping**:
+     - `feat`: Features
+     - `fix`: Bug Fixes
+     - `perf`: Features
+     - `refactor`: Features
+     - `style`: Styling
+     - `docs`: Documentation
+     - `chore(deps)`: Dependencies
+     - `chore` / `ci`: Miscellaneous Tasks
+     - `sec` / `fix(security)` / `feat(security)`: Security
+     - `test`: Skipped (internal only)
+   - **Scopes**: Always specify a concise scope when applicable (e.g., `ui`, `qml`, `daemon`, `clipboard`, `vault`, `crypto`, `auth`, `attachment`, `logging`, `cli`, `install`).
+   - **Breaking Changes**:
+     - Mark breaking changes with a `!` before the colon (e.g., `feat(daemon)!: switch to binary protocol`).
+     - Alternatively, include `BREAKING CHANGE:` in the commit message footer explaining the migration requirements.
+     - Breaking changes are automatically rendered with `[BREAKING]` in release notes.
 
 4. **Create Pull Request via `gh` CLI**:
    - Push branch to remote:
@@ -48,3 +64,4 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      ```bash
      git checkout main && git pull
      ```
+
