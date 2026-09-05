@@ -168,6 +168,7 @@ Item {
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
     root.searchQuery = ""
+    root.selectedIndex = 0
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
