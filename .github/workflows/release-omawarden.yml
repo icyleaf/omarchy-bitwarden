@@ -108,7 +108,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --tag ${{ github.ref_name }} --include-path "omawarden/**" --strip header
+          args: --tag ${{ github.ref_name }} --include-path "omawarden/**" --strip header --latest
         env:
           OUTPUT: CHANGELOG.md
           GITHUB_REPO: ${{ github.repository }}
