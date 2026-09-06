@@ -55,19 +55,18 @@ git cliff --tag-pattern "^omarchy-bitwarden-v?[0-9].*" --exclude-path "omawarden
 """
 
 [tasks.bump]
-description = "Bump component versions and create a bump commit (usage: mise run bump [cli|plugin|all] [v1] [v2])"
-run = """
-TARGET="${1}"
-V1="${2}"
-V2="${3}"
-
-if [ -z "$TARGET" ]; then
-  echo "Usage:"
-  echo "  mise run bump cli <version>"
-  echo "  mise run bump plugin <version>"
-  echo "  mise run bump all <cli_version> <plugin_version>"
-  exit 1
-fi
+description = "Bump component versions and create a bump commit"
+usage = '''
+arg "<target>" help="Target component (cli, plugin, all)" {
+  choices "cli" "plugin" "all"
+}
+arg "<version>" help="Version for target or cli_version when all"
+arg "[plugin_version]" help="Plugin version when using all"
+'''
+run = '''
+TARGET="${usage_target}"
+V1="${usage_version}"
+V2="${usage_plugin_version:-}"
 
 BUMP_CLI=false
 BUMP_PLUGIN=false
@@ -76,24 +75,16 @@ PLUGIN_VER=""
 
 case "$TARGET" in
   cli)
-    if [ -z "$V1" ]; then
-      echo "Error: Version argument required. Example: mise run bump cli 0.5.2"
-      exit 1
-    fi
     BUMP_CLI=true
     CLI_VER="$V1"
     ;;
   plugin)
-    if [ -z "$V1" ]; then
-      echo "Error: Version argument required. Example: mise run bump plugin 0.7.2"
-      exit 1
-    fi
     BUMP_PLUGIN=true
     PLUGIN_VER="$V1"
     ;;
   all)
-    if [ -z "$V1" ] || [ -z "$V2" ]; then
-      echo "Error: Both versions required. Example: mise run bump all 0.5.2 0.7.2"
+    if [ -z "$V2" ]; then
+      echo "Error: Both cli and plugin versions required for 'all'. Example: mise run bump all 0.5.2 0.7.2"
       exit 1
     fi
     BUMP_CLI=true
@@ -101,25 +92,21 @@ case "$TARGET" in
     BUMP_PLUGIN=true
     PLUGIN_VER="$V2"
     ;;
-  *)
-    echo "Unknown target '$TARGET'. Choose from: cli, plugin, all"
-    exit 1
-    ;;
 esac
 
 COMMIT_MSG="bump:"
 
 if [ "$BUMP_CLI" = true ]; then
   echo "Bumping omawarden to $CLI_VER..."
-  sed -i -E "s/^version = \"[^\"]+\"/version = \"$CLI_VER\"/" omawarden/Cargo.toml
-  (cd omawarden && cargo check --quiet 2>/dev/null || true)
+  sed -i -E "s/^version = .*/version = \"$CLI_VER\"/" omawarden/Cargo.toml
+  (cd omawarden && cargo check --quiet)
   git add omawarden/Cargo.toml omawarden/Cargo.lock
   COMMIT_MSG="$COMMIT_MSG omawarden $CLI_VER"
 fi
 
 if [ "$BUMP_PLUGIN" = true ]; then
   echo "Bumping omarchy-bitwarden plugin to $PLUGIN_VER..."
-  sed -i -E "s/\"version\": \"[^\"]+\"/\"version\": \"$PLUGIN_VER\"/" manifest.json
+  sed -i -E "s/\"version\": .*/\"version\": \"$PLUGIN_VER\",/" manifest.json
   git add manifest.json
   if [ "$BUMP_CLI" = true ]; then
     COMMIT_MSG="$COMMIT_MSG, omarchy-bitwarden $PLUGIN_VER"
@@ -130,4 +117,4 @@ fi
 
 git commit -m "$COMMIT_MSG"
 echo "Successfully created commit: $COMMIT_MSG"
-"""
+'''

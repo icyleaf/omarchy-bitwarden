@@ -58,15 +58,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TITLE="chore(release): ${{ steps.check.outputs.bump_title }}"
-          
+          TITLE="${{ steps.check.outputs.bump_title }}"
+
           # Build PR body file safely
           cat << 'BODY_EOF' > /tmp/pr_body.md
           # Release Summary
 
-          This PR was automatically created upon detecting a `bump:` commit on `develop`.
+          This PR was automatically created upon detecting a `bump:` commit on `develop`. Here's a summary of the changes included in this release:
 
-          ## Omawarden CLI Changelog
+          ## Omawarden CLI
           BODY_EOF
           sed -i 's/^          //' /tmp/pr_body.md
 
@@ -80,14 +80,14 @@ jobs:
 
           ---
 
-          ## Omarchy Plugin Changelog
+          ## Omarchy Bitwarden Plugin
           BODY_EOF
           sed -i 's/^          //' /tmp/pr_body.md
 
           if [ -s /tmp/plugin_changelog.md ]; then
             cat /tmp/plugin_changelog.md >> /tmp/pr_body.md
           else
-            echo "_No unreleased changes for Omarchy Plugin._" >> /tmp/pr_body.md
+            echo "_No unreleased changes for Omarchy Bitwarden Plugin._" >> /tmp/pr_body.md
           fi
 
           cat << 'BODY_EOF' >> /tmp/pr_body.md
