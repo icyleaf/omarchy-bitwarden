@@ -10,25 +10,26 @@ import json, sys, urllib.request
 
 repo = "${REPO}"
 headers = {"User-Agent": "OmarchyBitwarden"}
-req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest", headers=headers)
+req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=10", headers=headers)
 try:
     with urllib.request.urlopen(req, timeout=6) as response:
-        data = json.loads(response.read().decode())
-        tag = data.get("tag_name", "")
-        name = data.get("name", "")
-        body = data.get("body", "")
-        url = data.get("html_url", "")
-        pub = data.get("published_at", "")
-        if tag:
-            print(json.dumps({
-                "ok": True,
-                "tag": tag,
-                "name": name,
-                "body": body,
-                "url": url,
-                "published_at": pub
-            }))
-            sys.exit(0)
+        releases = json.loads(response.read().decode())
+        for r in releases:
+            tag = r.get("tag_name", "")
+            if tag.startswith("omawarden-") and not r.get("draft") and not r.get("prerelease"):
+                name = r.get("name", "")
+                body = r.get("body", "")
+                url = r.get("html_url", "")
+                pub = r.get("published_at", "")
+                print(json.dumps({
+                    "ok": True,
+                    "tag": tag,
+                    "name": name,
+                    "body": body,
+                    "url": url,
+                    "published_at": pub
+                }))
+                sys.exit(0)
 except Exception:
     pass
 sys.exit(1)
@@ -38,11 +39,11 @@ EOF
   fi
 fi
 
-# 2. Fallback: Try web redirect (not subject to GitHub REST API rate limits)
+# 2. Fallback: Try Atom feed (not subject to GitHub REST API rate limits)
 if command -v curl >/dev/null 2>&1; then
-  TAG=$(curl -sIL --max-time 6 "https://github.com/${REPO}/releases/latest" 2>/dev/null | grep -i "^location:" | awk -F'/tag/' '{print $2}' | tr -d ' \r\n' || true)
+  TAG=$(curl -sSL --max-time 6 "https://github.com/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
 elif command -v wget >/dev/null 2>&1; then
-  TAG=$(wget --spider -S --max-redirect=0 "https://github.com/${REPO}/releases/latest" 2>&1 | grep -i "^  Location:" | awk -F'/tag/' '{print $2}' | tr -d ' \r\n' || true)
+  TAG=$(wget -qO- --timeout=6 "https://github.com/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
 else
   TAG=""
 fi
@@ -50,9 +51,9 @@ fi
 # 3. Fallback: GitHub REST API via curl/wget
 if [ -z "$TAG" ]; then
   if command -v curl >/dev/null 2>&1; then
-    TAG=$(curl -sSL -H "User-Agent: OmarchyBitwarden" --max-time 6 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+    TAG=$(curl -sSL -H "User-Agent: OmarchyBitwarden" --max-time 6 "https://api.github.com/repos/${REPO}/releases?per_page=10" 2>/dev/null | grep -o '"tag_name": *"omawarden-[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
   elif command -v wget >/dev/null 2>&1; then
-    TAG=$(wget -qO- --user-agent="OmarchyBitwarden" --timeout=6 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+    TAG=$(wget -qO- --user-agent="OmarchyBitwarden" --timeout=6 "https://api.github.com/repos/${REPO}/releases?per_page=10" 2>/dev/null | grep -o '"tag_name": *"omawarden-[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
   fi
 fi
 

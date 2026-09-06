@@ -43,6 +43,8 @@ commit_parsers = [
   { message = "^chore\\(pr\\)", skip = true },
   { message = "^chore\\(pull\\)", skip = true },
   { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^.*\\(ci\\)", skip = true },
 
   # 1. Security (highest priority)
   { message = "^sec", group = "Security" },
@@ -67,8 +69,8 @@ commit_parsers = [
   { message = "^chore\\(deps.*\\)", group = "Dependencies" },
   { message = "^deps", group = "Dependencies" },
 
-  # 7. CI & Miscellaneous Tasks
-  { message = "^chore|^ci", group = "Miscellaneous Tasks" },
+  # 7. Miscellaneous Tasks
+  { message = "^chore", group = "Miscellaneous Tasks" },
 
   # 8. Fallback for unclassified commits
   { message = ".*", group = "Other" },

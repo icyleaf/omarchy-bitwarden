@@ -24,25 +24,25 @@ download_file() {
   fi
 }
 
-# 1. Fetch latest release tag via web redirect (immune to API rate limits)
+# 1. Fetch latest omawarden release tag via Atom feed (immune to API rate limits)
 if command -v curl >/dev/null 2>&1; then
-  TAG=$(curl -sIL --max-time 6 "https://github.com/${REPO}/releases/latest" 2>/dev/null | grep -i "^location:" | awk -F'/tag/' '{print $2}' | tr -d ' \r\n' || true)
+  TAG=$(curl -sSL --max-time 6 "https://github.com/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
 elif command -v wget >/dev/null 2>&1; then
-  TAG=$(wget --spider -S --max-redirect=0 "https://github.com/${REPO}/releases/latest" 2>&1 | grep -i "^  Location:" | awk -F'/tag/' '{print $2}' | tr -d ' \r\n' || true)
+  TAG=$(wget -qO- --timeout=6 "https://github.com/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
 else
   TAG=""
 fi
 
-# Fallback to API if web redirect was not found
+# Fallback to GitHub Releases API if Atom feed was not resolved
 if [ -z "$TAG" ]; then
   if command -v curl >/dev/null 2>&1; then
-    RELEASE_JSON=$(curl -sSL -H "User-Agent: OmarchyBitwarden" --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    RELEASE_JSON=$(curl -sSL -H "User-Agent: OmarchyBitwarden" --max-time 10 "https://api.github.com/repos/${REPO}/releases?per_page=10" 2>/dev/null || true)
   elif command -v wget >/dev/null 2>&1; then
-    RELEASE_JSON=$(wget -qO- --user-agent="OmarchyBitwarden" --timeout=10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    RELEASE_JSON=$(wget -qO- --user-agent="OmarchyBitwarden" --timeout=10 "https://api.github.com/repos/${REPO}/releases?per_page=10" 2>/dev/null || true)
   else
     RELEASE_JSON=""
   fi
-  TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+  TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"omawarden-[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
 fi
 
 if [ -z "$TAG" ]; then

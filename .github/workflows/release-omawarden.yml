@@ -117,7 +117,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --tag ${{ inputs.tag || github.ref_name }} --include-path "omawarden/**" --strip header --latest
+          args: --tag ${{ inputs.tag || github.ref_name }} --tag-pattern "^omawarden-v?[0-9].*" --include-path "omawarden/**" --strip header --latest
         env:
           OUTPUT: CHANGELOG.md
           GITHUB_REPO: ${{ github.repository }}
@@ -134,4 +134,5 @@ jobs:
             artifacts/*.sha256
           draft: false
           prerelease: false
+          make_latest: true
 

@@ -35,9 +35,9 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      - `style`: Styling
      - `docs`: Documentation
      - `chore(deps)`: Dependencies
-     - `chore` / `ci`: Miscellaneous Tasks
+     - `chore`: Miscellaneous Tasks
      - `sec` / `fix(security)` / `feat(security)`: Security
-     - `test`: Skipped (internal only)
+     - `ci` / `test`: Skipped (internal only)
    - **Scopes**: Always specify a concise scope when applicable (e.g., `ui`, `qml`, `daemon`, `clipboard`, `vault`, `crypto`, `auth`, `attachment`, `logging`, `cli`, `install`).
    - **Breaking Changes**:
      - Mark breaking changes with a `!` before the colon (e.g., `feat(daemon)!: switch to binary protocol`).
@@ -81,7 +81,6 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      git push origin develop
      ```
    - Pushing a `bump:` commit to `develop` automatically triggers the **Auto Release PR** workflow (`.github/workflows/auto-release-pr.yml`), which opens or updates a Release PR from `develop` to `main` with changelog previews.
-   - Review and merge the Release PR on GitHub using **Merge commit** (to preserve Git history between `develop` and `main`).
+   - Review and merge the Release PR on GitHub using **Merge commit** (to preserve full Git commit history between `develop` and `main`).
+     > **Warning**: **Never use Squash merge on Release PRs targeting `main`!** Squash merging squashes all conventional commits into a single commit, causing `git-cliff` on `main` to lose individual `feat`, `fix`, `sec` commits when generating release notes.
    - Upon merging to `main`, the **Auto Tag on Release** workflow (`.github/workflows/auto-tag.yml`) automatically detects version changes, tags the release (`omawarden-<version>` and/or `omarchy-bitwarden-<version>`), and dispatches the build and package workflows (`release-omawarden.yml` / `release-plugin.yml`).
-
-
