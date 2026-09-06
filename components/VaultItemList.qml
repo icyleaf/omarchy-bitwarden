@@ -8,6 +8,8 @@ Item {
   property var items: []
   property int selectedIndex: 0
   property string searchQuery: ""
+  property string activeVaultScope: "all"
+  property string activeFolderScope: "all"
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
@@ -100,16 +102,16 @@ Item {
 
       Text {
         Layout.alignment: Qt.AlignHCenter
-        text: itemListRoot.searchQuery ? "No matching items found" : "Vault is empty"
+        text: (itemListRoot.searchQuery || itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "No matching items found" : "Vault is empty"
         color: Qt.darker(itemListRoot.foreground, 1.4)
         font.pixelSize: 12
         font.weight: Font.Medium
       }
 
       Text {
-        visible: Boolean(itemListRoot.searchQuery)
+        visible: Boolean(itemListRoot.searchQuery || itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all")
         Layout.alignment: Qt.AlignHCenter
-        text: "Try a different keyword or press Tab to switch category"
+        text: (itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "Try resetting scope filters or press Esc" : "Try a different keyword or press Tab to switch category"
         color: Qt.darker(itemListRoot.foreground, 2.0)
         font.pixelSize: 11
       }
@@ -211,7 +213,7 @@ Item {
             Rectangle {
               visible: Boolean(modelData.organization_name)
               implicitHeight: 16
-              implicitWidth: orgText.implicitWidth + 8
+              implicitWidth: Math.min(110, orgText.implicitWidth + 8)
               radius: 3
               color: Qt.rgba(0.9, 0.6, 0.2, 0.2)
               border.color: Qt.rgba(0.9, 0.6, 0.2, 0.5)
@@ -220,11 +222,13 @@ Item {
               Text {
                 id: orgText
                 anchors.centerIn: parent
+                width: Math.min(102, implicitWidth)
                 text: "\uf1ad " + (modelData.organization_name || "")
                 font.family: itemListRoot.fontFamily
                 color: "#fbbf24"
                 font.pixelSize: 9
                 font.weight: Font.Medium
+                elide: Text.ElideRight
               }
             }
 
@@ -232,7 +236,7 @@ Item {
             Rectangle {
               visible: Boolean(modelData.folder_name)
               implicitHeight: 16
-              implicitWidth: folderText.implicitWidth + 8
+              implicitWidth: Math.min(100, folderText.implicitWidth + 8)
               radius: 3
               color: Qt.rgba(0.4, 0.7, 1.0, 0.2)
               border.color: Qt.rgba(0.4, 0.7, 1.0, 0.5)
@@ -241,11 +245,13 @@ Item {
               Text {
                 id: folderText
                 anchors.centerIn: parent
+                width: Math.min(92, implicitWidth)
                 text: "\uf07b " + (modelData.folder_name || "")
                 font.family: itemListRoot.fontFamily
                 color: "#60a5fa"
                 font.pixelSize: 9
                 font.weight: Font.Medium
+                elide: Text.ElideRight
               }
             }
 

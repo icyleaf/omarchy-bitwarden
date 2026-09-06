@@ -48,9 +48,13 @@
 
 ### Interaction & UI Paradigms
 - **Overlay Window**: Main search launcher modal summoned by global shortcut (`Super+/` or user-defined).
-- **Category Tabs**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
+- **Multi-Dimensional Filtering & Scope**:
+  - **Vault Scope (`vault_scope`)**: Filters items by vault ownership domain: `All Vaults` (default), `Personal Vault` (personal credentials where `organization_id == null`), or a specific Organization (`[🏢 Org Name]`). Triggered via the search bar dropdown selector or `Ctrl+K`.
+  - **Folder Scope (`folder_scope`)**: Filters items assigned to a specific folder: `All Folders` (default) or a specific Folder (`[📁 Folder Name]`).
+  - **Category Tabs (`category_scope`)**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
+  - **Conjunctive Filter Pipeline**: Orthogonal multi-layer query evaluation (`Query ∧ Category ∧ VaultScope ∧ FolderScope`), enabling precise credential narrowing.
 - **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, attachments, and password history entry.
-- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy TOTP `Ctrl+↵`, Copy Username `Ctrl+U`, Toggle Field Visibility `Ctrl+T`, View Password History `Ctrl+H`, Open Website `Ctrl+O`, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
+- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy TOTP `Ctrl+↵`, Copy Username `Ctrl+U`, Toggle Field Visibility `Ctrl+T`, View Password History `Ctrl+H`, Open Website `Ctrl+O`, Filter by Vault/Org, Filter by Folder, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
 - **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, `max_output_mb`, and `log_level`, with real-time CLI readiness indicators and an embedded Logs Viewer.
 - **Observability & Diagnostics**: Dual-channel structured logging across `omawarden` (`stderr`) and Quickshell (`console.error`), featuring module prefixes (`[omawarden:cli]`, `[omarchy:ui]`), configurable log levels (`error` by default), zero-knowledge credential and custom server URL redaction, and one-click "Copy Diagnostics" for privacy-safe GitHub issue reporting (see `docs/adr/0004-structured-logging-and-diagnostics.md`).
 
