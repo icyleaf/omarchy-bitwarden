@@ -16,6 +16,10 @@ ApplicationWindow {
     id: itemInspector
   }
 
+  EmptyInspector {
+    id: emptyInspector
+  }
+
   function assert(condition, message) {
     if (!condition) {
       console.error("ASSERTION FAILED: " + message)
@@ -86,6 +90,9 @@ ApplicationWindow {
       assert(itemInspector.getItemCategoryLabel(sshKeyItem) === "SSH Key", "ItemInspector: ssh_key item label is 'SSH Key'")
       assert(itemInspector.getItemCategoryLabel(customItem) === "Custom Subtitle", "ItemInspector: custom item falls back to sub_title")
       assert(itemInspector.getItemCategoryLabel(null) === "", "ItemInspector: null item label is empty string")
+
+      // 3. EmptyInspector instantiation test
+      assert(emptyInspector !== null, "EmptyInspector: instantiated successfully")
 
       console.log("ALL ITEM CATEGORY SUBTITLE TESTS PASSED!")
       Qt.quit()

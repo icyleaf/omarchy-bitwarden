@@ -28,52 +28,6 @@ ScrollView {
     width: emptyInspectorRoot.width - 16
     spacing: 12
 
-    // Header Hero
-    RowLayout {
-      Layout.fillWidth: true
-      spacing: 10
-
-      Rectangle {
-        width: 32
-        height: 32
-        radius: 6
-        color: Qt.rgba(emptyInspectorRoot.accent.r, emptyInspectorRoot.accent.g, emptyInspectorRoot.accent.b, 0.15)
-        border.color: Qt.rgba(emptyInspectorRoot.accent.r, emptyInspectorRoot.accent.g, emptyInspectorRoot.accent.b, 0.4)
-        border.width: 1
-
-        Text {
-          anchors.centerIn: parent
-          text: "\uf132"
-          font.family: emptyInspectorRoot.fontFamily
-          font.pixelSize: 16
-          color: emptyInspectorRoot.accent
-        }
-      }
-
-      ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 1
-        Text {
-          text: "Omarchy Bitwarden"
-          color: emptyInspectorRoot.foreground
-          font.pixelSize: 12
-          font.weight: Font.DemiBold
-        }
-        Text {
-          text: (emptyInspectorRoot.rawVaultItems ? emptyInspectorRoot.rawVaultItems.length : 0) + " items synced • Ready for search"
-          color: Qt.darker(emptyInspectorRoot.foreground, 1.6)
-          font.pixelSize: 10
-        }
-      }
-    }
-
-    // Divider
-    Rectangle {
-      Layout.fillWidth: true
-      height: 1
-      color: emptyInspectorRoot.borderColor
-    }
-
     // Shortcuts Cheat Sheet Header
     Text {
       text: "KEYBOARD SHORTCUTS"
@@ -106,7 +60,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Switch category filter (Logins, Cards, Secure Note, SSH)"
+        text: "Switch Category Filter (Logins, Cards, Secure Note, SSH)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -131,7 +85,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Copy primary credential (password / card / key)"
+        text: "Copy Primary Credential (Password / Card / Key)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -156,7 +110,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Copy live TOTP code"
+        text: "Copy Live TOTP Code"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -181,7 +135,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Copy username"
+        text: "Copy Username"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -206,7 +160,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Toggle field / secret visibility"
+        text: "Toggle Field / Secret Visibility"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -231,7 +185,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Open password history modal"
+        text: "Open Password History Modal"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -256,7 +210,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Open primary website in default browser"
+        text: "Open Primary Website in Default Browser"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -281,14 +235,12 @@ ScrollView {
         }
       }
       Text {
-        text: "Open Action Palette (copy attributes, PIN, attachments)"
+        text: "Open Action Palette (Copy Attributes, PIN, Attachments)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
-
-
 
       // Ctrl+R
       Rectangle {
@@ -308,7 +260,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Sync vault with server"
+        text: "Sync Vault with Server"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -333,7 +285,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Lock vault immediately"
+        text: "Lock Vault Immediately"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
@@ -358,7 +310,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Open Settings & configuration"
+        text: "Open Settings & Configuration"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
