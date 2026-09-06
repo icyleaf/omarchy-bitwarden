@@ -182,6 +182,21 @@ ScrollView {
     return "\uf084"
   }
 
+  function getItemCategoryLabel(item) {
+    if (!item) return ""
+    var type = item.type_name || item.category || ""
+    switch (type) {
+      case "login": return "Login"
+      case "card": return "Card"
+      case "identity": return "Identity"
+      case "note":
+      case "secure_note":
+        return "Secure Note"
+      case "ssh_key": return "SSH Key"
+      default: return item.sub_title || item.type_name || "Item"
+    }
+  }
+
   function formatMaskedCardNumber(num) {
     if (!num) return "•••• •••• •••• ••••"
     var clean = String(num).replace(/\s+/g, "")
@@ -585,7 +600,7 @@ ScrollView {
           }
 
           Text {
-            text: inspectorRoot.item ? (inspectorRoot.item.sub_title || inspectorRoot.item.type_name || "Item") : ""
+            text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
             color: Qt.darker(inspectorRoot.foreground, 1.6)
             font.pixelSize: 11
             elide: Text.ElideRight
