@@ -84,6 +84,16 @@ ApplicationWindow {
       assert(dropdown.isFiltered === false, "isFiltered is false after reset to 'all'")
       assert(dropdown.currentItem.id === "all", "currentItem is 'all'")
 
+      // 6. Cycle Next
+      dropdown.cycleNext()
+      assert(testRunner.selectedScopeId === "personal", "cycleNext from 'all' selects 'personal'")
+      dropdown.currentValue = "personal"
+      dropdown.cycleNext()
+      assert(testRunner.selectedScopeId === "org-1", "cycleNext from 'personal' selects 'org-1'")
+      dropdown.currentValue = "org-1"
+      dropdown.cycleNext()
+      assert(testRunner.selectedScopeId === "all", "cycleNext from 'org-1' cycles back to 'all'")
+
       console.log("All ScopeDropdown tests passed successfully!")
       Qt.quit()
     }
