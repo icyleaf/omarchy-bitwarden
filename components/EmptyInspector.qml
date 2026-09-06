@@ -67,6 +67,56 @@ ScrollView {
         wrapMode: Text.WordWrap
       }
 
+      // Alt+V
+      Rectangle {
+        implicitHeight: 20
+        implicitWidth: kAltV.implicitWidth + 10
+        radius: 3
+        color: Qt.rgba(0, 0, 0, 0.25)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: kAltV
+          anchors.centerIn: parent
+          text: "Alt + V"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 10
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Switch Vault Scope (All Vaults, Personal, Organizations)"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 10
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+      }
+
+      // Alt+F
+      Rectangle {
+        implicitHeight: 20
+        implicitWidth: kAltF.implicitWidth + 10
+        radius: 3
+        color: Qt.rgba(0, 0, 0, 0.25)
+        border.color: emptyInspectorRoot.borderColor
+        border.width: 1
+        Text {
+          id: kAltF
+          anchors.centerIn: parent
+          text: "Alt + F"
+          color: emptyInspectorRoot.foreground
+          font.pixelSize: 10
+          font.weight: Font.Medium
+        }
+      }
+      Text {
+        text: "Switch Folder Scope (All Folders, Specific Folder)"
+        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        font.pixelSize: 10
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+      }
+
       // Enter
       Rectangle {
         implicitHeight: 20
@@ -78,7 +128,7 @@ ScrollView {
         Text {
           id: k1
           anchors.centerIn: parent
-          text: "↵ Enter"
+          text: "↵ "
           color: emptyInspectorRoot.foreground
           font.pixelSize: 10
           font.weight: Font.Medium

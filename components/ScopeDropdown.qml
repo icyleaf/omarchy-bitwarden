@@ -29,6 +29,25 @@ Item {
     popup.close()
   }
 
+  function cycleNext() {
+    if (!items || items.length <= 1) return
+    var nextIdx = 0
+    if (popup.opened) {
+      nextIdx = (popup.highlightedIndex + 1) % items.length
+      popup.highlightedIndex = nextIdx
+      menuListView.currentIndex = nextIdx
+      dropdownRoot.selected(items[nextIdx].id)
+    } else {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].id === currentValue) {
+          nextIdx = (i + 1) % items.length
+          break
+        }
+      }
+      dropdownRoot.selected(items[nextIdx].id)
+    }
+  }
+
   property var currentItem: {
     var val = currentValue
     var list = items

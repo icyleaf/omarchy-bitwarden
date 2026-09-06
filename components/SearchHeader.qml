@@ -38,11 +38,19 @@ ColumnLayout {
   property alias isFolderScopeOpen: folderScopeDropdown.isOpen
 
   function openVaultScope() {
-    vaultScopeDropdown.open()
+    if (vaultScopeDropdown.isOpen) {
+      vaultScopeDropdown.cycleNext()
+    } else {
+      vaultScopeDropdown.open()
+    }
   }
 
   function openFolderScope() {
-    folderScopeDropdown.open()
+    if (folderScopeDropdown.isOpen) {
+      folderScopeDropdown.cycleNext()
+    } else {
+      folderScopeDropdown.open()
+    }
   }
 
   function closeScopeDropdowns() {
@@ -198,12 +206,12 @@ ColumnLayout {
             if (searchHeaderRoot.modalsActive) return
 
             if (event.modifiers & Qt.AltModifier) {
-              if (event.key === Qt.Key_V) {
-                vaultScopeDropdown.open()
+              if (event.key === Qt.Key_V || (event.text && event.text.toLowerCase() === "v")) {
+                searchHeaderRoot.openVaultScope()
                 event.accepted = true
                 return
-              } else if (event.key === Qt.Key_F) {
-                folderScopeDropdown.open()
+              } else if (event.key === Qt.Key_F || (event.text && event.text.toLowerCase() === "f")) {
+                searchHeaderRoot.openFolderScope()
                 event.accepted = true
                 return
               }
