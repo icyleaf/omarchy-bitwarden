@@ -35,9 +35,9 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      - `style`: Styling
      - `docs`: Documentation
      - `chore(deps)`: Dependencies
-     - `chore` / `ci`: Miscellaneous Tasks
+     - `chore`: Miscellaneous Tasks
      - `sec` / `fix(security)` / `feat(security)`: Security
-     - `test`: Skipped (internal only)
+     - `ci` / `test`: Skipped (internal only)
    - **Scopes**: Always specify a concise scope when applicable (e.g., `ui`, `qml`, `daemon`, `clipboard`, `vault`, `crypto`, `auth`, `attachment`, `logging`, `cli`, `install`).
    - **Breaking Changes**:
      - Mark breaking changes with a `!` before the colon (e.g., `feat(daemon)!: switch to binary protocol`).
