@@ -562,6 +562,37 @@ pub fn decrypt_sync_ciphers_with_context(
                         }
                     }
 
+                    let mut password_history = Vec::new();
+                    let raw_hist_arr = c
+                        .get("passwordHistory")
+                        .or_else(|| c.get("password_history"))
+                        .or_else(|| c.get("PasswordHistory"))
+                        .or_else(|| login_obj.get("passwordHistory"))
+                        .or_else(|| login_obj.get("password_history"))
+                        .or_else(|| login_obj.get("PasswordHistory"))
+                        .and_then(|v| v.as_array());
+
+                    if let Some(hist_arr) = raw_hist_arr {
+                        for h in hist_arr {
+                            let hist_pwd = decrypt_cipher_string(
+                                h.get("password").and_then(|v| v.as_str()),
+                                &cipher_key,
+                            );
+                            let last_used = h
+                                .get("lastUsedDate")
+                                .or_else(|| h.get("last_used_date"))
+                                .or_else(|| h.get("LastUsedDate"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if let Some(p) = hist_pwd {
+                                password_history.push(json!({
+                                    "password": p,
+                                    "last_used_date": last_used,
+                                }));
+                            }
+                        }
+                    }
+
                     let mut has_passkey = false;
                     let mut passkey_created_at: Option<String> = None;
                     if let Some(fido2_arr) = login_obj
@@ -588,6 +619,7 @@ pub fn decrypt_sync_ciphers_with_context(
                         "password": pwd,
                         "totp": totp,
                         "uris": uris_decrypted,
+                        "password_history": password_history,
                         "has_passkey": has_passkey,
                         "passkey_created_at": passkey_created_at,
                     }));
@@ -1465,5 +1497,77 @@ mod tests {
             items[0].updated_at.as_deref(),
             Some("2024-06-20T11:45:00.000Z")
         );
+    }
+
+    #[test]
+    fn test_decrypt_ciphers_with_password_history() {
+        let raw_user_key = [16u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-with-pwd-history",
+                "type": 1,
+                "name": encrypt_test_string("Login With History", &user_key),
+                "login": {
+                    "username": encrypt_test_string("bob", &user_key),
+                    "password": encrypt_test_string("current_secret_pwd", &user_key),
+                    "passwordHistory": [
+                        {
+                            "password": encrypt_test_string("old_secret_pwd_2", &user_key),
+                            "lastUsedDate": "2024-05-10T10:00:00.000Z"
+                        },
+                        {
+                            "password": encrypt_test_string("old_secret_pwd_1", &user_key),
+                            "lastUsedDate": "2023-12-01T08:00:00.000Z"
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "id": "cipher-without-pwd-history",
+                "type": 1,
+                "name": encrypt_test_string("Login Without History", &user_key),
+                "login": {
+                    "username": encrypt_test_string("charlie", &user_key),
+                    "password": encrypt_test_string("another_pwd", &user_key),
+                }
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // First item has 2 password history entries
+        let login_0 = items[0].login.as_ref().unwrap();
+        assert_eq!(
+            login_0.get("password").and_then(|v| v.as_str()),
+            Some("current_secret_pwd")
+        );
+        let hist_0 = login_0
+            .get("password_history")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(hist_0.len(), 2);
+        assert_eq!(
+            hist_0[0].get("password").and_then(|v| v.as_str()),
+            Some("old_secret_pwd_2")
+        );
+        assert_eq!(
+            hist_0[0].get("last_used_date").and_then(|v| v.as_str()),
+            Some("2024-05-10T10:00:00.000Z")
+        );
+        assert_eq!(
+            hist_0[1].get("password").and_then(|v| v.as_str()),
+            Some("old_secret_pwd_1")
+        );
+
+        // Second item has empty password history list
+        let login_1 = items[1].login.as_ref().unwrap();
+        let hist_1 = login_1
+            .get("password_history")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(hist_1.is_empty());
     }
 }

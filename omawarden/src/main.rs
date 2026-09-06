@@ -60,15 +60,43 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
-    #[command(about = "Wayland clipboard integration")]
-    Clipboard {
-        #[command(subcommand)]
-        action: ClipboardAction,
+    #[command(
+        about = "Wayland clipboard operations (copy vault item field, pipe stdin, or clear)"
+    )]
+    Copy {
+        #[arg(index = 1, help = "Vault item ID or name query")]
+        query: Option<String>,
+        #[arg(long, help = "Clear Wayland clipboard immediately")]
+        clear: bool,
+        #[arg(long, help = "Read text to copy from standard input")]
+        stdin: bool,
+        #[arg(long, help = "Mark STDIN text as sensitive with auto-clear")]
+        sensitive: bool,
+        #[arg(long, help = "Copy password (default for login items)")]
+        password: bool,
+        #[arg(long, help = "Copy username")]
+        username: bool,
+        #[arg(long, help = "Copy TOTP code")]
+        totp: bool,
+        #[arg(long, help = "Copy notes")]
+        notes: bool,
+        #[arg(long, help = "Copy SSH private key or card security code")]
+        private_key: bool,
+        #[arg(long, help = "Copy SSH public key or card number")]
+        public_key: bool,
+        #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
+        timeout: Option<i64>,
     },
-    #[command(about = "Generate TOTP verification code")]
+    #[command(
+        about = "Generate TOTP verification code from vault item ID/name, secret, or otpauth URI"
+    )]
     Totp {
-        #[command(subcommand)]
-        action: TotpAction,
+        #[arg(index = 1, help = "Vault item ID, name query, secret, or otpauth URI")]
+        query: Option<String>,
+        #[arg(long, help = "Explicit TOTP secret or otpauth URI")]
+        secret: Option<String>,
+        #[arg(long, help = "Copy generated code directly to clipboard")]
+        copy: bool,
     },
     #[command(about = "Manage vault item attachments")]
     Attachment {
@@ -161,32 +189,6 @@ enum VaultAction {
 }
 
 #[derive(Subcommand)]
-enum ClipboardAction {
-    #[command(about = "Copy text to clipboard (text read securely from stdin)")]
-    Copy {
-        #[arg(long)]
-        sensitive: bool,
-        #[arg(long)]
-        timeout: Option<i64>,
-    },
-    #[command(about = "Clear clipboard immediately")]
-    Clear,
-}
-
-#[derive(Subcommand)]
-enum TotpAction {
-    #[command(
-        about = "Generate TOTP code from secret or otpauth URI (supports stdin and --secret)"
-    )]
-    Generate {
-        #[arg(index = 1)]
-        positional_secret: Option<String>,
-        #[arg(long)]
-        secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum AttachmentAction {
     #[command(about = "Download or view an attachment")]
     Download {
@@ -202,6 +204,11 @@ enum AttachmentAction {
         open: bool,
         #[arg(long)]
         preview: bool,
+    },
+    #[command(about = "Clean temporary preview attachments")]
+    Clean {
+        #[arg(long)]
+        item_id: Option<String>,
     },
 }
 
@@ -525,19 +532,37 @@ fn main() -> ExitCode {
                 VaultAction::Sync => {
                     omawarden::daemon::ensure_daemon_running();
                     let resp = send_daemon_request(&json!({ "action": "sync" }));
-                    let ok = resp
-                        .as_ref()
-                        .and_then(|v| v.get("ok"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or_else(|| vault_mgr.sync().is_ok());
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
-                    );
-                    if ok {
-                        ExitCode::SUCCESS
+                    if let Some(resp_val) = resp {
+                        let ok = resp_val
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
+                        if ok {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
                     } else {
-                        ExitCode::FAILURE
+                        match vault_mgr.sync() {
+                            Ok(_) => {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({ "ok": true })).unwrap()
+                                );
+                                ExitCode::SUCCESS
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(
+                                        &json!({ "ok": false, "error": e })
+                                    )
+                                    .unwrap()
+                                );
+                                ExitCode::FAILURE
+                            }
+                        }
                     }
                 }
                 VaultAction::List { category } => {
@@ -551,7 +576,11 @@ fn main() -> ExitCode {
                     if !is_unlocked && !vault_mgr.is_unlocked() {
                         println!(
                             "{}",
-                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                            }))
+                            .unwrap()
                         );
                         return ExitCode::FAILURE;
                     }
@@ -571,7 +600,11 @@ fn main() -> ExitCode {
                     if !is_unlocked && !vault_mgr.is_unlocked() {
                         println!(
                             "{}",
-                            json!({ "ok": false, "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first." })
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                            }))
+                            .unwrap()
                         );
                         return ExitCode::FAILURE;
                     }
@@ -582,64 +615,476 @@ fn main() -> ExitCode {
             }
         }
 
-        Commands::Clipboard { action } => {
+        Commands::Copy {
+            query,
+            clear,
+            stdin,
+            sensitive,
+            password,
+            username,
+            totp,
+            notes,
+            private_key,
+            public_key,
+            timeout,
+        } => {
             let clip_mgr = ClipboardManager::default();
-            match action {
-                ClipboardAction::Copy { sensitive, timeout } => {
-                    let text_val = read_clipboard_stdin();
-                    let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-                    let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
+            if !clip_mgr.is_available() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
+                    }))
+                    .unwrap()
+                );
+                return ExitCode::FAILURE;
+            }
+
+            if clear {
+                let ok = clip_mgr.clear();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "ok": ok })).unwrap()
+                );
+                return if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+
+            if stdin {
+                let text_val = read_clipboard_stdin();
+                let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
+                let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": ok,
+                        "copied": "stdin",
+                        "timeout": if sensitive { timeout_val } else { 0 }
+                    }))
+                    .unwrap()
+                );
+                return if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+
+            let query = match query {
+                Some(q) if !q.trim().is_empty() => q,
+                _ => {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": "Missing item query or action flag (--clear / --stdin). See 'omawarden copy --help'."
+                        }))
+                        .unwrap()
                     );
-                    if ok {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            omawarden::daemon::ensure_daemon_running();
+            let st = send_daemon_request(&json!({ "action": "status" }));
+            let is_unlocked = st
+                .as_ref()
+                .and_then(|v| v.get("is_unlocked"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+            let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                let daemon_res = send_daemon_request(&json!({
+                    "action": "get_item",
+                    "query": query
+                }));
+                daemon_res
+                    .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                    .and_then(|res| {
+                        res.get("item")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    })
+            } else {
+                match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                    Ok(user_key) => {
+                        let storage = vault_mgr.storage_mgr.load();
+                        let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                            &storage.ciphers,
+                            &storage.folders,
+                            &storage.organizations,
+                            &user_key,
+                            storage.enc_private_key.as_deref(),
+                        );
+                        let lower = query.to_lowercase();
+                        items.into_iter().find(|i| {
+                            i.id == query
+                                || i.name.eq_ignore_ascii_case(&query)
+                                || i.name.to_lowercase().contains(&lower)
+                        })
+                    }
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                .unwrap()
+                        );
+                        return ExitCode::FAILURE;
                     }
                 }
-                ClipboardAction::Clear => {
-                    let ok = clip_mgr.clear();
+            };
+
+            let item = match item {
+                Some(i) => i,
+                None => {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "ok": ok })).unwrap()
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": format!("Item '{}' not found in vault", query)
+                        }))
+                        .unwrap()
                     );
-                    if ok {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let (field_name, text_to_copy, is_sensitive) = if username {
+                let u = item
+                    .login
+                    .as_ref()
+                    .and_then(|l| l.get("username"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        item.identity
+                            .as_ref()
+                            .and_then(|id| id.get("username"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .or_else(|| {
+                        item.identity
+                            .as_ref()
+                            .and_then(|id| id.get("email"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                ("username", u, false)
+            } else if totp {
+                let seed = item
+                    .login
+                    .as_ref()
+                    .and_then(|l| l.get("totp"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if let Some(t_res) = omawarden::totp::generate_totp(seed, None, 6, 30) {
+                    ("totp", t_res.code, true)
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": "Item has no valid TOTP configuration"
+                        }))
+                        .unwrap()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            } else if notes {
+                ("notes", item.notes.clone().unwrap_or_default(), false)
+            } else if public_key {
+                let pk = item
+                    .ssh_key
+                    .as_ref()
+                    .and_then(|s| s.public_key.as_deref())
+                    .or_else(|| {
+                        item.card
+                            .as_ref()
+                            .and_then(|c| c.get("number"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                ("public_key", pk, false)
+            } else if private_key {
+                let privk = item
+                    .ssh_key
+                    .as_ref()
+                    .and_then(|s| s.private_key.as_deref())
+                    .or_else(|| {
+                        item.card
+                            .as_ref()
+                            .and_then(|c| c.get("code"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                ("private_key", privk, true)
+            } else if password {
+                let pwd = item
+                    .login
+                    .as_ref()
+                    .and_then(|l| l.get("password"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ("password", pwd, true)
+            } else {
+                match item.type_name.as_str() {
+                    "login" => {
+                        let pwd = item
+                            .login
+                            .as_ref()
+                            .and_then(|l| l.get("password"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        ("password", pwd, true)
+                    }
+                    "ssh_key" => {
+                        let privk = item
+                            .ssh_key
+                            .as_ref()
+                            .and_then(|s| s.private_key.as_deref())
+                            .unwrap_or_default()
+                            .to_string();
+                        ("private_key", privk, true)
+                    }
+                    "card" => {
+                        let num = item
+                            .card
+                            .as_ref()
+                            .and_then(|c| c.get("number"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        ("card_number", num, true)
+                    }
+                    "note" => ("notes", item.notes.clone().unwrap_or_default(), false),
+                    _ => {
+                        let val = item
+                            .login
+                            .as_ref()
+                            .and_then(|l| l.get("password"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        ("password", val, true)
                     }
                 }
+            };
+
+            if text_to_copy.is_empty() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": format!("Field '{}' is empty for item '{}'", field_name, item.name)
+                    }))
+                    .unwrap()
+                );
+                return ExitCode::FAILURE;
+            }
+
+            let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
+            let ok = clip_mgr.copy(&text_to_copy, is_sensitive, timeout_val);
+            if ok {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "name": item.name,
+                        "copied": field_name,
+                        "timeout": if is_sensitive { timeout_val } else { 0 }
+                    }))
+                    .unwrap()
+                );
+                ExitCode::SUCCESS
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": "Failed to copy content to clipboard"
+                    }))
+                    .unwrap()
+                );
+                ExitCode::FAILURE
             }
         }
 
-        Commands::Totp { action } => match action {
-            TotpAction::Generate {
-                positional_secret,
-                secret,
-            } => {
-                let secret_val = secret
-                    .or(positional_secret)
-                    .unwrap_or_else(read_secret_stdin);
-                match generate_totp(&secret_val, None, 6, 30) {
-                    Some(res) => {
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
-                        ExitCode::SUCCESS
-                    }
-                    None => {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(
-                                &serde_json::json!({ "error": "Invalid TOTP secret" })
-                            )
-                            .unwrap()
-                        );
-                        ExitCode::FAILURE
+        Commands::Totp {
+            query,
+            secret,
+            copy,
+        } => {
+            let clip_mgr = ClipboardManager::default();
+
+            let (totp_res, item_info) = if let Some(sec) = secret {
+                (generate_totp(&sec, None, 6, 30), None)
+            } else if let Some(q) = query {
+                let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
+                if is_uri {
+                    (generate_totp(&q, None, 6, 30), None)
+                } else {
+                    omawarden::daemon::ensure_daemon_running();
+                    let st = send_daemon_request(&json!({ "action": "status" }));
+                    let is_unlocked = st
+                        .as_ref()
+                        .and_then(|v| v.get("is_unlocked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+                    let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                        let daemon_res = send_daemon_request(&json!({
+                            "action": "get_item",
+                            "query": q
+                        }));
+                        daemon_res
+                            .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                            .and_then(|res| {
+                                res.get("item")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            })
+                    } else {
+                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                            Ok(user_key) => {
+                                let storage = vault_mgr.storage_mgr.load();
+                                let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                                    &storage.ciphers,
+                                    &storage.folders,
+                                    &storage.organizations,
+                                    &user_key,
+                                    storage.enc_private_key.as_deref(),
+                                );
+                                let lower = q.to_lowercase();
+                                items.into_iter().find(|i| {
+                                    i.id == q
+                                        || i.name.eq_ignore_ascii_case(&q)
+                                        || i.name.to_lowercase().contains(&lower)
+                                })
+                            }
+                            Err(_) => None,
+                        }
+                    };
+
+                    if let Some(it) = item {
+                        let seed = it
+                            .login
+                            .as_ref()
+                            .and_then(|l| l.get("totp"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        (generate_totp(seed, None, 6, 30), Some((it.id, it.name)))
+                    } else {
+                        (generate_totp(&q, None, 6, 30), None)
                     }
                 }
+            } else {
+                let stdin_val = read_secret_stdin();
+                if stdin_val.is_empty() {
+                    (None, None)
+                } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
+                    if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
+                        (generate_totp(sec, None, 6, 30), None)
+                    } else if let Some(q) = val
+                        .get("query")
+                        .or_else(|| val.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let daemon_res = send_daemon_request(&json!({
+                            "action": "totp",
+                            "query": q
+                        }));
+                        if let Some(res) = daemon_res {
+                            if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                let code = res
+                                    .get("code")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let period =
+                                    res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let name =
+                                    res.get("name").and_then(|v| v.as_str()).map(String::from);
+                                let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
+                                (
+                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                    if let (Some(id), Some(name)) = (id, name) {
+                                        Some((id, name))
+                                    } else {
+                                        None
+                                    },
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (generate_totp(&stdin_val, None, 6, 30), None)
+                    }
+                } else {
+                    (generate_totp(&stdin_val, None, 6, 30), None)
+                }
+            };
+
+            match totp_res {
+                Some(res) => {
+                    if copy {
+                        let ok = clip_mgr.copy(&res.code, true, 30);
+                        let mut resp = json!({
+                            "ok": ok,
+                            "code": res.code,
+                            "ttl": res.ttl,
+                            "period": res.period,
+                            "copied": true
+                        });
+                        if let Some((id, name)) = item_info {
+                            resp["id"] = json!(id);
+                            resp["name"] = json!(name);
+                        }
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        if ok {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
+                    } else {
+                        let mut resp = json!({
+                            "ok": true,
+                            "code": res.code,
+                            "ttl": res.ttl,
+                            "period": res.period
+                        });
+                        if let Some((id, name)) = item_info {
+                            resp["id"] = json!(id);
+                            resp["name"] = json!(name);
+                        }
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        ExitCode::SUCCESS
+                    }
+                }
+                None => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": "Failed to generate TOTP: item not found or secret is invalid"
+                        }))
+                        .unwrap()
+                    );
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
 
         Commands::Attachment { action } => match action {
             AttachmentAction::Download {
@@ -668,6 +1113,11 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+            AttachmentAction::Clean { item_id } => {
+                omawarden::attachment::clear_preview_attachments(item_id.as_deref());
+                println!("{}", serde_json::json!({ "ok": true, "status": "cleaned" }));
+                ExitCode::SUCCESS
+            }
         },
 
         Commands::SshKey { action } => {
@@ -685,7 +1135,11 @@ fn main() -> ExitCode {
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                    .unwrap()
+                            );
                             return ExitCode::FAILURE;
                         }
                     };
@@ -717,13 +1171,27 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": e
+                                            }))
+                                            .unwrap()
+                                        );
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -783,7 +1251,14 @@ fn main() -> ExitCode {
                         match std::fs::read_to_string(p) {
                             Ok(c) => c,
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e.to_string()
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -794,7 +1269,11 @@ fn main() -> ExitCode {
                     let mut keypair = match parse_private_key(&raw_priv) {
                         Ok(k) => k,
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                    .unwrap()
+                            );
                             return ExitCode::FAILURE;
                         }
                     };
@@ -835,13 +1314,27 @@ fn main() -> ExitCode {
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
-                                        println!("{}", json!({ "ok": false, "error": e }));
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": e
+                                            }))
+                                            .unwrap()
+                                        );
                                         return ExitCode::FAILURE;
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -907,7 +1400,14 @@ fn main() -> ExitCode {
                                 })
                             }
                             Err(e) => {
-                                println!("{}", json!({ "ok": false, "error": e }));
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": e
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -918,7 +1418,11 @@ fn main() -> ExitCode {
                         None => {
                             println!(
                                 "{}",
-                                json!({ "ok": false, "error": format!("SSH key item '{}' not found in vault", query) })
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": format!("SSH key item '{}' not found in vault", query)
+                                }))
+                                .unwrap()
                             );
                             return ExitCode::FAILURE;
                         }
@@ -929,7 +1433,11 @@ fn main() -> ExitCode {
                         None => {
                             println!(
                                 "{}",
-                                json!({ "ok": false, "error": "Item has no SSH key metadata" })
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Item has no SSH key metadata"
+                                }))
+                                .unwrap()
                             );
                             return ExitCode::FAILURE;
                         }
@@ -985,7 +1493,14 @@ fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
-                            println!("{}", json!({ "ok": false, "error": e.to_string() }));
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": e.to_string()
+                                }))
+                                .unwrap()
+                            );
                             ExitCode::FAILURE
                         }
                     }

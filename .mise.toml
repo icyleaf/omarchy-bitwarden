@@ -33,3 +33,88 @@ depends = ["build-release", "dev-update-omarchy-plugin"]
 depends_post = ["dev-restart-omarchy"]
 run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f bin/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
 
+[tasks.version]
+description = "Show the latest version of the project"
+run = """
+printf "Latest omawarden tag: "
+git tag --sort=-creatordate | grep omawarden | head -n 1
+
+printf "Latest omarchy plugin tag: "
+git tag --sort=-creatordate | grep omarchy-bitwarden | head -n 1
+"""
+
+[tasks.unreleased-changelog]
+description = "Show the unreleased changelog"
+run = """
+export RUST_LOG=off
+echo '## Unreleased omawarden changelog:'
+git cliff --tag-pattern "^omawarden-v?[0-9].*" --include-path "omawarden/**" --unreleased
+
+echo '## Unreleased omarchy plugin changelog:'
+git cliff --tag-pattern "^omarchy-bitwarden-v?[0-9].*" --exclude-path "omawarden/**" --unreleased
+"""
+
+[tasks.bump]
+description = "Bump component versions and create a bump commit"
+usage = '''
+arg "<target>" help="Target component (cli, plugin, all)" {
+  choices "cli" "plugin" "all"
+}
+arg "<version>" help="Version for target or cli_version when all"
+arg "[plugin_version]" help="Plugin version when using all"
+'''
+run = '''
+TARGET="${usage_target}"
+V1="${usage_version}"
+V2="${usage_plugin_version:-}"
+
+BUMP_CLI=false
+BUMP_PLUGIN=false
+CLI_VER=""
+PLUGIN_VER=""
+
+case "$TARGET" in
+  cli)
+    BUMP_CLI=true
+    CLI_VER="$V1"
+    ;;
+  plugin)
+    BUMP_PLUGIN=true
+    PLUGIN_VER="$V1"
+    ;;
+  all)
+    if [ -z "$V2" ]; then
+      echo "Error: Both cli and plugin versions required for 'all'. Example: mise run bump all 0.5.2 0.7.2"
+      exit 1
+    fi
+    BUMP_CLI=true
+    CLI_VER="$V1"
+    BUMP_PLUGIN=true
+    PLUGIN_VER="$V2"
+    ;;
+esac
+
+COMMIT_MSG="bump:"
+
+if [ "$BUMP_CLI" = true ]; then
+  echo "Bumping omawarden to $CLI_VER..."
+  sed -i -E "s/^version = .*/version = \"$CLI_VER\"/" omawarden/Cargo.toml
+  (cd omawarden && cargo check --quiet)
+  git add omawarden/Cargo.toml omawarden/Cargo.lock
+  COMMIT_MSG="$COMMIT_MSG omawarden $CLI_VER"
+fi
+
+if [ "$BUMP_PLUGIN" = true ]; then
+  echo "Bumping omarchy-bitwarden plugin to $PLUGIN_VER..."
+  sed -i -E "s/\"version\": .*/\"version\": \"$PLUGIN_VER\",/" manifest.json
+  git add manifest.json
+  if [ "$BUMP_CLI" = true ]; then
+    COMMIT_MSG="$COMMIT_MSG, omarchy-bitwarden $PLUGIN_VER"
+  else
+    COMMIT_MSG="$COMMIT_MSG omarchy-bitwarden $PLUGIN_VER"
+  fi
+fi
+
+git commit -m "$COMMIT_MSG"
+echo "Successfully created commit: $COMMIT_MSG"
+'''

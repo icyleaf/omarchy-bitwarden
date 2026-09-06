@@ -15,7 +15,7 @@ To achieve sub-millisecond query responses (<1ms), deterministic memory zeroizat
    - Embed compile-time Git Commit SHA (`GIT_HASH`) and Build Date (`BUILD_DATE`) into the binary.
 
 2. **Dual-Mode Execution Architecture & Seamless Daemon Auto-Upgrade**:
-   - **CLI Mode**: Standalone subcommands for `config`, `health`, `auth`, `hook`, `vault`, `clipboard`, `totp`, `attachment`.
+   - **CLI Mode**: Standalone subcommands for `config`, `health`, `auth`, `hook`, `vault`, `copy`, `totp`, `attachment`, `ssh-key`.
    - **Resident Daemon Mode**: Stateful background daemon listening on `/run/user/<UID>/omawarden.sock` with `0600` permissions. Holds decrypted vault items in RAM while unlocked, enabling instantaneous sub-millisecond fuzzy search.
    - **Version Handshake & Auto-Upgrade**: The CLI queries the daemon version on every command; if the daemon's commit SHA does not match the active binary, the CLI gracefully requests the outdated daemon to exit via `{"action": "stop"}` and spawns the new version automatically.
 

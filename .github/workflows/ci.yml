@@ -4,11 +4,23 @@ on:
   push:
     branches:
       - main
+      - develop
       - feat/*
       - fix/*
+      - sec/*
+      - chore/*
+      - ci/*
+      - refactor/*
+    paths:
+      - "omawarden/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches:
       - main
+      - develop
+    paths:
+      - "omawarden/**"
+      - ".github/workflows/ci.yml"
 
 jobs:
   test:

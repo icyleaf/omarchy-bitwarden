@@ -38,7 +38,7 @@
 
 ### Vault Item Domain & Type Isolation
 - **Vault Item**: A single entity stored in the vault, categorized by type with strict type-specific JSON serialization (omitting empty structures for unrelated types):
-  - **Login**: Website/app credentials (Username, Password, URIs, live TOTP countdown, Custom Fields).
+  - **Login**: Website/app credentials (Username, Password, URIs, live TOTP countdown, Custom Fields, Password History with `Ctrl+H` modal).
   - **Card**: Payment card details (Brand, Cardholder, Number with reveal toggle, Expiration, CVV/Security Code).
   - **Identity**: Personal identification records (Title, Full Name, Username, Email, Phone, Company, Address, SSN, Passport, License).
   - **Secure Note**: Encrypted text notes or documentation with dedicated category classification.
@@ -49,8 +49,8 @@
 ### Interaction & UI Paradigms
 - **Overlay Window**: Main search launcher modal summoned by global shortcut (`Super+/` or user-defined).
 - **Category Tabs**: Filter bar allowing quick switching across item kinds (All, Login, Card, Identity, Note, SSH).
-- **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, and attachments.
-- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy Username `Ctrl+U`, Copy TOTP `Ctrl+T`, Open Website `Ctrl+O`, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
+- **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, attachments, and password history entry.
+- **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy TOTP `Ctrl+↵`, Copy Username `Ctrl+U`, Toggle Field Visibility `Ctrl+T`, View Password History `Ctrl+H`, Open Website `Ctrl+O`, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
 - **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, `max_output_mb`, and `log_level`, with real-time CLI readiness indicators and an embedded Logs Viewer.
 - **Observability & Diagnostics**: Dual-channel structured logging across `omawarden` (`stderr`) and Quickshell (`console.error`), featuring module prefixes (`[omawarden:cli]`, `[omarchy:ui]`), configurable log levels (`error` by default), zero-knowledge credential and custom server URL redaction, and one-click "Copy Diagnostics" for privacy-safe GitHub issue reporting (see `docs/adr/0004-structured-logging-and-diagnostics.md`).
 

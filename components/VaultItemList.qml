@@ -19,15 +19,29 @@ Item {
 
   onSelectedIndexChanged: {
     if (selectedIndex >= 0 && items && selectedIndex < items.length) {
-      if (listView.currentIndex !== selectedIndex) {
-        listView.currentIndex = selectedIndex
-      }
       listView.positionViewAtIndex(selectedIndex, ListView.Contain)
     }
   }
 
+  onItemsChanged: {
+    if (selectedIndex >= 0 && items && selectedIndex < items.length) {
+      listView.positionViewAtIndex(selectedIndex, ListView.Contain)
+    }
+  }
+
+  function isAppScheme(uri) {
+    if (!uri) return false
+    var str = String(uri).trim()
+    var match = str.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/i)
+    if (match) {
+      var scheme = match[1].toLowerCase()
+      return scheme !== "http" && scheme !== "https"
+    }
+    return false
+  }
+
   function getHostname(uri) {
-    if (!uri) return ""
+    if (!uri || isAppScheme(uri)) return ""
     var str = String(uri).trim()
     var match = str.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?#]+)/i)
     return match ? match[1] : ""
@@ -40,6 +54,7 @@ Item {
     for (var i = 0; i < item.login.uris.length; i++) {
       var u = item.login.uris[i]
       var uriStr = (typeof u === "string") ? u : (u && u.uri ? u.uri : "")
+      if (!uriStr || isAppScheme(uriStr)) continue
       var domain = getHostname(uriStr)
       if (domain && domain.indexOf(".") !== -1) {
         return "https://icons.bitwarden.net/" + domain + "/icon.png"
@@ -125,14 +140,10 @@ Item {
       }
     }
 
-    onCurrentIndexChanged: {
-      if (currentIndex !== itemListRoot.selectedIndex) {
-        itemListRoot.itemSelected(currentIndex)
-      }
-    }
-
     delegate: Rectangle {
       id: itemDelegate
+      required property int index
+      required property var modelData
       property bool isSelected: index === itemListRoot.selectedIndex
       width: listView.width
       height: 48
@@ -273,11 +284,9 @@ Item {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: {
-          itemListRoot.selectedIndex = index
           itemListRoot.itemSelected(index)
         }
         onDoubleClicked: {
-          itemListRoot.selectedIndex = index
           itemListRoot.itemTriggered(index)
         }
       }

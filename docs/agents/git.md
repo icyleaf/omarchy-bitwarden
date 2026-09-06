@@ -1,13 +1,15 @@
 # Git & Pull Request Workflow
 
-All implementation and bugfix tasks must follow a strict branch-and-PR workflow so that GitHub Release notes and changelogs are populated automatically from merged Pull Requests.
+All implementation and bugfix tasks must follow a strict branch-and-PR workflow so that GitHub Release notes and changelogs are populated automatically by `git-cliff` from commit history and merged Pull Requests.
 
 ## Rules
 
-1. **Never commit directly to `main`**:
-   - Always branch off `main` before starting any implementation, bugfix, or chore:
+1. **Branch Strategy (`main` vs `develop`)**:
+   - `main`: **Production / Stable Release Branch** and the default GitHub branch. End-users install plugins and download releases from `main`. Direct commits are strictly forbidden. Only Release PRs (from `develop`) or emergency hotfixes merge into `main`.
+   - `develop`: **Active Integration Branch**. All feature branches, bugfixes, refactors, and chores must branch off `develop` and target `develop` for PRs.
+   - Always branch off `develop` before starting any work:
      ```bash
-     git checkout main && git pull
+     git checkout develop && git pull
      git checkout -b <type>/<short-description-or-issue>
      ```
    - Standard branch naming conventions:
@@ -24,27 +26,62 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      ```
 
 3. **Commit with Conventional Commits**:
-   - Format: `<type>(<scope>): <summary>`
+   - Format: `<type>(<scope>): <summary>` or `<type>(<scope>)!: <summary>` for breaking changes.
+   - **Allowed Types & Release Notes Category Mapping**:
+     - `feat`: Features
+     - `fix`: Bug Fixes
+     - `perf`: Features
+     - `refactor`: Features
+     - `style`: Styling
+     - `docs`: Documentation
+     - `chore(deps)`: Dependencies
+     - `chore` / `ci`: Miscellaneous Tasks
+     - `sec` / `fix(security)` / `feat(security)`: Security
+     - `test`: Skipped (internal only)
+   - **Scopes**: Always specify a concise scope when applicable (e.g., `ui`, `qml`, `daemon`, `clipboard`, `vault`, `crypto`, `auth`, `attachment`, `logging`, `cli`, `install`).
+   - **Breaking Changes**:
+     - Mark breaking changes with a `!` before the colon (e.g., `feat(daemon)!: switch to binary protocol`).
+     - Alternatively, include `BREAKING CHANGE:` in the commit message footer explaining the migration requirements.
+     - Breaking changes are automatically rendered with `[BREAKING]` in release notes.
 
 4. **Create Pull Request via `gh` CLI**:
    - Push branch to remote:
      ```bash
      git push -u origin HEAD
      ```
-   - Create PR linking the issue:
+   - Create PR targeting `develop` (linking the issue if applicable):
      ```bash
-     gh pr create --title "<type>(<scope>): <summary>" --body "Closes #<issue_number>
+     gh pr create --base develop --title "<type>(<scope>): <summary>" --body "Closes #<issue_number>
 
      ## Summary of Changes
      - ..."
      ```
 
 5. **Merge PR & Clean Up**:
-   - Merge the pull request (squash or merge):
+   - Merge the pull request into `develop` (squash or rebase):
      ```bash
      gh pr merge --squash --delete-branch
      ```
-   - Sync local `main`:
+   - Sync local `develop`:
      ```bash
-     git checkout main && git pull
+     git checkout develop && git pull
      ```
+
+6. **Release Lifecycle (Promoting `develop` to `main`)**:
+   - Releases are automated via GitHub Actions when a version bump commit is merged from `develop` into `main`.
+   - To prepare a release on `develop`:
+     ```bash
+     # Single component bump:
+     mise run bump cli <version>        # e.g., 0.5.2
+     mise run bump plugin <version>     # e.g., 0.7.2
+
+     # Both components:
+     mise run bump all <cli_version> <plugin_version>  # e.g., 0.5.2 0.7.2
+
+     git push origin develop
+     ```
+   - Pushing a `bump:` commit to `develop` automatically triggers the **Auto Release PR** workflow (`.github/workflows/auto-release-pr.yml`), which opens or updates a Release PR from `develop` to `main` with changelog previews.
+   - Review and merge the Release PR on GitHub using **Merge commit** (to preserve Git history between `develop` and `main`).
+   - Upon merging to `main`, the **Auto Tag on Release** workflow (`.github/workflows/auto-tag.yml`) automatically detects version changes, tags the release (`omawarden-<version>` and/or `omarchy-bitwarden-<version>`), and dispatches the build and package workflows (`release-omawarden.yml` / `release-plugin.yml`).
+
+
