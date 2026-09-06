@@ -134,4 +134,5 @@ jobs:
             artifacts/*.sha256
           draft: false
           prerelease: false
+          make_latest: true
 

@@ -66,3 +66,4 @@ jobs:
             dist/*.sha256
           draft: false
           prerelease: false
+          make_latest: false
