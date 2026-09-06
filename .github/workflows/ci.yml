@@ -7,6 +7,10 @@ on:
       - develop
       - feat/*
       - fix/*
+      - sec/*
+      - chore/*
+      - ci/*
+      - refactor/*
   pull_request:
     branches:
       - main
