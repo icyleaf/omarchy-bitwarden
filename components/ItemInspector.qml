@@ -242,7 +242,7 @@ ScrollView {
   }
 
   ColumnLayout {
-    width: inspectorRoot.width - 16
+    width: Math.max(0, inspectorRoot.availableWidth - 12)
     spacing: 12
 
     // ----------------------------------------------------
@@ -301,6 +301,7 @@ ScrollView {
           font.weight: Font.Medium
           elide: Text.ElideRight
           Layout.fillWidth: true
+          Layout.preferredWidth: 0
         }
 
         // Open Externally
@@ -493,10 +494,12 @@ ScrollView {
 
         ColumnLayout {
           Layout.fillWidth: true
+          Layout.preferredWidth: 0
           spacing: 3
 
           RowLayout {
             Layout.fillWidth: true
+            Layout.preferredWidth: 0
             spacing: 6
 
             Text {
@@ -506,6 +509,7 @@ ScrollView {
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
             }
 
             // Monochrome Favorite Badge
@@ -584,6 +588,9 @@ ScrollView {
             text: inspectorRoot.item ? (inspectorRoot.item.sub_title || inspectorRoot.item.type_name || "Item") : ""
             color: Qt.darker(inspectorRoot.foreground, 1.6)
             font.pixelSize: 11
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+            Layout.preferredWidth: 0
           }
         }
       }
@@ -614,6 +621,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Username"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -623,6 +631,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -649,6 +658,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Password"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -659,6 +669,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -711,6 +722,7 @@ ScrollView {
 
                 ColumnLayout {
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                   spacing: 2
                   Text { text: uriWrapper.labelText; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
                   Text {
@@ -720,6 +732,7 @@ ScrollView {
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
                   }
                 }
 
@@ -762,6 +775,7 @@ ScrollView {
 
               ColumnLayout {
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 spacing: 2
 
                 RowLayout {
@@ -780,7 +794,9 @@ ScrollView {
                   font.pixelSize: 14
                   font.family: "monospace"
                   font.weight: Font.Bold
+                  elide: Text.ElideRight
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                 }
               }
 
@@ -823,6 +839,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
 
               Text { text: "Passkey"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
@@ -832,6 +849,7 @@ ScrollView {
                 font.pixelSize: inspectorRoot.valuePixelSize
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
           }
@@ -864,6 +882,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Cardholder"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -873,6 +892,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -899,6 +919,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Brand"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -908,6 +929,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
           }
@@ -928,6 +950,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Card Number"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -938,6 +961,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -969,6 +993,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Expires"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -979,6 +1004,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1005,6 +1031,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Security Code"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1015,6 +1042,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1057,6 +1085,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Full Name"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1066,6 +1095,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1093,6 +1123,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Email"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1102,6 +1133,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1126,6 +1158,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Phone"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1135,6 +1168,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1159,6 +1193,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Address"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1168,6 +1203,7 @@ ScrollView {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1208,6 +1244,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Private Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1218,6 +1255,7 @@ ScrollView {
                 font.weight: Font.Medium
                 wrapMode: Text.WrapAnywhere
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1252,6 +1290,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Public Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1262,6 +1301,7 @@ ScrollView {
                 font.weight: Font.Medium
                 wrapMode: Text.WrapAnywhere
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1286,6 +1326,7 @@ ScrollView {
 
             ColumnLayout {
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
               spacing: 2
               Text { text: "Fingerprint"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
@@ -1296,6 +1337,7 @@ ScrollView {
                 font.weight: Font.Medium
                 wrapMode: Text.WrapAnywhere
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
               }
             }
 
@@ -1341,11 +1383,12 @@ ScrollView {
 
           Text {
             Layout.fillWidth: true
+            Layout.preferredWidth: 0
             text: inspectorRoot.item ? (inspectorRoot.item.notes || "") : ""
             color: inspectorRoot.foreground
             font.pixelSize: inspectorRoot.valuePixelSize
             lineHeight: 1.35
-            wrapMode: Text.Wrap
+            wrapMode: Text.WrapAnywhere
             textFormat: Text.PlainText
           }
         }
@@ -1426,6 +1469,7 @@ ScrollView {
 
                 ColumnLayout {
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                   spacing: 2
 
                   Text {
@@ -1434,6 +1478,7 @@ ScrollView {
                     font.pixelSize: inspectorRoot.keyPixelSize
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
                   }
 
                   Text {
@@ -1444,6 +1489,7 @@ ScrollView {
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
                   }
                 }
 
@@ -1523,6 +1569,7 @@ ScrollView {
 
                 ColumnLayout {
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                   spacing: 1
 
                   Text {
@@ -1532,6 +1579,7 @@ ScrollView {
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
                   }
                   Text {
                     text: modelData.sizeName || inspectorRoot.formatFileSize(modelData.size)
@@ -1602,6 +1650,7 @@ ScrollView {
 
               ColumnLayout {
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 spacing: 2
                 Text { text: "Created"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
@@ -1611,6 +1660,7 @@ ScrollView {
                   font.weight: Font.Medium
                   elide: Text.ElideRight
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                 }
               }
             }
@@ -1635,6 +1685,7 @@ ScrollView {
 
               ColumnLayout {
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 spacing: 2
                 Text { text: "Updated"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
@@ -1644,6 +1695,7 @@ ScrollView {
                   font.weight: Font.Medium
                   elide: Text.ElideRight
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                 }
               }
             }
@@ -1667,6 +1719,7 @@ ScrollView {
 
               ColumnLayout {
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 spacing: 2
                 Text { text: "Password History"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
@@ -1676,6 +1729,7 @@ ScrollView {
                   font.weight: Font.Medium
                   elide: Text.ElideRight
                   Layout.fillWidth: true
+                  Layout.preferredWidth: 0
                 }
               }
 

@@ -142,6 +142,7 @@ Rectangle {
           font.weight: Font.DemiBold
           elide: Text.ElideRight
           Layout.fillWidth: true
+          Layout.preferredWidth: 0
         }
       }
 
@@ -215,6 +216,7 @@ Rectangle {
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
                   }
 
                   // Toggle Mask Ghost Button
