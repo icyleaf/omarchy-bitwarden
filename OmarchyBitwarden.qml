@@ -2406,20 +2406,27 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
-            root.statusMessage = "Logged in successfully."
+            var statusVal = data.status || "unlocked"
+            if (statusVal === "locked") {
+              root.statusMessage = "API Key authenticated. Please enter Master Password to unlock."
+            } else {
+              root.statusMessage = "Logged in successfully."
+            }
             root.searchQuery = ""
             if (authViewComponent) authViewComponent.clearInputs()
 
             root.show2FAField = false
             root.authState = ({
-              status: "unlocked",
+              status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
               user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
               has_session: true
             })
             root.refreshAuthStatus()
-            root.loadVaultItems()
-            root.syncVault(true, true)
+            if (statusVal === "unlocked") {
+              root.loadVaultItems()
+              root.syncVault(true, true)
+            }
           } else {
             root.errorMessage = data.error || "Login failed."
             root.logWarn("omarchy:auth", root.errorMessage)

@@ -88,7 +88,9 @@ impl AuthManager {
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
         let storage = self.storage_mgr.load();
 
-        if storage.enc_user_key.is_none() || storage.user_email.is_empty() {
+        if (storage.enc_user_key.is_none() && storage.access_token.is_none())
+            || storage.user_email.is_empty()
+        {
             return AuthStatus {
                 status: "unauthenticated".to_string(),
                 server_url: if storage.server_url.is_empty() {
@@ -132,7 +134,7 @@ impl AuthManager {
                 last_sync: storage.last_sync,
                 user_email: Some(storage.user_email),
                 user_id: storage.user_id,
-                has_session: is_unlocked_same_user,
+                has_session: is_unlocked_same_user || storage.access_token.is_some(),
             };
         }
 
@@ -146,7 +148,7 @@ impl AuthManager {
             last_sync: storage.last_sync,
             user_email: Some(storage.user_email),
             user_id: storage.user_id,
-            has_session: false,
+            has_session: storage.access_token.is_some(),
         }
     }
 
@@ -192,6 +194,19 @@ impl AuthManager {
             storage.folders = sync_data.folders;
             storage.collections = sync_data.collections;
             if let Some(ref prof) = sync_data.profile {
+                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                    storage.user_id = Some(id.to_string());
+                }
+                if storage.enc_user_key.is_none() {
+                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                        storage.enc_user_key = Some(key.to_string());
+                    }
+                }
+                if storage.enc_private_key.is_none() {
+                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                        storage.enc_private_key = Some(pk.to_string());
+                    }
+                }
                 if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
                     storage.organizations = orgs.clone();
                 }
@@ -262,11 +277,51 @@ impl AuthManager {
             storage.folders = sync_data.folders;
             storage.collections = sync_data.collections;
             if let Some(ref prof) = sync_data.profile {
+                if let Some(email) = prof.get("email").and_then(|v| v.as_str()) {
+                    storage.user_email = email.trim().to_lowercase();
+                }
+                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                    storage.user_id = Some(id.to_string());
+                }
+                if storage.enc_user_key.is_none() {
+                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                        storage.enc_user_key = Some(key.to_string());
+                    }
+                }
+                if storage.enc_private_key.is_none() {
+                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                        storage.enc_private_key = Some(pk.to_string());
+                    }
+                }
+                if storage.kdf.is_none() {
+                    if let Some(kdf) = prof.get("kdf").and_then(|v| v.as_u64()) {
+                        storage.kdf = Some(kdf as u32);
+                    }
+                }
+                if storage.kdf_iterations.is_none() {
+                    if let Some(iter) = prof.get("kdfIterations").and_then(|v| v.as_u64()) {
+                        storage.kdf_iterations = Some(iter as u32);
+                    }
+                }
+                if storage.kdf_memory.is_none() {
+                    if let Some(mem) = prof.get("kdfMemory").and_then(|v| v.as_u64()) {
+                        storage.kdf_memory = Some(mem as u32);
+                    }
+                }
+                if storage.kdf_parallelism.is_none() {
+                    if let Some(par) = prof.get("kdfParallelism").and_then(|v| v.as_u64()) {
+                        storage.kdf_parallelism = Some(par as u32);
+                    }
+                }
                 if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
                     storage.organizations = orgs.clone();
                 }
             }
             storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+        }
+
+        if storage.user_email.is_empty() {
+            storage.user_email = client_id.trim().to_string();
         }
 
         let _ = self.storage_mgr.save(&storage);
@@ -464,5 +519,35 @@ mod tests {
         assert!(!res.ok);
         assert_eq!(res.status.as_deref(), Some("unauthenticated"));
         assert!(res.error.is_some());
+    }
+
+    #[test]
+    fn test_auth_status_with_apikey_session() {
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_apikey_status.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let auth_mgr = AuthManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr.clone()),
+            Some(mock_keyring),
+        );
+
+        // Simulate storage after API key authentication
+        let storage = VaultStorage {
+            user_email: "apikey-user@example.com".to_string(),
+            user_id: Some("user-uuid-123".to_string()),
+            access_token: Some("fake_access_token_abc".to_string()),
+            enc_user_key: Some("2.dummy_iv|dummy_ct|dummy_mac".to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let st = auth_mgr.get_status(false);
+        assert_eq!(st.status, "locked");
+        assert_eq!(st.user_email.as_deref(), Some("apikey-user@example.com"));
+        assert_eq!(st.user_id.as_deref(), Some("user-uuid-123"));
+        assert!(st.has_session);
     }
 }
