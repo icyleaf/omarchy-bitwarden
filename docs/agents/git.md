@@ -68,15 +68,20 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      ```
 
 6. **Release Lifecycle (Promoting `develop` to `main`)**:
-   - When preparing a new release, open a Release PR from `develop` into `main`:
+   - Releases are automated via GitHub Actions when a version bump commit is merged from `develop` into `main`.
+   - To prepare a release on `develop`:
      ```bash
-     gh pr create --base main --head develop --title "chore(release): release <version>" --body "Promote develop to main for release."
+     # Single component bump:
+     mise run bump cli <version>        # e.g., 0.5.2
+     mise run bump plugin <version>     # e.g., 0.7.2
+
+     # Both components:
+     mise run bump all <cli_version> <plugin_version>  # e.g., 0.5.2 0.7.2
+
+     git push origin develop
      ```
-   - After merging into `main`, tag the release on `main` to trigger automated GitHub Actions workflows:
-     ```bash
-     git checkout main && git pull
-     git tag -a omawarden-v<version> -m "Release omawarden v<version>"
-     git push origin omawarden-v<version>
-     ```
+   - Pushing a `bump:` commit to `develop` automatically triggers the **Auto Release PR** workflow (`.github/workflows/auto-release-pr.yml`), which opens or updates a Release PR from `develop` to `main` with changelog previews.
+   - Review and merge the Release PR on GitHub using **Merge commit** (to preserve Git history between `develop` and `main`).
+   - Upon merging to `main`, the **Auto Tag on Release** workflow (`.github/workflows/auto-tag.yml`) automatically detects version changes, tags the release (`omawarden-<version>` and/or `omarchy-bitwarden-<version>`), and dispatches the build and package workflows (`release-omawarden.yml` / `release-plugin.yml`).
 
 

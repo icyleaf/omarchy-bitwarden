@@ -1,0 +1,80 @@
+name: Auto Tag on Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  auto-tag:
+    name: Check & Tag Releases
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check omawarden version and tag
+        id: omawarden
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CLI_VER=$(grep '^version = ' omawarden/Cargo.toml | head -n 1 | cut -d'"' -f2)
+          TAG_NAME="omawarden-${CLI_VER}"
+          echo "Current omawarden version: ${CLI_VER} (Tag: ${TAG_NAME})"
+          
+          if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Tag ${TAG_NAME} already exists. Skipping."
+            echo "tagged=false" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${TAG_NAME} does not exist. Creating tag..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+            git push origin "${TAG_NAME}"
+            echo "tagged=true" >> $GITHUB_OUTPUT
+            echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Omawarden Release Workflow
+        if: steps.omawarden.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Dispatching release-omawarden.yml for ${{ steps.omawarden.outputs.tag_name }}..."
+          gh workflow run release-omawarden.yml -f tag="${{ steps.omawarden.outputs.tag_name }}"
+
+      - name: Check omarchy-bitwarden plugin version and tag
+        id: plugin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PLUGIN_VER=$(grep '"version"' manifest.json | head -n 1 | cut -d'"' -f4)
+          TAG_NAME="omarchy-bitwarden-${PLUGIN_VER}"
+          echo "Current plugin version: ${PLUGIN_VER} (Tag: ${TAG_NAME})"
+
+          if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Tag ${TAG_NAME} already exists. Skipping."
+            echo "tagged=false" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${TAG_NAME} does not exist. Creating tag..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+            git push origin "${TAG_NAME}"
+            echo "tagged=true" >> $GITHUB_OUTPUT
+            echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Plugin Release Workflow
+        if: steps.plugin.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Dispatching release-plugin.yml for ${{ steps.plugin.outputs.tag_name }}..."
+          gh workflow run release-plugin.yml -f tag="${{ steps.plugin.outputs.tag_name }}"

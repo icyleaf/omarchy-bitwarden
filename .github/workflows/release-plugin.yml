@@ -5,6 +5,12 @@ on:
     tags:
       - 'omarchy-bitwarden-*'
       - 'omarchy-bitwarden-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,11 +23,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Package Plugin Archive
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_NAME="${{ inputs.tag || github.ref_name }}"
           ARCHIVE_NAME="omarchy-bitwarden-${TAG_NAME}"
           mkdir -p dist
 
@@ -43,7 +50,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --tag ${{ github.ref_name }} --exclude-path "omawarden/**" --strip header --latest
+          args: --tag ${{ inputs.tag || github.ref_name }} --exclude-path "omawarden/**" --strip header --latest
         env:
           OUTPUT: CHANGELOG.md
           GITHUB_REPO: ${{ github.repository }}
@@ -52,7 +59,8 @@ jobs:
       - name: Create Plugin Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Omarchy Bitwarden Plugin ${{ github.ref_name }}"
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: "Omarchy Bitwarden Plugin ${{ inputs.tag || github.ref_name }}"
           body_path: CHANGELOG.md
           files: |
             dist/*.tar.gz

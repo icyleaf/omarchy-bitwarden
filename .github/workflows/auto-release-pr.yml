@@ -1,0 +1,76 @@
+name: Auto Release PR
+
+on:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    name: Prepare Release PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if commit is a version bump
+        id: check
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          echo "Commit message: $COMMIT_MSG"
+          if echo "$COMMIT_MSG" | grep -Eq '^bump:'; then
+            echo "is_bump=true" >> $GITHUB_OUTPUT
+            echo "bump_title=$COMMIT_MSG" >> $GITHUB_OUTPUT
+          else
+            echo "is_bump=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or update Release PR
+        if: steps.check.outputs.is_bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="chore(release): ${{ steps.check.outputs.bump_title }}"
+          
+          # Fetch main to compare diff
+          git fetch origin main:main || true
+
+          # Build PR body file safely
+          cat << 'BODY_EOF' > /tmp/pr_body.md
+          ## Release Summary
+
+          This PR was automatically created upon detecting a `bump:` commit on `develop`.
+
+          ### Proposed Changelog
+          BODY_EOF
+          # Remove leading spaces from heredoc template
+          sed -i 's/^          //' /tmp/pr_body.md
+
+          # Append changelog from git-cliff
+          git cliff --tag-pattern "^(omawarden|omarchy-bitwarden)-v?[0-9].*" main..develop 2>/dev/null >> /tmp/pr_body.md || true
+
+          cat << 'BODY_EOF' >> /tmp/pr_body.md
+
+          ---
+          > [!NOTE]
+          > Merging this PR into `main` will automatically trigger tags and release builds.
+          > Please merge using **Merge commit** to preserve Git history between `develop` and `main`.
+          BODY_EOF
+          sed -i 's/^          //' /tmp/pr_body.md
+
+          # Check if an open PR from develop to main already exists
+          EXISTING_PR=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number' || true)
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Updating existing PR #$EXISTING_PR"
+            gh pr edit "$EXISTING_PR" --title "$TITLE" --body-file /tmp/pr_body.md
+          else
+            echo "Creating new release PR"
+            gh pr create --base main --head develop --title "$TITLE" --body-file /tmp/pr_body.md
+          fi
