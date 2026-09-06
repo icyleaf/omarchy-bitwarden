@@ -173,7 +173,7 @@ Rectangle {
         spacing: 8
 
         Text {
-          text: modalRoot.mode === "create" ? "\uf067" : (modalRoot.mode === "import" ? "\uf093" : "\uf019")
+          text: modalRoot.mode === "create" ? "\uf067" : (modalRoot.mode === "import" ? "\uf019" : "\uf093")
           font.family: modalRoot.fontFamily
           font.pixelSize: 14
           color: modalRoot.accent

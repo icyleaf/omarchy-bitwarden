@@ -814,7 +814,7 @@ Item {
     var actions = []
     if (!item) {
       actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
-      actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
+      actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
       actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
       actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
       return actions
@@ -889,7 +889,7 @@ Item {
       if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "\uf023", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
       actions.push({
         label: "Export to ~/.ssh",
-        icon: "\uf019",
+        icon: "\uf093",
         shortcut: "Ctrl+E",
         action: function() {
           root.openSshKeyModal("export", item)
@@ -986,7 +986,7 @@ Item {
     actions.push({ label: "Toggle Field Visibility", icon: "\uf06e", shortcut: "Ctrl+T", action: function() { root.toggleItemRevealed() } })
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
-    actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
+    actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
     actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
     actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
 
