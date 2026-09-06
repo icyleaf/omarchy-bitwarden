@@ -189,10 +189,12 @@ Item {
         // Title and Subtitle Column
         ColumnLayout {
           Layout.fillWidth: true
+          Layout.preferredWidth: 0
           spacing: 2
 
           RowLayout {
             Layout.fillWidth: true
+            Layout.preferredWidth: 0
             spacing: 6
 
             Text {
@@ -202,6 +204,7 @@ Item {
               font.weight: Font.Medium
               elide: Text.ElideRight
               Layout.fillWidth: true
+              Layout.preferredWidth: 0
             }
 
             // Organization Badge
@@ -274,6 +277,7 @@ Item {
             font.pixelSize: 11
             elide: Text.ElideRight
             Layout.fillWidth: true
+            Layout.preferredWidth: 0
           }
         }
       }

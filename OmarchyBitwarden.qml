@@ -1550,6 +1550,7 @@ Item {
               Layout.fillHeight: true
               Layout.preferredWidth: 320
               Layout.minimumWidth: 260
+              Layout.maximumWidth: 320
               items: root.filteredItems
               selectedIndex: root.selectedIndex
               searchQuery: root.searchQuery
