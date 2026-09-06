@@ -31,6 +31,28 @@ jobs:
             echo "is_bump=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Generate CLI Changelog
+        if: steps.check.outputs.is_bump == 'true'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag-pattern "^omawarden-v?[0-9].*" --include-path "omawarden/**" --unreleased
+        env:
+          OUTPUT: /tmp/cli_changelog.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Plugin Changelog
+        if: steps.check.outputs.is_bump == 'true'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag-pattern "^omarchy-bitwarden-v?[0-9].*" --exclude-path "omawarden/**" --unreleased
+        env:
+          OUTPUT: /tmp/plugin_changelog.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create or update Release PR
         if: steps.check.outputs.is_bump == 'true'
         env:
@@ -38,22 +60,35 @@ jobs:
         run: |
           TITLE="chore(release): ${{ steps.check.outputs.bump_title }}"
           
-          # Fetch main to compare diff
-          git fetch origin main:main || true
-
           # Build PR body file safely
           cat << 'BODY_EOF' > /tmp/pr_body.md
-          ## Release Summary
+          # Release Summary
 
           This PR was automatically created upon detecting a `bump:` commit on `develop`.
 
-          ### Proposed Changelog
+          ## Omawarden CLI Changelog
           BODY_EOF
-          # Remove leading spaces from heredoc template
           sed -i 's/^          //' /tmp/pr_body.md
 
-          # Append changelog from git-cliff
-          git cliff --tag-pattern "^(omawarden|omarchy-bitwarden)-v?[0-9].*" main..develop 2>/dev/null >> /tmp/pr_body.md || true
+          if [ -s /tmp/cli_changelog.md ]; then
+            cat /tmp/cli_changelog.md >> /tmp/pr_body.md
+          else
+            echo "_No unreleased changes for Omawarden CLI._" >> /tmp/pr_body.md
+          fi
+
+          cat << 'BODY_EOF' >> /tmp/pr_body.md
+
+          ---
+
+          ## Omarchy Plugin Changelog
+          BODY_EOF
+          sed -i 's/^          //' /tmp/pr_body.md
+
+          if [ -s /tmp/plugin_changelog.md ]; then
+            cat /tmp/plugin_changelog.md >> /tmp/pr_body.md
+          else
+            echo "_No unreleased changes for Omarchy Plugin._" >> /tmp/pr_body.md
+          fi
 
           cat << 'BODY_EOF' >> /tmp/pr_body.md
 
