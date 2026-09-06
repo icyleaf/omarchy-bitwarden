@@ -998,6 +998,7 @@ Item {
     root.logInfo("omarchy:attachment", "Requesting preview for " + (att.fileName || "attachment"))
     root.loadingAttachmentId = (att.id || att.fileName || "loading")
     attachmentProc.activeAttachmentId = att.id || ""
+    attachmentProc.activeItemId = item.id || ""
     attachmentProc.command = [
       root.helperPath,
       "attachment",
@@ -1597,7 +1598,14 @@ Item {
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
                 onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
-                onClosePreviewRequested: { root.activeAttachmentPreview = null }
+                onClosePreviewRequested: {
+                  var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
+                  root.activeAttachmentPreview = null
+                  if (prevItem) {
+                    cleanAttachmentProc.command = [root.helperPath, "attachment", "clean", "--item-id", prevItem]
+                    cleanAttachmentProc.running = true
+                  }
+                }
                 onTogglePasswordRevealed: { root.showPasswordRevealed = !root.showPasswordRevealed }
                 onTogglePrivateKeyRevealed: { root.showPrivateKeyRevealed = !root.showPrivateKeyRevealed }
                 onToggleCardNumberRevealed: { root.showCardNumberRevealed = !root.showCardNumberRevealed }
@@ -2361,8 +2369,14 @@ Item {
   }
 
   Process {
+    id: cleanAttachmentProc
+    command: []
+  }
+
+  Process {
     id: attachmentProc
     property string activeAttachmentId: ""
+    property string activeItemId: ""
     command: []
     stdout: StdioCollector {
       waitForEnd: true
@@ -2373,6 +2387,7 @@ Item {
           if (data.ok) {
             if (data.action === "preview") {
               data.attachment_id = attachmentProc.activeAttachmentId
+              data.item_id = attachmentProc.activeItemId
               root.activeAttachmentPreview = data
             } else if (data.action === "view") {
               root.statusMessage = "Opened " + (data.filename || "attachment") + "."

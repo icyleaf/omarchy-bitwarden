@@ -205,6 +205,11 @@ enum AttachmentAction {
         #[arg(long)]
         preview: bool,
     },
+    #[command(about = "Clean temporary preview attachments")]
+    Clean {
+        #[arg(long)]
+        item_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1107,6 +1112,11 @@ fn main() -> ExitCode {
                 } else {
                     ExitCode::FAILURE
                 }
+            }
+            AttachmentAction::Clean { item_id } => {
+                omawarden::attachment::clear_preview_attachments(item_id.as_deref());
+                println!("{}", serde_json::json!({ "ok": true, "status": "cleaned" }));
+                ExitCode::SUCCESS
             }
         },
 

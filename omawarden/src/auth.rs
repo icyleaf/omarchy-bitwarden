@@ -341,6 +341,7 @@ impl AuthManager {
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        crate::attachment::clear_preview_attachments(None);
         crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
             ok: true,
@@ -356,6 +357,7 @@ impl AuthManager {
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        crate::attachment::clear_preview_attachments(None);
         crate::log_info!("omawarden:auth", "Account logged out and session cleared.");
         AuthResult {
             ok: true,

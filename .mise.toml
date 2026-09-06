@@ -33,3 +33,23 @@ depends = ["build-release", "dev-update-omarchy-plugin"]
 depends_post = ["dev-restart-omarchy"]
 run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f bin/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
 
+[tasks.version]
+description = "Show the latest version of the project"
+run = """
+printf "Latest omawarden tag: "
+git tag --sort=-creatordate | grep omawarden | head -n 1
+
+printf "Latest omarchy plugin tag: "
+git tag --sort=-creatordate | grep omarchy-bitwarden | head -n 1
+"""
+
+[tasks.unreleased-changelog]
+description = "Show the unreleased changelog"
+run = """
+export RUST_LOG=off
+echo '## Unreleased omawarden changelog:'
+git cliff --tag-pattern "^omawarden-v?[0-9].*" --include-path "omawarden/**" --unreleased
+
+echo '## Unreleased omarchy plugin changelog:'
+git cliff --tag-pattern "^omarchy-bitwarden-v?[0-9].*" --exclude-path "omawarden/**" --unreleased
+"""

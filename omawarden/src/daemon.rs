@@ -201,6 +201,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
         "lock" => {
             state.lock();
+            crate::attachment::clear_preview_attachments(None);
             json!({ "ok": true, "status": "locked" })
         }
         "sync" => match state.sync() {
