@@ -492,36 +492,39 @@ pub fn decrypt_attachment_blob(
         let mac = &blob[17..49];
         let ct = &blob[49..];
 
-        if ct.len().is_multiple_of(16) {
-            if let Some(mac_key) = key.mac_key.as_ref() {
-                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
-                    hmac.update(iv);
-                    hmac.update(ct);
-                    let calculated_mac = hmac.finalize().into_bytes();
-                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
-                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                            return Ok(decrypted);
-                        }
-                    }
-                }
-            }
+        if !ct.len().is_multiple_of(16) {
+            return Err(CryptoError::DecryptionFailed(
+                "Attachment ciphertext length is not a multiple of 16 (incomplete or truncated download)".to_string(),
+            ));
+        }
 
-            // If MAC key not present or verification bypassed, attempt AES decrypt
-            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                return Ok(decrypted);
+        if let Some(mac_key) = key.mac_key.as_ref() {
+            let mut hmac = HmacSha256::new_from_slice(mac_key)
+                .map_err(|_| CryptoError::DecryptionFailed("Invalid MAC key".to_string()))?;
+            hmac.update(iv);
+            hmac.update(ct);
+            let calculated_mac = hmac.finalize().into_bytes();
+            if mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
+                return Err(CryptoError::DecryptionFailed(
+                    "Attachment HMAC integrity verification failed (corrupted or incomplete download)".to_string(),
+                ));
             }
         }
+
+        return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
     }
 
     // Format 2: [1 byte encType == 0][16 bytes IV][Ciphertext]
     if blob.len() >= 17 && blob[0] == 0 {
         let iv = &blob[1..17];
         let ct = &blob[17..];
-        if ct.len().is_multiple_of(16) {
-            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                return Ok(decrypted);
-            }
+        if !ct.len().is_multiple_of(16) {
+            return Err(CryptoError::DecryptionFailed(
+                "Attachment ciphertext length is not a multiple of 16 (incomplete download)"
+                    .to_string(),
+            ));
         }
+        return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
     }
 
     // Format 3: [16 bytes IV][32 bytes MAC][Ciphertext] (no leading encType byte)
@@ -541,9 +544,6 @@ pub fn decrypt_attachment_blob(
                         }
                     }
                 }
-            }
-            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                return Ok(decrypted);
             }
         }
     }
@@ -571,7 +571,10 @@ pub fn decrypt_attachment_blob(
         }
     }
 
-    Ok(blob.to_vec())
+    Err(CryptoError::DecryptionFailed(
+        "Attachment blob does not match any valid encrypted format or decryption failed"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -707,4 +710,19 @@ fn test_decrypt_attachment_blob() {
 
     let decrypted2 = decrypt_attachment_blob(&blob, &key).unwrap();
     assert_eq!(decrypted2, plaintext);
+
+    // Truncated blob (incomplete download) MUST fail decryption rather than returning raw ciphertext
+    let truncated_blob = &bitwarden_blob[..bitwarden_blob.len() - 5];
+    assert!(
+        decrypt_attachment_blob(truncated_blob, &key).is_err(),
+        "Truncated attachment blob must return Err, not Ok"
+    );
+
+    // Blob with corrupted HMAC (e.g. truncated block boundary) MUST fail decryption
+    let mut bad_mac_blob = bitwarden_blob.clone();
+    bad_mac_blob[20] ^= 0xFF;
+    assert!(
+        decrypt_attachment_blob(&bad_mac_blob, &key).is_err(),
+        "Corrupted MAC attachment blob must return Err, not Ok"
+    );
 }

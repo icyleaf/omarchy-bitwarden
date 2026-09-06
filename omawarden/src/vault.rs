@@ -310,6 +310,7 @@ impl VaultManager {
         if let Ok(mut key) = self.user_key.write() {
             *key = None;
         }
+        crate::attachment::clear_preview_attachments(None);
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
