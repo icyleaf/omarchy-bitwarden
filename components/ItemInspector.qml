@@ -1270,7 +1270,7 @@ ScrollView {
               onClicked: { if (inspectorRoot.item && inspectorRoot.item.ssh_key) inspectorRoot.copyRequested(inspectorRoot.item.ssh_key.private_key, true, "SSH private key") }
             }
             GhostIconButton {
-              iconText: "\uf019"
+              iconText: "\uf093"
               tooltip: "Export SSH key to ~/.ssh"
               onClicked: { if (inspectorRoot.item) inspectorRoot.exportSshKeyRequested(inspectorRoot.item) }
             }

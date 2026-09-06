@@ -202,7 +202,7 @@ ColumnLayout {
 
         Text {
           anchors.centerIn: parent
-          text: "\uf093"
+          text: "\uf019"
           font.family: searchHeaderRoot.fontFamily
           font.pixelSize: 10
           color: importMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
