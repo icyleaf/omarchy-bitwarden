@@ -3,8 +3,8 @@ name: Release Omarchy Plugin
 on:
   push:
     tags:
-      - 'omarchy-bitwarden-*'
-      - 'omarchy-bitwarden-v*'
+      - "omarchy-bitwarden-*"
+      - "omarchy-bitwarden-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -37,7 +37,6 @@ jobs:
             components \
             scripts \
             manifest.json \
-            config.json \
             preview.png \
             LICENSE \
             README.md \
@@ -67,5 +66,3 @@ jobs:
             dist/*.sha256
           draft: false
           prerelease: false
-
-
