@@ -106,7 +106,7 @@ ScrollView {
         }
       }
       Text {
-        text: "Switch category filter (Logins, Cards, Notes, SSH)"
+        text: "Switch category filter (Logins, Cards, Secure Note, SSH)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
         font.pixelSize: 10
         Layout.fillWidth: true
