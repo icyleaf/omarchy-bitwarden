@@ -44,6 +44,11 @@ Item {
     if (authState && (authState.status === "locked" || authState.status === "unlocked" || authState.status === "unauthenticated")) {
       clearInputs()
     }
+    if (authState && authState.status === "locked") {
+      Qt.callLater(function() {
+        if (unlockPasswordField) unlockPasswordField.forceActiveFocus()
+      })
+    }
   }
 
   Flickable {

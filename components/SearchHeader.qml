@@ -18,7 +18,12 @@ ColumnLayout {
   property string fontFamily: ""
   property bool modalsActive: false
 
+  property string activeVaultScope: "all"
+  property string activeFolderScope: "all"
+
   signal categorySelected(string category)
+  signal vaultScopeSelected(string scope)
+  signal folderScopeSelected(string scope)
   signal clearSearchRequested()
   signal createSshKeyRequested()
   signal importSshKeyRequested()
@@ -27,6 +32,104 @@ ColumnLayout {
   signal openUrlRequested()
   signal actionPaletteRequested()
   signal exportSshKeyRequested()
+
+  property alias isScopeDropdownOpen: vaultScopeDropdown.isOpen
+  property alias isVaultScopeOpen: vaultScopeDropdown.isOpen
+  property alias isFolderScopeOpen: folderScopeDropdown.isOpen
+
+  function openVaultScope() {
+    if (vaultScopeDropdown.isOpen) {
+      vaultScopeDropdown.cycleNext()
+    } else {
+      vaultScopeDropdown.open()
+    }
+  }
+
+  function openFolderScope() {
+    if (folderScopeDropdown.isOpen) {
+      folderScopeDropdown.cycleNext()
+    } else {
+      folderScopeDropdown.open()
+    }
+  }
+
+  function closeScopeDropdowns() {
+    vaultScopeDropdown.close()
+    folderScopeDropdown.close()
+  }
+
+  function computeVaultScopes() {
+    var items = searchHeaderRoot.rawVaultItems || []
+    var personalCount = 0
+    var orgMap = {}
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (!it.organization_id) {
+        personalCount++
+      } else {
+        var orgId = it.organization_id
+        var orgName = it.organization_name || "Organization"
+        if (!orgMap[orgId]) {
+          orgMap[orgId] = { id: orgId, name: orgName, icon: "\uf1ad", count: 0 }
+        }
+        orgMap[orgId].count++
+      }
+    }
+
+    var list = [
+      { id: "all", name: "All Vaults", icon: "\uf009", count: items.length },
+      { id: "personal", name: "Personal", icon: "\uf007", count: personalCount }
+    ]
+
+    var orgKeys = Object.keys(orgMap)
+    orgKeys.sort(function(a, b) {
+      return orgMap[a].name.localeCompare(orgMap[b].name)
+    })
+
+    for (var k = 0; k < orgKeys.length; k++) {
+      list.push(orgMap[orgKeys[k]])
+    }
+
+    return list
+  }
+
+  function computeFolderScopes() {
+    var items = searchHeaderRoot.rawVaultItems || []
+    var noFolderCount = 0
+    var folderMap = {}
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (!it.folder_id && !it.folder_name) {
+        noFolderCount++
+      } else {
+        var fId = it.folder_id || it.folder_name
+        var fName = it.folder_name || "Folder"
+        if (!folderMap[fId]) {
+          folderMap[fId] = { id: fId, name: fName, icon: "\uf07b", count: 0 }
+        }
+        folderMap[fId].count++
+      }
+    }
+
+    var list = [
+      { id: "all", name: "All Folders", icon: "\uf07b", count: items.length }
+    ]
+
+    if (noFolderCount > 0) {
+      list.push({ id: "none", name: "No Folder", icon: "\uf016", count: noFolderCount })
+    }
+
+    var folderKeys = Object.keys(folderMap)
+    folderKeys.sort(function(a, b) {
+      return folderMap[a].name.localeCompare(folderMap[b].name)
+    })
+
+    for (var j = 0; j < folderKeys.length; j++) {
+      list.push(folderMap[folderKeys[j]])
+    }
+
+    return list
+  }
 
   function focusSearch() {
     searchInputField.forceActiveFocus()
@@ -54,16 +157,33 @@ ColumnLayout {
 
     RowLayout {
       anchors.fill: parent
-      anchors.leftMargin: 10
-      anchors.rightMargin: 10
+      anchors.leftMargin: 6
+      anchors.rightMargin: 6
       spacing: 6
 
-      Text {
-        text: "\uf002"
-        font.family: searchHeaderRoot.fontFamily
-        font.pixelSize: 12
-        color: Qt.darker(searchHeaderRoot.foreground, 1.4)
+      // Vault / Organization Scope Dropdown (Replaces static magnifying glass)
+      ScopeDropdown {
+        id: vaultScopeDropdown
+        title: "Vault"
+        currentValue: searchHeaderRoot.activeVaultScope
+        items: searchHeaderRoot.computeVaultScopes()
+        foreground: searchHeaderRoot.foreground
+        accent: searchHeaderRoot.accent
+        borderColor: searchHeaderRoot.borderColor
+        fontFamily: searchHeaderRoot.fontFamily
+        maxLabelWidth: 120
         Layout.alignment: Qt.AlignVCenter
+        onSelected: function(id) {
+          searchHeaderRoot.vaultScopeSelected(id)
+          searchHeaderRoot.focusSearch()
+        }
+        onResetRequested: {
+          searchHeaderRoot.vaultScopeSelected("all")
+          searchHeaderRoot.focusSearch()
+        }
+        onClosed: {
+          searchHeaderRoot.focusSearch()
+        }
       }
 
       Item {
@@ -85,6 +205,18 @@ ColumnLayout {
           Keys.onPressed: function(event) {
             if (searchHeaderRoot.modalsActive) return
 
+            if (event.modifiers & Qt.AltModifier) {
+              if (event.key === Qt.Key_V || (event.text && event.text.toLowerCase() === "v")) {
+                searchHeaderRoot.openVaultScope()
+                event.accepted = true
+                return
+              } else if (event.key === Qt.Key_F || (event.text && event.text.toLowerCase() === "f")) {
+                searchHeaderRoot.openFolderScope()
+                event.accepted = true
+                return
+              }
+            }
+
             if (event.modifiers & Qt.ControlModifier) {
               if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 searchHeaderRoot.copyTotpRequested()
@@ -103,6 +235,31 @@ ColumnLayout {
                 event.accepted = true
               }
             }
+
+            if (event.key === Qt.Key_Escape) {
+              if (vaultScopeDropdown.isOpen) {
+                vaultScopeDropdown.close()
+                event.accepted = true
+                return
+              }
+              if (folderScopeDropdown.isOpen) {
+                folderScopeDropdown.close()
+                event.accepted = true
+                return
+              }
+              if (searchInputField.text.length > 0) {
+                searchInputField.text = ""
+                searchHeaderRoot.clearSearchRequested()
+                event.accepted = true
+                return
+              }
+              if (searchHeaderRoot.activeVaultScope !== "all" || searchHeaderRoot.activeFolderScope !== "all") {
+                searchHeaderRoot.vaultScopeSelected("all")
+                searchHeaderRoot.folderScopeSelected("all")
+                event.accepted = true
+                return
+              }
+            }
           }
         }
 
@@ -118,7 +275,7 @@ ColumnLayout {
         }
       }
 
-      // Clear search button
+      // Clear search button (placed before Folder Scope Dropdown)
       Text {
         visible: Boolean(searchInputField.text)
         text: "\uf00d"
@@ -139,6 +296,32 @@ ColumnLayout {
           }
         }
       }
+
+      // Folder Scope Dropdown
+      ScopeDropdown {
+        id: folderScopeDropdown
+        title: "Folder"
+        currentValue: searchHeaderRoot.activeFolderScope
+        items: searchHeaderRoot.computeFolderScopes()
+        foreground: searchHeaderRoot.foreground
+        accent: searchHeaderRoot.accent
+        borderColor: searchHeaderRoot.borderColor
+        fontFamily: searchHeaderRoot.fontFamily
+        alignRight: true
+        maxLabelWidth: 110
+        Layout.alignment: Qt.AlignVCenter
+        onSelected: function(id) {
+          searchHeaderRoot.folderScopeSelected(id)
+          searchHeaderRoot.focusSearch()
+        }
+        onResetRequested: {
+          searchHeaderRoot.folderScopeSelected("all")
+          searchHeaderRoot.focusSearch()
+        }
+        onClosed: {
+          searchHeaderRoot.focusSearch()
+        }
+      }
     }
   }
 
@@ -151,6 +334,8 @@ ColumnLayout {
       id: catBar
       categoryList: searchHeaderRoot.categoryList
       activeCategory: searchHeaderRoot.activeCategory
+      activeVaultScope: searchHeaderRoot.activeVaultScope
+      activeFolderScope: searchHeaderRoot.activeFolderScope
       rawVaultItems: searchHeaderRoot.rawVaultItems
       foreground: searchHeaderRoot.foreground
       accent: searchHeaderRoot.accent
@@ -202,7 +387,7 @@ ColumnLayout {
 
         Text {
           anchors.centerIn: parent
-          text: "\uf093"
+          text: "\uf019"
           font.family: searchHeaderRoot.fontFamily
           font.pixelSize: 10
           color: importMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)

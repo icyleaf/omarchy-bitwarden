@@ -39,7 +39,9 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | <kbd>Ctrl</kbd> + <kbd>L</kbd>         | Manually lock the vault immediately                                       |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd>         | Trigger manual vault sync with Bitwarden server                           |
 | <kbd>↓</kbd> / <kbd>↑</kbd>            | Navigate item list or action options (stops at boundaries)                |
-| <kbd>Tab</kbd>                         | Switch category filters (All, Logins, Cards, Identities, Notes, SSH Keys) |
+| <kbd>Tab</kbd>                         | Switch category filters (All, Logins, Cards, Identities, Secure Note, SSH Keys) |
+| <kbd>Alt</kbd> + <kbd>V</kbd>          | Switch or cycle Vault / Organization scope filter (All, Personal, Organizations) |
+| <kbd>Alt</kbd> + <kbd>F</kbd>          | Switch or cycle Folder scope filter (All Folders, specific folder)         |
 | <kbd>Esc</kbd>                         | Dismiss Action Palette, History modal, Settings, or hide overlay          |
 
 ---

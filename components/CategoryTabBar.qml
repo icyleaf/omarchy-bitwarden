@@ -16,13 +16,16 @@ RowLayout {
 
   spacing: 4
 
+  property string activeVaultScope: "all"
+  property string activeFolderScope: "all"
+
   function getCategoryLabel(cat) {
     switch (cat) {
       case "all": return "All"
       case "login": return "Logins"
       case "card": return "Cards"
       case "identity": return "Identities"
-      case "note": return "Notes"
+      case "note": return "Secure Note"
       case "ssh_key": return "SSH Keys"
       default: return cat
     }
@@ -30,8 +33,27 @@ RowLayout {
 
   function getCategoryCount(cat) {
     if (!rawVaultItems || rawVaultItems.length === 0) return 0
-    if (cat === "all") return rawVaultItems.length
-    return rawVaultItems.filter(function(i) {
+    var vs = activeVaultScope || "all"
+    var fs = activeFolderScope || "all"
+
+    var scopedItems = rawVaultItems.filter(function(i) {
+      if (vs === "personal") {
+        if (i.organization_id) return false
+      } else if (vs !== "all") {
+        if (i.organization_id !== vs && i.organization_name !== vs) return false
+      }
+
+      if (fs === "none") {
+        if (i.folder_id || i.folder_name) return false
+      } else if (fs !== "all") {
+        if (i.folder_id !== fs && i.folder_name !== fs) return false
+      }
+
+      return true
+    })
+
+    if (cat === "all") return scopedItems.length
+    return scopedItems.filter(function(i) {
       return (i.type_name === cat) || (cat === "ssh_key" && (i.type_name === "ssh_key" || i.category === "ssh_key"))
     }).length
   }

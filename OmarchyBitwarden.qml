@@ -86,6 +86,8 @@ Item {
   property string searchQuery: ""
   property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
+  property string activeVaultScope: "all"
+  property string activeFolderScope: "all"
   property int selectedIndex: 0
 
   // Details Inspector State
@@ -431,11 +433,29 @@ Item {
     var currentId = (root.selectedItem && !resetSelection) ? root.selectedItem.id : null
     var q = (root.searchQuery || "").trim().toLowerCase()
     var cat = root.activeCategory
+    var vs = root.activeVaultScope || "all"
+    var fs = root.activeFolderScope || "all"
     var items = root.rawVaultItems || []
 
     var res = []
     for (var i = 0; i < items.length; i++) {
       var item = items[i]
+
+      // 1. Vault Scope Filter
+      if (vs === "personal") {
+        if (item.organization_id) continue
+      } else if (vs !== "all") {
+        if (item.organization_id !== vs && item.organization_name !== vs) continue
+      }
+
+      // 2. Folder Scope Filter
+      if (fs === "none") {
+        if (item.folder_id || item.folder_name) continue
+      } else if (fs !== "all") {
+        if (item.folder_id !== fs && item.folder_name !== fs) continue
+      }
+
+      // 3. Category Filter
       if (cat !== "all" && item.type_name !== cat && !(cat === "ssh_key" && item.category === "ssh_key")) continue
 
       if (q === "") {
@@ -513,8 +533,83 @@ Item {
     root.handleSelectedItemChanged()
   }
 
+  function getAvailableVaultScopes() {
+    var items = root.rawVaultItems || []
+    var personalCount = 0
+    var orgMap = {}
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (!it.organization_id) {
+        personalCount++
+      } else {
+        var orgId = it.organization_id
+        var orgName = it.organization_name || "Organization"
+        if (!orgMap[orgId]) {
+          orgMap[orgId] = { id: orgId, name: orgName, icon: "\uf1ad", count: 0 }
+        }
+        orgMap[orgId].count++
+      }
+    }
+
+    var list = [
+      { id: "all", name: "All Vaults", icon: "\uf009", count: items.length },
+      { id: "personal", name: "Personal Vault", icon: "\uf007", count: personalCount }
+    ]
+
+    var orgKeys = Object.keys(orgMap)
+    orgKeys.sort(function(a, b) {
+      return orgMap[a].name.localeCompare(orgMap[b].name)
+    })
+
+    for (var k = 0; k < orgKeys.length; k++) {
+      list.push(orgMap[orgKeys[k]])
+    }
+
+    return list
+  }
+
+  function getAvailableFolderScopes() {
+    var items = root.rawVaultItems || []
+    var noFolderCount = 0
+    var folderMap = {}
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (!it.folder_id && !it.folder_name) {
+        noFolderCount++
+      } else {
+        var fId = it.folder_id || it.folder_name
+        var fName = it.folder_name || "Folder"
+        if (!folderMap[fId]) {
+          folderMap[fId] = { id: fId, name: fName, icon: "\uf07b", count: 0 }
+        }
+        folderMap[fId].count++
+      }
+    }
+
+    var list = [
+      { id: "all", name: "All Folders", icon: "\uf07b", count: items.length }
+    ]
+
+    if (noFolderCount > 0) {
+      list.push({ id: "none", name: "No Folder", icon: "\uf016", count: noFolderCount })
+    }
+
+    var folderKeys = Object.keys(folderMap)
+    folderKeys.sort(function(a, b) {
+      return folderMap[a].name.localeCompare(folderMap[b].name)
+    })
+
+    for (var j = 0; j < folderKeys.length; j++) {
+      list.push(folderMap[folderKeys[j]])
+    }
+
+    return list
+  }
+
   onSearchQueryChanged: filterVaultItems(true)
   onActiveCategoryChanged: filterVaultItems(true)
+  onActiveVaultScopeChanged: filterVaultItems(true)
+  onActiveFolderScopeChanged: filterVaultItems(true)
   onSelectedIndexChanged: root.handleSelectedItemChanged()
 
   function handleSelectedItemChanged() {
@@ -814,9 +909,52 @@ Item {
     var actions = []
     if (!item) {
       actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
-      actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
+      actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
       actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
       actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
+
+      var vScopesNull = root.getAvailableVaultScopes()
+      for (var vsn = 0; vsn < vScopesNull.length; vsn++) {
+        var vItemNull = vScopesNull[vsn]
+        if (vItemNull.id !== root.activeVaultScope) {
+          (function(s) {
+            actions.push({
+              label: "Filter Vault: " + s.name,
+              icon: s.icon,
+              shortcut: (s.id === "all") ? "Alt+V" : "",
+              action: function() { root.activeVaultScope = s.id }
+            })
+          })(vItemNull)
+        }
+      }
+
+      var fScopesNull = root.getAvailableFolderScopes()
+      for (var fsn = 0; fsn < fScopesNull.length; fsn++) {
+        var fItemNull = fScopesNull[fsn]
+        if (fItemNull.id !== root.activeFolderScope) {
+          (function(f) {
+            actions.push({
+              label: "Filter Folder: " + f.name,
+              icon: f.icon,
+              shortcut: (f.id === "all") ? "Alt+F" : "",
+              action: function() { root.activeFolderScope = f.id }
+            })
+          })(fItemNull)
+        }
+      }
+
+      if (root.activeVaultScope !== "all" || root.activeFolderScope !== "all") {
+        actions.push({
+          label: "Clear Scope Filters",
+          icon: "\uf00d",
+          shortcut: "Esc",
+          action: function() {
+            root.activeVaultScope = "all"
+            root.activeFolderScope = "all"
+          }
+        })
+      }
+
       return actions
     }
 
@@ -889,7 +1027,7 @@ Item {
       if (item.ssh_key.passphrase) actions.push({ label: "Copy Passphrase", icon: "\uf023", shortcut: "", action: function() { root.copyToClipboard(item.ssh_key.passphrase, true, "passphrase") } })
       actions.push({
         label: "Export to ~/.ssh",
-        icon: "\uf019",
+        icon: "\uf093",
         shortcut: "Ctrl+E",
         action: function() {
           root.openSshKeyModal("export", item)
@@ -985,8 +1123,69 @@ Item {
 
     actions.push({ label: "Toggle Field Visibility", icon: "\uf06e", shortcut: "Ctrl+T", action: function() { root.toggleItemRevealed() } })
     actions.push({ label: "Copy Item Name (" + item.name + ")", icon: "\uf0c5", shortcut: "", action: function() { root.copyToClipboard(item.name, false, "item name") } })
+
+    // Scope filters in Action Palette
+    if (item.organization_id && root.activeVaultScope !== item.organization_id) {
+      actions.push({
+        label: "Filter by this Vault (" + (item.organization_name || "Organization") + ")",
+        icon: "\uf1ad",
+        shortcut: "",
+        action: function() { root.activeVaultScope = item.organization_id }
+      })
+    }
+    if (item.folder_id && root.activeFolderScope !== item.folder_id) {
+      actions.push({
+        label: "Filter by this Folder (" + (item.folder_name || "Folder") + ")",
+        icon: "\uf07b",
+        shortcut: "",
+        action: function() { root.activeFolderScope = item.folder_id }
+      })
+    }
+
+    var vScopes = root.getAvailableVaultScopes()
+    for (var vs = 0; vs < vScopes.length; vs++) {
+      var vItem = vScopes[vs]
+      if (vItem.id !== root.activeVaultScope && (!item.organization_id || vItem.id !== item.organization_id)) {
+        (function(s) {
+          actions.push({
+            label: "Filter Vault: " + s.name,
+            icon: s.icon,
+            shortcut: (s.id === "all") ? "Alt+V" : "",
+            action: function() { root.activeVaultScope = s.id }
+          })
+        })(vItem)
+      }
+    }
+
+    var fScopes = root.getAvailableFolderScopes()
+    for (var fs = 0; fs < fScopes.length; fs++) {
+      var fItem = fScopes[fs]
+      if (fItem.id !== root.activeFolderScope && (!item.folder_id || fItem.id !== item.folder_id)) {
+        (function(f) {
+          actions.push({
+            label: "Filter Folder: " + f.name,
+            icon: f.icon,
+            shortcut: (f.id === "all") ? "Alt+F" : "",
+            action: function() { root.activeFolderScope = f.id }
+          })
+        })(fItem)
+      }
+    }
+
+    if (root.activeVaultScope !== "all" || root.activeFolderScope !== "all") {
+      actions.push({
+        label: "Clear Scope Filters",
+        icon: "\uf00d",
+        shortcut: "Esc",
+        action: function() {
+          root.activeVaultScope = "all"
+          root.activeFolderScope = "all"
+        }
+      })
+    }
+
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
-    actions.push({ label: "Import SSH Key", icon: "\uf093", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
+    actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
     actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
     actions.push({ label: "Lock Vault", icon: "\uf023", shortcut: "Ctrl+L", action: function() { root.doLock() } })
 
@@ -1169,6 +1368,8 @@ Item {
     root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
+    root.activeVaultScope = "all"
+    root.activeFolderScope = "all"
     root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Locking vault..."
@@ -1218,6 +1419,8 @@ Item {
     root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
+    root.activeVaultScope = "all"
+    root.activeFolderScope = "all"
     root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Logging out..."
@@ -1350,6 +1553,22 @@ Item {
       }
 
       Shortcut {
+        sequence: "Alt+V"
+        enabled: root.opened && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal
+        onActivated: {
+          if (searchHeader) searchHeader.openVaultScope()
+        }
+      }
+
+      Shortcut {
+        sequence: "Alt+F"
+        enabled: root.opened && root.effectiveView === "search" && !root.showActionPalette && !root.showSshKeyModal && !root.showPasswordHistoryModal
+        onActivated: {
+          if (searchHeader) searchHeader.openFolderScope()
+        }
+      }
+
+      Shortcut {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
@@ -1365,6 +1584,14 @@ Item {
             settingsView.showReleaseNotes = false
           } else if (root.effectiveView === "settings") {
             root.currentView = "auto"
+          } else if (searchHeader && (searchHeader.isVaultScopeOpen || searchHeader.isFolderScopeOpen)) {
+            searchHeader.closeScopeDropdowns()
+          } else if (root.searchQuery && root.searchQuery.length > 0) {
+            root.searchQuery = ""
+            if (searchHeader) searchHeader.clearSearchRequested()
+          } else if (root.activeVaultScope !== "all" || root.activeFolderScope !== "all") {
+            root.activeVaultScope = "all"
+            root.activeFolderScope = "all"
           } else {
             root.dismiss()
           }
@@ -1377,6 +1604,18 @@ Item {
           root.toggleItemRevealed()
           event.accepted = true
           return
+        }
+
+        if (event.modifiers & Qt.AltModifier && root.effectiveView === "search") {
+          if (event.key === Qt.Key_V) {
+            if (searchHeader) searchHeader.openVaultScope()
+            event.accepted = true
+            return
+          } else if (event.key === Qt.Key_F) {
+            if (searchHeader) searchHeader.openFolderScope()
+            event.accepted = true
+            return
+          }
         }
 
         if (root.showSshKeyModal) {
@@ -1410,6 +1649,14 @@ Item {
             settingsView.showReleaseNotes = false
           } else if (root.effectiveView === "settings") {
             root.currentView = "auto"
+          } else if (searchHeader && (searchHeader.isVaultScopeOpen || searchHeader.isFolderScopeOpen)) {
+            searchHeader.closeScopeDropdowns()
+          } else if (root.searchQuery && root.searchQuery.length > 0) {
+            root.searchQuery = ""
+            if (searchHeader) searchHeader.clearSearchRequested()
+          } else if (root.activeVaultScope !== "all" || root.activeFolderScope !== "all") {
+            root.activeVaultScope = "all"
+            root.activeFolderScope = "all"
           } else {
             root.dismiss()
           }
@@ -1493,6 +1740,8 @@ Item {
           searchQuery: root.searchQuery
           categoryList: root.categoryList
           activeCategory: root.activeCategory
+          activeVaultScope: root.activeVaultScope
+          activeFolderScope: root.activeFolderScope
           rawVaultItems: root.rawVaultItems
           fontFamily: root.fontFamily
           background: root.background
@@ -1501,6 +1750,8 @@ Item {
           borderColor: root.borderColor
           onSearchQueryChanged: root.searchQuery = searchQuery
           onCategorySelected: function(cat) { root.activeCategory = cat }
+          onVaultScopeSelected: function(scope) { root.activeVaultScope = scope }
+          onFolderScopeSelected: function(scope) { root.activeFolderScope = scope }
           onCreateSshKeyRequested: { root.openSshKeyModal("create", null) }
           onImportSshKeyRequested: { root.openSshKeyModal("import", null) }
           onClearSearchRequested: {
@@ -1550,9 +1801,12 @@ Item {
               Layout.fillHeight: true
               Layout.preferredWidth: 320
               Layout.minimumWidth: 260
+              Layout.maximumWidth: 320
               items: root.filteredItems
               selectedIndex: root.selectedIndex
               searchQuery: root.searchQuery
+              activeVaultScope: root.activeVaultScope
+              activeFolderScope: root.activeFolderScope
               fontFamily: root.fontFamily
               foreground: root.foreground
               accent: root.accent
@@ -2152,20 +2406,27 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
-            root.statusMessage = "Logged in successfully."
+            var statusVal = data.status || "unlocked"
+            if (statusVal === "locked") {
+              root.statusMessage = "API Key authenticated. Please enter Master Password to unlock."
+            } else {
+              root.statusMessage = "Logged in successfully."
+            }
             root.searchQuery = ""
             if (authViewComponent) authViewComponent.clearInputs()
 
             root.show2FAField = false
             root.authState = ({
-              status: "unlocked",
+              status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
               user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
               has_session: true
             })
             root.refreshAuthStatus()
-            root.loadVaultItems()
-            root.syncVault(true, true)
+            if (statusVal === "unlocked") {
+              root.loadVaultItems()
+              root.syncVault(true, true)
+            }
           } else {
             root.errorMessage = data.error || "Login failed."
             root.logWarn("omarchy:auth", root.errorMessage)
@@ -2299,6 +2560,22 @@ Item {
           root.lastVaultItemsRawText = cleanText
           var items = JSON.parse(cleanText)
           root.rawVaultItems = items || []
+          if (root.activeVaultScope !== "all" && root.activeVaultScope !== "personal") {
+            var vScopes = root.getAvailableVaultScopes()
+            var vFound = false
+            for (var vi = 0; vi < vScopes.length; vi++) {
+              if (vScopes[vi].id === root.activeVaultScope) { vFound = true; break }
+            }
+            if (!vFound) root.activeVaultScope = "all"
+          }
+          if (root.activeFolderScope !== "all" && root.activeFolderScope !== "none") {
+            var fScopes = root.getAvailableFolderScopes()
+            var fFound = false
+            for (var fi = 0; fi < fScopes.length; fi++) {
+              if (fScopes[fi].id === root.activeFolderScope) { fFound = true; break }
+            }
+            if (!fFound) root.activeFolderScope = "all"
+          }
           root.filterVaultItems(false)
           Qt.callLater(function() {
             if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
