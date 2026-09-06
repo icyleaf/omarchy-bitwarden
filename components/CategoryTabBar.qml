@@ -25,7 +25,7 @@ RowLayout {
       case "login": return "Logins"
       case "card": return "Cards"
       case "identity": return "Identities"
-      case "note": return "Notes"
+      case "note": return "Secure Note"
       case "ssh_key": return "SSH Keys"
       default: return cat
     }
