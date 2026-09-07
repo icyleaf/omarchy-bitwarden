@@ -413,11 +413,14 @@ impl AuthManager {
             if let Some(ref ref_tok) = token_resp.refresh_token {
                 refresh_stored = self.keyring_mgr.store_token(KIND_REFRESH_TOKEN, ref_tok);
             }
-            let _ = self.keyring_mgr.store_api_secret(
-                &self.server_url,
-                client_id.trim(),
-                client_secret.trim(),
-            );
+            let s_url = if !storage.server_url.is_empty() {
+                &storage.server_url
+            } else {
+                &self.server_url
+            };
+            let _ =
+                self.keyring_mgr
+                    .store_api_secret(s_url, client_id.trim(), client_secret.trim());
         }
 
         if access_stored {
