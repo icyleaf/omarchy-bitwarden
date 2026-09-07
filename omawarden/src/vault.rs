@@ -778,13 +778,35 @@ impl VaultManager {
     pub fn get_status(&self) -> Value {
         let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
-        let has_valid_token = if let Some(ref tok) = fresh_storage.access_token {
-            !crate::auth::is_jwt_expired(tok) || fresh_storage.refresh_token.is_some()
+        let active_token = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session())
+            .or_else(|| fresh_storage.access_token.clone());
+
+        let has_refresh = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+            .is_some()
+            || fresh_storage.refresh_token.is_some();
+        let s_url = if !fresh_storage.server_url.is_empty() {
+            &fresh_storage.server_url
         } else {
-            false
+            &self.server_url
+        };
+        let has_api_secret = fresh_storage
+            .client_id
+            .as_ref()
+            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
+            .is_some();
+
+        let has_valid_token = if let Some(ref tok) = active_token {
+            !crate::auth::is_jwt_expired(tok) || has_refresh || has_api_secret
+        } else {
+            has_refresh || has_api_secret
         };
 
-        let status = if !has_valid_token && fresh_storage.access_token.is_some() {
+        let status = if !has_valid_token && active_token.is_some() {
             "unauthenticated"
         } else if is_unlocked {
             "unlocked"
