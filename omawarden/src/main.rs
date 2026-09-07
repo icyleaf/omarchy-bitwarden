@@ -493,7 +493,12 @@ fn main() -> ExitCode {
         }
 
         Commands::Auth { action } => {
-            let auth_mgr = AuthManager::new(&cfg.server_url, None, None);
+            let auth_mgr = AuthManager::with_identity_url(
+                &cfg.server_url,
+                cfg.identity_url.as_deref(),
+                None,
+                None,
+            );
             match action {
                 AuthAction::Status => {
                     omawarden::daemon::ensure_daemon_running();
@@ -592,7 +597,12 @@ fn main() -> ExitCode {
         },
 
         Commands::Vault { action } => {
-            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+            let vault_mgr = VaultManager::with_identity_url(
+                &cfg.server_url,
+                cfg.identity_url.as_deref(),
+                None,
+                None,
+            );
             match action {
                 VaultAction::Sync => {
                     omawarden::daemon::ensure_daemon_running();
@@ -762,7 +772,12 @@ fn main() -> ExitCode {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+            let vault_mgr = VaultManager::with_identity_url(
+                &cfg.server_url,
+                cfg.identity_url.as_deref(),
+                None,
+                None,
+            );
             let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
                 let daemon_res = send_daemon_request(&json!({
                     "action": "get_item",
@@ -1004,7 +1019,12 @@ fn main() -> ExitCode {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
 
-                    let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+                    let vault_mgr = VaultManager::with_identity_url(
+                        &cfg.server_url,
+                        cfg.identity_url.as_deref(),
+                        None,
+                        None,
+                    );
                     let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
                         let daemon_res = send_daemon_request(&json!({
                             "action": "get_item",
@@ -1186,7 +1206,12 @@ fn main() -> ExitCode {
         },
 
         Commands::SshKey { action } => {
-            let vault_mgr = VaultManager::new(&cfg.server_url, None, None);
+            let vault_mgr = VaultManager::with_identity_url(
+                &cfg.server_url,
+                cfg.identity_url.as_deref(),
+                None,
+                None,
+            );
             match action {
                 SshKeyAction::Create {
                     name,

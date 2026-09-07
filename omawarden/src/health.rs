@@ -29,9 +29,15 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         .build()
         .unwrap_or_default();
 
-    let prelogin_url = format!("{}/api/accounts/prelogin", server_clean);
-    let server_reachable =
-        client.get(&prelogin_url).send().is_ok() || client.get(server_clean).send().is_ok();
+    let env_urls = crate::api::EnvironmentUrls::resolve(server_url, None);
+    let prelogin_url = if env_urls.is_cloud {
+        format!("{}/accounts/prelogin", env_urls.identity_url)
+    } else {
+        format!("{}/accounts/prelogin", env_urls.api_url)
+    };
+    let server_reachable = client.get(&prelogin_url).send().is_ok()
+        || client.get(&env_urls.base_url).send().is_ok()
+        || client.get(server_clean).send().is_ok();
 
     // 2. Check Keyring (secret-tool)
     let keyring_available = which::which("secret-tool").is_ok();
