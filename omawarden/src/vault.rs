@@ -362,72 +362,71 @@ impl VaultManager {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
-        if !self.is_unlocked() {
-            crate::log_warn!(
-                "omawarden:vault",
-                "Cannot sync vault: vault is locked. Please unlock first."
-            );
-            return Err("Vault is locked. Please unlock first.".to_string());
-        }
-
         crate::log_info!(
             "omawarden:vault",
             "Starting vault synchronization with server..."
         );
         let storage = self.storage_mgr.load();
-        let token = storage.access_token.as_ref().ok_or_else(|| {
-            crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
-            "Session token missing. Please log in.".to_string()
-        })?;
-
-        let client = BitwardenApiClient::new(if self.server_url.is_empty() {
+        let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
         } else {
             &self.server_url
-        });
-        let sync_resp_res = client.sync_vault(token);
+        };
+        let client = BitwardenApiClient::new(s_url);
+
+        let initial_token = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session())
+            .or_else(|| storage.access_token.clone());
+
+        let active_token = match initial_token {
+            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
+            Some(_) => {
+                crate::log_info!(
+                    "omawarden:vault",
+                    "Access token is expired, attempting renewal..."
+                );
+                self.renew_session()?
+            }
+            None => {
+                let has_refresh = self
+                    .keyring_mgr
+                    .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+                    .is_some()
+                    || storage.refresh_token.is_some();
+                let has_api_secret = storage
+                    .client_id
+                    .as_ref()
+                    .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
+                    .is_some();
+                if has_refresh || has_api_secret {
+                    self.renew_session()?
+                } else {
+                    crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
+                    return Err("Session token missing. Please log in.".to_string());
+                }
+            }
+        };
+
+        let sync_resp_res = client.sync_vault(&active_token);
 
         let sync_resp = match sync_resp_res {
             Ok(resp) => resp,
             Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
                     "omawarden:vault",
-                    "HTTP 401/403 on sync. Attempting token refresh..."
+                    "HTTP 401/403 on sync. Attempting session renewal..."
                 );
-                if let Some(ref ref_tok) = storage.refresh_token {
-                    if let Ok(tok_resp) = client.refresh_token_grant(ref_tok) {
-                        crate::log_info!(
-                            "omawarden:vault",
-                            "Token refresh successful. Resuming sync."
-                        );
-                        let mut updated_tok = storage.clone();
-                        updated_tok.access_token = Some(tok_resp.access_token.clone());
-                        if let Some(new_ref) = tok_resp.refresh_token {
-                            updated_tok.refresh_token = Some(new_ref);
-                        }
-                        let _ = self.storage_mgr.save(&updated_tok);
-                        client.sync_vault(&tok_resp.access_token).map_err(|e| {
-                            crate::log_error!(
-                                "omawarden:vault",
-                                "Sync failed after token refresh: {:?}",
-                                e
-                            );
-                            format!("Sync failed: {:?}", e)
-                        })?
-                    } else {
-                        crate::log_error!(
-                            "omawarden:vault",
-                            "Session expired. Please log in again."
-                        );
-                        return Err("Session expired. Please log in again.".to_string());
-                    }
-                } else {
+                let renewed_token = self.renew_session()?;
+                client.sync_vault(&renewed_token).map_err(|e| {
                     crate::log_error!(
                         "omawarden:vault",
-                        "Session expired and no refresh token available."
+                        "Sync failed after token renewal: {:?}",
+                        e
                     );
-                    return Err("Session expired. Please log in again.".to_string());
-                }
+                    format!("Sync failed: {:?}", e)
+                })?
             }
             Err(e) => {
                 crate::log_error!("omawarden:vault", "Sync failed: {:?}", e);
@@ -436,7 +435,7 @@ impl VaultManager {
         };
 
         let count = sync_resp.ciphers.len();
-        let mut updated = storage.clone();
+        let mut updated = self.storage_mgr.load();
         updated.ciphers = sync_resp.ciphers;
         updated.folders = sync_resp.folders;
         updated.collections = sync_resp.collections;
@@ -478,6 +477,173 @@ impl VaultManager {
         );
 
         Ok(count)
+    }
+
+    pub fn renew_session(&self) -> Result<String, String> {
+        let storage = self.storage_mgr.load();
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+        let client = BitwardenApiClient::new(s_url);
+
+        let mut had_credentials = false;
+        let mut auth_failed = false;
+        let mut last_error = None;
+
+        // 1. Try refresh_token grant
+        let refresh_token = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+            .or_else(|| storage.refresh_token.clone());
+
+        if let Some(ref ref_tok) = refresh_token {
+            had_credentials = true;
+            crate::log_info!(
+                "omawarden:vault",
+                "Attempting session renewal via refresh token..."
+            );
+            match client.refresh_token_grant(ref_tok) {
+                Ok(tok_resp) => {
+                    crate::log_info!("omawarden:vault", "Token refresh grant successful.");
+                    self.persist_renewed_tokens(&tok_resp);
+                    return Ok(tok_resp.access_token);
+                }
+                Err(ApiError::AuthFailed(msg)) => {
+                    crate::log_warn!(
+                        "omawarden:vault",
+                        "Refresh token grant rejected (auth failed: {}). Falling back to API credentials...",
+                        msg
+                    );
+                    auth_failed = true;
+                    last_error = Some(format!("Authentication failed: {}", msg));
+                }
+                Err(ApiError::Http(msg)) => {
+                    crate::log_warn!(
+                        "omawarden:vault",
+                        "Refresh token grant encountered network error: {}. Falling back...",
+                        msg
+                    );
+                    last_error = Some(format!("Network error during token refresh: {}", msg));
+                }
+                Err(e) => {
+                    crate::log_warn!(
+                        "omawarden:vault",
+                        "Refresh token grant failed: {:?}. Falling back...",
+                        e
+                    );
+                    last_error = Some(format!("Token refresh failed: {:?}", e));
+                }
+            }
+        }
+
+        // 2. Try client_credentials grant via client_id + client_secret in Keyring
+        if let Some(ref cid) = storage.client_id {
+            if let Some(sec) = self.keyring_mgr.get_api_secret(s_url, cid) {
+                had_credentials = true;
+                crate::log_info!(
+                    "omawarden:vault",
+                    "Attempting silent re-authentication via API key secret..."
+                );
+                match client.login_apikey(cid, &sec) {
+                    Ok(tok_resp) => {
+                        crate::log_info!(
+                            "omawarden:vault",
+                            "Silent re-authentication via API key successful."
+                        );
+                        self.persist_renewed_tokens(&tok_resp);
+                        return Ok(tok_resp.access_token);
+                    }
+                    Err(ApiError::AuthFailed(msg)) => {
+                        crate::log_error!(
+                            "omawarden:vault",
+                            "API key silent re-auth rejected (auth failed: {})",
+                            msg
+                        );
+                        auth_failed = true;
+                        last_error = Some(format!("Authentication failed: {}", msg));
+                    }
+                    Err(ApiError::Http(msg)) => {
+                        crate::log_error!(
+                            "omawarden:vault",
+                            "API key silent re-auth encountered network error: {}",
+                            msg
+                        );
+                        last_error = Some(format!(
+                            "Network error during API key authentication: {}",
+                            msg
+                        ));
+                    }
+                    Err(e) => {
+                        crate::log_error!(
+                            "omawarden:vault",
+                            "API key silent re-auth failed: {:?}",
+                            e
+                        );
+                        last_error = Some(format!("API key login failed: {:?}", e));
+                    }
+                }
+            }
+        }
+
+        if !had_credentials {
+            self.purge_credentials_and_lock();
+            return Err("Session token missing. Please log in.".to_string());
+        }
+
+        if auth_failed {
+            self.purge_credentials_and_lock();
+            return Err(
+                "Session expired or credentials rejected. Please log in again.".to_string(),
+            );
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            "Session renewal failed due to network error. Please check your connection.".to_string()
+        }))
+    }
+
+    fn persist_renewed_tokens(&self, tok_resp: &crate::api::TokenResponse) {
+        let mut updated_storage = self.storage_mgr.load();
+        if self.keyring_mgr.is_available() {
+            let s1 = self
+                .keyring_mgr
+                .store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
+            let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
+                self.keyring_mgr
+                    .store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+            } else {
+                self.keyring_mgr
+                    .clear_token(crate::keyring::KIND_REFRESH_TOKEN);
+                true
+            };
+            if s1 && s2 {
+                updated_storage.access_token = None;
+                updated_storage.refresh_token = None;
+            } else {
+                updated_storage.access_token = Some(tok_resp.access_token.clone());
+                updated_storage.refresh_token = tok_resp.refresh_token.clone();
+            }
+        } else {
+            updated_storage.access_token = Some(tok_resp.access_token.clone());
+            updated_storage.refresh_token = tok_resp.refresh_token.clone();
+        }
+        let _ = self.storage_mgr.save(&updated_storage);
+    }
+
+    fn purge_credentials_and_lock(&self) {
+        self.keyring_mgr
+            .clear_token(crate::keyring::KIND_ACCESS_TOKEN);
+        self.keyring_mgr
+            .clear_token(crate::keyring::KIND_REFRESH_TOKEN);
+        self.keyring_mgr.clear_session();
+        let mut updated = self.storage_mgr.load();
+        updated.access_token = None;
+        updated.refresh_token = None;
+        let _ = self.storage_mgr.save(&updated);
+        self.lock();
+        crate::attachment::clear_preview_attachments(None);
     }
 
     pub fn get_items(&self) -> Vec<VaultItem> {
@@ -628,10 +794,23 @@ impl VaultManager {
         user_key: &SymmetricCryptoKey,
     ) -> Result<VaultItem, String> {
         let storage = self.storage_mgr.load();
-        let token = storage
-            .access_token
-            .as_deref()
-            .ok_or_else(|| "Not logged in or missing access token".to_string())?;
+        let initial_token = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session())
+            .or_else(|| storage.access_token.clone());
+
+        let active_token = match initial_token {
+            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
+            Some(_) => {
+                crate::log_info!(
+                    "omawarden:vault",
+                    "Access token is expired for create_ssh_key, attempting renewal..."
+                );
+                self.renew_session()?
+            }
+            None => self.renew_session()?,
+        };
 
         let enc_name = user_key
             .encrypt_string(name)
@@ -680,12 +859,23 @@ impl VaultManager {
             &self.server_url
         });
 
-        let created_cipher = client
-            .create_cipher(token, &payload)
-            .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?;
+        let created_cipher = match client.create_cipher(&active_token, &payload) {
+            Ok(c) => c,
+            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "HTTP 401/403 creating SSH key. Attempting session renewal..."
+                );
+                let renewed = self.renew_session()?;
+                client
+                    .create_cipher(&renewed, &payload)
+                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
+            }
+            Err(e) => return Err(format!("Failed to create SSH key on server: {:?}", e)),
+        };
 
         // Update local storage data.json
-        let mut updated_storage = storage.clone();
+        let mut updated_storage = self.storage_mgr.load();
         updated_storage.ciphers.push(created_cipher.clone());
         let _ = self.storage_mgr.save(&updated_storage);
 
@@ -774,15 +964,54 @@ impl VaultManager {
     pub fn get_status(&self) -> Value {
         let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
+        let active_token = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session())
+            .or_else(|| fresh_storage.access_token.clone());
+
+        let has_refresh = self
+            .keyring_mgr
+            .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+            .is_some()
+            || fresh_storage.refresh_token.is_some();
+        let s_url = if !fresh_storage.server_url.is_empty() {
+            &fresh_storage.server_url
+        } else {
+            &self.server_url
+        };
+        let has_api_secret = fresh_storage
+            .client_id
+            .as_ref()
+            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
+            .is_some();
+
+        let has_valid_token = if let Some(ref tok) = active_token {
+            !crate::auth::is_jwt_expired(tok) || has_refresh || has_api_secret
+        } else {
+            has_refresh || has_api_secret
+        };
+
+        let status = if !has_valid_token {
+            "unauthenticated"
+        } else if is_unlocked {
+            "unlocked"
+        } else if fresh_storage.enc_user_key.is_some() {
+            "locked"
+        } else {
+            "unauthenticated"
+        };
+
         json!({
             "ok": true,
-            "status": if is_unlocked { "unlocked" } else if fresh_storage.enc_user_key.is_some() { "locked" } else { "unauthenticated" },
+            "status": status,
             "server_url": fresh_storage.server_url,
             "user_email": fresh_storage.user_email,
             "user_id": fresh_storage.user_id,
             "last_sync": fresh_storage.last_sync,
-            "is_unlocked": is_unlocked,
-            "items_count": self.decrypted_items.read().map(|i| i.len()).unwrap_or(0),
+            "is_unlocked": is_unlocked && has_valid_token,
+            "has_session": has_valid_token,
+            "items_count": if has_valid_token { self.decrypted_items.read().map(|i| i.len()).unwrap_or(0) } else { 0 },
         })
     }
 
@@ -1313,7 +1542,12 @@ mod tests {
         let path = dir.path().join("vault_test.json");
         let storage_mgr = StorageManager::new(path);
 
-        let vault_mgr = VaultManager::new("https://vault.example.com", Some(storage_mgr), None);
+        let dummy_keyring = KeyringManager::new("/nonexistent-keyring");
+        let vault_mgr = VaultManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr),
+            Some(dummy_keyring),
+        );
         assert!(!vault_mgr.is_unlocked());
         assert_eq!(vault_mgr.decrypted_items.read().unwrap().len(), 0);
 
@@ -1329,8 +1563,30 @@ mod tests {
         assert!(sync_err.is_err());
         assert_eq!(
             sync_err.unwrap_err(),
-            "Vault is locked. Please unlock first."
+            "Session token missing. Please log in."
         );
+    }
+
+    #[test]
+    fn test_sync_allowed_when_locked_with_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault_sync_locked.json");
+        let storage_mgr = StorageManager::new(path);
+        let mut storage = storage_mgr.load();
+        storage.access_token = Some("fake_test_token".to_string());
+        storage_mgr.save(&storage).unwrap();
+
+        let dummy_keyring = KeyringManager::new("/nonexistent-keyring");
+        let vault_mgr =
+            VaultManager::new("http://127.0.0.1:9", Some(storage_mgr), Some(dummy_keyring));
+        assert!(!vault_mgr.is_unlocked());
+
+        let sync_res = vault_mgr.sync();
+        assert!(sync_res.is_err());
+        let err_msg = sync_res.unwrap_err();
+        assert!(!err_msg.contains("Vault is locked"));
+        assert!(!err_msg.contains("Session token missing"));
+        assert!(err_msg.contains("Sync failed"));
     }
 
     #[test]
@@ -1392,5 +1648,431 @@ mod tests {
 
         let not_found_cat = vault_mgr.find_item("Deploy Key", Some("login"));
         assert!(not_found_cat.is_none());
+    }
+
+    #[test]
+    fn test_vault_sync_silent_reauth_with_api_secret_on_expired_token() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use std::fs;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        // Spawn mock server responding to /identity/connect/token and /api/sync
+        let server_handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("/identity/connect/token") {
+                    let body = serde_json::json!({
+                        "access_token": "renewed_access_token_abc123",
+                        "expires_in": 7200,
+                        "token_type": "Bearer"
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("/api/sync") {
+                    assert!(req.contains("Bearer renewed_access_token_abc123"));
+                    let body = serde_json::json!({
+                        "ciphers": [],
+                        "folders": [],
+                        "collections": [],
+                        "profile": {
+                            "id": "uuid-sync-user",
+                            "email": "sync@example.com"
+                        }
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("vault_reauth.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let store_dir = dir.path().join("store");
+        fs::create_dir_all(&store_dir).unwrap();
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+STORE_DIR="{}"
+cmd="$1"
+shift
+case "$1" in
+    --label=*)
+        shift
+        ;;
+esac
+
+key=""
+while [ $# -gt 0 ]; do
+    k="$1"
+    v="$2"
+    safe_v=$(printf '%s' "$v" | tr '/:' '_')
+    key="${{key}}__${{k}}=${{safe_v}}"
+    shift 2 2>/dev/null || shift 1
+done
+
+case "$cmd" in
+    store)
+        cat > "${{STORE_DIR}}/${{key}}"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
+            cat "${{STORE_DIR}}/${{key}}"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+            rm -f "${{STORE_DIR}}"/*
+        else
+            rm -f "${{STORE_DIR}}/${{key}}"*
+        fi
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            store_dir.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
+
+        let client_id = "user.reauth-test-id";
+        let client_secret = "reauth-secret-val";
+
+        // Store API secret in Keyring
+        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
+
+        // Store an EXPIRED access token in Keyring
+        let now = chrono::Utc::now().timestamp();
+        let past_payload = serde_json::json!({ "exp": now - 300 });
+        let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
+        let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
+        assert!(mock_keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &expired_token));
+
+        let storage = VaultStorage {
+            server_url: server_url.clone(),
+            user_email: "reauth@example.com".to_string(),
+            client_id: Some(client_id.to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let vault_mgr = VaultManager::new(
+            &server_url,
+            Some(storage_mgr.clone()),
+            Some(mock_keyring.clone()),
+        );
+
+        // sync() should detect expired token, silently re-auth via API secret, and successfully sync
+        let sync_res = vault_mgr.sync();
+        assert!(
+            sync_res.is_ok(),
+            "Sync should succeed after silent re-auth: {:?}",
+            sync_res
+        );
+
+        let _ = server_handle.join();
+
+        // Verify the new token is stored in Keyring
+        assert_eq!(
+            mock_keyring.get_token(crate::keyring::KIND_ACCESS_TOKEN),
+            Some("renewed_access_token_abc123".to_string())
+        );
+        // Verify disk storage remains zero-plaintext
+        let fresh_storage = storage_mgr.load();
+        assert!(fresh_storage.access_token.is_none());
+    }
+
+    #[test]
+    fn test_vault_sync_reauth_failure_purges_tokens_and_locks() {
+        use std::fs;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+
+        let server_handle = thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.contains("/connect/token") {
+                    let body = serde_json::json!({
+                        "error": "invalid_grant",
+                        "error_description": "Refresh token revoked"
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("vault_reauth_fail.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let store_dir = dir.path().join("store");
+        fs::create_dir_all(&store_dir).unwrap();
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+STORE_DIR="{}"
+cmd="$1"
+shift
+case "$1" in
+    --label=*)
+        shift
+        ;;
+esac
+
+key=""
+while [ $# -gt 0 ]; do
+    k="$1"
+    v="$2"
+    safe_v=$(printf '%s' "$v" | tr '/:' '_')
+    key="${{key}}__${{k}}=${{safe_v}}"
+    shift 2 2>/dev/null || shift 1
+done
+
+case "$cmd" in
+    store)
+        cat > "${{STORE_DIR}}/${{key}}"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
+            cat "${{STORE_DIR}}/${{key}}"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+            rm -f "${{STORE_DIR}}"/*
+        else
+            rm -f "${{STORE_DIR}}/${{key}}"*
+        fi
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            store_dir.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
+
+        let client_id = "user.fail-test";
+        let client_secret = "secret-val-to-retain";
+
+        // Store API secret in Keyring
+        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
+
+        // Set refresh token in Keyring and storage
+        assert!(mock_keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, "revoked_ref_token"));
+
+        let storage = VaultStorage {
+            server_url: server_url.clone(),
+            user_email: "fail@example.com".to_string(),
+            refresh_token: Some("revoked_ref_token".to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let vault_mgr = VaultManager::new(
+            &server_url,
+            Some(storage_mgr.clone()),
+            Some(mock_keyring.clone()),
+        );
+
+        // renew_session should fail with auth rejection, purge tokens, and lock vault
+        let res = vault_mgr.renew_session();
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err(),
+            "Session expired or credentials rejected. Please log in again."
+        );
+
+        let _ = server_handle.join();
+
+        // Keyring tokens purged
+        assert_eq!(
+            mock_keyring.get_token(crate::keyring::KIND_ACCESS_TOKEN),
+            None
+        );
+        assert_eq!(
+            mock_keyring.get_token(crate::keyring::KIND_REFRESH_TOKEN),
+            None
+        );
+
+        // API secret is preserved
+        assert_eq!(
+            mock_keyring.get_api_secret(&server_url, client_id),
+            Some(client_secret.to_string())
+        );
+
+        // Storage tokens purged
+        let fresh_storage = storage_mgr.load();
+        assert!(fresh_storage.access_token.is_none());
+        assert!(fresh_storage.refresh_token.is_none());
+    }
+
+    #[test]
+    fn test_vault_sync_network_error_preserves_tokens() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("vault_reauth_net_fail.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let store_dir = dir.path().join("store");
+        fs::create_dir_all(&store_dir).unwrap();
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+STORE_DIR="{}"
+cmd="$1"
+shift
+case "$1" in
+    --label=*)
+        shift
+        ;;
+esac
+
+key=""
+while [ $# -gt 0 ]; do
+    k="$1"
+    v="$2"
+    safe_v=$(printf '%s' "$v" | tr '/:' '_')
+    key="${{key}}__${{k}}=${{safe_v}}"
+    shift 2 2>/dev/null || shift 1
+done
+
+case "$cmd" in
+    store)
+        cat > "${{STORE_DIR}}/${{key}}"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
+            cat "${{STORE_DIR}}/${{key}}"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+            rm -f "${{STORE_DIR}}"/*
+        else
+            rm -f "${{STORE_DIR}}/${{key}}"*
+        fi
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            store_dir.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
+
+        // Set refresh token
+        assert!(mock_keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
+
+        let storage = VaultStorage {
+            server_url: "http://127.0.0.1:9".to_string(), // Unreachable port
+            user_email: "offline@example.com".to_string(),
+            refresh_token: Some("valid_ref_token".to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let vault_mgr = VaultManager::new(
+            "http://127.0.0.1:9",
+            Some(storage_mgr.clone()),
+            Some(mock_keyring.clone()),
+        );
+
+        // renew_session should fail due to network error without wiping tokens
+        let res = vault_mgr.renew_session();
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Network error"));
+
+        // Keyring refresh token NOT purged
+        assert_eq!(
+            mock_keyring.get_token(crate::keyring::KIND_REFRESH_TOKEN),
+            Some("valid_ref_token".to_string())
+        );
+
+        // Storage tokens NOT purged
+        let fresh_storage = storage_mgr.load();
+        assert_eq!(
+            fresh_storage.refresh_token,
+            Some("valid_ref_token".to_string())
+        );
     }
 }

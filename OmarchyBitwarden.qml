@@ -136,8 +136,8 @@ Item {
 
   readonly property string effectiveView: {
     if (currentView !== "auto") return currentView
-    if (authState.status === "unlocked") return "search"
-    if (authState.status === "locked") return "unlock"
+    if (authState.status === "unlocked" && Boolean(authState.has_session)) return "search"
+    if (authState.status === "locked" && Boolean(authState.has_session)) return "unlock"
     return "login"
   }
 
@@ -283,8 +283,9 @@ Item {
   }
 
   function syncVault(isBackground, force) {
-    if (root.authState.status !== "unlocked") {
-      root.logWarn("omarchy:vault", "Cannot sync vault: vault is not unlocked.")
+    var hasSession = root.authState && Boolean(root.authState.has_session)
+    if (!hasSession) {
+      root.logWarn("omarchy:vault", "Cannot sync vault: not logged in.")
       return
     }
     if (vaultSyncProc.running) return
@@ -1537,7 +1538,7 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+R"
-        enabled: root.opened && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal
+        enabled: root.opened && (root.authState.status === "unlocked" || (root.authState.status === "locked" && root.authState.has_session)) && !root.isBusy && !root.showSshKeyModal
         onActivated: root.syncVault(false, true)
       }
 
@@ -1713,7 +1714,7 @@ Item {
           } else if (event.key === Qt.Key_L && root.authState.status === "unlocked" && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.doLock()
             event.accepted = true
-          } else if (event.key === Qt.Key_R && root.authState.status === "unlocked" && !root.isBusy && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
+          } else if (event.key === Qt.Key_R && (root.authState.status === "unlocked" || (root.authState.status === "locked" && root.authState.has_session)) && !root.isBusy && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
             root.syncVault(false, true)
             event.accepted = true
           } else if (event.key === Qt.Key_Comma && !root.showSshKeyModal && !root.showPasswordHistoryModal) {
@@ -2517,9 +2518,33 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
+        try {
+          var res = JSON.parse(text)
+          if (res && res.ok === false) {
+            root.errorMessage = res.error || "Vault sync failed."
+            root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
+            var errStr = String(res.error || "")
+            if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
+              root.authState = ({
+                status: "unauthenticated",
+                server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
+                user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
+                has_session: false
+              })
+              root.rawVaultItems = []
+              root.filteredItems = []
+              root.currentView = "auto"
+            }
+            return
+          }
+        } catch (e) {
+          // Non-JSON output
+        }
         root.lastSyncTime = Date.now()
         root.statusMessage = "Vault synchronized."
-        root.loadVaultItems()
+        if (root.authState && root.authState.status === "unlocked") {
+          root.loadVaultItems()
+        }
         Qt.callLater(function() {
           if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
             searchHeader.searchField.forceActiveFocus()
@@ -2533,7 +2558,7 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0) {
+      if (code !== 0 && !root.errorMessage) {
         root.errorMessage = "Vault sync failed."
         root.logError("omarchy:vault", "Vault sync process exited with code " + code)
       }

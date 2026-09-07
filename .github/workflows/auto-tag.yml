@@ -78,3 +78,13 @@ jobs:
         run: |
           echo "Dispatching release-plugin.yml for ${{ steps.plugin.outputs.tag_name }}..."
           gh workflow run release-plugin.yml -f tag="${{ steps.plugin.outputs.tag_name }}"
+
+      - name: Sync main back to develop
+        run: |
+          echo "Syncing main back into develop..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin develop
+          git checkout develop
+          git merge --no-edit origin/main -m "chore: sync main back to develop"
+          git push origin develop
