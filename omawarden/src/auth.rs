@@ -16,8 +16,11 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     if lower.contains("mac mismatch:") {
         return raw.to_string();
     }
-    if lower.contains("invalid")
-        && (lower.contains("password") || lower.contains("username") || lower.contains("email"))
+    if (lower.contains("invalid") || lower.contains("incorrect") || lower.contains("not found"))
+        && (lower.contains("password")
+            || lower.contains("username")
+            || lower.contains("email")
+            || lower.contains("user"))
     {
         return "Invalid username, email, or master password.".to_string();
     }
@@ -30,10 +33,39 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     if lower.contains("already logged in") {
         return "Already logged in.".to_string();
     }
+    if lower.contains("404") || lower.contains("endpoint not found") {
+        return "Bitwarden server endpoint not found (HTTP 404). Please verify your server URL."
+            .to_string();
+    }
+    if lower.contains("http error 500")
+        || lower.contains("http 500")
+        || lower.contains("status 500")
+        || lower.contains("internal server error")
+    {
+        return "Bitwarden server encountered an internal error (HTTP 500).".to_string();
+    }
+    if lower.contains("http error 502")
+        || lower.contains("http 502")
+        || lower.contains("status 502")
+        || lower.contains("bad gateway")
+    {
+        return "Bitwarden server is unavailable (HTTP 502 Bad Gateway).".to_string();
+    }
+    if lower.contains("http error 503")
+        || lower.contains("http 503")
+        || lower.contains("status 503")
+        || lower.contains("service unavailable")
+    {
+        return "Bitwarden server is temporarily unavailable (HTTP 503).".to_string();
+    }
     if lower.contains("network")
         || lower.contains("failed to fetch")
         || lower.contains("econnrefused")
+        || lower.contains("connection refused")
         || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("unable to reach")
+        || lower.contains("dns")
     {
         return "Network error: unable to reach Bitwarden server.".to_string();
     }
@@ -661,6 +693,46 @@ mod tests {
             "Network error: unable to reach Bitwarden server."
         );
         assert_eq!(
+            sanitize_auth_error(Some("Network error: dns lookup failed")),
+            "Network error: unable to reach Bitwarden server."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("HTTP error 404: Not Found")),
+            "Bitwarden server endpoint not found (HTTP 404). Please verify your server URL."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Prelogin returned HTTP 404 Not Found")),
+            "Bitwarden server endpoint not found (HTTP 404). Please verify your server URL."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("HTTP error 500: Internal Server Error")),
+            "Bitwarden server encountered an internal error (HTTP 500)."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("HTTP error 502: Bad Gateway")),
+            "Bitwarden server is unavailable (HTTP 502 Bad Gateway)."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("HTTP error 503: Service Unavailable")),
+            "Bitwarden server is temporarily unavailable (HTTP 503)."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Connection timed out")),
+            "Network error: unable to reach Bitwarden server."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("operation timed out")),
+            "Network error: unable to reach Bitwarden server."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Invalid username or password (kdf 500000 iterations)")),
+            "Invalid username, email, or master password."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Username not found")),
+            "Invalid username, email, or master password."
+        );
+        assert_eq!(
             sanitize_auth_error(Some("Vault is locked")),
             "Vault is locked."
         );
@@ -728,7 +800,49 @@ mod tests {
         let res = auth_mgr.login_apikey("user.client-id-123", "secret-xyz");
         assert!(!res.ok);
         assert_eq!(res.status.as_deref(), Some("unauthenticated"));
-        assert!(res.error.is_some());
+        assert_eq!(
+            res.error.as_deref(),
+            Some("Network error: unable to reach Bitwarden server.")
+        );
+    }
+
+    #[test]
+    fn test_login_password_endpoint_404_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            let mut count = 0;
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                count += 1;
+                if count >= 2 {
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_404_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), None);
+        let res = auth_mgr.login_password("test@example.com", "password123", None);
+        assert!(!res.ok);
+        assert_eq!(
+            res.error.as_deref(),
+            Some("Bitwarden server endpoint not found (HTTP 404). Please verify your server URL.")
+        );
+        let _ = handle.join();
     }
 
     #[test]

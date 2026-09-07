@@ -11,6 +11,8 @@ use crate::vault::{parse_ssh_key_fields, SshMetadata, VaultItem};
 
 #[derive(Debug, Clone)]
 pub enum ApiError {
+    Network(String),
+    HttpStatus(reqwest::StatusCode, String),
     Http(String),
     Json(String),
     AuthFailed(String),
@@ -21,7 +23,9 @@ pub enum ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ApiError::Http(s) => write!(f, "Network HTTP error: {}", s),
+            ApiError::Network(s) => write!(f, "Network error: {}", s),
+            ApiError::HttpStatus(code, s) => write!(f, "HTTP error {}: {}", code, s),
+            ApiError::Http(s) => write!(f, "HTTP error: {}", s),
             ApiError::Json(s) => write!(f, "JSON decode error: {}", s),
             ApiError::AuthFailed(s) => write!(f, "API authentication failed: {}", s),
             ApiError::TwoFactorRequired { .. } => write!(f, "Two-factor authentication required"),
@@ -30,6 +34,30 @@ impl std::fmt::Display for ApiError {
     }
 }
 impl std::error::Error for ApiError {}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_connect() || e.is_timeout() {
+            ApiError::Network(e.to_string())
+        } else if let Some(status) = e.status() {
+            ApiError::HttpStatus(status, e.to_string())
+        } else {
+            let msg = e.to_string();
+            let lower = msg.to_lowercase();
+            if lower.contains("dns")
+                || lower.contains("connection refused")
+                || lower.contains("connect")
+                || lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("unreachable")
+            {
+                ApiError::Network(msg)
+            } else {
+                ApiError::Http(msg)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreloginResponse {
@@ -238,12 +266,14 @@ impl BitwardenApiClient {
             }
         }
 
-        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let resp = resp.map_err(ApiError::from)?;
         if !resp.status().is_success() {
-            return Err(ApiError::Http(format!(
-                "Prelogin returned status {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Prelogin returned HTTP {} ({})", status, body),
+            ));
         }
 
         resp.json::<PreloginResponse>()
@@ -268,7 +298,7 @@ impl BitwardenApiClient {
             }
         }
 
-        resp.map_err(|e| ApiError::Http(e.to_string()))
+        resp.map_err(ApiError::from)
     }
 
     pub fn login_password(
@@ -345,6 +375,11 @@ impl BitwardenApiClient {
                 .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
 
             Ok((token_resp, user_key))
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Password login endpoint error: HTTP {}", status),
+            ))
         } else {
             if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
                 if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
@@ -357,7 +392,13 @@ impl BitwardenApiClient {
                     return Err(ApiError::AuthFailed(err_msg.to_string()));
                 }
             }
-            Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+            } else {
+                Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
+            }
         }
     }
 
@@ -382,6 +423,11 @@ impl BitwardenApiClient {
         if status.is_success() {
             serde_json::from_str::<TokenResponse>(&body_text)
                 .map_err(|e| ApiError::Json(e.to_string()))
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("API key login endpoint error: HTTP {}", status),
+            ))
         } else {
             if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
                 if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
@@ -391,7 +437,13 @@ impl BitwardenApiClient {
                     return Err(ApiError::AuthFailed(err_msg.to_string()));
                 }
             }
-            Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+            } else {
+                Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
+            }
         }
     }
 
@@ -408,11 +460,33 @@ impl BitwardenApiClient {
         if status.is_success() {
             serde_json::from_str::<TokenResponse>(&body_text)
                 .map_err(|e| ApiError::Json(e.to_string()))
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Refresh token endpoint error: HTTP {}", status),
+            ))
         } else {
-            Err(ApiError::AuthFailed(format!(
-                "Refresh token failed: HTTP {}",
-                status
-            )))
+            if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
+                if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_desc.to_string()));
+                }
+                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                Err(ApiError::AuthFailed(format!(
+                    "Refresh token rejected: HTTP {}",
+                    status
+                )))
+            } else {
+                Err(ApiError::HttpStatus(
+                    status,
+                    format!("Refresh token HTTP {}", status),
+                ))
+            }
         }
     }
 
@@ -423,13 +497,15 @@ impl BitwardenApiClient {
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
-            .map_err(|e| ApiError::Http(e.to_string()))?;
+            .map_err(ApiError::from)?;
 
         if !resp.status().is_success() {
-            return Err(ApiError::Http(format!(
-                "Sync vault failed with HTTP status {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Sync vault failed with HTTP status {} ({})", status, body),
+            ));
         }
 
         resp.json::<SyncResponse>()
@@ -444,15 +520,15 @@ impl BitwardenApiClient {
             .header("Authorization", format!("Bearer {}", access_token))
             .json(payload)
             .send()
-            .map_err(|e| ApiError::Http(e.to_string()))?;
+            .map_err(ApiError::from)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            return Err(ApiError::Http(format!(
-                "Create cipher failed ({}): {}",
-                status, body
-            )));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Create cipher failed (HTTP {}): {}", status, body),
+            ));
         }
 
         resp.json::<Value>()
