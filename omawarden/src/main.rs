@@ -155,6 +155,8 @@ enum AuthAction {
     LoginPassword {
         #[arg(long, required = true)]
         email: String,
+        #[arg(long, help = "Optional two-factor authentication (2FA) code")]
+        code: Option<String>,
     },
     #[command(about = "Login using API Key (client_secret read from stdin)")]
     LoginApikey {
@@ -302,12 +304,13 @@ fn read_clipboard_stdin() -> String {
 }
 
 fn read_auth_payload() -> (String, Option<String>) {
+    use std::io::Read;
     let stdin = io::stdin();
     if stdin.is_terminal() {
         return (String::new(), None);
     }
     let mut raw = String::new();
-    let _ = stdin.lock().read_line(&mut raw);
+    let _ = stdin.lock().read_to_string(&mut raw);
     let raw = raw.trim();
     if raw.is_empty() {
         return (String::new(), None);
@@ -328,7 +331,7 @@ fn read_auth_payload() -> (String, Option<String>) {
         }
     }
 
-    let mut lines = raw.splitn(2, '\n');
+    let mut lines = raw.lines();
     let first = lines
         .next()
         .unwrap_or("")
@@ -506,15 +509,16 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
                 }
-                AuthAction::LoginPassword { email } => {
-                    let (pwd, code_val) = if io::stdin().is_terminal() {
+                AuthAction::LoginPassword { email, code } => {
+                    let (pwd, stdin_code) = if io::stdin().is_terminal() {
                         let p = rpassword::prompt_password("Enter Master Password: ")
                             .unwrap_or_default();
                         (p, None)
                     } else {
                         read_auth_payload()
                     };
-                    let res = auth_mgr.login_password(&email, &pwd, code_val.as_deref());
+                    let effective_code = code.or(stdin_code);
+                    let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
                         ExitCode::SUCCESS

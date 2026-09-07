@@ -26,6 +26,7 @@ Item {
   signal settingsRequested()
 
   property alias unlockInput: unlockPasswordField
+  property alias twoFactorInput: login2FAInput
 
   function clearInputs() {
     if (unlockPasswordField) unlockPasswordField.text = ""
@@ -38,6 +39,11 @@ Item {
     if (!visible) {
       clearInputs()
     }
+  }
+
+  onLoginMethodChanged: {
+    clearInputs()
+    authRoot.show2FAField = false
   }
 
   onAuthStateChanged: {
@@ -285,6 +291,13 @@ Item {
                   id: loginPwdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  onAccepted: {
+                    if (authRoot.show2FAField && !login2FAInput.text.trim()) {
+                      login2FAInput.forceActiveFocus()
+                    } else {
+                      authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
+                    }
+                  }
                 }
               }
             }
@@ -300,6 +313,9 @@ Item {
                   id: login2FAInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  onAccepted: {
+                    authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
+                  }
                 }
               }
             }

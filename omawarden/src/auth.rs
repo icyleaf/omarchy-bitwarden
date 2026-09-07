@@ -27,7 +27,15 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     if lower.contains("decryption") || lower.contains("not the expected type") {
         return "Decryption failed. Incorrect master password.".to_string();
     }
-    if lower.contains("two-step") || lower.contains("two-factor") || lower.contains("code") {
+    if lower.contains("two-step")
+        || lower.contains("two-factor")
+        || lower.contains("two factor")
+        || lower.contains("twofactor")
+        || lower.contains("2fa")
+        || lower.contains("verification code")
+        || lower.contains("authenticator code")
+        || lower.contains("security code")
+    {
         return "Two-factor authentication required or invalid code.".to_string();
     }
     if lower.contains("already logged in") {
@@ -115,12 +123,16 @@ pub struct AuthStatus {
     pub has_session: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthResult {
     pub ok: bool,
     pub status: Option<String>,
     pub session: Option<String>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_factor_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_factor_providers: Option<Vec<i32>>,
 }
 
 pub struct AuthManager {
@@ -333,14 +345,34 @@ impl AuthManager {
         let (token_resp, _user_key) = match client.login_password(email, &password_zeroizing, code)
         {
             Ok(r) => r,
+            Err(crate::api::ApiError::TwoFactorRequired { providers }) => {
+                crate::log_info!(
+                    "omawarden:auth",
+                    "Two-factor authentication required for {}",
+                    email
+                );
+                return AuthResult {
+                    ok: false,
+                    status: Some("unauthenticated".to_string()),
+                    session: None,
+                    error: Some("Two-factor authentication required or invalid code.".to_string()),
+                    two_factor_required: Some(true),
+                    two_factor_providers: Some(providers),
+                };
+            }
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
+                let is_2fa = err_msg.to_lowercase().contains("two-factor")
+                    || err_msg.to_lowercase().contains("two factor")
+                    || err_msg.to_lowercase().contains("2fa");
                 crate::log_warn!("omawarden:auth", "Login failed for {}: {}", email, err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
                     session: None,
                     error: Some(err_msg),
+                    two_factor_required: if is_2fa { Some(true) } else { None },
+                    two_factor_providers: None,
                 };
             }
         };
@@ -429,7 +461,7 @@ impl AuthManager {
             ok: true,
             status: Some("unlocked".to_string()),
             session: Some(token_resp.access_token),
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -451,6 +483,7 @@ impl AuthManager {
                     status: Some("unauthenticated".to_string()),
                     session: None,
                     error: Some(err_msg),
+                    ..Default::default()
                 };
             }
         };
@@ -562,7 +595,7 @@ impl AuthManager {
             ok: true,
             status: Some("locked".to_string()),
             session: Some(token_resp.access_token),
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -576,6 +609,7 @@ impl AuthManager {
                 status: Some("unauthenticated".to_string()),
                 session: None,
                 error: Some("Account is not logged in.".to_string()),
+                ..Default::default()
             };
         }
 
@@ -613,7 +647,7 @@ impl AuthManager {
                     ok: true,
                     status: Some("unlocked".to_string()),
                     session: session_val,
-                    error: None,
+                    ..Default::default()
                 }
             }
             Err(e) => {
@@ -624,6 +658,7 @@ impl AuthManager {
                     status: Some("locked".to_string()),
                     session: None,
                     error: Some(err_msg),
+                    ..Default::default()
                 }
             }
         }
@@ -640,7 +675,7 @@ impl AuthManager {
             ok: true,
             status: Some("locked".to_string()),
             session: None,
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -660,7 +695,7 @@ impl AuthManager {
             ok: true,
             status: Some("unauthenticated".to_string()),
             session: None,
-            error: None,
+            ..Default::default()
         }
     }
 }
@@ -731,6 +766,14 @@ mod tests {
         assert_eq!(
             sanitize_auth_error(Some("Username not found")),
             "Invalid username, email, or master password."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("Two factor required.")),
+            "Two-factor authentication required or invalid code."
+        );
+        assert_eq!(
+            sanitize_auth_error(Some("2FA code invalid")),
+            "Two-factor authentication required or invalid code."
         );
         assert_eq!(
             sanitize_auth_error(Some("Vault is locked")),
@@ -841,6 +884,62 @@ mod tests {
         assert_eq!(
             res.error.as_deref(),
             Some("Bitwarden server endpoint not found (HTTP 404). Please verify your server URL.")
+        );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_two_factor_required() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["0"]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_2fa_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), None);
+        let res = auth_mgr.login_password("user@example.com", "password123", None);
+        assert!(!res.ok);
+        assert_eq!(res.status.as_deref(), Some("unauthenticated"));
+        assert_eq!(res.two_factor_required, Some(true));
+        assert_eq!(res.two_factor_providers, Some(vec![0]));
+        assert_eq!(
+            res.error.as_deref(),
+            Some("Two-factor authentication required or invalid code.")
         );
         let _ = handle.join();
     }
