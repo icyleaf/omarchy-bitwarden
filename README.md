@@ -15,13 +15,16 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 
 ## Why omarchy-bitwarden?
 
-| Dimension                | omarchy-bitwarden (`omawarden`)                              | Official Desktop App (Electron) | Official CLI (`bw`)                   |
-| :----------------------- | :----------------------------------------------------------- | :------------------------------ | :------------------------------------ |
-| **Response Latency**     | **Sub-millisecond** (resident in-memory IPC socket)          | Slow UI render (1.5s - 3s)      | Heavy Node.js startup delay           |
-| **Memory Footprint**     | **Lightweight daemon (~10MB base / ~60-80MB with Argon2id)** | 200MB - 400MB+ Chromium bloat   | Transient, high peak memory           |
-| **Process Security**     | **Zero-leakage** (protected stdin & 0600 socket)             | Broad webview memory exposure   | Secrets prone to `argv`/`ps` snooping |
-| **Lock-Screen Sync**     | **Native D-Bus / Hyprlock hooks**                            | App idle timeout only           | None (manual lock required)           |
-| **Runtime Dependencies** | **100% standalone binary** (Zero external deps)              | Full Chromium/Node runtime      | Node.js environment required          |
+| Dimension                      | omarchy-bitwarden (`omawarden`)                                      | Official Desktop App (Electron)    | Official CLI (`bw`)                                                          |
+| :----------------------------- | :------------------------------------------------------------------- | :--------------------------------- | :--------------------------------------------------------------------------- |
+| **Response Latency**           | **Sub-millisecond** (resident in-memory IPC socket)                  | Slow UI render (1.5s - 3s)         | Heavy Node.js startup delay                                                  |
+| **Memory Footprint**           | **Lightweight daemon (~10MB base / ~60-80MB with Argon2id)**         | 200MB - 400MB+ Chromium bloat      | Transient, high peak memory                                                  |
+| **Process Security**           | **Zero-leakage** (protected stdin & 0600 socket)                     | Broad webview memory exposure      | Secrets prone to `argv`/`ps` snooping                                        |
+| **Token & Secret Storage**     | **System Keyring Isolation** (0 plaintext tokens in local cache)     | Desktop Keychain / Electron store  | Stored in plaintext cache file or relies on insecure, leak-prone `BW_SESSION` env export |
+| **Local Data Caching**         | **Zero-Knowledge Ciphertext Cache** (fast offline search, no tokens) | Local cache file mixed with session tokens                         | Local cache file mixed with session tokens                                   |
+| **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
+| **Lock-Screen Sync**           | **Native D-Bus / Hyprlock hooks**                                   | App idle timeout only              | None (manual lock required)                                                  |
+| **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
 ---
 
 ## Keyboard Shortcuts
@@ -113,6 +116,7 @@ rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
   3. Click **View API Key** and enter your master password.
   4. Copy your `client_id` (e.g. `user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and `client_secret`.
 - **In Omarchy Overlay**: Switch the login tab to **API Key**, paste your `client_id` and `client_secret`, and log in. Once authenticated, subsequent unlocks are completed via your Master Password.
+- **Keyring Persistence & Silent Renewal**: Your `client_secret` is securely preserved in the system Keyring (never written to disk). When 2-hour access tokens expire, `omawarden` automatically and silently re-authenticates in the background without interrupting sync or kicking you back to re-login.
 
 ---
 
@@ -139,9 +143,13 @@ flowchart TD
         direction TB
         Daemon["Resident In-Memory Daemon\nZeroized Memory on Drop (zeroize)"]
         Crypto["Native Cryptography Engine\nPBKDF2 • Argon2id • AES-256-CBC • RSA-OAEP-SHA1"]
-        REST["Direct Bitwarden REST/OAuth2 Client"]
-        Keyring["FreeDesktop Secret Service (Keyring)"]
+        REST["Direct Bitwarden REST/OAuth2 Client\nSilent Background Re-authentication"]
         Clipboard["Ephemeral Wayland Clipboard (wl-copy)"]
+    end
+
+    subgraph SecurityStore["Protected System & Disk Stores"]
+        Keyring["System Keyring (Secret Service)\nAccess/Refresh Tokens • API Secrets • Session\nZero Plaintext on Disk"]
+        Disk["Local Cache File (0600)\nZero-Knowledge Ciphertext Only\nCiphers • Folders • No Bearer Tokens"]
     end
 
     UI_Pwd -->|Protected Stdin| P_Stdin
@@ -155,17 +163,20 @@ flowchart TD
 
     Daemon <--> Crypto
     Daemon <--> REST
-    Daemon <--> Keyring
     Daemon --> Clipboard
+
+    REST <-->|Silent Re-auth / Fetch Tokens| Keyring
+    Daemon <-->|Read / Write E2E Ciphertext| Disk
+    Daemon <-->|Session & Credentials| Keyring
 ```
 
 ### Key Security Guarantees:
 
 1. **Zero Command-Line (`argv`) Credential Leakage**: Master passwords, client secrets, 2FA codes, TOTP seeds, and clipboard text are **never passed as command-line arguments**. By delivering all sensitive data exclusively through protected `stdin` streams or `0600` Unix domain sockets, command line inspection reveals zero sensitive credentials.
 2. **Zero Process Environment (`env`) Secret Spillage**: API client secrets, passwords, and live session tokens are never exported to process environment variables (`/proc/<pid>/environ`).
-3. **Strict Owner-Only File & Socket Permissions (`0600`)**: Vault cache file (`~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`) and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
+3. **Strict Owner-Only File & Socket Permissions (`0600`)**: The local vault cache file and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
 4. **Deterministic Zero-Memory Destruction (`zeroize`)**: All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate hashes implement `zeroize::ZeroizeOnDrop` to overwrite volatile memory with zeros upon drop. When the vault is locked, all decrypted items and keys are immediately purged from daemon memory.
-5. **Native FreeDesktop Secret Service Keyring Lifecycle**: Encrypted session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols. **No cleartext master passwords are ever written to disk**. Immediate session destruction occurs on lock (<kbd>Ctrl</kbd>+<kbd>L</kbd>), screen-lock events (`hyprlock`/`swaylock`), or idle timeout.
+5. **Native FreeDesktop Secret Service Keyring Lifecycle**: Bearer tokens (`access_token`, `refresh_token`), API key secrets (`client_secret`), and active session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols. **The local cache file is a pure zero-knowledge ciphertext store with zero plaintext bearer tokens or master passwords on disk**. Immediate session destruction occurs on lock (<kbd>Ctrl</kbd>+<kbd>L</kbd>), screen-lock events (`hyprlock`/`swaylock`), or idle timeout.
 6. **Ephemeral Clipboard Auto-Clearing (30s TTL)**: When copying passwords, TOTP codes, card CVVs, or SSH private keys, sensitive values are piped directly to `wl-copy` without entering shell logs. A dedicated timer daemon automatically clears the Wayland clipboard after 30 seconds (configurable in Settings).
 7. **Zero External Runtime Dependencies**: 100% pure Rust binary. No external Node.js, Python, or official `bw` CLI binary is required at runtime.
 
@@ -179,10 +190,15 @@ flowchart TD
 - [x] Full Argon2id / PBKDF2 / AES-256-CBC / RSA-OAEP native decryption
 - [x] Real-time live RFC 6238 TOTP token engine & visual countdown
 - [x] Screen-lock auto-lock hook & FreeDesktop Secret Service Keyring integration
+- [x] Multi-slot system Keyring credential persistence & silent background re-authentication
 - [x] Ephemeral Wayland clipboard manager with 30s auto-clear TTL
 - [x] Encrypted binary attachment downloads & inline previews (images & text)
 - [x] SSH key management (Ed25519/RSA/ECDSA generation, file import & export)
+- [x] Multi-dimensional vault (personal/organization) and folder scope filtering
 - [x] Multi-organization & collection key unwrapping with badges
+- [x] Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) & password history viewer (<kbd>Ctrl</kbd>+<kbd>H</kbd>)
+- [x] FIDO2 / WebAuthn passkey indicator & item creation/update history
+- [x] Locked-state background sync (syncing encrypted ciphertext while vault is locked)
 - [x] Self-hosted Vaultwarden & personal API key / 2FA login support
 - [x] Dual-channel structured logging & privacy-redacted diagnostics
 
