@@ -12,6 +12,8 @@ pub const DEFAULT_STORAGE_FILENAME: &str = "data.json";
 pub struct VaultStorage {
     pub server_url: String,
     pub user_email: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
     pub user_id: Option<String>,
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
@@ -132,6 +134,7 @@ mod tests {
         let storage = VaultStorage {
             user_email: "tester@domain.com".to_string(),
             server_url: "https://vaultwarden.local".to_string(),
+            client_id: Some("user.12345678".to_string()),
             ..Default::default()
         };
 
@@ -139,5 +142,6 @@ mod tests {
         let loaded = mgr.load();
         assert_eq!(loaded.user_email, "tester@domain.com");
         assert_eq!(loaded.server_url, "https://vaultwarden.local");
+        assert_eq!(loaded.client_id, Some("user.12345678".to_string()));
     }
 }
