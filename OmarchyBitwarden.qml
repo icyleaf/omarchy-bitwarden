@@ -1415,6 +1415,7 @@ Item {
 
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
+    root.show2FAField = false
     if (authViewComponent) authViewComponent.clearInputs()
     root.authState = ({
       status: "unauthenticated",
@@ -2440,8 +2441,24 @@ Item {
             root.errorMessage = data.error || "Login failed."
             root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
-            if (errLower.indexOf("two-step") !== -1 || errLower.indexOf("two-factor") !== -1 || errLower.indexOf("code") !== -1) {
+            var is2FA = Boolean(data.two_factor_required)
+                || errLower.indexOf("two-step") !== -1
+                || errLower.indexOf("two-factor") !== -1
+                || errLower.indexOf("two factor") !== -1
+                || errLower.indexOf("twofactor") !== -1
+                || errLower.indexOf("2fa") !== -1
+                || errLower.indexOf("verification code") !== -1
+                || errLower.indexOf("authenticator code") !== -1
+                || errLower.indexOf("security code") !== -1
+            if (is2FA) {
               root.show2FAField = true
+              if (authViewComponent && authViewComponent.twoFactorInput) {
+                Qt.callLater(function() {
+                  authViewComponent.twoFactorInput.forceActiveFocus()
+                })
+              }
+            } else {
+              root.show2FAField = false
             }
           }
         } catch (e) {
