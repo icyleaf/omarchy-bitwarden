@@ -303,20 +303,13 @@ fn read_clipboard_stdin() -> String {
     String::new()
 }
 
-fn read_auth_payload() -> (String, Option<String>) {
-    use std::io::Read;
-    let stdin = io::stdin();
-    if stdin.is_terminal() {
-        return (String::new(), None);
-    }
-    let mut raw = String::new();
-    let _ = stdin.lock().read_to_string(&mut raw);
-    let raw = raw.trim();
-    if raw.is_empty() {
+fn parse_auth_payload(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim_end_matches(&['\r', '\n'][..]).trim();
+    if trimmed.is_empty() {
         return (String::new(), None);
     }
 
-    if let Ok(val) = serde_json::from_str::<Value>(raw) {
+    if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
         if let Some(map) = val.as_object() {
             let pwd = map
                 .get("password")
@@ -331,19 +324,26 @@ fn read_auth_payload() -> (String, Option<String>) {
         }
     }
 
-    let mut lines = raw.lines();
-    let first = lines
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('\r')
-        .to_string();
-    if let Some(second) = lines.next() {
-        let second_trimmed = second.trim().to_string();
-        if !second_trimmed.is_empty() {
-            return (first, Some(second_trimmed));
+    let mut pwd = trimmed.to_string();
+    if pwd.starts_with('"') && pwd.ends_with('"') && pwd.len() >= 2 {
+        if let Ok(unescaped) = serde_json::from_str::<String>(&pwd) {
+            pwd = unescaped;
         }
     }
-    (first, None)
+
+    (pwd, None)
+}
+
+fn read_auth_payload() -> (String, Option<String>) {
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return (String::new(), None);
+    }
+    let mut buffer = String::new();
+    if stdin.lock().read_line(&mut buffer).is_err() {
+        return (String::new(), None);
+    }
+    parse_auth_payload(&buffer)
 }
 
 fn main() -> ExitCode {
@@ -1630,4 +1630,37 @@ fn ensure_unlocked_user_key(
     let _ = send_daemon_request(&json!({ "action": "unlock", "password": pwd }));
 
     Ok(user_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_auth_payload_plain() {
+        let (pwd, code) = parse_auth_payload("mypassword\n");
+        assert_eq!(pwd, "mypassword");
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn test_parse_auth_payload_json_with_code() {
+        let (pwd, code) = parse_auth_payload("{\"password\": \"secret123\", \"code\": \"654321\"}\n");
+        assert_eq!(pwd, "secret123");
+        assert_eq!(code.as_deref(), Some("654321"));
+    }
+
+    #[test]
+    fn test_parse_auth_payload_json_without_code() {
+        let (pwd, code) = parse_auth_payload("{\"password\": \"secret123\"}\n");
+        assert_eq!(pwd, "secret123");
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn test_parse_auth_payload_empty() {
+        let (pwd, code) = parse_auth_payload("  \r\n");
+        assert_eq!(pwd, "");
+        assert_eq!(code, None);
+    }
 }

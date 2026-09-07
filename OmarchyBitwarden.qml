@@ -1396,7 +1396,7 @@ Item {
     if (code) {
       authLoginProc.secret = JSON.stringify({ password: password, code: code })
     } else {
-      authLoginProc.secret = password
+      authLoginProc.secret = JSON.stringify({ password: password })
     }
     authLoginProc.command = cmd
     authLoginProc.running = true
