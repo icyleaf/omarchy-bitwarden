@@ -17,6 +17,8 @@ pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub struct Config {
     #[serde(default = "default_server_url")]
     pub server_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_url: Option<String>,
     #[serde(default = "default_bw_path")]
     pub bw_path: String,
     #[serde(default = "default_download_dir")]
@@ -67,6 +69,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             server_url: default_server_url(),
+            identity_url: None,
             bw_path: default_bw_path(),
             download_dir: default_download_dir(),
             auto_lock_minutes: default_auto_lock_minutes(),
@@ -133,6 +136,7 @@ mod tests {
     fn test_default_config() {
         let cfg = Config::default();
         assert_eq!(cfg.server_url, DEFAULT_SERVER_URL);
+        assert_eq!(cfg.identity_url, None);
         assert_eq!(cfg.bw_path, DEFAULT_BW_PATH);
         assert_eq!(cfg.download_dir, DEFAULT_DOWNLOAD_DIR);
         assert_eq!(cfg.auto_lock_minutes, 15);
@@ -179,6 +183,7 @@ mod tests {
         assert_eq!(loaded.email, "partial@test.com");
         assert_eq!(loaded.auto_lock_minutes, 5);
         assert_eq!(loaded.server_url, DEFAULT_SERVER_URL);
+        assert_eq!(loaded.identity_url, None);
         assert_eq!(loaded.bw_path, DEFAULT_BW_PATH);
         assert!(loaded.remember_email);
     }
@@ -192,5 +197,39 @@ mod tests {
         let mgr = ConfigManager::new(Some(&path));
         let loaded = mgr.load();
         assert_eq!(loaded, Config::default());
+    }
+
+    #[test]
+    fn test_identity_url_serialization_and_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mgr = ConfigManager::new(Some(&path));
+
+        let cfg = Config {
+            server_url: "https://api.bitwarden.com".to_string(),
+            identity_url: Some("https://identity.bitwarden.com".to_string()),
+            ..Default::default()
+        };
+
+        mgr.save(&cfg).unwrap();
+        let json_content = fs::read_to_string(&path).unwrap();
+        assert!(json_content.contains("\"identity_url\": \"https://identity.bitwarden.com\""));
+
+        let loaded = mgr.load();
+        assert_eq!(loaded.server_url, "https://api.bitwarden.com");
+        assert_eq!(
+            loaded.identity_url,
+            Some("https://identity.bitwarden.com".to_string())
+        );
+
+        // Test that skipping identity_url omits it from JSON when None
+        let mut cfg_no_id = cfg;
+        cfg_no_id.identity_url = None;
+        mgr.save(&cfg_no_id).unwrap();
+        let json_content_none = fs::read_to_string(&path).unwrap();
+        assert!(!json_content_none.contains("\"identity_url\""));
+
+        let loaded_none = mgr.load();
+        assert_eq!(loaded_none.identity_url, None);
     }
 }
