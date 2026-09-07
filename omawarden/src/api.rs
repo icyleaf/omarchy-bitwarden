@@ -200,6 +200,43 @@ impl EnvironmentUrls {
     }
 }
 
+/// Returns a stable device identifier (UUID format) for Bitwarden identity endpoints.
+/// Uses `/etc/machine-id` or `/var/lib/dbus/machine-id` if available,
+/// or falls back to an RFC 4122 v4 UUID.
+pub fn get_device_identifier() -> String {
+    for path in &["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(id) = std::fs::read_to_string(path) {
+            let trimmed = id.trim();
+            if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                return format!(
+                    "{}-{}-{}-{}-{}",
+                    &trimmed[0..8],
+                    &trimmed[8..12],
+                    &trimmed[12..16],
+                    &trimmed[16..20],
+                    &trimmed[20..32]
+                );
+            }
+        }
+    }
+
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 16];
+    let mut rng = rand_core::OsRng;
+    rng.fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
 pub struct BitwardenApiClient {
     pub server_url: String,
     pub urls: EnvironmentUrls,
@@ -228,7 +265,7 @@ impl BitwardenApiClient {
         );
         default_headers.insert(
             reqwest::header::HeaderName::from_static("device-type"),
-            reqwest::header::HeaderValue::from_static("linux"),
+            reqwest::header::HeaderValue::from_static("8"),
         );
 
         let client = Client::builder()
@@ -329,9 +366,9 @@ impl BitwardenApiClient {
         form_params.insert("password", password_hash);
         form_params.insert("scope", "api offline_access".to_string());
         form_params.insert("client_id", "web".to_string());
-        form_params.insert("deviceType", "linux".to_string());
-        form_params.insert("deviceIdentifier", "omarchy-bitwarden".to_string());
-        form_params.insert("deviceName", "Omarchy Bitwarden".to_string());
+        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceIdentifier", get_device_identifier());
+        form_params.insert("deviceName", "linux".to_string());
 
         if let Some(code) = two_factor_token {
             form_params.insert("twoFactorToken", code.trim().to_string());
@@ -382,10 +419,46 @@ impl BitwardenApiClient {
             ))
         } else {
             if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
-                if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
-                    if err_desc.contains("TwoFactor") || err_desc.contains("Two-factor") {
-                        return Err(ApiError::TwoFactorRequired { providers: vec![0] });
+                let has_2fa_field = err_json.get("TwoFactorProviders").is_some()
+                    || err_json.get("twoFactorProviders").is_some();
+                let err_desc = err_json
+                    .get("error_description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let err_desc_lower = err_desc.to_lowercase();
+
+                if has_2fa_field
+                    || err_desc_lower.contains("two factor")
+                    || err_desc_lower.contains("two-factor")
+                    || err_desc_lower.contains("twofactor")
+                    || err_desc_lower.contains("two-step")
+                {
+                    let mut providers = vec![0];
+                    if let Some(arr) = err_json
+                        .get("TwoFactorProviders")
+                        .or_else(|| err_json.get("twoFactorProviders"))
+                        .and_then(|v| v.as_array())
+                    {
+                        let parsed: Vec<i32> = arr
+                            .iter()
+                            .filter_map(|p| {
+                                if let Some(n) = p.as_i64() {
+                                    Some(n as i32)
+                                } else if let Some(s) = p.as_str() {
+                                    s.parse::<i32>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if !parsed.is_empty() {
+                            providers = parsed;
+                        }
                     }
+                    return Err(ApiError::TwoFactorRequired { providers });
+                }
+
+                if !err_desc.is_empty() {
                     return Err(ApiError::AuthFailed(err_desc.to_string()));
                 }
                 if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
@@ -412,9 +485,9 @@ impl BitwardenApiClient {
         form_params.insert("client_id", client_id.trim().to_string());
         form_params.insert("client_secret", client_secret.trim().to_string());
         form_params.insert("scope", "api".to_string());
-        form_params.insert("deviceType", "linux".to_string());
-        form_params.insert("deviceIdentifier", "omarchy-bitwarden".to_string());
-        form_params.insert("deviceName", "Omarchy Bitwarden".to_string());
+        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceIdentifier", get_device_identifier());
+        form_params.insert("deviceName", "linux".to_string());
 
         let resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
@@ -2016,5 +2089,90 @@ mod tests {
         assert!(err.to_string().contains("Invalid username or password"));
         let _ = handle.join();
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_get_device_identifier_format() {
+        let id = get_device_identifier();
+        assert_eq!(id.len(), 36);
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        for c in id.chars() {
+            assert!(c == '-' || c.is_ascii_hexdigit());
+        }
+    }
+
+    #[test]
+    fn test_client_device_parameters_and_2fa_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    // Verify device parameters in request body
+                    assert!(
+                        req.contains("deviceType=8"),
+                        "Expected deviceType=8, got: {}",
+                        req
+                    );
+                    assert!(
+                        req.contains("deviceName=linux"),
+                        "Expected deviceName=linux, got: {}",
+                        req
+                    );
+                    assert!(
+                        req.contains("deviceIdentifier="),
+                        "Expected deviceIdentifier in request: {}",
+                        req
+                    );
+
+                    // Return official Bitwarden 2FA challenge
+                    let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["0","1"]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+        let res = client.login_password("user@example.com", &pwd, None);
+        match res {
+            Err(ApiError::TwoFactorRequired { providers }) => {
+                assert_eq!(providers, vec![0, 1]);
+            }
+            other => panic!("Expected TwoFactorRequired, got {:?}", other),
+        }
+        let _ = handle.join();
     }
 }
