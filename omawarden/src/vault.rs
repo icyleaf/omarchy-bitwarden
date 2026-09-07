@@ -362,14 +362,6 @@ impl VaultManager {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
-        if !self.is_unlocked() {
-            crate::log_warn!(
-                "omawarden:vault",
-                "Cannot sync vault: vault is locked. Please unlock first."
-            );
-            return Err("Vault is locked. Please unlock first.".to_string());
-        }
-
         crate::log_info!(
             "omawarden:vault",
             "Starting vault synchronization with server..."
@@ -1329,8 +1321,28 @@ mod tests {
         assert!(sync_err.is_err());
         assert_eq!(
             sync_err.unwrap_err(),
-            "Vault is locked. Please unlock first."
+            "Session token missing. Please log in."
         );
+    }
+
+    #[test]
+    fn test_sync_allowed_when_locked_with_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault_sync_locked.json");
+        let storage_mgr = StorageManager::new(path);
+        let mut storage = storage_mgr.load();
+        storage.access_token = Some("fake_test_token".to_string());
+        storage_mgr.save(&storage).unwrap();
+
+        let vault_mgr = VaultManager::new("http://127.0.0.1:9", Some(storage_mgr), None);
+        assert!(!vault_mgr.is_unlocked());
+
+        let sync_res = vault_mgr.sync();
+        assert!(sync_res.is_err());
+        let err_msg = sync_res.unwrap_err();
+        assert!(!err_msg.contains("Vault is locked"));
+        assert!(!err_msg.contains("Session token missing"));
+        assert!(err_msg.contains("Sync failed"));
     }
 
     #[test]
