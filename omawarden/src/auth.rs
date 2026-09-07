@@ -48,6 +48,31 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     truncated.trim().to_string()
 }
 
+pub fn is_jwt_expired(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+
+    let payload = parts[1];
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .or_else(|_| STANDARD.decode(payload));
+
+    if let Ok(bytes) = decoded {
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(exp) = val.get("exp").and_then(|v| v.as_i64()) {
+                let now = chrono::Utc::now().timestamp();
+                return now >= exp;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthStatus {
     pub status: String,
@@ -86,7 +111,7 @@ impl AuthManager {
     }
 
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
-        let storage = self.storage_mgr.load();
+        let mut storage = self.storage_mgr.load();
 
         if (storage.enc_user_key.is_none() && storage.access_token.is_none())
             || storage.user_email.is_empty()
@@ -103,6 +128,33 @@ impl AuthManager {
                 user_id: storage.user_id,
                 has_session: false,
             };
+        }
+
+        // Detect expired session token without refresh capability
+        if let Some(ref tok) = storage.access_token {
+            if is_jwt_expired(tok) && storage.refresh_token.is_none() {
+                crate::log_warn!(
+                    "omawarden:auth",
+                    "Stored session token has expired. Invalidation required."
+                );
+                storage.access_token = None;
+                let _ = self.storage_mgr.save(&storage);
+                let _ =
+                    crate::daemon::send_daemon_request(&serde_json::json!({ "action": "lock" }));
+
+                return AuthStatus {
+                    status: "unauthenticated".to_string(),
+                    server_url: if storage.server_url.is_empty() {
+                        Some(self.server_url.clone())
+                    } else {
+                        Some(storage.server_url)
+                    },
+                    last_sync: storage.last_sync,
+                    user_email: Some(storage.user_email),
+                    user_id: storage.user_id,
+                    has_session: false,
+                };
+            }
         }
 
         if let Some(daemon_resp) =
@@ -549,5 +601,66 @@ mod tests {
         assert_eq!(st.user_email.as_deref(), Some("apikey-user@example.com"));
         assert_eq!(st.user_id.as_deref(), Some("user-uuid-123"));
         assert!(st.has_session);
+    }
+
+    #[test]
+    fn test_jwt_expiration_detection() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let now = chrono::Utc::now().timestamp();
+        let past_payload = serde_json::json!({ "exp": now - 3600 });
+        let future_payload = serde_json::json!({ "exp": now + 3600 });
+
+        let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
+        let future_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&future_payload).unwrap());
+
+        let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
+        let valid_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", future_b64);
+
+        assert!(is_jwt_expired(&expired_token));
+        assert!(!is_jwt_expired(&valid_token));
+        assert!(!is_jwt_expired("invalid_token_not_three_parts"));
+    }
+
+    #[test]
+    fn test_auth_status_with_expired_token() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_expired_status.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let auth_mgr = AuthManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr.clone()),
+            Some(mock_keyring),
+        );
+
+        let now = chrono::Utc::now().timestamp();
+        let past_payload = serde_json::json!({ "exp": now - 100 });
+        let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
+        let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
+
+        let storage = VaultStorage {
+            user_email: "expired-user@example.com".to_string(),
+            user_id: Some("user-uuid-999".to_string()),
+            access_token: Some(expired_token),
+            refresh_token: None,
+            enc_user_key: Some("2.dummy_iv|dummy_ct|dummy_mac".to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let st = auth_mgr.get_status(false);
+        assert_eq!(st.status, "unauthenticated");
+        assert!(!st.has_session);
+        assert_eq!(st.user_email.as_deref(), Some("expired-user@example.com"));
+
+        // Verify storage had access_token cleared
+        let fresh_storage = storage_mgr.load();
+        assert!(fresh_storage.access_token.is_none());
     }
 }

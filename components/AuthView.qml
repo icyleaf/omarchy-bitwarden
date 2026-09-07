@@ -44,7 +44,7 @@ Item {
     if (authState && (authState.status === "locked" || authState.status === "unlocked" || authState.status === "unauthenticated")) {
       clearInputs()
     }
-    if (authState && authState.status === "locked") {
+    if (authState && authState.status === "locked" && Boolean(authState.has_session)) {
       Qt.callLater(function() {
         if (unlockPasswordField) unlockPasswordField.forceActiveFocus()
       })
@@ -76,7 +76,7 @@ Item {
         // 1. UNLOCK VIEW (When session exists but vault is locked)
         // --------------------------------------------------
         ColumnLayout {
-          visible: authRoot.authState.status === "locked"
+          visible: authRoot.authState.status === "locked" && Boolean(authRoot.authState.has_session)
           Layout.fillWidth: true
           spacing: 14
 
@@ -201,7 +201,7 @@ Item {
         // 2. FULL LOGIN VIEW (When unauthenticated)
         // --------------------------------------------------
         ColumnLayout {
-          visible: authRoot.authState.status !== "locked"
+          visible: authRoot.authState.status !== "locked" || !authRoot.authState.has_session
           Layout.fillWidth: true
           spacing: 12
 
