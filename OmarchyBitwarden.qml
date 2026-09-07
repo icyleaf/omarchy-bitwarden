@@ -329,11 +329,15 @@ Item {
     if (!url || !url.trim()) return "Default (https://vault.bitwarden.com)"
     var trimmed = url.trim()
     var lower = trimmed.toLowerCase()
-    if (lower === "https://vault.bitwarden.com" || lower === "http://vault.bitwarden.com") {
-      return "Official Cloud (https://vault.bitwarden.com)"
+    if (lower === "https://vault.bitwarden.com" || lower === "http://vault.bitwarden.com" ||
+        lower === "https://api.bitwarden.com" || lower === "https://identity.bitwarden.com" ||
+        lower === "https://bitwarden.com") {
+      return "Official Cloud (" + trimmed + ")"
     }
-    if (lower === "https://vault.bitwarden.eu" || lower === "http://vault.bitwarden.eu") {
-      return "Official Cloud (https://vault.bitwarden.eu)"
+    if (lower === "https://vault.bitwarden.eu" || lower === "http://vault.bitwarden.eu" ||
+        lower === "https://api.bitwarden.eu" || lower === "https://identity.bitwarden.eu" ||
+        lower === "https://bitwarden.eu") {
+      return "Official Cloud (" + trimmed + ")"
     }
     var scheme = (lower.indexOf("http://") === 0) ? "http" : "https"
     if (lower.indexOf("127.0.0.1") !== -1 || lower.indexOf("localhost") !== -1 || lower.indexOf("192.168.") !== -1 || lower.indexOf("10.") !== -1 || lower.indexOf("172.") !== -1) {
@@ -1299,6 +1303,7 @@ Item {
     root.statusMessage = "Saving configuration..."
     var cmd = [root.helperPath, "config", "set"]
     if (settings.server_url !== undefined) cmd.push("--server-url", settings.server_url)
+    if (settings.identity_url !== undefined) cmd.push("--identity-url", settings.identity_url)
     if (settings.download_dir !== undefined) cmd.push("--download-dir", settings.download_dir)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
@@ -1314,6 +1319,8 @@ Item {
     var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : "Unknown"
     var rawUrl = (root.config && root.config.server_url) ? root.config.server_url : ""
     var sUrl = root.sanitizeServerUrl(rawUrl)
+    var rawIdUrl = (root.config && root.config.identity_url) ? root.config.identity_url : ""
+    var idUrl = rawIdUrl ? root.sanitizeServerUrl(rawIdUrl) : "Auto"
     var lLevel = (root.config && root.config.log_level) ? root.config.log_level : "error"
     var vStatus = (root.authState ? root.authState.status : "unknown")
 
@@ -1321,6 +1328,7 @@ Item {
     report += "- **Generated At**: " + ts + "\n"
     report += "- **omawarden Version**: " + cliVer + "\n"
     report += "- **Server URL**: " + sUrl + "\n"
+    report += "- **Identity URL**: " + idUrl + "\n"
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"

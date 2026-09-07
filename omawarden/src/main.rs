@@ -117,12 +117,17 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    #[command(about = "Get current configuration")]
-    Get,
+    #[command(about = "Get current configuration or a specific key")]
+    Get {
+        #[arg(help = "Optional configuration key to query")]
+        key: Option<String>,
+    },
     #[command(about = "Set configuration options")]
     Set {
         #[arg(long)]
         server_url: Option<String>,
+        #[arg(long)]
+        identity_url: Option<String>,
         #[arg(long)]
         bw_path: Option<String>,
         #[arg(long)]
@@ -357,12 +362,34 @@ fn main() -> ExitCode {
         }
 
         Commands::Config { action } => match action {
-            ConfigAction::Get => {
-                println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
+            ConfigAction::Get { key } => {
+                if let Some(k) = key {
+                    match k.as_str() {
+                        "server_url" => println!("{}", cfg.server_url),
+                        "identity_url" => println!("{}", cfg.identity_url.as_deref().unwrap_or("")),
+                        "bw_path" => println!("{}", cfg.bw_path),
+                        "download_dir" => println!("{}", cfg.download_dir),
+                        "auto_lock_minutes" | "auto_lock" => println!("{}", cfg.auto_lock_minutes),
+                        "clipboard_clear_seconds" | "clipboard_clear" => {
+                            println!("{}", cfg.clipboard_clear_seconds)
+                        }
+                        "max_output_mb" => println!("{}", cfg.max_output_mb),
+                        "email" => println!("{}", cfg.email),
+                        "remember_email" => println!("{}", cfg.remember_email),
+                        "log_level" => println!("{}", cfg.log_level),
+                        _ => {
+                            eprintln!("Unknown configuration key: {}", k);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
+                }
                 ExitCode::SUCCESS
             }
             ConfigAction::Set {
                 server_url,
+                identity_url,
                 bw_path,
                 download_dir,
                 auto_lock,
@@ -374,6 +401,14 @@ fn main() -> ExitCode {
             } => {
                 if let Some(v) = server_url {
                     cfg.server_url = v;
+                }
+                if let Some(v) = identity_url {
+                    let trimmed = v.trim();
+                    if trimmed.is_empty() {
+                        cfg.identity_url = None;
+                    } else {
+                        cfg.identity_url = Some(trimmed.to_string());
+                    }
                 }
                 if let Some(v) = bw_path {
                     cfg.bw_path = v;
@@ -403,18 +438,48 @@ fn main() -> ExitCode {
                 let _ = config_mgr.save(&cfg);
                 let safe_url = if cfg.server_url.is_empty() {
                     "default (official)".to_string()
-                } else if cfg.server_url.contains("vault.bitwarden.com")
-                    || cfg.server_url.contains("vault.bitwarden.eu")
-                {
-                    cfg.server_url.clone()
+                } else if let Ok(parsed) = url::Url::parse(&cfg.server_url) {
+                    if let Some(host) = parsed.host_str() {
+                        if host == "vault.bitwarden.com"
+                            || host == "api.bitwarden.com"
+                            || host == "bitwarden.com"
+                            || host == "vault.bitwarden.eu"
+                            || host == "api.bitwarden.eu"
+                            || host == "bitwarden.eu"
+                        {
+                            format!("{}://{}", parsed.scheme(), host)
+                        } else {
+                            "<REDACTED_CUSTOM_HOST>".to_string()
+                        }
+                    } else {
+                        "<REDACTED_CUSTOM_HOST>".to_string()
+                    }
                 } else {
                     "<REDACTED_CUSTOM_HOST>".to_string()
                 };
+                let safe_id_url = if let Some(ref u) = cfg.identity_url {
+                    if let Ok(parsed) = url::Url::parse(u) {
+                        if let Some(host) = parsed.host_str() {
+                            if host == "identity.bitwarden.com" || host == "identity.bitwarden.eu" {
+                                format!("{}://{}", parsed.scheme(), host)
+                            } else {
+                                "<REDACTED_CUSTOM_HOST>".to_string()
+                            }
+                        } else {
+                            "<REDACTED_CUSTOM_HOST>".to_string()
+                        }
+                    } else {
+                        "<REDACTED_CUSTOM_HOST>".to_string()
+                    }
+                } else {
+                    "auto".to_string()
+                };
                 omawarden::log_info!(
                     "omawarden:config",
-                    "Updated configuration (log_level: {}, server_url: {}).",
+                    "Updated configuration (log_level: {}, server_url: {}, identity_url: {}).",
                     cfg.log_level,
-                    safe_url
+                    safe_url,
+                    safe_id_url
                 );
                 println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
                 ExitCode::SUCCESS
