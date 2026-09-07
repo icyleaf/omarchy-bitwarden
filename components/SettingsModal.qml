@@ -22,6 +22,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color mutedForeground: Qt.darker(foreground, 1.8)
   property string fontFamily: ""
 
   Timer {
@@ -452,6 +453,32 @@ Item {
             }
           }
 
+          // Identity URL
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 4
+              Text { text: "Identity URL:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "(Optional override, e.g. https://identity.bitwarden.com)"; color: settingsRoot.mutedForeground; font.pixelSize: 10 }
+            }
+            Rectangle {
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: idUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              TextInput {
+                id: idUrlInput
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                text: (settingsRoot.config && settingsRoot.config.identity_url) ? settingsRoot.config.identity_url : ""
+              }
+              Text {
+                anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                text: "Auto (default: identity.bitwarden.com or /identity)"
+                color: settingsRoot.mutedForeground
+                font.family: "sans-serif"; font.pixelSize: 11
+                visible: idUrlInput.text.length === 0
+              }
+            }
+          }
+
           // Download Directory
           ColumnLayout {
             Layout.fillWidth: true
@@ -595,6 +622,7 @@ Item {
               onClicked: {
                 var payload = {
                   server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
+                  identity_url: idUrlInput.text.trim(),
                   download_dir: dlDirInput.text.trim() || "~/Downloads",
                   auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
                   clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
