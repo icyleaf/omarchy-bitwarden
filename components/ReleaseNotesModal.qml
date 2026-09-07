@@ -38,30 +38,42 @@ Rectangle {
     if (!text) return ""
     var escaped = escapeHtml(text)
 
-    // Markdown link: [Title](url)
+    var linkTokens = []
+    function storeLink(html) {
+      var token = "@@OMAWARDEN_LINK_" + linkTokens.length + "@@"
+      linkTokens.push(html)
+      return token
+    }
+
+    // Markdown link: [Title](url) - highest precedence
     escaped = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, function(match, title, url) {
-      return "<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + title + "</a>"
+      return storeLink("<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + title + "</a>")
     })
 
     // GitHub PR link: https://github.com/.../pull/123 -> #123
     escaped = escaped.replace(/(https?:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/pull\/(\d+))/g, function(match, url, prNum) {
-      return "<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>#" + prNum + "</a>"
+      return storeLink("<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>#" + prNum + "</a>")
     })
 
     // GitHub Commit link: https://github.com/.../commit/abcdef123 -> abcdef1
     escaped = escaped.replace(/(https?:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/commit\/([a-f0-9]{7,40}))/g, function(match, url, sha) {
-      return "<a href='" + url + "' style='color: #60a5fa; text-decoration: underline; font-family: monospace;'>" + sha.substring(0, 7) + "</a>"
+      return storeLink("<a href='" + url + "' style='color: #60a5fa; text-decoration: underline; font-family: monospace;'>" + sha.substring(0, 7) + "</a>")
     })
 
     // GitHub Compare link: https://github.com/.../compare/v1...v2 -> v1...v2
     escaped = escaped.replace(/(https?:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/compare\/([^\s\<\>\)]+))/g, function(match, url, range) {
-      return "<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + range + "</a>"
+      return storeLink("<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + range + "</a>")
     })
 
     // Other plain URLs
     escaped = escaped.replace(/(^|[\s\(])(https?:\/\/[^\s<\)]+)/g, function(match, prefix, url) {
-      return prefix + "<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + url + "</a>"
+      return prefix + storeLink("<a href='" + url + "' style='color: #60a5fa; text-decoration: underline;'>" + url + "</a>")
     })
+
+    // Restore all link tokens
+    for (var i = 0; i < linkTokens.length; i++) {
+      escaped = escaped.replace("@@OMAWARDEN_LINK_" + i + "@@", linkTokens[i])
+    }
 
     // Bold: **text**
     escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<b style='color: #ffffff;'>$1</b>")
