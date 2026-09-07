@@ -1645,7 +1645,8 @@ mod tests {
 
     #[test]
     fn test_parse_auth_payload_json_with_code() {
-        let (pwd, code) = parse_auth_payload("{\"password\": \"secret123\", \"code\": \"654321\"}\n");
+        let (pwd, code) =
+            parse_auth_payload("{\"password\": \"secret123\", \"code\": \"654321\"}\n");
         assert_eq!(pwd, "secret123");
         assert_eq!(code.as_deref(), Some("654321"));
     }
