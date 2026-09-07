@@ -20,7 +20,9 @@
   - `unlocked`: Decryption session active, stored in System Keyring, in-memory search index populated.
 
 ### Keyring & Security Policies
-- **System Keyring**: Secret storage backend (via FreeDesktop Secret Service / `secret-tool` / D-Bus) used to securely persist access tokens across app invocations during the unlocked lifecycle (see `docs/adr/0001-keyring-session-and-helper-architecture.md`).
+- **System Keyring & Credential Persistence**: Secret storage backend (via FreeDesktop Secret Service / `secret-tool` / D-Bus) used to securely persist `access_token`, `refresh_token`, and API `client_secret` across app invocations, ensuring `data.json` on disk remains a pure zero-knowledge ciphertext store (see `docs/adr/0007-keyring-credential-persistence-and-silent-reauth.md`).
+- **Silent Background Re-authentication**: Seamless re-authentication via API `client_secret` or OAuth2 `refresh_token` when tokens expire (~2h TTL) or return 401/403, preventing disruption during background sync.
+- **Atomic Credential Erasure**: Calling `auth logout` triggers `clear_all()` across all `service=omarchy-bitwarden` entries in the OS keyring.
 - **Zero-Leakage Memory Policy**: Sensitive cryptographic keys (`SymmetricCryptoKey`) and intermediate hashes derive `Zeroize` and `#[zeroize(drop)]` to enforce volatile memory destruction on drop.
 - **Zero-Argv / Zero-Environ Security Seam**: To prevent credential leakage across Linux processes (`/proc/<pid>/cmdline` and `/proc/<pid>/environ`), secrets (Master Passwords, API Secrets, TOTP seeds, Clipboard text) are delivered exclusively through protected `stdin` streams or `0600` Unix Domain Sockets.
 - **Strict File & Socket Permissions**: Disk storage (`data.json`) and the daemon Unix socket (`omawarden.sock`) enforce `0600` owner-only permissions.
