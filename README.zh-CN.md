@@ -15,13 +15,16 @@
 
 ## 为什么选择 omarchy-bitwarden？
 
-| 评估维度       | omarchy-bitwarden (`omawarden`)                    | 官方桌面端 (Electron)         | 官方命令行 (`bw`)           |
-| :------------- | :------------------------------------------------- | :---------------------------- | :-------------------------- |
-| **响应延迟**   | **亚毫秒级**（常驻内存 IPC 套接字）                | 界面渲染较慢（1.5 秒 - 3 秒） | 较重的 Node.js 启动延迟     |
-| **内存开销**   | **轻量守护进程（基础 ~10MB / Argon2id ~60-80MB）** | 200MB - 400MB+ Chromium 占用  | 瞬时高内存峰值              |
-| **进程安全**   | **零泄漏**（受保护的 stdin 与 0600 套接字管道）    | 广泛的 Webview 内存暴露       | 易受到 `argv`/`ps` 进程窥探 |
-| **锁屏联动**   | **原生 D-Bus / Hyprlock 挂钩**                     | 仅依赖应用内闲置超时          | 无（需手动执行锁定）        |
-| **运行时依赖** | **100% 独立二进制**（零外部运行时依赖）            | 完整的 Chromium/Node 运行环境 | 需要 Node.js 环境           |
+| 评估维度             | omarchy-bitwarden (`omawarden`)                         | 官方桌面端 (Electron)          | 官方命令行 (`bw`)                                            |
+| :------------------- | :------------------------------------------------------ | :----------------------------- | :----------------------------------------------------------- |
+| **响应延迟**         | **亚毫秒级**（常驻内存 IPC 套接字）                     | 界面渲染较慢（1.5 秒 - 3 秒）  | 较重的 Node.js 启动延迟                                      |
+| **内存开销**         | **轻量守护进程（基础 ~10MB / Argon2id ~60-80MB）**      | 200MB - 400MB+ Chromium 占用   | 瞬时高内存峰值                                               |
+| **进程安全**         | **零泄漏**（受保护的 stdin 与 0600 套接字管道）         | 广泛的 Webview 内存暴露        | 易受到 `argv`/`ps` 进程窥探                                  |
+| **Token 与凭据存储** | **系统密钥环安全隔离**（本地缓存文件零明文 Token）     | 平台 Keychain / Electron 存储  | 曾默认明文写入本地缓存文件，或依赖不安全且易泄漏的 `BW_SESSION` 环境变量 |
+| **本地数据缓存**     | **纯零知识密文缓存**（离线毫秒级检索，无解密凭据）      | 本地缓存文件与认证凭据混杂                          | 本地缓存文件与认证凭据混杂                                     |
+| **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
+| **锁屏联动**         | **原生 D-Bus / Hyprlock 挂钩**                          | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
+| **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
 ---
 
 ## 常用快捷键
@@ -113,6 +116,7 @@ rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
   3. 点击 **查看 API 密钥 (View API Key)** 并输入主密码验证。
   4. 复制你的 `client_id`（如 `user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）与 `client_secret`。
 - **在覆盖层中登录**：切换登录标签至 **API Key**，粘贴对应凭据并登录。登录成功后，日常解锁仅需输入主密码即可。
+- **密钥环持久化与静默续期**：你的 `client_secret` 安全保存在系统密钥环中（绝不以明文落盘）。当短期 2 小时 Access Token 到期时，`omawarden` 会在后台自动完成静默续期重鉴权，不会打断同步或强制退回重登。
 
 ---
 
@@ -139,9 +143,13 @@ flowchart TD
         direction TB
         Daemon["常驻内存守护进程\nDrop 时确定性清零 (zeroize)"]
         Crypto["原生密码学引擎\nPBKDF2 • Argon2id • AES-256-CBC • RSA-OAEP-SHA1"]
-        REST["直连 Bitwarden REST/OAuth2 客户端"]
-        Keyring["FreeDesktop Secret Service 密钥环 (Keyring)"]
+        REST["直连 Bitwarden REST/OAuth2 客户端\n后台静默自动续期与重鉴权"]
         Clipboard["临时 Wayland 剪贴板管理 (wl-copy)"]
+    end
+
+    subgraph SecurityStore["凭据与安全存储 (Security & Storage)"]
+        Keyring["系统密钥环 (Secret Service)\nAccess/Refresh Token • API Secret • 会话凭据\n磁盘零明文隔离"]
+        Disk["本地缓存文件 (0600)\n纯零知识密文存储\n密码本 • 文件夹 • 无任何 Bearer Token"]
     end
 
     UI_Pwd -->|受保护 Stdin| P_Stdin
@@ -155,17 +163,20 @@ flowchart TD
 
     Daemon <--> Crypto
     Daemon <--> REST
-    Daemon <--> Keyring
     Daemon --> Clipboard
+
+    REST <-->|静默续期 / 存取 Token| Keyring
+    Daemon <-->|读写端到端密文| Disk
+    Daemon <-->|会话与凭据生命周期| Keyring
 ```
 
 ### 关键安全机制：
 
 1. **零命令行参数（`argv`）凭据泄露**：主密码、API 密钥、2FA 验证码、TOTP 种子与剪贴板文本**绝不作为命令行参数传递**。所有敏感数据均通过受保护的 `stdin` 数据流或 `0600` Unix 域套接字传输，彻底杜绝 `/proc/<pid>/cmdline` 窥探。
 2. **零环境变量（`env`）秘密溢出**：API Client Secret、密码与会话令牌绝不导出到进程环境变量（`/proc/<pid>/environ`）。
-3. **严格仅所有者访问权限（`0600`）**：密码库缓存文件（`~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`）与守护进程套接字（`/run/user/<UID>/omawarden.sock`）强制执行 `0600` 权限（仅当前用户 UID 可读写）。
+3. **严格仅所有者访问权限（`0600`）**：本地密码库缓存文件与守护进程套接字（`/run/user/<UID>/omawarden.sock`）强制执行 `0600` 权限（仅当前用户 UID 可读写）。
 4. **确定性内存清零销毁（`zeroize`）**：所有对称加密密钥（`SymmetricCryptoKey`）、派生主密钥及中间哈希均实现 `zeroize::ZeroizeOnDrop`，在使用结束或离开作用域时以零字节覆写内存。锁定密码库时会立即从常驻内存中清除所有已解密条目与密钥。
-5. **原生 FreeDesktop 密钥环生命周期**：解密后的会话令牌安全保存在系统密钥环中（GNOME Keyring / KWallet / KeePassXC）。**绝不在磁盘中写入任何明文主密码**。在手动锁定（<kbd>Ctrl</kbd>+<kbd>L</kbd>）、系统锁屏事件（`hyprlock`/`swaylock`）或闲置超时触发时，立即销毁密钥环中的会话并清空常驻内存。
+5. **原生 FreeDesktop 密钥环生命周期**：Bearer Token（Access/Refresh Token）、API 密钥（Client Secret）以及会话凭据均安全隔离于系统密钥环（GNOME Keyring / KWallet / KeePassXC）中。**本地缓存文件纯粹作为零知识密文存储，绝无任何明文 Bearer Token 或主密码落盘**。在手动锁定（<kbd>Ctrl</kbd>+<kbd>L</kbd>）、系统锁屏事件（`hyprlock`/`swaylock`）或闲置超时触发时，立即销毁密钥环中的会话并清空常驻内存。
 6. **阅后即焚剪贴板（30 秒 TTL 自动清除）**：复制密码、TOTP、信用卡安全码或 SSH 私钥时，内容直接管道传输至 `wl-copy` 而不进入 Shell 历史。专用定时器会在 30 秒后自动清空 Wayland 剪贴板（可在设置中自定义时长）。
 7. **零外部运行时依赖**：100% 纯 Rust 编译二进制文件。运行期无需安装 Node.js、Python 或官方 `bw` CLI。
 
@@ -179,10 +190,15 @@ flowchart TD
 - [x] 完整的 Argon2id / PBKDF2 / AES-256-CBC / RSA-OAEP 原生密码学解密
 - [x] 实时 RFC 6238 TOTP 动态验证码生成与视觉倒计时
 - [x] 系统锁屏挂钩与 FreeDesktop Secret Service 密钥环生命周期联动
+- [x] 多槽位系统密钥环凭据持久化与后台静默自动重鉴权
 - [x] 阅后即焚式 Wayland 剪贴板管理（30 秒 TTL 自动清除）
 - [x] 加密二进制附件下载与内联预览（图片与文本）
 - [x] SSH 密钥生命周期管理（Ed25519/RSA/ECDSA 密钥对生成、文件导入与安全导出）
+- [x] 多维度密码库（个人/各组织）与文件夹作用域筛选（支持快捷键循环切换）
 - [x] 多组织与集合密钥自动解密及徽标分类展示
+- [x] 动作面板（<kbd>Ctrl</kbd>+<kbd>K</kbd>）与密码历史记录查看器（<kbd>Ctrl</kbd>+<kbd>H</kbd>）
+- [x] FIDO2 / WebAuthn Passkey 凭据标识与条目创建/修改时间历史
+- [x] 锁定状态后台同步（支持在登录且锁定时安全同步最新端到端密文）
 - [x] 自建 Vaultwarden 实例、个人 API Key 及 2FA 登录支持
 - [x] 双通道结构化日志与脱敏诊断信息导出
 
