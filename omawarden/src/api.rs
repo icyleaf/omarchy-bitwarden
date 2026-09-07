@@ -418,20 +418,36 @@ impl BitwardenApiClient {
                 format!("Password login endpoint error: HTTP {}", status),
             ))
         } else {
+            let body_lower = body_text.to_lowercase();
             if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
                 let has_2fa_field = err_json.get("TwoFactorProviders").is_some()
-                    || err_json.get("twoFactorProviders").is_some();
+                    || err_json.get("twoFactorProviders").is_some()
+                    || err_json.get("TwoFactorProviders2").is_some()
+                    || err_json.get("twoFactorProviders2").is_some()
+                    || body_lower.contains("twofactorproviders");
                 let err_desc = err_json
                     .get("error_description")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let err_msg = err_json
+                    .get("Message")
+                    .or_else(|| err_json.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let err_desc_lower = err_desc.to_lowercase();
+                let err_msg_lower = err_msg.to_lowercase();
 
                 if has_2fa_field
                     || err_desc_lower.contains("two factor")
                     || err_desc_lower.contains("two-factor")
                     || err_desc_lower.contains("twofactor")
                     || err_desc_lower.contains("two-step")
+                    || err_desc_lower.contains("2fa")
+                    || err_msg_lower.contains("two factor")
+                    || err_msg_lower.contains("two-factor")
+                    || err_msg_lower.contains("twofactor")
+                    || err_msg_lower.contains("two-step")
+                    || err_msg_lower.contains("2fa")
                 {
                     let mut providers = vec![0];
                     if let Some(arr) = err_json
