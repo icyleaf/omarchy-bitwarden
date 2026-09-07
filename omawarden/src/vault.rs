@@ -440,6 +440,25 @@ impl VaultManager {
 
         let sync_resp = match sync_resp_res {
             Ok(resp) => resp,
+            Err(ApiError::HttpStatus(code, _))
+                if code == reqwest::StatusCode::UNAUTHORIZED
+                    || code == reqwest::StatusCode::FORBIDDEN =>
+            {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "HTTP {} on sync. Attempting session renewal...",
+                    code
+                );
+                let renewed_token = self.renew_session()?;
+                client.sync_vault(&renewed_token).map_err(|e| {
+                    crate::log_error!(
+                        "omawarden:vault",
+                        "Sync failed after token renewal: {:?}",
+                        e
+                    );
+                    format!("Sync failed: {:?}", e)
+                })?
+            }
             Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
                     "omawarden:vault",
@@ -550,10 +569,12 @@ impl VaultManager {
                     auth_failed = true;
                     last_error = Some(format!("Authentication failed: {}", msg));
                 }
-                Err(ApiError::Http(msg)) => {
+                Err(ApiError::Network(msg))
+                | Err(ApiError::Http(msg))
+                | Err(ApiError::HttpStatus(_, msg)) => {
                     crate::log_warn!(
                         "omawarden:vault",
-                        "Refresh token grant encountered network error: {}. Falling back...",
+                        "Refresh token grant encountered network or server error: {}. Falling back...",
                         msg
                     );
                     last_error = Some(format!("Network error during token refresh: {}", msg));
@@ -595,10 +616,12 @@ impl VaultManager {
                         auth_failed = true;
                         last_error = Some(format!("Authentication failed: {}", msg));
                     }
-                    Err(ApiError::Http(msg)) => {
+                    Err(ApiError::Network(msg))
+                    | Err(ApiError::Http(msg))
+                    | Err(ApiError::HttpStatus(_, msg)) => {
                         crate::log_error!(
                             "omawarden:vault",
-                            "API key silent re-auth encountered network error: {}",
+                            "API key silent re-auth encountered network or server error: {}",
                             msg
                         );
                         last_error = Some(format!(
@@ -897,6 +920,20 @@ impl VaultManager {
 
         let created_cipher = match client.create_cipher(&active_token, &payload) {
             Ok(c) => c,
+            Err(ApiError::HttpStatus(code, _))
+                if code == reqwest::StatusCode::UNAUTHORIZED
+                    || code == reqwest::StatusCode::FORBIDDEN =>
+            {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "HTTP {} creating SSH key. Attempting session renewal...",
+                    code
+                );
+                let renewed = self.renew_session()?;
+                client
+                    .create_cipher(&renewed, &payload)
+                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
+            }
             Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
                     "omawarden:vault",
@@ -2110,5 +2147,140 @@ esac
             fresh_storage.refresh_token,
             Some("valid_ref_token".to_string())
         );
+    }
+
+    #[test]
+    fn test_vault_sync_server_502_error_preserves_tokens() {
+        use std::fs;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            let mut count = 0;
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp =
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                count += 1;
+                if count >= 2 {
+                    break;
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("vault_502_preserves.json");
+        let storage_mgr = StorageManager::new(storage_path);
+
+        let store_dir = dir.path().join("store");
+        fs::create_dir_all(&store_dir).unwrap();
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+STORE_DIR="{}"
+cmd="$1"
+shift
+case "$1" in
+    --label=*)
+        shift
+        ;;
+esac
+
+key=""
+while [ $# -gt 0 ]; do
+    k="$1"
+    v="$2"
+    safe_v=$(printf '%s' "$v" | tr '/:' '_')
+    key="${{key}}__${{k}}=${{safe_v}}"
+    shift 2 2>/dev/null || shift 1
+done
+
+case "$cmd" in
+    store)
+        cat > "${{STORE_DIR}}/${{key}}"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
+            cat "${{STORE_DIR}}/${{key}}"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+            rm -f "${{STORE_DIR}}"/*
+        else
+            rm -f "${{STORE_DIR}}/${{key}}"*
+        fi
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            store_dir.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
+
+        // Set refresh token and api secret
+        assert!(mock_keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
+        assert!(mock_keyring.store_api_secret(&server_url, "test_client_id", "test_secret"));
+
+        let storage = VaultStorage {
+            server_url: server_url.clone(),
+            user_email: "gateway502@example.com".to_string(),
+            client_id: Some("test_client_id".to_string()),
+            refresh_token: Some("valid_ref_token".to_string()),
+            ..Default::default()
+        };
+        storage_mgr.save(&storage).unwrap();
+
+        let vault_mgr = VaultManager::new(
+            &server_url,
+            Some(storage_mgr.clone()),
+            Some(mock_keyring.clone()),
+        );
+
+        // renew_session should fail due to 502 without wiping tokens
+        let res = vault_mgr.renew_session();
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Network error"));
+
+        // Keyring refresh token and api secret NOT purged
+        assert_eq!(
+            mock_keyring.get_token(crate::keyring::KIND_REFRESH_TOKEN),
+            Some("valid_ref_token".to_string())
+        );
+        assert_eq!(
+            mock_keyring.get_api_secret(&server_url, "test_client_id"),
+            Some("test_secret".to_string())
+        );
+
+        // Storage tokens NOT purged
+        let fresh_storage = storage_mgr.load();
+        assert_eq!(
+            fresh_storage.refresh_token,
+            Some("valid_ref_token".to_string())
+        );
+
+        let _ = handle.join();
     }
 }
