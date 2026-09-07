@@ -105,7 +105,9 @@ impl KeyringManager {
     }
 
     pub fn store_api_secret(&self, server_url: &str, client_id: &str, secret: &str) -> bool {
-        if secret.is_empty() || client_id.is_empty() || server_url.is_empty() {
+        let norm_url = server_url.trim().trim_end_matches('/');
+        let norm_cid = client_id.trim();
+        if secret.is_empty() || norm_cid.is_empty() || norm_url.is_empty() {
             return false;
         }
         let label = "Omarchy Bitwarden API Secret";
@@ -118,9 +120,9 @@ impl KeyringManager {
                 "kind",
                 KIND_API_SECRET,
                 "server_url",
-                server_url,
+                norm_url,
                 "client_id",
-                client_id,
+                norm_cid,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -142,7 +144,9 @@ impl KeyringManager {
     }
 
     pub fn get_api_secret(&self, server_url: &str, client_id: &str) -> Option<String> {
-        if client_id.is_empty() || server_url.is_empty() {
+        let norm_url = server_url.trim().trim_end_matches('/');
+        let norm_cid = client_id.trim();
+        if norm_cid.is_empty() || norm_url.is_empty() {
             return None;
         }
         let output = Command::new(&self.secret_tool_path)
@@ -153,9 +157,9 @@ impl KeyringManager {
                 "kind",
                 KIND_API_SECRET,
                 "server_url",
-                server_url,
+                norm_url,
                 "client_id",
-                client_id,
+                norm_cid,
             ])
             .output()
             .ok()?;
@@ -170,7 +174,9 @@ impl KeyringManager {
     }
 
     pub fn clear_api_secret(&self, server_url: &str, client_id: &str) -> bool {
-        if client_id.is_empty() || server_url.is_empty() {
+        let norm_url = server_url.trim().trim_end_matches('/');
+        let norm_cid = client_id.trim();
+        if norm_cid.is_empty() || norm_url.is_empty() {
             return false;
         }
         match Command::new(&self.secret_tool_path)
@@ -181,9 +187,9 @@ impl KeyringManager {
                 "kind",
                 KIND_API_SECRET,
                 "server_url",
-                server_url,
+                norm_url,
                 "client_id",
-                client_id,
+                norm_cid,
             ])
             .output()
         {
@@ -497,5 +503,85 @@ esac
         assert_eq!(mgr.get_api_secret("https://bw.local", ""), None);
         assert!(!mgr.clear_api_secret("", "client_id"));
         assert!(!mgr.clear_api_secret("https://bw.local", ""));
+    }
+
+    #[test]
+    fn test_keyring_trailing_slash_normalization() {
+        let dir = tempdir().unwrap();
+        let store_dir = dir.path().join("store");
+        fs::create_dir_all(&store_dir).unwrap();
+        let script_path = dir.path().join("mock-secret-tool");
+
+        let script = format!(
+            r#"#!/bin/sh
+STORE_DIR="{}"
+cmd="$1"
+shift
+case "$1" in
+    --label=*)
+        shift
+        ;;
+esac
+
+key=""
+while [ $# -gt 0 ]; do
+    k="$1"
+    v="$2"
+    safe_v=$(printf '%s' "$v" | tr '/:' '_')
+    key="${{key}}__${{k}}=${{safe_v}}"
+    shift 2 2>/dev/null || shift 1
+done
+
+case "$cmd" in
+    store)
+        cat > "${{STORE_DIR}}/${{key}}"
+        exit 0
+        ;;
+    lookup)
+        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
+            cat "${{STORE_DIR}}/${{key}}"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    clear)
+        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+            rm -f "${{STORE_DIR}}"/*
+        else
+            rm -f "${{STORE_DIR}}/${{key}}"*
+        fi
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+"#,
+            store_dir.display()
+        );
+
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mgr = KeyringManager::new(script_path.to_str().unwrap());
+
+        // Store with trailing slash
+        assert!(mgr.store_api_secret("https://vault.example.com/", "user.123 ", "secret_val"));
+
+        // Lookup without trailing slash
+        assert_eq!(
+            mgr.get_api_secret("https://vault.example.com", "user.123"),
+            Some("secret_val".to_string())
+        );
+
+        // Clear with trailing slash
+        assert!(mgr.clear_api_secret("https://vault.example.com/", "user.123"));
+        assert_eq!(
+            mgr.get_api_secret("https://vault.example.com", "user.123"),
+            None
+        );
     }
 }

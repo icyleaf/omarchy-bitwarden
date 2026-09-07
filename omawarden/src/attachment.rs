@@ -8,7 +8,7 @@ use std::thread;
 use crate::config::ConfigManager;
 use crate::crypto::{Engine, BASE64};
 use crate::keyring::KeyringManager;
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, VaultStorage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentResponse {
@@ -158,12 +158,30 @@ pub fn get_attachment(
             })
         });
 
+    let keyring_mgr = KeyringManager::default();
+    let initial_server_url = if !storage.server_url.is_empty() {
+        storage.server_url.trim_end_matches('/')
+    } else {
+        cfg.server_url.trim_end_matches('/')
+    };
+
     let initial_token = session_token
         .map(|s| s.to_string())
-        .or_else(|| KeyringManager::default().get_session())
+        .or_else(|| keyring_mgr.get_token(crate::keyring::KIND_ACCESS_TOKEN))
+        .or_else(|| keyring_mgr.get_session())
         .or_else(|| storage.access_token.clone());
 
     let token_val = match initial_token {
+        Some(ref t) if !t.is_empty() && !crate::auth::is_jwt_expired(t) => Some(t.clone()),
+        _ => attempt_attachment_token_refresh(
+            initial_server_url,
+            &storage_mgr,
+            &keyring_mgr,
+            &storage,
+        ),
+    };
+
+    let active_token = match token_val {
         Some(ref t) if !t.is_empty() => t.clone(),
         _ => {
             return AttachmentResponse {
@@ -179,7 +197,7 @@ pub fn get_attachment(
             };
         }
     };
-    let mut active_token = token_val;
+    let mut active_token = active_token;
 
     let safe_filename = if filename.is_empty() || filename == "." {
         format!("attachment_{}", attachment_id)
@@ -298,37 +316,33 @@ pub fn get_attachment(
         .header("Authorization", format!("Bearer {}", active_token))
         .send();
 
-    // If 401 Unauthorized, attempt token refresh using refresh_token
+    // If 401 Unauthorized or 403 Forbidden, attempt token refresh using refresh_token or API key credentials
     if let Ok(ref r) = download_res {
-        if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if r.status() == reqwest::StatusCode::UNAUTHORIZED
+            || r.status() == reqwest::StatusCode::FORBIDDEN
+        {
             crate::log_warn!(
                 "omawarden:attachment",
-                "HTTP 401 Unauthorized for item {} attachment {}. Attempting token refresh.",
+                "HTTP {} for item {} attachment {}. Attempting token refresh.",
+                r.status(),
                 item_id,
                 attachment_id
             );
-            if let Some(ref ref_tok) = storage.refresh_token {
-                let api_client = crate::api::BitwardenApiClient::new(server_url);
-                if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
-                    let mut fresh_st = storage_mgr.load();
-                    fresh_st.access_token = Some(tok_resp.access_token.clone());
-                    if let Some(ref new_ref) = tok_resp.refresh_token {
-                        fresh_st.refresh_token = Some(new_ref.clone());
-                    }
-                    let _ = storage_mgr.save(&fresh_st);
-                    active_token = tok_resp.access_token;
-                    crate::log_info!(
-                        "omawarden:attachment",
-                        "Token refresh successful, retrying download."
-                    );
+            if let Some(new_token) =
+                attempt_attachment_token_refresh(server_url, &storage_mgr, &keyring_mgr, &storage)
+            {
+                active_token = new_token;
+                crate::log_info!(
+                    "omawarden:attachment",
+                    "Token refresh successful, retrying download."
+                );
 
-                    download_res = client
-                        .get(&download_url)
-                        .header("Authorization", format!("Bearer {}", active_token))
-                        .send();
-                } else {
-                    crate::log_error!("omawarden:attachment", "Token refresh grant failed.");
-                }
+                download_res = client
+                    .get(&download_url)
+                    .header("Authorization", format!("Bearer {}", active_token))
+                    .send();
+            } else {
+                crate::log_error!("omawarden:attachment", "Token renewal failed.");
             }
         }
     }
@@ -682,6 +696,67 @@ pub fn get_attachment(
         notify,
         &bytes,
     )
+}
+
+fn attempt_attachment_token_refresh(
+    server_url: &str,
+    storage_mgr: &StorageManager,
+    keyring_mgr: &KeyringManager,
+    storage: &VaultStorage,
+) -> Option<String> {
+    let api_client = crate::api::BitwardenApiClient::new(server_url);
+
+    // 1. Try refresh_token
+    let refresh_token = keyring_mgr
+        .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+        .or_else(|| storage.refresh_token.clone());
+
+    if let Some(ref ref_tok) = refresh_token {
+        if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
+            persist_attachment_tokens(storage_mgr, keyring_mgr, &tok_resp);
+            return Some(tok_resp.access_token);
+        }
+    }
+
+    // 2. Try client_credentials via client_id + client_secret in Keyring
+    if let Some(ref cid) = storage.client_id {
+        if let Some(sec) = keyring_mgr.get_api_secret(server_url, cid) {
+            if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
+                persist_attachment_tokens(storage_mgr, keyring_mgr, &tok_resp);
+                return Some(tok_resp.access_token);
+            }
+        }
+    }
+
+    None
+}
+
+fn persist_attachment_tokens(
+    storage_mgr: &StorageManager,
+    keyring_mgr: &KeyringManager,
+    tok_resp: &crate::api::TokenResponse,
+) {
+    let mut fresh_st = storage_mgr.load();
+    if keyring_mgr.is_available() {
+        let s1 = keyring_mgr.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
+        let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
+            keyring_mgr.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+        } else {
+            keyring_mgr.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
+            true
+        };
+        if s1 && s2 {
+            fresh_st.access_token = None;
+            fresh_st.refresh_token = None;
+        } else {
+            fresh_st.access_token = Some(tok_resp.access_token.clone());
+            fresh_st.refresh_token = tok_resp.refresh_token.clone();
+        }
+    } else {
+        fresh_st.access_token = Some(tok_resp.access_token.clone());
+        fresh_st.refresh_token = tok_resp.refresh_token.clone();
+    }
+    let _ = storage_mgr.save(&fresh_st);
 }
 
 fn is_cached_file_valid(path: &Path, expected_encrypted_size: Option<u64>, bytes: &[u8]) -> bool {
