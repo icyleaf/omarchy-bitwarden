@@ -93,6 +93,7 @@ pub struct AuthResult {
 
 pub struct AuthManager {
     pub server_url: String,
+    pub identity_url: Option<String>,
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
 }
@@ -103,9 +104,34 @@ impl AuthManager {
         storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
     ) -> Self {
+        Self::with_identity_url(server_url, None, storage_mgr, keyring_mgr)
+    }
+
+    pub fn with_identity_url(
+        server_url: &str,
+        identity_url: Option<&str>,
+        storage_mgr: Option<StorageManager>,
+        keyring_mgr: Option<KeyringManager>,
+    ) -> Self {
+        let sm = storage_mgr.unwrap_or_default();
+        let storage = sm.load();
+        let effective_identity_url = if let Some(id) = identity_url {
+            let id_trim = id.trim();
+            if !id_trim.is_empty() {
+                Some(id_trim.to_string())
+            } else {
+                None
+            }
+        } else if server_url.is_empty() || server_url == storage.server_url {
+            storage.identity_url.clone()
+        } else {
+            None
+        };
+
         Self {
             server_url: server_url.to_string(),
-            storage_mgr: storage_mgr.unwrap_or_default(),
+            identity_url: effective_identity_url,
+            storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
         }
     }
@@ -268,7 +294,8 @@ impl AuthManager {
             "Starting login with password for {}",
             email
         );
-        let client = BitwardenApiClient::new(&self.server_url);
+        let client =
+            BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let password_zeroizing = Zeroizing::new(password.to_string());
 
         let (token_resp, _user_key) = match client.login_password(email, &password_zeroizing, code)
@@ -288,6 +315,7 @@ impl AuthManager {
 
         let mut storage = self.storage_mgr.load();
         storage.server_url = self.server_url.clone();
+        storage.identity_url = self.identity_url.clone();
         storage.user_email = email.trim().to_lowercase();
         storage.enc_user_key = token_resp.key;
         storage.enc_private_key = token_resp.private_key;
@@ -379,7 +407,8 @@ impl AuthManager {
             "Starting login with API Key client_id: {}",
             client_id
         );
-        let client = BitwardenApiClient::new(&self.server_url);
+        let client =
+            BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let token_resp = match client.login_apikey(client_id, client_secret) {
             Ok(r) => r,
             Err(e) => {
@@ -396,6 +425,7 @@ impl AuthManager {
 
         let mut storage = self.storage_mgr.load();
         storage.server_url = self.server_url.clone();
+        storage.identity_url = self.identity_url.clone();
         storage.client_id = Some(client_id.trim().to_string());
         storage.enc_user_key = token_resp.key;
         storage.enc_private_key = token_resp.private_key;
@@ -1151,5 +1181,63 @@ esac
         let st = auth_mgr.get_status(false);
         assert!(st.has_session);
         assert_eq!(st.status, "locked");
+    }
+
+    #[test]
+    fn test_auth_manager_identity_url_isolation_and_clearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage_isolation.json");
+        let storage_mgr = StorageManager::new(path);
+
+        // Pre-save storage for custom server with an identity URL
+        let initial_storage = VaultStorage {
+            server_url: "https://vaultwarden.custom.local".to_string(),
+            identity_url: Some("https://id.custom.local".to_string()),
+            user_email: "user@custom.local".to_string(),
+            ..Default::default()
+        };
+        storage_mgr.save(&initial_storage).unwrap();
+
+        // 1. When switching to a new server, old storage identity_url must NOT be inherited
+        let auth_mgr_cloud = AuthManager::with_identity_url(
+            "https://vault.bitwarden.com",
+            None,
+            Some(storage_mgr.clone()),
+            None,
+        );
+        assert_eq!(auth_mgr_cloud.identity_url, None);
+
+        // 2. When same server URL is used, storage identity_url is inherited
+        let auth_mgr_same = AuthManager::with_identity_url(
+            "https://vaultwarden.custom.local",
+            None,
+            Some(storage_mgr.clone()),
+            None,
+        );
+        assert_eq!(
+            auth_mgr_same.identity_url,
+            Some("https://id.custom.local".to_string())
+        );
+
+        // 3. When empty string is explicitly provided, identity_url is cleared (None)
+        let auth_mgr_cleared = AuthManager::with_identity_url(
+            "https://vaultwarden.custom.local",
+            Some(""),
+            Some(storage_mgr.clone()),
+            None,
+        );
+        assert_eq!(auth_mgr_cleared.identity_url, None);
+
+        // 4. When explicit non-empty identity URL is provided, it is used
+        let auth_mgr_override = AuthManager::with_identity_url(
+            "https://vaultwarden.custom.local",
+            Some("https://new-id.custom.local"),
+            Some(storage_mgr.clone()),
+            None,
+        );
+        assert_eq!(
+            auth_mgr_override.identity_url,
+            Some("https://new-id.custom.local".to_string())
+        );
     }
 }

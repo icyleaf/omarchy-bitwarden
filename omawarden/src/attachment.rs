@@ -295,15 +295,20 @@ pub fn get_attachment(
     }
 
     // Direct HTTP download via REST API
-    let server_url = if !storage.server_url.is_empty() {
-        storage.server_url.trim_end_matches('/')
+    let raw_server_url = if !storage.server_url.is_empty() {
+        &storage.server_url
     } else {
-        cfg.server_url.trim_end_matches('/')
+        &cfg.server_url
     };
+    let effective_id_url = cfg
+        .identity_url
+        .as_deref()
+        .or(storage.identity_url.as_deref());
+    let env_urls = crate::api::EnvironmentUrls::resolve(raw_server_url, effective_id_url);
 
     let download_url = format!(
-        "{}/api/ciphers/{}/attachment/{}",
-        server_url, item_id, attachment_id
+        "{}/ciphers/{}/attachment/{}",
+        env_urls.api_url, item_id, attachment_id
     );
 
     let client = reqwest::blocking::Client::builder()
@@ -328,9 +333,12 @@ pub fn get_attachment(
                 item_id,
                 attachment_id
             );
-            if let Some(new_token) =
-                attempt_attachment_token_refresh(server_url, &storage_mgr, &keyring_mgr, &storage)
-            {
+            if let Some(new_token) = attempt_attachment_token_refresh(
+                raw_server_url,
+                &storage_mgr,
+                &keyring_mgr,
+                &storage,
+            ) {
                 active_token = new_token;
                 crate::log_info!(
                     "omawarden:attachment",
@@ -386,13 +394,13 @@ pub fn get_attachment(
                         if url_str.starts_with("http://") || url_str.starts_with("https://") {
                             url_str.to_string()
                         } else if url_str.starts_with('/') {
-                            format!("{}{}", server_url, url_str)
+                            format!("{}{}", env_urls.base_url, url_str)
                         } else {
-                            format!("{}/{}", server_url, url_str)
+                            format!("{}/{}", env_urls.base_url, url_str)
                         };
 
                     let mut req = client.get(&full_signed_url);
-                    if full_signed_url.starts_with(server_url)
+                    if full_signed_url.starts_with(&env_urls.base_url)
                         && !full_signed_url.contains("token=")
                     {
                         req = req.header("Authorization", format!("Bearer {}", active_token));
@@ -704,7 +712,13 @@ fn attempt_attachment_token_refresh(
     keyring_mgr: &KeyringManager,
     storage: &VaultStorage,
 ) -> Option<String> {
-    let api_client = crate::api::BitwardenApiClient::new(server_url);
+    let effective_id_url = if server_url.is_empty() || server_url == storage.server_url {
+        storage.identity_url.as_deref()
+    } else {
+        None
+    };
+    let api_client =
+        crate::api::BitwardenApiClient::with_identity_url(server_url, effective_id_url);
 
     // 1. Try refresh_token
     let refresh_token = keyring_mgr

@@ -263,6 +263,7 @@ pub fn parse_ssh_key_fields(
 
 pub struct VaultManager {
     pub server_url: String,
+    pub identity_url: Option<String>,
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
     pub storage: RwLock<VaultStorage>,
@@ -277,6 +278,15 @@ impl VaultManager {
         storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
     ) -> Self {
+        Self::with_identity_url(server_url, None, storage_mgr, keyring_mgr)
+    }
+
+    pub fn with_identity_url(
+        server_url: &str,
+        identity_url: Option<&str>,
+        storage_mgr: Option<StorageManager>,
+        keyring_mgr: Option<KeyringManager>,
+    ) -> Self {
         let sm = storage_mgr.unwrap_or_default();
         let storage = sm.load();
         let effective_url = if server_url.is_empty() {
@@ -284,9 +294,22 @@ impl VaultManager {
         } else {
             server_url.to_string()
         };
+        let effective_identity_url = if let Some(id) = identity_url {
+            let id_trim = id.trim();
+            if !id_trim.is_empty() {
+                Some(id_trim.to_string())
+            } else {
+                None
+            }
+        } else if server_url.is_empty() || server_url == storage.server_url {
+            storage.identity_url.clone()
+        } else {
+            None
+        };
 
         Self {
             server_url: effective_url,
+            identity_url: effective_identity_url,
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
             storage: RwLock::new(storage),
@@ -372,7 +395,11 @@ impl VaultManager {
         } else {
             &self.server_url
         };
-        let client = BitwardenApiClient::new(s_url);
+        let id_url = self
+            .identity_url
+            .as_deref()
+            .or(storage.identity_url.as_deref());
+        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
 
         let initial_token = self
             .keyring_mgr
@@ -486,7 +513,11 @@ impl VaultManager {
         } else {
             &self.server_url
         };
-        let client = BitwardenApiClient::new(s_url);
+        let id_url = self
+            .identity_url
+            .as_deref()
+            .or(storage.identity_url.as_deref());
+        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
 
         let mut had_credentials = false;
         let mut auth_failed = false;
@@ -853,11 +884,16 @@ impl VaultManager {
             }
         });
 
-        let client = BitwardenApiClient::new(if !storage.server_url.is_empty() {
+        let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
         } else {
             &self.server_url
-        });
+        };
+        let id_url = self
+            .identity_url
+            .as_deref()
+            .or(storage.identity_url.as_deref());
+        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
 
         let created_cipher = match client.create_cipher(&active_token, &payload) {
             Ok(c) => c,

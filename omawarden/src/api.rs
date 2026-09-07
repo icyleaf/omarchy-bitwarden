@@ -83,14 +83,108 @@ pub struct SyncResponse {
     pub ciphers: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentUrls {
+    pub base_url: String,
+    pub api_url: String,
+    pub identity_url: String,
+    pub is_cloud: bool,
+    pub has_explicit_identity: bool,
+}
+
+impl EnvironmentUrls {
+    pub fn resolve(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
+        let trimmed_server = server_url.trim();
+        let normalized_server = if trimmed_server.is_empty() {
+            "https://vault.bitwarden.com".to_string()
+        } else if !trimmed_server.starts_with("http://") && !trimmed_server.starts_with("https://")
+        {
+            format!("https://{}", trimmed_server)
+        } else {
+            trimmed_server.to_string()
+        };
+
+        let parsed = url::Url::parse(&normalized_server).ok();
+        let host = parsed
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mut is_cloud = false;
+        let (base_url, api_url, mut identity_url) =
+            if host == "bitwarden.eu" || host.ends_with(".bitwarden.eu") {
+                is_cloud = true;
+                (
+                    "https://vault.bitwarden.eu".to_string(),
+                    "https://api.bitwarden.eu".to_string(),
+                    "https://identity.bitwarden.eu".to_string(),
+                )
+            } else if host == "bitwarden.com" || host.ends_with(".bitwarden.com") {
+                is_cloud = true;
+                (
+                    "https://vault.bitwarden.com".to_string(),
+                    "https://api.bitwarden.com".to_string(),
+                    "https://identity.bitwarden.com".to_string(),
+                )
+            } else {
+                let clean = normalized_server.trim_end_matches('/');
+                let root = if let Some(stripped) = clean.strip_suffix("/api") {
+                    stripped.trim_end_matches('/')
+                } else if let Some(stripped) = clean.strip_suffix("/identity") {
+                    stripped.trim_end_matches('/')
+                } else {
+                    clean
+                };
+                (
+                    root.to_string(),
+                    format!("{}/api", root),
+                    format!("{}/identity", root),
+                )
+            };
+
+        let mut has_explicit_identity = false;
+        if let Some(explicit) = explicit_identity_url {
+            let exp_trimmed = explicit.trim();
+            if !exp_trimmed.is_empty() {
+                has_explicit_identity = true;
+                let mut norm_explicit = if !exp_trimmed.starts_with("http://")
+                    && !exp_trimmed.starts_with("https://")
+                {
+                    format!("https://{}", exp_trimmed.trim_end_matches('/'))
+                } else {
+                    exp_trimmed.trim_end_matches('/').to_string()
+                };
+                if let Some(stripped) = norm_explicit.strip_suffix("/connect/token") {
+                    norm_explicit = stripped.trim_end_matches('/').to_string();
+                }
+                identity_url = norm_explicit;
+            }
+        }
+
+        Self {
+            base_url,
+            api_url,
+            identity_url,
+            is_cloud,
+            has_explicit_identity,
+        }
+    }
+}
+
 pub struct BitwardenApiClient {
     pub server_url: String,
+    pub urls: EnvironmentUrls,
     client: Client,
 }
 
 impl BitwardenApiClient {
     pub fn new(server_url: &str) -> Self {
-        let base = server_url.trim_end_matches('/');
+        Self::with_identity_url(server_url, None)
+    }
+
+    pub fn with_identity_url(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
+        let urls = EnvironmentUrls::resolve(server_url, explicit_identity_url);
         let mut default_headers = reqwest::header::HeaderMap::new();
         default_headers.insert(
             reqwest::header::USER_AGENT,
@@ -115,20 +209,36 @@ impl BitwardenApiClient {
             .build()
             .unwrap_or_default();
         Self {
-            server_url: base.to_string(),
+            server_url: urls.base_url.clone(),
+            urls,
             client,
         }
     }
 
     pub fn prelogin(&self, email: &str) -> Result<PreloginResponse, ApiError> {
-        let url = format!("{}/api/accounts/prelogin", self.server_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&json!({ "email": email.trim().to_lowercase() }))
-            .send()
-            .map_err(|e| ApiError::Http(e.to_string()))?;
+        let try_identity_first = self.urls.is_cloud || self.urls.has_explicit_identity;
+        let (primary_url, fallback_url) = if try_identity_first {
+            (
+                format!("{}/accounts/prelogin", self.urls.identity_url),
+                Some(format!("{}/accounts/prelogin", self.urls.api_url)),
+            )
+        } else {
+            (
+                format!("{}/accounts/prelogin", self.urls.api_url),
+                Some(format!("{}/accounts/prelogin", self.urls.identity_url)),
+            )
+        };
 
+        let email_payload = json!({ "email": email.trim().to_lowercase() });
+        let mut resp = self.client.post(&primary_url).json(&email_payload).send();
+
+        if let (Some(ref fb_url), Ok(ref r)) = (fallback_url, &resp) {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = self.client.post(fb_url).json(&email_payload).send();
+            }
+        }
+
+        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(ApiError::Http(format!(
                 "Prelogin returned status {}",
@@ -138,6 +248,27 @@ impl BitwardenApiClient {
 
         resp.json::<PreloginResponse>()
             .map_err(|e| ApiError::Json(e.to_string()))
+    }
+
+    fn post_identity_connect_token(
+        &self,
+        form_params: &HashMap<&str, String>,
+    ) -> Result<reqwest::blocking::Response, ApiError> {
+        let primary_url = format!("{}/connect/token", self.urls.identity_url);
+        let fallback_url = if self.urls.is_cloud {
+            None
+        } else {
+            Some(format!("{}/connect/token", self.urls.base_url))
+        };
+
+        let mut resp = self.client.post(&primary_url).form(form_params).send();
+        if let (Some(ref fb_url), Ok(ref r)) = (fallback_url, &resp) {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = self.client.post(fb_url).form(form_params).send();
+            }
+        }
+
+        resp.map_err(|e| ApiError::Http(e.to_string()))
     }
 
     pub fn login_password(
@@ -162,10 +293,6 @@ impl BitwardenApiClient {
 
         let password_hash = derive_master_password_hash(&master_key, password);
 
-        // Connect token endpoint (supports both Bitwarden official cloud and Vaultwarden)
-        let identity_url = format!("{}/identity/connect/token", self.server_url);
-        let fallback_url = format!("{}/connect/token", self.server_url);
-
         let mut form_params: HashMap<&str, String> = HashMap::new();
         form_params.insert("grant_type", "password".to_string());
         form_params.insert("username", email.trim().to_lowercase());
@@ -182,14 +309,7 @@ impl BitwardenApiClient {
             form_params.insert("twoFactorRemember", "1".to_string());
         }
 
-        let mut resp = self.client.post(&identity_url).form(&form_params).send();
-        if let Ok(ref r) = resp {
-            if r.status() == reqwest::StatusCode::NOT_FOUND {
-                resp = self.client.post(&fallback_url).form(&form_params).send();
-            }
-        }
-
-        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
         let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
 
@@ -246,9 +366,6 @@ impl BitwardenApiClient {
         client_id: &str,
         client_secret: &str,
     ) -> Result<TokenResponse, ApiError> {
-        let identity_url = format!("{}/identity/connect/token", self.server_url);
-        let fallback_url = format!("{}/connect/token", self.server_url);
-
         let mut form_params: HashMap<&str, String> = HashMap::new();
         form_params.insert("grant_type", "client_credentials".to_string());
         form_params.insert("client_id", client_id.trim().to_string());
@@ -258,14 +375,7 @@ impl BitwardenApiClient {
         form_params.insert("deviceIdentifier", "omarchy-bitwarden".to_string());
         form_params.insert("deviceName", "Omarchy Bitwarden".to_string());
 
-        let mut resp = self.client.post(&identity_url).form(&form_params).send();
-        if let Ok(ref r) = resp {
-            if r.status() == reqwest::StatusCode::NOT_FOUND {
-                resp = self.client.post(&fallback_url).form(&form_params).send();
-            }
-        }
-
-        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
         let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
 
@@ -286,22 +396,12 @@ impl BitwardenApiClient {
     }
 
     pub fn refresh_token_grant(&self, refresh_token: &str) -> Result<TokenResponse, ApiError> {
-        let identity_url = format!("{}/identity/connect/token", self.server_url);
-        let fallback_url = format!("{}/connect/token", self.server_url);
-
         let mut form_params = HashMap::new();
         form_params.insert("grant_type", "refresh_token".to_string());
         form_params.insert("client_id", "web".to_string());
         form_params.insert("refresh_token", refresh_token.to_string());
 
-        let mut resp = self.client.post(&identity_url).form(&form_params).send();
-        if let Ok(ref r) = resp {
-            if r.status() == reqwest::StatusCode::NOT_FOUND {
-                resp = self.client.post(&fallback_url).form(&form_params).send();
-            }
-        }
-
-        let resp = resp.map_err(|e| ApiError::Http(e.to_string()))?;
+        let resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
         let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
 
@@ -317,7 +417,7 @@ impl BitwardenApiClient {
     }
 
     pub fn sync_vault(&self, access_token: &str) -> Result<SyncResponse, ApiError> {
-        let url = format!("{}/api/sync", self.server_url);
+        let url = format!("{}/sync", self.urls.api_url);
         let resp = self
             .client
             .get(&url)
@@ -327,7 +427,7 @@ impl BitwardenApiClient {
 
         if !resp.status().is_success() {
             return Err(ApiError::Http(format!(
-                "Sync returned status {}",
+                "Sync vault failed with HTTP status {}",
                 resp.status()
             )));
         }
@@ -337,7 +437,7 @@ impl BitwardenApiClient {
     }
 
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
-        let url = format!("{}/api/ciphers", self.server_url);
+        let url = format!("{}/ciphers", self.urls.api_url);
         let resp = self
             .client
             .post(&url)
@@ -1569,5 +1669,276 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap();
         assert!(hist_1.is_empty());
+    }
+
+    #[test]
+    fn test_endpoint_resolver_official_us_cloud() {
+        let cases = [
+            "https://vault.bitwarden.com",
+            "https://vault.bitwarden.com/",
+            "https://api.bitwarden.com",
+            "https://identity.bitwarden.com",
+            "https://bitwarden.com",
+            "vault.bitwarden.com",
+            "bitwarden.com",
+        ];
+
+        for url in cases {
+            let urls = EnvironmentUrls::resolve(url, None);
+            assert!(urls.is_cloud, "Expected is_cloud for {}", url);
+            assert_eq!(urls.base_url, "https://vault.bitwarden.com");
+            assert_eq!(urls.api_url, "https://api.bitwarden.com");
+            assert_eq!(urls.identity_url, "https://identity.bitwarden.com");
+            assert!(!urls.has_explicit_identity);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_resolver_official_eu_cloud() {
+        let cases = [
+            "https://vault.bitwarden.eu",
+            "https://vault.bitwarden.eu/",
+            "https://api.bitwarden.eu",
+            "https://identity.bitwarden.eu",
+            "https://bitwarden.eu",
+            "vault.bitwarden.eu",
+            "bitwarden.eu",
+        ];
+
+        for url in cases {
+            let urls = EnvironmentUrls::resolve(url, None);
+            assert!(urls.is_cloud, "Expected is_cloud for {}", url);
+            assert_eq!(urls.base_url, "https://vault.bitwarden.eu");
+            assert_eq!(urls.api_url, "https://api.bitwarden.eu");
+            assert_eq!(urls.identity_url, "https://identity.bitwarden.eu");
+            assert!(!urls.has_explicit_identity);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_resolver_self_hosted_and_suffixes() {
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Trailing slash
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Redundant /api suffix
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/api", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Redundant /identity suffix
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/identity/", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Localhost with port
+        let urls = EnvironmentUrls::resolve("http://127.0.0.1:8080", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "http://127.0.0.1:8080");
+        assert_eq!(urls.api_url, "http://127.0.0.1:8080/api");
+        assert_eq!(urls.identity_url, "http://127.0.0.1:8080/identity");
+
+        // Subpath deployment
+        let urls = EnvironmentUrls::resolve("https://example.com/vw/api", None);
+        assert_eq!(urls.base_url, "https://example.com/vw");
+        assert_eq!(urls.api_url, "https://example.com/vw/api");
+        assert_eq!(urls.identity_url, "https://example.com/vw/identity");
+    }
+
+    #[test]
+    fn test_endpoint_resolver_explicit_identity_override() {
+        // Cloud base with custom identity override
+        let urls = EnvironmentUrls::resolve(
+            "https://vault.bitwarden.com",
+            Some("https://custom-auth.corp.net/identity/"),
+        );
+        assert!(urls.is_cloud);
+        assert!(urls.has_explicit_identity);
+        assert_eq!(urls.base_url, "https://vault.bitwarden.com");
+        assert_eq!(urls.api_url, "https://api.bitwarden.com");
+        assert_eq!(urls.identity_url, "https://custom-auth.corp.net/identity");
+
+        // Self-hosted with custom identity override
+        let urls =
+            EnvironmentUrls::resolve("https://vaultwarden.corp.net", Some("https://id.corp.net"));
+        assert!(!urls.is_cloud);
+        assert!(urls.has_explicit_identity);
+        assert_eq!(urls.base_url, "https://vaultwarden.corp.net");
+        assert_eq!(urls.api_url, "https://vaultwarden.corp.net/api");
+        assert_eq!(urls.identity_url, "https://id.corp.net");
+
+        // Empty string explicit identity is treated as None
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.corp.net", Some("   "));
+        assert!(!urls.has_explicit_identity);
+        assert_eq!(urls.identity_url, "https://vaultwarden.corp.net/identity");
+    }
+
+    #[test]
+    fn test_endpoint_resolver_non_official_bitwarden_domain() {
+        // Host has bitwarden in domain name but is not the official cloud
+        let urls = EnvironmentUrls::resolve("https://mybitwarden.com", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "https://mybitwarden.com");
+        assert_eq!(urls.api_url, "https://mybitwarden.com/api");
+        assert_eq!(urls.identity_url, "https://mybitwarden.com/identity");
+    }
+
+    #[test]
+    fn test_client_prelogin_fallback_from_api_to_identity() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /api/accounts/prelogin") {
+                    // First request to /api/accounts/prelogin returns 404
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/accounts/prelogin") {
+                    // Fallback to /identity/accounts/prelogin returns 200
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("fallback@example.com").unwrap();
+        assert_eq!(res.kdf, Some(0));
+        assert_eq!(res.kdf_iterations, Some(600_000));
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_client_connect_token_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/connect/token") {
+                    // Primary returns 404
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /connect/token") {
+                    // Fallback returns 200
+                    let body = r#"{"access_token":"token_fallback_123","token_type":"Bearer","expires_in":3600}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.login_apikey("client_id_val", "client_sec").unwrap();
+        assert_eq!(res.access_token, "token_fallback_123");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_endpoint_resolver_explicit_identity_strips_redundant_token_path() {
+        let urls = EnvironmentUrls::resolve(
+            "https://vault.bitwarden.com",
+            Some("https://identity.bitwarden.com/connect/token/"),
+        );
+        assert_eq!(urls.identity_url, "https://identity.bitwarden.com");
+    }
+
+    #[test]
+    fn test_client_connect_token_400_does_not_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/connect/token") {
+                    // HTTP 400 Bad Request (e.g. invalid credentials)
+                    let body = r#"{"error":"invalid_grant","error_description":"Invalid username or password."}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let err = client.login_apikey("bad_client", "bad_secret").unwrap_err();
+        assert!(err.to_string().contains("Invalid username or password"));
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
     }
 }
