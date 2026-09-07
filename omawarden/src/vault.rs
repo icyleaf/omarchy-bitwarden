@@ -411,6 +411,12 @@ impl VaultManager {
                             "omawarden:vault",
                             "Session expired. Please log in again."
                         );
+                        let mut updated = storage.clone();
+                        updated.access_token = None;
+                        updated.refresh_token = None;
+                        let _ = self.storage_mgr.save(&updated);
+                        self.lock();
+                        crate::attachment::clear_preview_attachments(None);
                         return Err("Session expired. Please log in again.".to_string());
                     }
                 } else {
@@ -418,6 +424,12 @@ impl VaultManager {
                         "omawarden:vault",
                         "Session expired and no refresh token available."
                     );
+                    let mut updated = storage.clone();
+                    updated.access_token = None;
+                    updated.refresh_token = None;
+                    let _ = self.storage_mgr.save(&updated);
+                    self.lock();
+                    crate::attachment::clear_preview_attachments(None);
                     return Err("Session expired. Please log in again.".to_string());
                 }
             }
@@ -766,15 +778,32 @@ impl VaultManager {
     pub fn get_status(&self) -> Value {
         let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
+        let has_valid_token = if let Some(ref tok) = fresh_storage.access_token {
+            !crate::auth::is_jwt_expired(tok) || fresh_storage.refresh_token.is_some()
+        } else {
+            false
+        };
+
+        let status = if !has_valid_token && fresh_storage.access_token.is_some() {
+            "unauthenticated"
+        } else if is_unlocked {
+            "unlocked"
+        } else if fresh_storage.enc_user_key.is_some() {
+            "locked"
+        } else {
+            "unauthenticated"
+        };
+
         json!({
             "ok": true,
-            "status": if is_unlocked { "unlocked" } else if fresh_storage.enc_user_key.is_some() { "locked" } else { "unauthenticated" },
+            "status": status,
             "server_url": fresh_storage.server_url,
             "user_email": fresh_storage.user_email,
             "user_id": fresh_storage.user_id,
             "last_sync": fresh_storage.last_sync,
-            "is_unlocked": is_unlocked,
-            "items_count": self.decrypted_items.read().map(|i| i.len()).unwrap_or(0),
+            "is_unlocked": is_unlocked && has_valid_token,
+            "has_session": has_valid_token,
+            "items_count": if has_valid_token { self.decrypted_items.read().map(|i| i.len()).unwrap_or(0) } else { 0 },
         })
     }
 

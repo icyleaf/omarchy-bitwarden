@@ -136,8 +136,8 @@ Item {
 
   readonly property string effectiveView: {
     if (currentView !== "auto") return currentView
-    if (authState.status === "unlocked") return "search"
-    if (authState.status === "locked") return "unlock"
+    if (authState.status === "unlocked" && Boolean(authState.has_session)) return "search"
+    if (authState.status === "locked" && Boolean(authState.has_session)) return "unlock"
     return "login"
   }
 
@@ -283,7 +283,7 @@ Item {
   }
 
   function syncVault(isBackground, force) {
-    var hasSession = root.authState && (root.authState.has_session || root.authState.status === "unlocked" || root.authState.status === "locked")
+    var hasSession = root.authState && Boolean(root.authState.has_session)
     if (!hasSession) {
       root.logWarn("omarchy:vault", "Cannot sync vault: not logged in.")
       return
@@ -2523,6 +2523,18 @@ Item {
           if (res && res.ok === false) {
             root.errorMessage = res.error || "Vault sync failed."
             root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
+            var errStr = String(res.error || "")
+            if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
+              root.authState = ({
+                status: "unauthenticated",
+                server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
+                user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
+                has_session: false
+              })
+              root.rawVaultItems = []
+              root.filteredItems = []
+              root.currentView = "auto"
+            }
             return
           }
         } catch (e) {
