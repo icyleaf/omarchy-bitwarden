@@ -1368,6 +1368,7 @@ Item {
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
+    if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -2204,6 +2205,7 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
           root.refreshAuthStatus()

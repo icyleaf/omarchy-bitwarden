@@ -47,6 +47,21 @@ Item {
   property string activeTab: "general" // "general" | "logs"
   property string logFilter: "all" // "all" | "error" | "warn"
   property string selectedLogLevel: (config && config.log_level) ? config.log_level.toLowerCase() : "error"
+  property bool showWebsiteIconsChecked: true
+
+  onConfigChanged: if (config && config.show_website_icons !== undefined) showWebsiteIconsChecked = (config.show_website_icons !== false)
+
+  function buildPayload() {
+    return {
+      server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
+      identity_url: idUrlInput.text.trim(),
+      download_dir: dlDirInput.text.trim() || "~/Downloads",
+      auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
+      clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
+      log_level: settingsRoot.selectedLogLevel,
+      show_website_icons: settingsRoot.showWebsiteIconsChecked
+    }
+  }
 
   signal saveRequested(var newSettings)
   signal closeRequested()
@@ -545,6 +560,35 @@ Item {
             }
           }
 
+          // Show Website Icons Checkbox
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.showWebsiteIconsChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.showWebsiteIconsChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.showWebsiteIconsChecked = !settingsRoot.showWebsiteIconsChecked }
+              }
+              Text { text: "Show website icons"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              text: "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              Layout.fillWidth: true
+              wrapMode: Text.WordWrap
+            }
+          }
+
           // Log Level Selection
           ColumnLayout {
             Layout.fillWidth: true
@@ -634,17 +678,7 @@ Item {
             MouseArea {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                var payload = {
-                  server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
-                  identity_url: idUrlInput.text.trim(),
-                  download_dir: dlDirInput.text.trim() || "~/Downloads",
-                  auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
-                  clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
-                  log_level: settingsRoot.selectedLogLevel
-                }
-                settingsRoot.saveRequested(payload)
-              }
+              onClicked: settingsRoot.saveRequested(settingsRoot.buildPayload())
             }
           }
         }
