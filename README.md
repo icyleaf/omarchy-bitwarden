@@ -23,7 +23,7 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | **Token & Secret Storage**     | **System Keyring Isolation** (0 plaintext tokens in local cache)     | Desktop Keychain / Electron store  | Stored in plaintext cache file or relies on insecure, leak-prone `BW_SESSION` env export |
 | **Local Data Caching**         | **Zero-Knowledge Ciphertext Cache** (fast offline search, no tokens) | Local cache file mixed with session tokens                         | Local cache file mixed with session tokens                                   |
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
-| **Lock-Screen Sync**           | **Native D-Bus / Hyprlock hooks**                                   | App idle timeout only              | None (manual lock required)                                                  |
+| **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
 ---
 
@@ -92,7 +92,6 @@ omarchy plugin update icyleaf.bitwarden
 ```bash
 killall omawarden
 omarchy plugin remove icyleaf.bitwarden
-rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
 ---

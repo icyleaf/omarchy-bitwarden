@@ -21,6 +21,11 @@ Item {
   property var shell: null
   property var manifest: null
   property bool opened: false
+  onOpenedChanged: {
+    if (root.opened) {
+      root.refreshAuthStatus()
+    }
+  }
   function toLocalPath(url) {
     if (!url) return ""
     var str = url.toString ? url.toString() : String(url)
@@ -1501,7 +1506,7 @@ Item {
 
   Timer {
     id: lockSyncTimer
-    interval: 10000
+    interval: 3000
     running: Boolean(root.opened && root.authState && root.authState.status === "unlocked")
     repeat: true
     onTriggered: root.refreshAuthStatus()

@@ -23,7 +23,7 @@
 | **Token 与凭据存储** | **系统密钥环安全隔离**（本地缓存文件零明文 Token）     | 平台 Keychain / Electron 存储  | 曾默认明文写入本地缓存文件，或依赖不安全且易泄漏的 `BW_SESSION` 环境变量 |
 | **本地数据缓存**     | **纯零知识密文缓存**（离线毫秒级检索，无解密凭据）      | 本地缓存文件与认证凭据混杂                          | 本地缓存文件与认证凭据混杂                                     |
 | **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
-| **锁屏联动**         | **原生 D-Bus / Hyprlock 挂钩**                          | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
+| **锁屏联动**         | **守护进程原生自动检测（Omarchy 锁屏、Hyprlock、D-Bus/logind 睡眠与挂起）** | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
 | **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
 ---
 
@@ -92,7 +92,6 @@ omarchy plugin update icyleaf.bitwarden
 ```bash
 killall omawarden
 omarchy plugin remove icyleaf.bitwarden
-rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
 ---

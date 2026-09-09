@@ -174,7 +174,9 @@ enum AuthAction {
 
 #[derive(Subcommand)]
 enum HookAction {
-    #[command(about = "Install system-lock hook into Omarchy hooks directory")]
+    #[command(
+        about = "Install optional system-lock hook into Omarchy hooks directory (daemon also auto-detects locks natively)"
+    )]
     Install,
 }
 
@@ -617,7 +619,8 @@ fn main() -> ExitCode {
                 Ok(path) => {
                     let json_val = serde_json::json!({
                         "ok": true,
-                        "installed_path": path.to_string_lossy()
+                        "installed_path": path.to_string_lossy(),
+                        "note": "Lock hook installed. omawarden daemon also natively auto-detects screen lock, sleep, and Omarchy shell lock."
                     });
                     println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
                     ExitCode::SUCCESS
