@@ -208,7 +208,58 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn verify_peer_credentials(stream: &UnixStream) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut ucred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut ucred_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut libc::ucred as *mut libc::c_void,
+            &mut ucred_len,
+        )
+    };
+
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let current_uid = unsafe { libc::getuid() };
+    if ucred.uid != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "Peer UID mismatch: expected {}, got {}",
+                current_uid, ucred.uid
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn verify_peer_credentials(_stream: &UnixStream) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+    if let Err(e) = verify_peer_credentials(&stream) {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Client connection rejected: peer credential check failed: {}",
+            e
+        );
+        let err = json!({ "ok": false, "error": "Access denied: client UID mismatch" });
+        let _ = writeln!(stream, "{}", err);
+        return Ok(());
+    }
+
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -679,5 +730,12 @@ mod tests {
             *state.auto_lock_duration.lock().unwrap(),
             Duration::from_secs(45)
         );
+    }
+
+    #[test]
+    fn test_verify_peer_credentials() {
+        let (client, server) = UnixStream::pair().unwrap();
+        assert!(verify_peer_credentials(&client).is_ok());
+        assert!(verify_peer_credentials(&server).is_ok());
     }
 }
