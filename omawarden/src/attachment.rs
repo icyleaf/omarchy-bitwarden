@@ -654,7 +654,26 @@ pub fn get_attachment(
     };
 
     let temp_part_path = target_dir.join(format!("{}.part_{}", safe_filename, std::process::id()));
-    if let Err(e) = fs::write(&temp_part_path, &bytes) {
+
+    #[cfg(unix)]
+    let write_res = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        if open_file || preview {
+            options.mode(0o600);
+        }
+        options.open(&temp_part_path).and_then(|mut f| {
+            f.write_all(&bytes)?;
+            f.flush()
+        })
+    };
+
+    #[cfg(not(unix))]
+    let write_res = fs::write(&temp_part_path, &bytes);
+
+    if let Err(e) = write_res {
         return AttachmentResponse {
             ok: false,
             error: Some(format!("Failed to write temporary file to disk: {}", e)),
@@ -666,12 +685,6 @@ pub fn get_attachment(
             text_content: None,
             size: None,
         };
-    }
-
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&temp_part_path, fs::Permissions::from_mode(0o600));
     }
 
     if let Err(e) = fs::rename(&temp_part_path, &dest_path) {
