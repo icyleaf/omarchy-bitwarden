@@ -272,6 +272,7 @@ Item {
   }
 
   function refreshConfig() {
+    root.showWebsiteIcons = false
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
   }
@@ -2185,6 +2186,7 @@ Item {
           }
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
         } catch (e) {
+          root.showWebsiteIcons = false
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
       }
@@ -2210,6 +2212,7 @@ Item {
           root.refreshHealth()
           root.refreshAuthStatus()
         } catch (e) {
+          root.showWebsiteIcons = false
           root.statusMessage = "Failed to update config."
           root.logError("omarchy:ui", "Failed to parse updated config: " + e)
         }

@@ -1855,6 +1855,52 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_show_website_icons_arg_parsing() {
+        // Without the flag, show_website_icons should be None so config keeps its value
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_false = Cli::try_parse_from([
+            "omawarden",
+            "config",
+            "set",
+            "--show-website-icons",
+            "false",
+        ])
+        .unwrap();
+        match cli_false.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("false".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_true =
+            Cli::try_parse_from(["omawarden", "config", "set", "--show-website-icons", "true"])
+                .unwrap();
+        match cli_true.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("true".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+    }
+
+    #[test]
     fn test_cli_totp_stdin_and_secret_arg_parsing() {
         let cli_stdin = Cli::try_parse_from(["omawarden", "totp", "--stdin"]).unwrap();
         match cli_stdin.command {
