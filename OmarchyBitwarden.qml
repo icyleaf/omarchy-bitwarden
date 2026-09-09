@@ -265,7 +265,7 @@ Item {
     configGetProc.running = true
   }
 
-  function downloadCli() {
+  function downloadCli(pinnedTag) {
     if (root.isDownloadingCli) return
     root.isDownloadingCli = true
     root.isBusy = true
@@ -277,8 +277,13 @@ Item {
     var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
     var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/download-engine.sh"))
 
+    var targetTag = pinnedTag || (root.latestVersion ? ("omawarden-v" + root.latestVersion) : "")
     downloadCliProc.running = false
-    downloadCliProc.command = ["bash", scriptPath, baseDir]
+    if (targetTag) {
+      downloadCliProc.command = ["bash", scriptPath, baseDir, "icyleaf/omarchy-bitwarden", targetTag]
+    } else {
+      downloadCliProc.command = ["bash", scriptPath, baseDir]
+    }
     downloadCliProc.running = true
   }
 
