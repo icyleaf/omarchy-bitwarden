@@ -2,9 +2,9 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,13 +15,91 @@ use crate::vault::VaultManager;
 
 use std::os::unix::process::CommandExt;
 
-pub fn get_socket_path() -> PathBuf {
+/// Resolves the secure runtime directory for daemon sockets and IPC.
+///
+/// Precedence:
+/// 1. `XDG_RUNTIME_DIR`: Verified to exist, owned by current UID, and not a symlink.
+/// 2. Fallback: Creates an isolated `/tmp/omawarden-runtime-{uid}/` directory with mode `0700`.
+pub fn get_runtime_dir() -> PathBuf {
+    let current_uid = unsafe { libc::getuid() };
+
     if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("omawarden.sock")
-    } else {
-        let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/omawarden-{}.sock", uid))
+        let p = PathBuf::from(runtime_dir);
+        if let Ok(meta) = fs::symlink_metadata(&p) {
+            if !meta.file_type().is_symlink() && meta.uid() == current_uid {
+                return p;
+            }
+        }
     }
+
+    let fallback = env::temp_dir().join(format!("omawarden-runtime-{}", current_uid));
+    let _ = crate::fs_util::create_secure_dir_all(&fallback, 0o700);
+    fallback
+}
+
+pub fn get_socket_path() -> PathBuf {
+    get_runtime_dir().join("omawarden.sock")
+}
+
+/// Validates that a socket file (and its parent directory) is owned by the current UID
+/// and is not a symlink to prevent cross-user socket hijacking or TOCTOU attacks.
+pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
+    let current_uid = unsafe { libc::getuid() };
+
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Socket path '{}' is a symlink (potential hijacking attempt)",
+                    path.display()
+                ),
+            ));
+        }
+
+        if meta.uid() != current_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Socket path '{}' is owned by foreign UID {} (expected current UID {})",
+                    path.display(),
+                    meta.uid(),
+                    current_uid
+                ),
+            ));
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Ok(parent_meta) = fs::symlink_metadata(parent) {
+            if parent_meta.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Socket parent directory '{}' is a symlink (potential hijacking attempt)",
+                        parent.display()
+                    ),
+                ));
+            }
+
+            if parent_meta.uid() != current_uid
+                && parent != Path::new("/tmp")
+                && parent != Path::new("/var/tmp")
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Socket parent directory '{}' is owned by foreign UID {} (expected current UID {})",
+                        parent.display(),
+                        parent_meta.uid(),
+                        current_uid
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn ensure_daemon_running() {
@@ -75,7 +153,28 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
         return None;
     }
 
-    let mut stream = UnixStream::connect(socket_path).ok()?;
+    if let Err(e) = validate_socket_path(&socket_path) {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Refusing to connect to socket {}: {}",
+            socket_path.display(),
+            e
+        );
+        return None;
+    }
+
+    let mut stream = UnixStream::connect(&socket_path).ok()?;
+
+    // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
+    if let Err(e) = verify_peer_credentials(&stream) {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Refusing to send request: server peer UID verification failed: {}",
+            e
+        );
+        return None;
+    }
+
     let payload = format!("{}\n", req);
     stream.write_all(payload.as_bytes()).ok()?;
     stream.flush().ok()?;
@@ -193,7 +292,12 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
 pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
     let socket_path = get_socket_path();
     if socket_path.exists() {
+        validate_socket_path(&socket_path)?;
         let _ = fs::remove_file(&socket_path);
+    }
+
+    if let Some(parent) = socket_path.parent() {
+        crate::fs_util::create_secure_dir_all(parent, 0o700)?;
     }
 
     let listener = UnixListener::bind(&socket_path)?;
@@ -910,5 +1014,56 @@ mod tests {
         let _ = is_screen_locker_running();
         let _ = is_logind_locked_or_sleeping();
         let _ = is_system_or_screen_locked();
+    }
+
+    #[test]
+    fn test_validate_socket_path_valid_and_symlink_rejection() {
+        let dir = tempdir().unwrap();
+        let real_socket = dir.path().join("real.sock");
+        fs::write(&real_socket, b"").unwrap();
+
+        // Valid socket file owned by current user
+        assert!(validate_socket_path(&real_socket).is_ok());
+
+        // Symlink pointing to the real socket must be rejected
+        let symlink_socket = dir.path().join("symlink.sock");
+        std::os::unix::fs::symlink(&real_socket, &symlink_socket).unwrap();
+        let err = validate_socket_path(&symlink_socket);
+        assert!(err.is_err());
+        assert_eq!(
+            err.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_validate_socket_path_parent_symlink_rejection() {
+        let dir = tempdir().unwrap();
+        let real_dir = dir.path().join("real_runtime");
+        fs::create_dir_all(&real_dir).unwrap();
+
+        let symlink_dir = dir.path().join("symlink_runtime");
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        let socket_in_symlink_parent = symlink_dir.join("omawarden.sock");
+        let err = validate_socket_path(&socket_in_symlink_parent);
+        assert!(err.is_err());
+        assert_eq!(
+            err.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_get_runtime_dir_permissions_and_ownership() {
+        let runtime_dir = get_runtime_dir();
+        assert!(runtime_dir.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::metadata(&runtime_dir).unwrap();
+            assert_eq!(meta.uid(), unsafe { libc::getuid() });
+        }
     }
 }
