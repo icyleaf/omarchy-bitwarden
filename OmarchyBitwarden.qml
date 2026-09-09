@@ -55,6 +55,7 @@ Item {
   })
   property bool rememberEmailChecked: true
   property bool showWebsiteIcons: false
+  property int configSeq: 0
   property bool show2FAField: false
 
   property var cliHealth: ({
@@ -273,6 +274,8 @@ Item {
 
   function refreshConfig() {
     root.showWebsiteIcons = false
+    root.configSeq++
+    configGetProc.seq = root.configSeq
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
   }
@@ -1359,6 +1362,7 @@ Item {
   }
 
   function saveSettings(settings) {
+    root.configSeq++
     root.isBusy = true
     root.logInfo("omarchy:settings", "Saving configuration (log_level: " + (settings.log_level || "error") + ")...")
     root.statusMessage = "Saving configuration..."
@@ -2174,10 +2178,12 @@ Item {
   }
   Process {
     id: configGetProc
+    property int seq: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (configGetProc.seq !== root.configSeq) return
         try {
           var data = JSON.parse(text)
           root.config = data
