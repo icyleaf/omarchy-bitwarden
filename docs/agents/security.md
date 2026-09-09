@@ -6,7 +6,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-## The 6 Mandatory Security Principles
+## The 8 Mandatory Security Principles
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -19,6 +19,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 5. Atomic 0600 Permissions   │ Restrictive mode set at creation time        │
 │ 6. IPC SO_PEERCRED Auth      │ Verify caller UID on all socket requests     │
 │ 7. Memory Locking (mlock)    │ Page-aligned physical RAM lock & no coredump │
+│ 8. Authenticated Encryption  │ Encrypt-then-MAC mandatory; no unauth cipher │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -150,6 +151,27 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
+### Rule 8: Mandatory Authenticated Encryption & Zero Unauthenticated Ciphertext Fallback
+
+**Principle**: All symmetric cryptographic operations (vault items, fields, attachments) MUST follow strict Authenticated Encryption (Encrypt-then-MAC via HMAC-SHA256). Silent fallback to unauthenticated ciphertexts or bypass on HMAC mismatch is strictly forbidden.
+
+- ❌ **Anti-Pattern**:
+  - Silently falling back to bare AES-CBC decryption without MAC when HMAC fails or when MAC is absent.
+  - Allowing unauthenticated attachment blob decryption (e.g. raw IV+ciphertext or encType 0) where a malicious or compromised server could alter ciphertext bytes undetected.
+  - Swallowing `MacMismatch` errors or returning partial unverified plaintexts.
+- ✅ **Required Pattern**:
+  - `decrypt_attachment_blob` MUST require `key.mac_key` and enforce HMAC-SHA256 validation over `IV + Ciphertext` before any decryption.
+  - Any attachment payload failing HMAC validation or omitting cryptographic authentication MUST immediately return `Err(CryptoError)`.
+  - Constant-time comparison (`subtle::ConstantTimeEq`) is mandatory for all MAC verifications.
+- 🧪 **Mandatory Verification**:
+  Unit tests must assert that:
+  1. Tampered ciphertext with valid MAC returns `Err`.
+  2. Corrupted MAC byte returns `Err`.
+  3. Unauthenticated blobs (bare IV + ciphertext) return `Err`.
+  4. Keys lacking `mac_key` fail immediately with `Err`.
+
+---
+
 ## Agent Checklist Before Opening a PR
 
 Before submitting any code changes touching authentication, crypto, networking, IPC, or storage:
@@ -161,6 +183,7 @@ Before submitting any code changes touching authentication, crypto, networking, 
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
 - [ ] Sockets enforce mutual peer UID (SO_PEERCRED) verification and validate paths/symlinks.
 - [ ] Master keys and cryptographic keys use page-aligned physical memory locks (LockedKey32 / mlock).
+- [ ] Symmetric decryption strictly requires and verifies HMAC-SHA256 (no unauthenticated fallback).
 - [ ] Process anti-dump protection (PR_SET_DUMPABLE = 0) is active.
 - [ ] Installers / downloaders enforce fail-closed checksum checks.
 - [ ] Vault locks cleanly upon screen-lock, sleep, or idle timeout.
