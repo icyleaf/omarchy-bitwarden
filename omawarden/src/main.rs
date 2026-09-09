@@ -91,7 +91,15 @@ enum Commands {
     Totp {
         #[arg(index = 1, help = "Vault item ID, name query, secret, or otpauth URI")]
         query: Option<String>,
-        #[arg(long, help = "Explicit TOTP secret or otpauth URI")]
+        #[arg(
+            long,
+            help = "Read secret, otpauth URI, or query JSON from standard input"
+        )]
+        stdin: bool,
+        #[arg(
+            long,
+            help = "Explicit TOTP secret or otpauth URI (deprecated: use STDIN for secret hygiene)"
+        )]
         secret: Option<String>,
         #[arg(long, help = "Copy generated code directly to clipboard")]
         copy: bool,
@@ -1039,16 +1047,72 @@ fn main() -> ExitCode {
 
         Commands::Totp {
             query,
+            stdin,
             secret,
             copy,
         } => {
             let clip_mgr = ClipboardManager::default();
 
-            let (totp_res, item_info) = if let Some(sec) = secret {
+            let (totp_res, item_info) = if stdin {
+                let stdin_val = read_secret_stdin();
+                if stdin_val.is_empty() {
+                    (None, None)
+                } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
+                    if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
+                        (generate_totp(sec, None, 6, 30), None)
+                    } else if let Some(q) = val
+                        .get("query")
+                        .or_else(|| val.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let daemon_res = send_daemon_request(&json!({
+                            "action": "totp",
+                            "query": q
+                        }));
+                        if let Some(res) = daemon_res {
+                            if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                let code = res
+                                    .get("code")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let period =
+                                    res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let name =
+                                    res.get("name").and_then(|v| v.as_str()).map(String::from);
+                                let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
+                                (
+                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                    if let (Some(id), Some(name)) = (id, name) {
+                                        Some((id, name))
+                                    } else {
+                                        None
+                                    },
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (generate_totp(&stdin_val, None, 6, 30), None)
+                    }
+                } else {
+                    (generate_totp(&stdin_val, None, 6, 30), None)
+                }
+            } else if let Some(sec) = secret {
+                eprintln!(
+                    "Warning: Passing secret via --secret CLI argument is insecure and visible in /proc. Pass via STDIN instead."
+                );
                 (generate_totp(&sec, None, 6, 30), None)
             } else if let Some(q) = query {
                 let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
                 if is_uri {
+                    eprintln!(
+                        "Warning: Passing otpauth URI containing secrets in CLI arguments is insecure and visible in /proc. Pass via STDIN instead."
+                    );
                     (generate_totp(&q, None, 6, 30), None)
                 } else {
                     omawarden::daemon::ensure_daemon_running();
@@ -1717,6 +1781,55 @@ mod tests {
         match cli_explicit.command {
             Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
             _ => panic!("Expected Commands::Daemon"),
+        }
+    }
+
+    #[test]
+    fn test_cli_totp_stdin_and_secret_arg_parsing() {
+        let cli_stdin = Cli::try_parse_from(["omawarden", "totp", "--stdin"]).unwrap();
+        match cli_stdin.command {
+            Commands::Totp {
+                stdin,
+                secret,
+                query,
+                ..
+            } => {
+                assert!(stdin);
+                assert_eq!(secret, None);
+                assert_eq!(query, None);
+            }
+            _ => panic!("Expected Commands::Totp"),
+        }
+
+        let cli_secret =
+            Cli::try_parse_from(["omawarden", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).unwrap();
+        match cli_secret.command {
+            Commands::Totp {
+                stdin,
+                secret,
+                query,
+                ..
+            } => {
+                assert!(!stdin);
+                assert_eq!(secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+                assert_eq!(query, None);
+            }
+            _ => panic!("Expected Commands::Totp"),
+        }
+
+        let cli_query = Cli::try_parse_from(["omawarden", "totp", "my-github-item"]).unwrap();
+        match cli_query.command {
+            Commands::Totp {
+                stdin,
+                secret,
+                query,
+                ..
+            } => {
+                assert!(!stdin);
+                assert_eq!(secret, None);
+                assert_eq!(query.as_deref(), Some("my-github-item"));
+            }
+            _ => panic!("Expected Commands::Totp"),
         }
     }
 }

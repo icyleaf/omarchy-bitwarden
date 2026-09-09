@@ -5,6 +5,12 @@ TARGET_DIR="${1:-$HOME/.config/omarchy/plugins/icyleaf.bitwarden/bin}"
 REPO="${2:-icyleaf/omarchy-bitwarden}"
 TAG="${3:-${OMAWARDEN_TAG:-}}"
 
+# Validate repository format to prevent path or URL injection
+if [[ ! "$REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+  echo "{\"ok\":false,\"error\":\"Invalid repository format: $REPO\"}"
+  exit 1
+fi
+
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) TRIPLE="x86_64-unknown-linux-gnu" ;;
