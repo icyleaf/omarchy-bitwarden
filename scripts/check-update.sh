@@ -3,12 +3,18 @@ set -e
 
 REPO="${1:-icyleaf/omarchy-bitwarden}"
 
+# Validate repository format to prevent script and URL injection
+if [[ ! "$REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+  echo '{"ok":false,"error":"Invalid repository format"}'
+  exit 1
+fi
+
 # 1. Try using python3 for full JSON fetching and safe parsing (releases API)
 if command -v python3 >/dev/null 2>&1; then
-  python3 - <<EOF
+  python3 - "$REPO" << 'EOF'
 import json, sys, urllib.request
 
-repo = "${REPO}"
+repo = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "icyleaf/omarchy-bitwarden"
 headers = {"User-Agent": "OmarchyBitwarden"}
 req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=10", headers=headers)
 try:
