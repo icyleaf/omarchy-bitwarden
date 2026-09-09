@@ -31,6 +31,19 @@ pub struct AttachmentResponse {
     pub size: Option<u64>,
 }
 
+/// Compares two URLs to verify they share the exact same origin (scheme, host, and port).
+/// Protects against bearer token leakage via prefix matching (e.g. `https://vault.example.com.attacker.com`).
+pub fn is_same_origin(u1_str: &str, u2_str: &str) -> bool {
+    match (url::Url::parse(u1_str), url::Url::parse(u2_str)) {
+        (Ok(u1), Ok(u2)) => {
+            u1.scheme() == u2.scheme()
+                && u1.host() == u2.host()
+                && u1.port_or_known_default() == u2.port_or_known_default()
+        }
+        _ => false,
+    }
+}
+
 pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path) {
     let t = title.to_string();
     let b = body.to_string();
@@ -400,7 +413,7 @@ pub fn get_attachment(
                         };
 
                     let mut req = client.get(&full_signed_url);
-                    if full_signed_url.starts_with(&env_urls.base_url)
+                    if is_same_origin(&full_signed_url, &env_urls.base_url)
                         && !full_signed_url.contains("token=")
                     {
                         req = req.header("Authorization", format!("Bearer {}", active_token));
@@ -659,14 +672,20 @@ pub fn get_attachment(
     let write_res = {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
-        if open_file || preview {
-            options.mode(0o600);
-        }
+        options.mode(0o600);
         options.open(&temp_part_path).and_then(|mut f| {
             f.write_all(&bytes)?;
-            f.flush()
+            f.flush()?;
+            let metadata = f.metadata()?;
+            let mut perms = metadata.permissions();
+            if perms.mode() & 0o777 != 0o600 {
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(&temp_part_path, perms);
+            }
+            Ok(())
         })
     };
 
@@ -1222,5 +1241,39 @@ mod tests {
         clear_preview_attachments(Some("test_item_clear"));
         assert!(!preview_file.exists());
         assert!(!preview_dir.exists());
+    }
+
+    #[test]
+    fn test_is_same_origin() {
+        let base = "https://vault.example.com";
+
+        // Same origin paths and subpaths
+        assert!(is_same_origin(
+            "https://vault.example.com/attachments/123",
+            base
+        ));
+        assert!(is_same_origin(
+            "https://vault.example.com/api/ciphers/abc/attachment/xyz",
+            base
+        ));
+
+        // Prefix match on different domain must FAIL (mitigates bearer token exfiltration)
+        assert!(!is_same_origin(
+            "https://vault.example.com.attacker.com/leak",
+            base
+        ));
+        assert!(!is_same_origin(
+            "https://vault.example.com-evil.org/download",
+            base
+        ));
+
+        // Different subdomain
+        assert!(!is_same_origin("https://evil.example.com", base));
+
+        // Different scheme
+        assert!(!is_same_origin("http://vault.example.com", base));
+
+        // Different port
+        assert!(!is_same_origin("https://vault.example.com:8443", base));
     }
 }

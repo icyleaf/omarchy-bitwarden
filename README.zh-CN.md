@@ -174,8 +174,8 @@ flowchart TD
 
 1. **零命令行参数（`argv`）凭据泄露**：主密码、API 密钥、2FA 验证码、TOTP 种子与剪贴板文本**绝不作为命令行参数传递**。所有敏感数据均通过受保护的 `stdin` 数据流或 `0600` Unix 域套接字传输，彻底杜绝 `/proc/<pid>/cmdline` 窥探。
 2. **零环境变量（`env`）秘密溢出**：API Client Secret、密码与会话令牌绝不导出到进程环境变量（`/proc/<pid>/environ`）。
-3. **严格仅所有者访问权限（`0600`）**：本地密码库缓存文件与守护进程套接字（`/run/user/<UID>/omawarden.sock`）强制执行 `0600` 权限（仅当前用户 UID 可读写）。
-4. **确定性内存清零销毁（`zeroize`）**：所有对称加密密钥（`SymmetricCryptoKey`）、派生主密钥及中间哈希均实现 `zeroize::ZeroizeOnDrop`，在使用结束或离开作用域时以零字节覆写内存。锁定密码库时会立即从常驻内存中清除所有已解密条目与密钥。
+3. **严格仅所有者访问权限（`0600`）与 Peer UID 校验**：本地密码库缓存文件、下载解密的附件及常驻守护进程套接字（`/run/user/<UID>/omawarden.sock`）强制执行 `0600` 权限，并通过内核级 `SO_PEERCRED` 校验对端 UID，实现跨系统用户的强隔离。注：在 Linux 系统中，同一 OS 用户身份下运行的进程默认共享 UID 权限；针对同机不可信用户进程的隔离建议配合沙盒（如 Bubblewrap/Flatpak）。
+4. **确定性主密钥内存清零销毁（`zeroize`）**：所有对称加密密钥（`SymmetricCryptoKey`）、派生主密钥及中间密码学缓冲区均实现 `zeroize::ZeroizeOnDrop`，在使用结束或离开作用域时以零字节覆写内存。锁定密码库时会立即清空并释放常驻内存中的所有已解密条目。
 5. **原生 FreeDesktop 密钥环生命周期**：Bearer Token（Access/Refresh Token）、API 密钥（Client Secret）以及会话凭据均安全隔离于系统密钥环（GNOME Keyring / KWallet / KeePassXC）中。**本地缓存文件纯粹作为零知识密文存储，绝无任何明文 Bearer Token 或主密码落盘**。在手动锁定（<kbd>Ctrl</kbd>+<kbd>L</kbd>）、系统锁屏事件（`hyprlock`/`swaylock`）或闲置超时触发时，立即销毁密钥环中的会话并清空常驻内存。
 6. **阅后即焚剪贴板（30 秒 TTL 自动清除）**：复制密码、TOTP、信用卡安全码或 SSH 私钥时，内容直接管道传输至 `wl-copy` 而不进入 Shell 历史。专用定时器会在 30 秒后自动清空 Wayland 剪贴板（可在设置中自定义时长）。
 7. **零外部运行时依赖**：100% 纯 Rust 编译二进制文件。运行期无需安装 Node.js、Python 或官方 `bw` CLI。
