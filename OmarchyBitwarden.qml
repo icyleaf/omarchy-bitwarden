@@ -272,6 +272,7 @@ Item {
   }
 
   function refreshConfig() {
+    root.checkUpdatesEnabled = false
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
   }
