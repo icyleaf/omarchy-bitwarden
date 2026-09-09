@@ -64,6 +64,7 @@ Item {
     error: "Checking CLI status..."
   })
   property bool isDownloadingCli: false
+  property bool engineAttestationVerified: false
   property string latestVersion: ""
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
@@ -1387,6 +1388,7 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
+    report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
     report += "#### Recent Logs (" + (root.logBuffer ? root.logBuffer.length : 0) + " entries):\n\n```text\n"
@@ -2284,7 +2286,12 @@ Item {
           var cleanText = (text || "").trim()
           var data = JSON.parse(cleanText)
           if (data && data.ok) {
-            root.statusMessage = "omawarden engine updated successfully."
+            root.engineAttestationVerified = Boolean(data.attestation_verified)
+            if (data.attestation_verified) {
+              root.statusMessage = "omawarden engine updated successfully (✓ GitHub Attestation verified)."
+            } else {
+              root.statusMessage = "omawarden engine updated successfully (SHA-256 verified)."
+            }
             root.errorMessage = ""
             root.refreshHealth()
             root.refreshConfig()

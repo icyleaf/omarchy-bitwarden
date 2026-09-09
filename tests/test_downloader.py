@@ -193,5 +193,93 @@ class TestDownloadEngine(unittest.TestCase):
         self.assertIn('"ok":true', proc.stdout)
         self.assertIn('"verified":true', proc.stdout)
 
+    def test_attestation_verification_success_reports_true(self):
+        """When gh attestation verify succeeds, output must include attestation_verified: true."""
+        MockGitHubHandler.routes[self.sha_url] = (
+            200,
+            "text/plain",
+            f"{self.valid_sha256}  {ARCHIVE_NAME}\n".encode("utf-8")
+        )
+        mock_bin_dir = tempfile.mkdtemp()
+        mock_gh = os.path.join(mock_bin_dir, "gh")
+        with open(mock_gh, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(mock_gh, 0o755)
+
+        try:
+            extra_path = f"{mock_bin_dir}:{os.environ.get('PATH', '')}"
+            proc = self.run_downloader(env_extra={"PATH": extra_path})
+            self.assertEqual(proc.returncode, 0, f"Downloader failed: {proc.stdout}")
+            self.assertIn('"attestation_verified":true', proc.stdout)
+        finally:
+            shutil.rmtree(mock_bin_dir, ignore_errors=True)
+
+    def test_attestation_verification_failure_fallback_in_default_mode(self):
+        """When gh attestation fails but strict mode is disabled, download succeeds with attestation_verified: false."""
+        MockGitHubHandler.routes[self.sha_url] = (
+            200,
+            "text/plain",
+            f"{self.valid_sha256}  {ARCHIVE_NAME}\n".encode("utf-8")
+        )
+        mock_bin_dir = tempfile.mkdtemp()
+        mock_gh = os.path.join(mock_bin_dir, "gh")
+        with open(mock_gh, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(mock_gh, 0o755)
+
+        try:
+            extra_path = f"{mock_bin_dir}:{os.environ.get('PATH', '')}"
+            proc = self.run_downloader(env_extra={"PATH": extra_path})
+            self.assertEqual(proc.returncode, 0, f"Downloader failed: {proc.stdout}")
+            self.assertIn('"attestation_verified":false', proc.stdout)
+        finally:
+            shutil.rmtree(mock_bin_dir, ignore_errors=True)
+
+    def test_attestation_verification_failure_fails_closed_in_strict_mode(self):
+        """When gh attestation fails and REQUIRE_ATTESTATION=1, download must fail closed."""
+        MockGitHubHandler.routes[self.sha_url] = (
+            200,
+            "text/plain",
+            f"{self.valid_sha256}  {ARCHIVE_NAME}\n".encode("utf-8")
+        )
+        mock_bin_dir = tempfile.mkdtemp()
+        mock_gh = os.path.join(mock_bin_dir, "gh")
+        with open(mock_gh, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(mock_gh, 0o755)
+
+        try:
+            extra_path = f"{mock_bin_dir}:{os.environ.get('PATH', '')}"
+            proc = self.run_downloader(env_extra={"PATH": extra_path, "REQUIRE_ATTESTATION": "1"})
+            self.assertNotEqual(proc.returncode, 0, "Downloader must fail non-zero in strict mode")
+            self.assertIn('"ok":false', proc.stdout)
+            self.assertIn("GitHub Artifact Attestation verification failed", proc.stdout)
+            installed_bin = os.path.join(self.target_dir, "omawarden")
+            self.assertFalse(os.path.exists(installed_bin), "Binary must NOT be installed on attestation failure")
+        finally:
+            shutil.rmtree(mock_bin_dir, ignore_errors=True)
+
+    def test_attestation_missing_gh_fails_closed_in_strict_mode(self):
+        """When gh is missing and REQUIRE_ATTESTATION=1, download must fail closed."""
+        MockGitHubHandler.routes[self.sha_url] = (
+            200,
+            "text/plain",
+            f"{self.valid_sha256}  {ARCHIVE_NAME}\n".encode("utf-8")
+        )
+        # Create a restricted PATH without gh
+        clean_bin_dir = tempfile.mkdtemp()
+        for cmd in ["bash", "sh", "uname", "which", "tar", "gzip", "sha256sum", "mktemp", "mkdir", "chmod", "cp", "mv", "rm", "find", "cat", "awk", "tr", "grep", "cut", "head", "curl", "sleep"]:
+            cmd_path = shutil.which(cmd)
+            if cmd_path:
+                os.symlink(cmd_path, os.path.join(clean_bin_dir, cmd))
+
+        try:
+            proc = self.run_downloader(env_extra={"PATH": clean_bin_dir, "REQUIRE_ATTESTATION": "1"})
+            self.assertNotEqual(proc.returncode, 0, "Downloader must fail non-zero when gh is missing in strict mode")
+            self.assertIn('"ok":false', proc.stdout)
+            self.assertIn("GitHub CLI (gh) required for strict attestation verification", proc.stdout)
+        finally:
+            shutil.rmtree(clean_bin_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     unittest.main()
