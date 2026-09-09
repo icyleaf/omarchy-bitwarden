@@ -49,9 +49,12 @@ Item {
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
     email: "",
-    remember_email: true
+    remember_email: true,
+    check_updates: true
   })
   property bool rememberEmailChecked: true
+  property bool checkUpdatesEnabled: false
+  property bool pendingUpdateCheck: false
   property bool show2FAField: false
 
   property var cliHealth: ({
@@ -316,6 +319,7 @@ Item {
   }
 
   function checkUpdates(isManual) {
+    if (!isManual && !root.checkUpdatesEnabled) { root.pendingUpdateCheck = true; return }
     if (root.isCheckingUpdate) return
     root.isCheckingUpdate = true
     if (isManual) {
@@ -1365,6 +1369,7 @@ Item {
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
+    if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -2177,6 +2182,11 @@ Item {
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
+          root.checkUpdatesEnabled = (data.check_updates !== false)
+          if (root.checkUpdatesEnabled && root.pendingUpdateCheck) {
+            root.pendingUpdateCheck = false
+            root.checkUpdates(false)
+          }
         } catch (e) {
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
@@ -2198,6 +2208,7 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
+          root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
           root.refreshAuthStatus()

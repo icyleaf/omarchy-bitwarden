@@ -24,6 +24,9 @@ Item {
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property color mutedForeground: Qt.darker(foreground, 1.8)
   property string fontFamily: ""
+  property bool checkUpdatesChecked: true
+
+  onConfigChanged: if (config && config.check_updates !== undefined) checkUpdatesChecked = (config.check_updates !== false)
 
   Timer {
     id: latestTimer
@@ -47,6 +50,18 @@ Item {
   property string activeTab: "general" // "general" | "logs"
   property string logFilter: "all" // "all" | "error" | "warn"
   property string selectedLogLevel: (config && config.log_level) ? config.log_level.toLowerCase() : "error"
+
+  function buildPayload() {
+    return {
+      server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
+      identity_url: idUrlInput.text.trim(),
+      download_dir: dlDirInput.text.trim() || "~/Downloads",
+      auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
+      clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
+      log_level: settingsRoot.selectedLogLevel,
+      check_updates: settingsRoot.checkUpdatesChecked
+    }
+  }
 
   signal saveRequested(var newSettings)
   signal closeRequested()
@@ -583,6 +598,35 @@ Item {
               }
             }
           }
+
+          // Automatic Update Check Toggle
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.checkUpdatesChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
+              }
+              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              wrapMode: Text.WordWrap
+            }
+          }
         }
 
         // Action Buttons Row
@@ -634,17 +678,7 @@ Item {
             MouseArea {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                var payload = {
-                  server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
-                  identity_url: idUrlInput.text.trim(),
-                  download_dir: dlDirInput.text.trim() || "~/Downloads",
-                  auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
-                  clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
-                  log_level: settingsRoot.selectedLogLevel
-                }
-                settingsRoot.saveRequested(payload)
-              }
+              onClicked: settingsRoot.saveRequested(settingsRoot.buildPayload())
             }
           }
         }
