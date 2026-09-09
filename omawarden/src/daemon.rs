@@ -36,8 +36,17 @@ pub fn ensure_daemon_running() {
     }
 
     if let Ok(exe_path) = env::current_exe() {
+        let cfg = crate::config::ConfigManager::default().load();
+        let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
+            cfg.auto_lock_minutes as u64
+        } else {
+            15
+        };
+
         let mut cmd = Command::new(exe_path);
         cmd.arg("daemon")
+            .arg("--auto-lock")
+            .arg(auto_lock_mins.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -81,7 +90,7 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
 pub struct DaemonState {
     pub vault_mgr: Arc<VaultManager>,
     pub last_activity: Mutex<Instant>,
-    pub auto_lock_duration: Duration,
+    pub auto_lock_duration: Mutex<Duration>,
 }
 
 impl DaemonState {
@@ -90,8 +99,35 @@ impl DaemonState {
         Self {
             vault_mgr,
             last_activity: Mutex::new(Instant::now()),
-            auto_lock_duration: Duration::from_secs(auto_lock_minutes * 60),
+            auto_lock_duration: Mutex::new(Duration::from_secs(auto_lock_minutes * 60)),
         }
+    }
+
+    pub fn set_auto_lock_duration(&self, duration: Duration) {
+        if let Ok(mut dur) = self.auto_lock_duration.lock() {
+            *dur = duration;
+        }
+    }
+
+    pub fn set_auto_lock_minutes(&self, minutes: u64) {
+        self.set_auto_lock_duration(Duration::from_secs(minutes * 60));
+    }
+
+    pub fn check_auto_lock(&self) -> bool {
+        if self.vault_mgr.is_unlocked() {
+            if let Ok(dur) = self.auto_lock_duration.lock() {
+                if !dur.is_zero() {
+                    if let Ok(last) = self.last_activity.lock() {
+                        if last.elapsed() > *dur {
+                            self.lock();
+                            crate::attachment::clear_preview_attachments(None);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn touch_activity(&self) {
@@ -113,8 +149,29 @@ impl DaemonState {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
-        self.vault_mgr.sync()
+        let res = self.vault_mgr.sync();
+        if res.is_ok() {
+            self.touch_activity();
+        }
+        res
     }
+}
+
+pub fn should_touch_activity(action: &str, req: &Value) -> bool {
+    if let Some(touch) = req.get("touch").and_then(|v| v.as_bool()) {
+        return touch;
+    }
+    matches!(
+        action,
+        "sync"
+            | "list"
+            | "search"
+            | "ssh_key_create"
+            | "get_item"
+            | "get_ssh_key"
+            | "get_attachment_key"
+            | "copy"
+    )
 }
 
 pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
@@ -131,14 +188,7 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
     let state_clone = state.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
-        let is_unlocked = state_clone.vault_mgr.is_unlocked();
-        if is_unlocked {
-            if let Ok(last) = state_clone.last_activity.lock() {
-                if last.elapsed() > state_clone.auto_lock_duration {
-                    state_clone.lock();
-                }
-            }
-        }
+        state_clone.check_auto_lock();
     });
 
     for stream in listener.incoming() {
@@ -176,8 +226,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
     };
 
-    state.touch_activity();
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if should_touch_activity(action, &req) {
+        state.touch_activity();
+    }
 
     let response = match action {
         "ping" => json!({
@@ -344,6 +396,20 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 json!({ "ok": false, "error": "Failed to copy to clipboard" })
             }
         }
+        "set_auto_lock" => {
+            if let Some(secs) = req.get("auto_lock_seconds").and_then(|v| v.as_u64()) {
+                state.set_auto_lock_duration(Duration::from_secs(secs));
+                json!({ "ok": true, "auto_lock_seconds": secs })
+            } else {
+                let mins = req
+                    .get("auto_lock")
+                    .or_else(|| req.get("auto_lock_minutes"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(15);
+                state.set_auto_lock_minutes(mins);
+                json!({ "ok": true, "auto_lock_minutes": mins })
+            }
+        }
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
@@ -440,5 +506,178 @@ mod tests {
         // Find by Name
         let found_name = state.vault_mgr.find_item("Github", None);
         assert!(found_name.is_some());
+    }
+
+    #[test]
+    fn test_should_touch_activity_classification() {
+        // Passive actions must not touch activity
+        for action in &[
+            "ping",
+            "status",
+            "stop",
+            "lock",
+            "totp",
+            "set_auto_lock",
+            "unknown_action",
+            "",
+        ] {
+            assert!(
+                !should_touch_activity(action, &json!({ "action": action })),
+                "Action '{}' should not touch activity",
+                action
+            );
+        }
+
+        // Active user actions must touch activity
+        for action in &[
+            "sync",
+            "list",
+            "search",
+            "ssh_key_create",
+            "get_item",
+            "get_ssh_key",
+            "get_attachment_key",
+            "copy",
+        ] {
+            assert!(
+                should_touch_activity(action, &json!({ "action": action })),
+                "Action '{}' should touch activity",
+                action
+            );
+        }
+
+        // Explicit touch: false must override active actions
+        let req_touch_false = json!({ "action": "list", "touch": false });
+        assert!(!should_touch_activity("list", &req_touch_false));
+
+        // Explicit touch: true must override passive actions
+        let req_touch_true = json!({ "action": "ping", "touch": true });
+        assert!(should_touch_activity("ping", &req_touch_true));
+    }
+
+    #[test]
+    fn test_handle_client_selective_activity_touch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        // Set initial activity to a known point in the past
+        let past = Instant::now() - Duration::from_secs(10);
+        *state.last_activity.lock().unwrap() = past;
+
+        // Helper to send a request via UnixStream pair and receive response
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", req);
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // 1. "ping" should not touch activity
+        let res = send_req(json!({ "action": "ping" }));
+        assert_eq!(res.get("pong").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 2. "status" should not touch activity
+        let _ = send_req(json!({ "action": "status" }));
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 3. "totp" should not touch activity
+        let _ = send_req(json!({ "action": "totp", "secret": "JBSWY3DPEHPK3PXP" }));
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 4. "get_item" with explicit touch: false should not touch activity
+        let _ = send_req(json!({ "action": "get_item", "query": "none", "touch": false }));
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 5. Active action (e.g. "search") should touch activity
+        let _ = send_req(json!({ "action": "search", "query": "test" }));
+        assert!(*state.last_activity.lock().unwrap() > past);
+    }
+
+    #[test]
+    fn test_background_pings_do_not_prevent_idle_auto_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        // Configure a short timeout (100ms) for testing
+        state.set_auto_lock_duration(Duration::from_millis(100));
+
+        // Unlock the vault
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        assert!(state.vault_mgr.is_unlocked());
+
+        // Send repeated pings over 150ms (crossing the 100ms threshold)
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(150) {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", json!({ "action": "ping" }));
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+            handle.join().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Auto-lock check must lock the vault despite the continuous background pings
+        assert!(state.check_auto_lock());
+        assert!(!state.vault_mgr.is_unlocked());
+    }
+
+    #[test]
+    fn test_set_auto_lock_action() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", req);
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // Update with minutes
+        let res = send_req(json!({ "action": "set_auto_lock", "auto_lock_minutes": 5 }));
+        assert_eq!(res.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            *state.auto_lock_duration.lock().unwrap(),
+            Duration::from_secs(300)
+        );
+
+        // Update with seconds
+        let res = send_req(json!({ "action": "set_auto_lock", "auto_lock_seconds": 45 }));
+        assert_eq!(res.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            *state.auto_lock_duration.lock().unwrap(),
+            Duration::from_secs(45)
+        );
     }
 }
