@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::locked::LockedKey32;
+
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
@@ -62,9 +64,9 @@ pub fn derive_master_key(
     iterations: u32,
     memory_mb: Option<u32>,
     parallelism: Option<u32>,
-) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+) -> Result<LockedKey32, CryptoError> {
     let email_normalized = email.trim().to_lowercase();
-    let mut master_key = Zeroizing::new([0u8; 32]);
+    let mut master_key = LockedKey32::new_zeroed();
 
     match kdf_type {
         KdfType::Pbkdf2Sha256 => {
@@ -77,7 +79,7 @@ pub fn derive_master_key(
                 password.as_bytes(),
                 email_normalized.as_bytes(),
                 iter,
-                master_key.as_mut(),
+                master_key.as_mut_slice(),
             );
         }
         KdfType::Argon2id => {
@@ -91,7 +93,7 @@ pub fn derive_master_key(
 
             let email_hash = Sha256::digest(email_normalized.as_bytes());
             argon2
-                .hash_password_into(password.as_bytes(), &email_hash, master_key.as_mut())
+                .hash_password_into(password.as_bytes(), &email_hash, master_key.as_mut_slice())
                 .map_err(|_| CryptoError::InvalidKdfParams)?;
         }
     }
@@ -99,28 +101,36 @@ pub fn derive_master_key(
     Ok(master_key)
 }
 
-pub fn derive_master_password_hash(master_key: &[u8; 32], password: &str) -> String {
+pub fn derive_master_password_hash(master_key: &[u8], password: &str) -> String {
     let mut hash = Zeroizing::new([0u8; 32]);
-    pbkdf2::pbkdf2_hmac::<Sha256>(master_key.as_ref(), password.as_bytes(), 1, hash.as_mut());
+    pbkdf2::pbkdf2_hmac::<Sha256>(master_key, password.as_bytes(), 1, hash.as_mut());
     BASE64.encode(hash.as_ref())
 }
 
-#[derive(Debug, Clone, Zeroize)]
-#[zeroize(drop)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymmetricCryptoKey {
-    pub enc_key: [u8; 32],
-    pub mac_key: Option<[u8; 32]>,
+    pub enc_key: LockedKey32,
+    pub mac_key: Option<LockedKey32>,
+}
+
+impl Zeroize for SymmetricCryptoKey {
+    fn zeroize(&mut self) {
+        self.enc_key.zeroize();
+        if let Some(ref mut mac) = self.mac_key {
+            mac.zeroize();
+        }
+    }
 }
 
 impl SymmetricCryptoKey {
-    pub fn from_master_key(master_key: &[u8; 32]) -> Self {
+    pub fn from_master_key(master_key: &[u8]) -> Self {
         let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
-        let mut enc_key = [0u8; 32];
-        let mut mac_key = [0u8; 32];
+        let mut enc_key = LockedKey32::new_zeroed();
+        let mut mac_key = LockedKey32::new_zeroed();
 
-        hkdf.expand(b"enc", &mut enc_key)
+        hkdf.expand(b"enc", enc_key.as_mut_slice())
             .expect("HKDF expand enc failed");
-        hkdf.expand(b"mac", &mut mac_key)
+        hkdf.expand(b"mac", mac_key.as_mut_slice())
             .expect("HKDF expand mac failed");
 
         Self {
@@ -131,16 +141,19 @@ impl SymmetricCryptoKey {
 
     pub fn decrypt_with_master_key(
         enc: &EncString,
-        master_key: &[u8; 32],
+        master_key: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        if master_key.len() != 32 {
+            return Err(CryptoError::InvalidKeyLength);
+        }
         let mut candidate_keys = Vec::new();
 
         // 1. HKDF from_prk (RFC 5869 Section 2.3 directly on master key)
         if let Ok(hkdf) = Hkdf::<Sha256>::from_prk(master_key) {
-            let mut enc_key = [0u8; 32];
-            let mut mac_key = [0u8; 32];
-            if hkdf.expand(b"enc", &mut enc_key).is_ok()
-                && hkdf.expand(b"mac", &mut mac_key).is_ok()
+            let mut enc_key = LockedKey32::new_zeroed();
+            let mut mac_key = LockedKey32::new_zeroed();
+            if hkdf.expand(b"enc", enc_key.as_mut_slice()).is_ok()
+                && hkdf.expand(b"mac", mac_key.as_mut_slice()).is_ok()
             {
                 candidate_keys.push(SymmetricCryptoKey {
                     enc_key,
@@ -152,10 +165,10 @@ impl SymmetricCryptoKey {
         // 2. HKDF with empty salt (Node.js/WebCrypto extract+expand)
         {
             let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
-            let mut enc_key = [0u8; 32];
-            let mut mac_key = [0u8; 32];
-            if hkdf.expand(b"enc", &mut enc_key).is_ok()
-                && hkdf.expand(b"mac", &mut mac_key).is_ok()
+            let mut enc_key = LockedKey32::new_zeroed();
+            let mut mac_key = LockedKey32::new_zeroed();
+            if hkdf.expand(b"enc", enc_key.as_mut_slice()).is_ok()
+                && hkdf.expand(b"mac", mac_key.as_mut_slice()).is_ok()
             {
                 candidate_keys.push(SymmetricCryptoKey {
                     enc_key,
@@ -166,10 +179,12 @@ impl SymmetricCryptoKey {
 
         // 3. Direct master key as encryption key (only for legacy unauthenticated enc_type == 0)
         if enc.enc_type == 0 {
-            candidate_keys.push(SymmetricCryptoKey {
-                enc_key: *master_key,
-                mac_key: None,
-            });
+            if let Some(enc_k) = LockedKey32::from_slice(master_key) {
+                candidate_keys.push(SymmetricCryptoKey {
+                    enc_key: enc_k,
+                    mac_key: None,
+                });
+            }
         }
 
         let mut last_err =
@@ -186,17 +201,16 @@ impl SymmetricCryptoKey {
 
     pub fn from_raw_bytes(key_bytes: &[u8]) -> Result<Self, CryptoError> {
         if key_bytes.len() == 32 {
-            let mut enc = [0u8; 32];
-            enc.copy_from_slice(key_bytes);
+            let enc = LockedKey32::from_slice(key_bytes).ok_or(CryptoError::InvalidKeyLength)?;
             Ok(Self {
                 enc_key: enc,
                 mac_key: None,
             })
         } else if key_bytes.len() == 64 {
-            let mut enc = [0u8; 32];
-            let mut mac = [0u8; 32];
-            enc.copy_from_slice(&key_bytes[..32]);
-            mac.copy_from_slice(&key_bytes[32..64]);
+            let enc =
+                LockedKey32::from_slice(&key_bytes[..32]).ok_or(CryptoError::InvalidKeyLength)?;
+            let mac =
+                LockedKey32::from_slice(&key_bytes[32..64]).ok_or(CryptoError::InvalidKeyLength)?;
             Ok(Self {
                 enc_key: enc,
                 mac_key: Some(mac),
@@ -732,7 +746,7 @@ mod tests {
         let parsed = EncString::parse(&encrypted).unwrap();
 
         let key_without_mac = SymmetricCryptoKey {
-            enc_key: key.enc_key,
+            enc_key: key.enc_key.clone(),
             mac_key: None,
         };
 
@@ -786,7 +800,7 @@ mod tests {
         assert!(parsed.mac.is_none());
 
         let key = SymmetricCryptoKey {
-            enc_key,
+            enc_key: LockedKey32::from_array(enc_key),
             mac_key: None,
         };
         let decrypted = parsed.decrypt_string(&key).unwrap();
@@ -835,7 +849,7 @@ fn test_decrypt_attachment_blob() {
     let plaintext = b"JFIF JPEG Image Content Data";
 
     // Encrypt AES-256-CBC
-    let cipher = cbc::Encryptor::<aes::Aes256>::new((&key.enc_key).into(), (&iv).into());
+    let cipher = cbc::Encryptor::<aes::Aes256>::new(key.enc_key.as_array().into(), (&iv).into());
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
     let ciphertext = cipher

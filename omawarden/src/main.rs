@@ -358,6 +358,9 @@ fn read_auth_payload() -> (String, Option<String>) {
 }
 
 fn main() -> ExitCode {
+    // Disable process tracing (ptrace) and core dump generation for memory defense
+    let _ = omawarden::locked::disable_dumpable();
+
     let cli = Cli::parse();
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();

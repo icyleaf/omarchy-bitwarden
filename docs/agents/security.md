@@ -18,6 +18,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 4. RFC 6454 Same-Origin      │ Exact scheme+host+port match; NO prefix match│
 │ 5. Atomic 0600 Permissions   │ Restrictive mode set at creation time        │
 │ 6. IPC SO_PEERCRED Auth      │ Verify caller UID on all socket requests     │
+│ 7. Memory Locking (mlock)    │ Page-aligned physical RAM lock & no coredump │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,6 +130,24 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
+### Rule 7: Physical Memory Locking (`mlock`) and Anti-Dump Protection (`prctl`)
+
+**Principle**: Master keys and derived cryptographic keys resident in memory while the vault is unlocked MUST be locked to physical RAM to prevent Linux kernel swap paging to disk, and protected against user-space memory dumping and crash coredumps.
+
+- ❌ **Anti-Pattern**:
+  - Allocating master keys and `SymmetricCryptoKey` in raw un-locked heap buffers without page-aligned `mlock`.
+  - Allowing `systemd-coredump` or `ptrace` to dump process memory containing active decrypted keys.
+  - Naive `mlock` on arbitrary heap memory where unlocking one key inadvertently unlocks other adjacent keys sharing the same 4KB page.
+- ✅ **Required Pattern**:
+  - Allocate sensitive cryptographic keys (`LockedKey32`, `LockedKey64`) in dedicated, 4096-byte page-aligned memory (`Layout::from_size_align(4096, 4096)`).
+  - Pin memory pages to physical RAM using `libc::mlock` upon allocation, and gracefully degrade with diagnostic logging if resource limits (`RLIMIT_MEMLOCK`) prevent locking.
+  - Overwrite entire 4KB page with zeroes (`zeroize`) and call `libc::munlock` upon `Drop`.
+  - Invoke `libc::prctl(libc::PR_SET_DUMPABLE, 0)` at process startup on Linux to disable ptrace attachment and suppress crash coredumps.
+- 🧪 **Mandatory Verification**:
+  Unit test must assert that `LockedKey32` allocations are 4096-byte page-aligned, independent copies occupy distinct memory addresses, and `disable_dumpable` returns `Ok`.
+
+---
+
 ## Agent Checklist Before Opening a PR
 
 Before submitting any code changes touching authentication, crypto, networking, IPC, or storage:
@@ -139,6 +158,8 @@ Before submitting any code changes touching authentication, crypto, networking, 
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
 - [ ] Socket handlers verify peer UID (SO_PEERCRED) on connection.
+- [ ] Master keys and cryptographic keys use page-aligned physical memory locks (LockedKey32 / mlock).
+- [ ] Process anti-dump protection (PR_SET_DUMPABLE = 0) is active.
 - [ ] Installers / downloaders enforce fail-closed checksum checks.
 - [ ] Vault locks cleanly upon screen-lock, sleep, or idle timeout.
 - [ ] Sensitive memory structures implement Zeroize.
