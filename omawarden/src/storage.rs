@@ -10,14 +10,18 @@ pub const DEFAULT_STORAGE_FILENAME: &str = "data.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VaultStorage {
+    #[serde(default)]
     pub server_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_url: Option<String>,
+    #[serde(default)]
     pub user_email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
+    #[serde(default, skip_serializing)]
     pub refresh_token: Option<String>,
     pub kdf: Option<u32>,
     pub kdf_iterations: Option<u32>,
@@ -32,6 +36,7 @@ pub struct VaultStorage {
     pub organizations: Vec<Value>,
     #[serde(default)]
     pub collections: Vec<Value>,
+    #[serde(default)]
     pub ciphers: Vec<Value>,
 }
 
@@ -75,19 +80,46 @@ impl StorageManager {
     pub fn save(&self, data: &VaultStorage) -> std::io::Result<()> {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = fs::metadata(parent) {
+                    let mut perms = metadata.permissions();
+                    if perms.mode() & 0o777 != 0o700 {
+                        perms.set_mode(0o700);
+                        let _ = fs::set_permissions(parent, perms);
+                    }
+                }
+            }
         }
         let content = serde_json::to_string_pretty(data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        fs::write(&self.file_path, content)?;
 
         #[cfg(unix)]
         {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(&self.file_path) {
-                let mut perms = metadata.permissions();
+
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            options.mode(0o600);
+
+            let mut file = options.open(&self.file_path)?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+
+            let metadata = file.metadata()?;
+            let mut perms = metadata.permissions();
+            if perms.mode() & 0o777 != 0o600 {
                 perms.set_mode(0o600);
-                let _ = fs::set_permissions(&self.file_path, perms);
+                fs::set_permissions(&self.file_path, perms)?;
             }
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&self.file_path, content)?;
         }
 
         Ok(())
@@ -150,5 +182,78 @@ mod tests {
             Some("https://identity.vaultwarden.local".to_string())
         );
         assert_eq!(loaded.client_id, Some("user.12345678".to_string()));
+    }
+
+    #[test]
+    fn test_storage_save_file_and_dir_permissions() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempdir().unwrap();
+            let sub_dir = dir.path().join("nested_vault");
+            let path = sub_dir.join("data.json");
+            let mgr = StorageManager::new(path.clone());
+
+            let storage = VaultStorage {
+                user_email: "sec@domain.com".to_string(),
+                server_url: "https://vault.example.com".to_string(),
+                ..Default::default()
+            };
+
+            mgr.save(&storage).unwrap();
+
+            // Check file permissions (must be 0600)
+            let file_meta = fs::metadata(&path).unwrap();
+            assert_eq!(
+                file_meta.permissions().mode() & 0o777,
+                0o600,
+                "data.json must be created with 0600 permissions"
+            );
+
+            // Check parent directory permissions (must be 0700)
+            let dir_meta = fs::metadata(&sub_dir).unwrap();
+            assert_eq!(
+                dir_meta.permissions().mode() & 0o777,
+                0o700,
+                "Parent directory must be restricted to 0700"
+            );
+        }
+    }
+
+    #[test]
+    fn test_storage_tokens_never_serialized_to_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        let mgr = StorageManager::new(path.clone());
+
+        let storage = VaultStorage {
+            user_email: "notokens@domain.com".to_string(),
+            server_url: "https://vault.example.com".to_string(),
+            access_token: Some("secret_access_token_12345".to_string()),
+            refresh_token: Some("secret_refresh_token_67890".to_string()),
+            ..Default::default()
+        };
+
+        mgr.save(&storage).unwrap();
+
+        // Read raw JSON string from disk directly
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("access_token"),
+            "access_token must never appear in saved data.json"
+        );
+        assert!(
+            !raw.contains("refresh_token"),
+            "refresh_token must never appear in saved data.json"
+        );
+        assert!(
+            !raw.contains("secret_access_token_12345"),
+            "Bearer token value must never be written to disk"
+        );
+        assert!(
+            !raw.contains("secret_refresh_token_67890"),
+            "Refresh token value must never be written to disk"
+        );
     }
 }

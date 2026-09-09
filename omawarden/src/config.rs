@@ -113,10 +113,48 @@ impl ConfigManager {
     pub fn save(&self, config: &Config) -> std::io::Result<()> {
         if let Some(parent) = self.config_path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = fs::metadata(parent) {
+                    let mut perms = metadata.permissions();
+                    if perms.mode() & 0o777 != 0o700 {
+                        perms.set_mode(0o700);
+                        let _ = fs::set_permissions(parent, perms);
+                    }
+                }
+            }
         }
         let content = serde_json::to_string_pretty(config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        fs::write(&self.config_path, content)
+
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            options.mode(0o600);
+
+            let mut file = options.open(&self.config_path)?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+
+            let metadata = file.metadata()?;
+            let mut perms = metadata.permissions();
+            if perms.mode() & 0o777 != 0o600 {
+                perms.set_mode(0o600);
+                fs::set_permissions(&self.config_path, perms)?;
+            }
+            Ok(())
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&self.config_path, content)
+        }
     }
 
     pub fn update_config(

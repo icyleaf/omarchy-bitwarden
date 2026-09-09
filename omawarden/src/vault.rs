@@ -675,15 +675,16 @@ impl VaultManager {
             if s1 && s2 {
                 updated_storage.access_token = None;
                 updated_storage.refresh_token = None;
-            } else {
-                updated_storage.access_token = Some(tok_resp.access_token.clone());
-                updated_storage.refresh_token = tok_resp.refresh_token.clone();
+                let _ = self.storage_mgr.save(&updated_storage);
+                return;
             }
-        } else {
-            updated_storage.access_token = Some(tok_resp.access_token.clone());
-            updated_storage.refresh_token = tok_resp.refresh_token.clone();
         }
-        let _ = self.storage_mgr.save(&updated_storage);
+
+        crate::log_error!(
+            "omawarden:vault",
+            "Keyring not available or failed to store renewed tokens. Locking session."
+        );
+        self.purge_credentials_and_lock();
     }
 
     fn purge_credentials_and_lock(&self) {
@@ -1644,10 +1645,11 @@ mod tests {
     fn test_sync_allowed_when_locked_with_session() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault_sync_locked.json");
-        let storage_mgr = StorageManager::new(path);
-        let mut storage = storage_mgr.load();
-        storage.access_token = Some("fake_test_token".to_string());
-        storage_mgr.save(&storage).unwrap();
+        let storage_mgr = StorageManager::new(path.clone());
+        let legacy_json = serde_json::json!({
+            "access_token": "fake_test_token"
+        });
+        std::fs::write(&path, legacy_json.to_string()).unwrap();
 
         let dummy_keyring = KeyringManager::new("/nonexistent-keyring");
         let vault_mgr =
@@ -2051,7 +2053,7 @@ esac
 
         let dir = tempfile::tempdir().unwrap();
         let storage_path = dir.path().join("vault_reauth_net_fail.json");
-        let storage_mgr = StorageManager::new(storage_path);
+        let storage_mgr = StorageManager::new(storage_path.clone());
 
         let store_dir = dir.path().join("store");
         fs::create_dir_all(&store_dir).unwrap();
@@ -2116,13 +2118,12 @@ esac
         // Set refresh token
         assert!(mock_keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
 
-        let storage = VaultStorage {
-            server_url: "http://127.0.0.1:9".to_string(), // Unreachable port
-            user_email: "offline@example.com".to_string(),
-            refresh_token: Some("valid_ref_token".to_string()),
-            ..Default::default()
-        };
-        storage_mgr.save(&storage).unwrap();
+        let legacy_json = serde_json::json!({
+            "server_url": "http://127.0.0.1:9",
+            "user_email": "offline@example.com",
+            "refresh_token": "valid_ref_token"
+        });
+        fs::write(&storage_path, legacy_json.to_string()).unwrap();
 
         let vault_mgr = VaultManager::new(
             "http://127.0.0.1:9",
@@ -2178,7 +2179,7 @@ esac
 
         let dir = tempfile::tempdir().unwrap();
         let storage_path = dir.path().join("vault_502_preserves.json");
-        let storage_mgr = StorageManager::new(storage_path);
+        let storage_mgr = StorageManager::new(storage_path.clone());
 
         let store_dir = dir.path().join("store");
         fs::create_dir_all(&store_dir).unwrap();
@@ -2244,14 +2245,13 @@ esac
         assert!(mock_keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
         assert!(mock_keyring.store_api_secret(&server_url, "test_client_id", "test_secret"));
 
-        let storage = VaultStorage {
-            server_url: server_url.clone(),
-            user_email: "gateway502@example.com".to_string(),
-            client_id: Some("test_client_id".to_string()),
-            refresh_token: Some("valid_ref_token".to_string()),
-            ..Default::default()
-        };
-        storage_mgr.save(&storage).unwrap();
+        let legacy_json = serde_json::json!({
+            "server_url": server_url.clone(),
+            "user_email": "gateway502@example.com",
+            "client_id": "test_client_id",
+            "refresh_token": "valid_ref_token"
+        });
+        fs::write(&storage_path, legacy_json.to_string()).unwrap();
 
         let vault_mgr = VaultManager::new(
             &server_url,
