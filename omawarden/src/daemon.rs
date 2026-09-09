@@ -130,6 +130,22 @@ impl DaemonState {
         false
     }
 
+    pub fn check_screen_lock(&self) -> bool {
+        self.check_screen_lock_with(is_system_or_screen_locked)
+    }
+
+    pub fn check_screen_lock_with<F>(&self, detector: F) -> bool
+    where
+        F: FnOnce() -> bool,
+    {
+        if self.vault_mgr.is_unlocked() && detector() {
+            self.lock();
+            crate::attachment::clear_preview_attachments(None);
+            return true;
+        }
+        false
+    }
+
     pub fn touch_activity(&self) {
         if let Ok(mut act) = self.last_activity.lock() {
             *act = Instant::now();
@@ -187,8 +203,15 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
 
     let state_clone = state.clone();
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(5));
+        let is_unlocked = state_clone.vault_mgr.is_unlocked();
+        let sleep_duration = if is_unlocked {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(5)
+        };
+        std::thread::sleep(sleep_duration);
         state_clone.check_auto_lock();
+        state_clone.check_screen_lock();
     });
 
     for stream in listener.incoming() {
@@ -246,6 +269,115 @@ pub fn verify_peer_credentials(stream: &UnixStream) -> std::io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn verify_peer_credentials(_stream: &UnixStream) -> std::io::Result<()> {
     Ok(())
+}
+
+pub const SCREEN_LOCKER_PROCESS_NAMES: &[&str] = &["hyprlock", "swaylock", "waylock", "gtklock"];
+
+pub fn get_omarchy_shell_cmd() -> Option<PathBuf> {
+    if which::which("omarchy-shell").is_ok() {
+        return Some(PathBuf::from("omarchy-shell"));
+    }
+    if let Ok(home) = env::var("HOME") {
+        let candidate = PathBuf::from(home).join(".local/share/omarchy/bin/omarchy-shell");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn is_omarchy_locked() -> bool {
+    let cmd_name = match get_omarchy_shell_cmd() {
+        Some(cmd) => cmd,
+        None => return false,
+    };
+
+    if let Ok(output) = Command::new(cmd_name).args(["lock", "isLocked"]).output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.trim() == "true" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn is_screen_locker_running() -> bool {
+    let locker_regex = SCREEN_LOCKER_PROCESS_NAMES.join("|");
+    if let Ok(output) = Command::new("pgrep").args(["-x", &locker_regex]).output() {
+        if output.status.success() && !output.stdout.is_empty() {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                if let Some(name_str) = file_name.to_str() {
+                    if name_str.chars().all(|c| c.is_ascii_digit()) {
+                        let comm_path = entry.path().join("comm");
+                        if let Ok(comm) = fs::read_to_string(comm_path) {
+                            let comm = comm.trim();
+                            if SCREEN_LOCKER_PROCESS_NAMES.contains(&comm) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+pub fn is_logind_locked_or_sleeping() -> bool {
+    // 1. Check session LockedHint
+    if let Ok(output) = Command::new("busctl")
+        .args([
+            "get-property",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1/session/auto",
+            "org.freedesktop.login1.Session",
+            "LockedHint",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.trim() == "b true" {
+                return true;
+            }
+        }
+    }
+
+    // 2. Check Manager PreparingForSleep
+    if let Ok(output) = Command::new("busctl")
+        .args([
+            "get-property",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            "PreparingForSleep",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.trim() == "b true" {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+pub fn is_system_or_screen_locked() -> bool {
+    is_omarchy_locked() || is_screen_locker_running() || is_logind_locked_or_sleeping()
 }
 
 fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
@@ -737,5 +869,46 @@ mod tests {
         let (client, server) = UnixStream::pair().unwrap();
         assert!(verify_peer_credentials(&client).is_ok());
         assert!(verify_peer_credentials(&server).is_ok());
+    }
+
+    #[test]
+    fn test_check_screen_lock_custom_detector() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = DaemonState::new(storage_mgr, 15);
+
+        // Vault is initially locked: detector should not be invoked or return false
+        let mut called = false;
+        assert!(!state.check_screen_lock_with(|| {
+            called = true;
+            true
+        }));
+        assert!(!called);
+        assert!(!state.vault_mgr.is_unlocked());
+
+        // Unlock the vault
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        assert!(state.vault_mgr.is_unlocked());
+
+        // Detector returns false -> vault remains unlocked
+        assert!(!state.check_screen_lock_with(|| false));
+        assert!(state.vault_mgr.is_unlocked());
+
+        // Detector returns true -> vault locks immediately
+        assert!(state.check_screen_lock_with(|| true));
+        assert!(!state.vault_mgr.is_unlocked());
+
+        // Subsequent call returns false because already locked
+        assert!(!state.check_screen_lock_with(|| true));
+    }
+
+    #[test]
+    fn test_screen_lock_detection_functions_safe() {
+        // Ensure detection functions execute safely without panicking
+        let _ = is_omarchy_locked();
+        let _ = is_screen_locker_running();
+        let _ = is_logind_locked_or_sleeping();
+        let _ = is_system_or_screen_locked();
     }
 }
