@@ -42,10 +42,7 @@ enum Commands {
         action: ConfigAction,
     },
     #[command(about = "Check CLI health and installation")]
-    Health {
-        #[arg(long, help = "Override bw binary path to check")]
-        bw_path: Option<String>,
-    },
+    Health,
     #[command(about = "Manage Bitwarden authentication and vault sessions")]
     Auth {
         #[command(subcommand)]
@@ -130,15 +127,11 @@ enum ConfigAction {
         #[arg(long)]
         identity_url: Option<String>,
         #[arg(long)]
-        bw_path: Option<String>,
-        #[arg(long)]
         download_dir: Option<String>,
         #[arg(long)]
         auto_lock: Option<i64>,
         #[arg(long)]
         clipboard_clear: Option<i64>,
-        #[arg(long)]
-        max_output_mb: Option<i64>,
         #[arg(long)]
         email: Option<String>,
         #[arg(long)]
@@ -378,13 +371,11 @@ fn main() -> ExitCode {
                     match k.as_str() {
                         "server_url" => println!("{}", cfg.server_url),
                         "identity_url" => println!("{}", cfg.identity_url.as_deref().unwrap_or("")),
-                        "bw_path" => println!("{}", cfg.bw_path),
                         "download_dir" => println!("{}", cfg.download_dir),
                         "auto_lock_minutes" | "auto_lock" => println!("{}", cfg.auto_lock_minutes),
                         "clipboard_clear_seconds" | "clipboard_clear" => {
                             println!("{}", cfg.clipboard_clear_seconds)
                         }
-                        "max_output_mb" => println!("{}", cfg.max_output_mb),
                         "email" => println!("{}", cfg.email),
                         "remember_email" => println!("{}", cfg.remember_email),
                         "log_level" => println!("{}", cfg.log_level),
@@ -401,11 +392,9 @@ fn main() -> ExitCode {
             ConfigAction::Set {
                 server_url,
                 identity_url,
-                bw_path,
                 download_dir,
                 auto_lock,
                 clipboard_clear,
-                max_output_mb,
                 email,
                 remember_email,
                 log_level,
@@ -432,11 +421,9 @@ fn main() -> ExitCode {
                 let options = ConfigUpdateOptions {
                     server_url,
                     identity_url,
-                    bw_path,
                     download_dir,
                     auto_lock_minutes: auto_lock,
                     clipboard_clear_seconds: clipboard_clear,
-                    max_output_mb,
                     email,
                     remember_email: parsed_remember_email,
                     log_level,
@@ -501,7 +488,7 @@ fn main() -> ExitCode {
             }
         },
 
-        Commands::Health { bw_path: _ } => {
+        Commands::Health => {
             let status = check_system_health(&cfg.server_url);
             println!("{}", serde_json::to_string_pretty(&status).unwrap());
             ExitCode::SUCCESS

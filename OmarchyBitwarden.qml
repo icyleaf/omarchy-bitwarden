@@ -43,7 +43,6 @@ Item {
     download_dir: "~/Downloads",
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
-    max_output_mb: 10,
     email: "",
     remember_email: true
   })
@@ -206,19 +205,6 @@ Item {
   function refreshConfig() {
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
-  }
-
-  function updateConfig(options) {
-    var cmd = [root.helperPath, "config", "set"]
-    if (options.server_url !== undefined) cmd.push("--server-url", options.server_url)
-    if (options.download_dir !== undefined) cmd.push("--download-dir", options.download_dir)
-    if (options.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(options.auto_lock_minutes))
-    if (options.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(options.clipboard_clear_seconds))
-    if (options.max_output_mb !== undefined) cmd.push("--max-output-mb", String(options.max_output_mb))
-    if (options.email !== undefined) cmd.push("--email", options.email)
-    if (options.remember_email !== undefined) cmd.push("--remember-email", options.remember_email ? "true" : "false")
-    configSetProc.command = cmd
-    configSetProc.running = true
   }
 
   function downloadCli() {
@@ -1307,7 +1293,6 @@ Item {
     if (settings.download_dir !== undefined) cmd.push("--download-dir", settings.download_dir)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
-    if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
 
     configSetProc.command = cmd

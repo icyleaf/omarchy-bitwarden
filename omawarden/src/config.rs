@@ -4,11 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_SERVER_URL: &str = "https://vault.bitwarden.com";
-pub const DEFAULT_BW_PATH: &str = "bw";
 pub const DEFAULT_DOWNLOAD_DIR: &str = "~/Downloads";
 pub const DEFAULT_AUTO_LOCK_MINUTES: i64 = 15;
 pub const DEFAULT_CLIPBOARD_CLEAR_SECONDS: i64 = 30;
-pub const DEFAULT_MAX_OUTPUT_MB: i64 = 10;
 pub const DEFAULT_EMAIL: &str = "";
 pub const DEFAULT_REMEMBER_EMAIL: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
@@ -19,16 +17,12 @@ pub struct Config {
     pub server_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_url: Option<String>,
-    #[serde(default = "default_bw_path")]
-    pub bw_path: String,
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: i64,
     #[serde(default = "default_clipboard_clear_seconds")]
     pub clipboard_clear_seconds: i64,
-    #[serde(default = "default_max_output_mb")]
-    pub max_output_mb: i64,
     #[serde(default = "default_email")]
     pub email: String,
     #[serde(default = "default_remember_email")]
@@ -40,9 +34,6 @@ pub struct Config {
 fn default_server_url() -> String {
     DEFAULT_SERVER_URL.to_string()
 }
-fn default_bw_path() -> String {
-    DEFAULT_BW_PATH.to_string()
-}
 fn default_download_dir() -> String {
     DEFAULT_DOWNLOAD_DIR.to_string()
 }
@@ -51,9 +42,6 @@ fn default_auto_lock_minutes() -> i64 {
 }
 fn default_clipboard_clear_seconds() -> i64 {
     DEFAULT_CLIPBOARD_CLEAR_SECONDS
-}
-fn default_max_output_mb() -> i64 {
-    DEFAULT_MAX_OUTPUT_MB
 }
 fn default_email() -> String {
     DEFAULT_EMAIL.to_string()
@@ -70,11 +58,9 @@ impl Default for Config {
         Self {
             server_url: default_server_url(),
             identity_url: None,
-            bw_path: default_bw_path(),
             download_dir: default_download_dir(),
             auto_lock_minutes: default_auto_lock_minutes(),
             clipboard_clear_seconds: default_clipboard_clear_seconds(),
-            max_output_mb: default_max_output_mb(),
             email: default_email(),
             remember_email: default_remember_email(),
             log_level: default_log_level(),
@@ -187,9 +173,6 @@ impl ConfigManager {
                 cfg.identity_url = Some(trimmed.to_string());
             }
         }
-        if let Some(v) = options.bw_path {
-            cfg.bw_path = v;
-        }
         if let Some(v) = options.download_dir {
             cfg.download_dir = v;
         }
@@ -198,9 +181,6 @@ impl ConfigManager {
         }
         if let Some(v) = options.clipboard_clear_seconds {
             cfg.clipboard_clear_seconds = v;
-        }
-        if let Some(v) = options.max_output_mb {
-            cfg.max_output_mb = v;
         }
         if let Some(v) = options.email {
             cfg.email = v;
@@ -221,11 +201,9 @@ impl ConfigManager {
 pub struct ConfigUpdateOptions {
     pub server_url: Option<String>,
     pub identity_url: Option<String>,
-    pub bw_path: Option<String>,
     pub download_dir: Option<String>,
     pub auto_lock_minutes: Option<i64>,
     pub clipboard_clear_seconds: Option<i64>,
-    pub max_output_mb: Option<i64>,
     pub email: Option<String>,
     pub remember_email: Option<bool>,
     pub log_level: Option<String>,
@@ -241,11 +219,9 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.server_url, DEFAULT_SERVER_URL);
         assert_eq!(cfg.identity_url, None);
-        assert_eq!(cfg.bw_path, DEFAULT_BW_PATH);
         assert_eq!(cfg.download_dir, DEFAULT_DOWNLOAD_DIR);
         assert_eq!(cfg.auto_lock_minutes, 15);
         assert_eq!(cfg.clipboard_clear_seconds, 30);
-        assert_eq!(cfg.max_output_mb, 10);
         assert_eq!(cfg.email, "");
         assert!(cfg.remember_email);
         assert_eq!(cfg.log_level, "error");
@@ -288,7 +264,6 @@ mod tests {
         assert_eq!(loaded.auto_lock_minutes, 5);
         assert_eq!(loaded.server_url, DEFAULT_SERVER_URL);
         assert_eq!(loaded.identity_url, None);
-        assert_eq!(loaded.bw_path, DEFAULT_BW_PATH);
         assert!(loaded.remember_email);
     }
 
