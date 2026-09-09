@@ -234,7 +234,13 @@ pub fn get_attachment(
         PathBuf::from(expanded)
     };
 
-    if let Err(e) = fs::create_dir_all(&target_dir) {
+    let dir_res = if open_file || preview {
+        crate::fs_util::create_secure_dir_all(&target_dir, 0o700)
+    } else {
+        fs::create_dir_all(&target_dir)
+    };
+
+    if let Err(e) = dir_res {
         return AttachmentResponse {
             ok: false,
             error: Some(format!("Failed to create target directory: {}", e)),
@@ -248,12 +254,6 @@ pub fn get_attachment(
         };
     }
 
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700));
-    }
-
     let dest_path = target_dir.join(&safe_filename);
 
     let preview_cached_path = get_preview_dir(Some(item_id)).join(&safe_filename);
@@ -262,6 +262,7 @@ pub fn get_attachment(
     if (!open_file && !preview) && preview_cached_path.is_file() {
         if preview_cached_path != dest_path {
             let _ = fs::copy(&preview_cached_path, &dest_path);
+            let _ = crate::fs_util::ensure_secure_permissions(&dest_path, 0o600);
         }
         if let Ok(cached_bytes) = fs::read(&dest_path) {
             if is_cached_file_valid(&dest_path, expected_size, &cached_bytes) {
@@ -666,36 +667,10 @@ pub fn get_attachment(
         };
     };
 
-    let temp_part_path = target_dir.join(format!("{}.part_{}", safe_filename, std::process::id()));
-
-    #[cfg(unix)]
-    let write_res = {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::fs::PermissionsExt;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        options.mode(0o600);
-        options.open(&temp_part_path).and_then(|mut f| {
-            f.write_all(&bytes)?;
-            f.flush()?;
-            let metadata = f.metadata()?;
-            let mut perms = metadata.permissions();
-            if perms.mode() & 0o777 != 0o600 {
-                perms.set_mode(0o600);
-                let _ = fs::set_permissions(&temp_part_path, perms);
-            }
-            Ok(())
-        })
-    };
-
-    #[cfg(not(unix))]
-    let write_res = fs::write(&temp_part_path, &bytes);
-
-    if let Err(e) = write_res {
+    if let Err(e) = crate::fs_util::atomic_write_file(&dest_path, &bytes, 0o600) {
         return AttachmentResponse {
             ok: false,
-            error: Some(format!("Failed to write temporary file to disk: {}", e)),
+            error: Some(format!("Failed to write downloaded file: {}", e)),
             path: None,
             filename: None,
             action: None,
@@ -704,27 +679,6 @@ pub fn get_attachment(
             text_content: None,
             size: None,
         };
-    }
-
-    if let Err(e) = fs::rename(&temp_part_path, &dest_path) {
-        let _ = fs::remove_file(&temp_part_path);
-        return AttachmentResponse {
-            ok: false,
-            error: Some(format!("Failed to finalize downloaded file: {}", e)),
-            path: None,
-            filename: None,
-            action: None,
-            is_image: None,
-            is_text: None,
-            text_content: None,
-            size: None,
-        };
-    }
-
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600));
     }
 
     build_attachment_response(
@@ -1123,6 +1077,16 @@ mod tests {
             fs::read_to_string(&dest).unwrap(),
             "cached attachment secret content 12345"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&dest).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "Downloaded attachment must have 0600 permissions"
+            );
+        }
 
         // Cleanup
         let _ = fs::remove_file(&preview_file);

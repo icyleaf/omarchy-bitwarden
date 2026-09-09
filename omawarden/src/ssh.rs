@@ -1,7 +1,4 @@
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -187,38 +184,22 @@ pub fn write_keypair_files_named(
     private_key: &str,
     public_key: &str,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
-    if !out_dir.exists() {
-        fs::create_dir_all(out_dir)?;
-    }
+    crate::fs_util::create_secure_dir_all(out_dir, 0o700)?;
 
     let priv_path = out_dir.join(priv_filename);
     let pub_path = out_dir.join(pub_filename);
 
-    // Write private key with strict 0600 permissions
-    let mut priv_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&priv_path)?;
-    priv_file.write_all(private_key.as_bytes())?;
-    if !private_key.ends_with('\n') {
-        priv_file.write_all(b"\n")?;
+    let mut priv_content = private_key.to_string();
+    if !priv_content.ends_with('\n') {
+        priv_content.push('\n');
     }
-    priv_file.flush()?;
+    crate::fs_util::atomic_write_str(&priv_path, &priv_content, 0o600)?;
 
-    // Write public key with 0644 permissions
-    let mut pub_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o644)
-        .open(&pub_path)?;
-    pub_file.write_all(public_key.as_bytes())?;
-    if !public_key.ends_with('\n') {
-        pub_file.write_all(b"\n")?;
+    let mut pub_content = public_key.to_string();
+    if !pub_content.ends_with('\n') {
+        pub_content.push('\n');
     }
-    pub_file.flush()?;
+    crate::fs_util::atomic_write_str(&pub_path, &pub_content, 0o644)?;
 
     Ok((priv_path, pub_path))
 }
@@ -242,7 +223,6 @@ pub fn write_keypair_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[test]
@@ -287,23 +267,41 @@ mod tests {
     #[test]
     fn test_write_keypair_files_permissions() {
         let dir = tempdir().unwrap();
+        let sub_dir = dir.path().join("nested_ssh");
         let priv_content =
             "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----";
         let pub_content = "ssh-ed25519 AAAAC3 test@host";
 
         let (priv_path, pub_path) =
-            write_keypair_files(dir.path(), "id_ed25519", priv_content, pub_content).unwrap();
+            write_keypair_files(&sub_dir, "id_ed25519", priv_content, pub_content).unwrap();
 
         assert!(priv_path.exists());
         assert!(pub_path.exists());
 
-        let priv_meta = fs::metadata(&priv_path).unwrap();
-        let pub_meta = fs::metadata(&pub_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
 
-        let priv_mode = priv_meta.permissions().mode() & 0o777;
-        let pub_mode = pub_meta.permissions().mode() & 0o777;
+            let dir_meta = fs::metadata(&sub_dir).unwrap();
+            let priv_meta = fs::metadata(&priv_path).unwrap();
+            let pub_meta = fs::metadata(&pub_path).unwrap();
 
-        assert_eq!(priv_mode, 0o600, "Private key must have 0600 permissions");
-        assert_eq!(pub_mode, 0o644, "Public key must have 0644 permissions");
+            assert_eq!(
+                dir_meta.permissions().mode() & 0o777,
+                0o700,
+                "SSH output directory must have 0700 permissions"
+            );
+            assert_eq!(
+                priv_meta.permissions().mode() & 0o777,
+                0o600,
+                "Private key must have 0600 permissions"
+            );
+            assert_eq!(
+                pub_meta.permissions().mode() & 0o777,
+                0o644,
+                "Public key must have 0644 permissions"
+            );
+        }
     }
 }
