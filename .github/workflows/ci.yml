@@ -13,6 +13,8 @@ on:
       - refactor/*
     paths:
       - "omawarden/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches:
@@ -20,6 +22,8 @@ on:
       - develop
     paths:
       - "omawarden/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -56,3 +60,6 @@ jobs:
 
       - name: Run test suite
         run: cargo test --all-targets
+
+      - name: Run downloader integration tests
+        run: python3 ../tests/test_downloader.py
