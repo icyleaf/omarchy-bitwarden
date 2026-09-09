@@ -448,6 +448,9 @@ Item {
               TextInput {
                 id: sUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: idUrlInput
+                KeyNavigation.backtab: clipSecInput
                 text: (settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "https://vault.bitwarden.com"
               }
             }
@@ -467,6 +470,9 @@ Item {
               TextInput {
                 id: idUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: dlDirInput
+                KeyNavigation.backtab: sUrlInput
                 text: (settingsRoot.config && settingsRoot.config.identity_url) ? settingsRoot.config.identity_url : ""
               }
               Text {
@@ -489,6 +495,9 @@ Item {
               TextInput {
                 id: dlDirInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: lockMinInput
+                KeyNavigation.backtab: idUrlInput
                 text: (settingsRoot.config && settingsRoot.config.download_dir) ? settingsRoot.config.download_dir : "~/Downloads"
               }
             }
@@ -509,6 +518,9 @@ Item {
                 TextInput {
                   id: lockMinInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: clipSecInput
+                  KeyNavigation.backtab: dlDirInput
                   text: (settingsRoot.config && settingsRoot.config.auto_lock_minutes) ? String(settingsRoot.config.auto_lock_minutes) : "15"
                 }
               }
@@ -524,6 +536,9 @@ Item {
                 TextInput {
                   id: clipSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: sUrlInput
+                  KeyNavigation.backtab: lockMinInput
                   text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
                 }
               }
