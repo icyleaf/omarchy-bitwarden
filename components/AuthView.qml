@@ -57,6 +57,14 @@ Item {
     }
   }
 
+  onConfigChanged: {
+    if (loginEmailInput && authRoot.config && authRoot.config.email && authRoot.rememberEmailChecked) {
+      if (!loginEmailInput.text || loginEmailInput.text.trim() === "") {
+        loginEmailInput.text = authRoot.config.email
+      }
+    }
+  }
+
   Flickable {
     id: authFlickable
     anchors.fill: parent

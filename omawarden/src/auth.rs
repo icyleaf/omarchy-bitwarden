@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::api::BitwardenApiClient;
+use crate::config::ConfigManager;
 use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_REFRESH_TOKEN};
 use crate::storage::{StorageManager, VaultStorage};
 
@@ -140,6 +141,7 @@ pub struct AuthManager {
     pub identity_url: Option<String>,
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
+    pub config_mgr: Option<ConfigManager>,
 }
 
 impl AuthManager {
@@ -156,6 +158,16 @@ impl AuthManager {
         identity_url: Option<&str>,
         storage_mgr: Option<StorageManager>,
         keyring_mgr: Option<KeyringManager>,
+    ) -> Self {
+        Self::with_config(server_url, identity_url, storage_mgr, keyring_mgr, None)
+    }
+
+    pub fn with_config(
+        server_url: &str,
+        identity_url: Option<&str>,
+        storage_mgr: Option<StorageManager>,
+        keyring_mgr: Option<KeyringManager>,
+        config_mgr: Option<ConfigManager>,
     ) -> Self {
         let sm = storage_mgr.unwrap_or_default();
         let storage = sm.load();
@@ -177,6 +189,7 @@ impl AuthManager {
             identity_url: effective_identity_url,
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
+            config_mgr,
         }
     }
 
@@ -443,6 +456,14 @@ impl AuthManager {
 
         let _ = self.storage_mgr.save(&storage);
 
+        if let Some(ref cm) = self.config_mgr {
+            let mut cfg = cm.load();
+            if cfg.remember_email {
+                cfg.email = email.trim().to_lowercase();
+                let _ = cm.save(&cfg);
+            }
+        }
+
         // Auto-unlock daemon with decrypted items in memory
         crate::daemon::ensure_daemon_running();
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
@@ -588,6 +609,14 @@ impl AuthManager {
         }
 
         let _ = self.storage_mgr.save(&storage);
+
+        if let Some(ref cm) = self.config_mgr {
+            let mut cfg = cm.load();
+            if cfg.remember_email && cfg.email.is_empty() && !storage.user_email.is_empty() {
+                cfg.email = storage.user_email.clone();
+                let _ = cm.save(&cfg);
+            }
+        }
 
         crate::log_info!("omawarden:auth", "API key authentication successful.");
 
@@ -1452,5 +1481,226 @@ esac
             auth_mgr_override.identity_url,
             Some("https://new-id.custom.local".to_string())
         );
+    }
+
+    #[test]
+    fn test_login_password_persists_email_to_config_based_on_remember_email() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        use crate::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+
+        let email = "user@example.com";
+        let password = "password123";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [1u8; 16];
+        let plaintext = [2u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let enc_user_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let key_clone = enc_user_key.clone();
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = format!(
+                        r#"{{"access_token":"mock_token_abc","token_type":"Bearer","Key":"{}"}}"#,
+                        key_clone
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"profile":{"id":"user-1","email":"user@example.com"},"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+        let config_path = dir.path().join("config.json");
+        let config_mgr = ConfigManager::new(Some(&config_path));
+
+        // Initial state: remember_email is true, but email is empty in config.json
+        let mut cfg = config_mgr.load();
+        cfg.remember_email = true;
+        cfg.email = String::new();
+        config_mgr.save(&cfg).unwrap();
+
+        let auth_mgr = AuthManager::with_config(
+            &server_url,
+            None,
+            Some(storage_mgr),
+            None,
+            Some(config_mgr.clone()),
+        );
+
+        let res = auth_mgr.login_password("User@Example.COM", password, None);
+        assert!(res.ok, "Login should succeed: {:?}", res.error);
+
+        // Verify config.json email was populated with normalized email
+        let updated_cfg = config_mgr.load();
+        assert_eq!(
+            updated_cfg.email, "user@example.com",
+            "Config email must be saved on successful login when remember_email is true"
+        );
+        assert!(updated_cfg.remember_email);
+
+        let _ = handle.join();
+
+        // 2. When remember_email is false, email is not saved into config.json
+        let mut cfg_no_remember = config_mgr.load();
+        cfg_no_remember.remember_email = false;
+        cfg_no_remember.email = String::new();
+        config_mgr.save(&cfg_no_remember).unwrap();
+
+        let email2 = "other@example.com";
+        let master_key2 =
+            derive_master_key(email2, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+        let sym_key2 = SymmetricCryptoKey::from_master_key(&master_key2);
+        let enc2 = Aes256CbcEnc::new_from_slices(&sym_key2.enc_key, &iv).unwrap();
+        let mut buf2 = vec![0u8; 128];
+        let ct_len2 = enc2
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf2)
+            .unwrap()
+            .len();
+        let ct2 = &buf2[..ct_len2];
+
+        let mut hmac2 = Hmac::<Sha256>::new_from_slice(sym_key2.mac_key.as_ref().unwrap()).unwrap();
+        hmac2.update(&iv);
+        hmac2.update(ct2);
+        let mac2 = hmac2.finalize().into_bytes();
+
+        let key_clone2 = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct2),
+            BASE64.encode(mac2)
+        );
+
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        let server_url2 = format!("http://127.0.0.1:{}", port2);
+
+        let handle2 = thread::spawn(move || {
+            for mut stream in listener2.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = format!(
+                        r#"{{"access_token":"mock_token_abc","token_type":"Bearer","Key":"{}"}}"#,
+                        key_clone2
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"profile":{"id":"user-1","email":"user@example.com"},"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let storage_path2 = dir.path().join("test_data2.json");
+        let storage_mgr2 = StorageManager::new(storage_path2);
+        let auth_mgr2 = AuthManager::with_config(
+            &server_url2,
+            None,
+            Some(storage_mgr2),
+            None,
+            Some(config_mgr.clone()),
+        );
+
+        let res2 = auth_mgr2.login_password("other@example.com", password, None);
+        assert!(res2.ok, "Login should succeed: {:?}", res2.error);
+
+        let updated_cfg2 = config_mgr.load();
+        assert_eq!(
+            updated_cfg2.email, "",
+            "Config email must remain empty when remember_email is false"
+        );
+        assert!(!updated_cfg2.remember_email);
+
+        let _ = handle2.join();
     }
 }

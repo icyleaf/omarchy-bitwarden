@@ -1393,6 +1393,11 @@ Item {
     root.errorMessage = ""
     root.statusMessage = "Logging in to Bitwarden..."
     var cmd = [root.helperPath, "auth", "login-password", "--email", email]
+    if (root.rememberEmailChecked) {
+      cmd.push("--remember-email", "true")
+    } else {
+      cmd.push("--remember-email", "false")
+    }
     if (code) {
       authLoginProc.secret = JSON.stringify({ password: password, code: code })
     } else {
@@ -2142,6 +2147,7 @@ Item {
           root.config = data
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
+          root.refreshAuthStatus()
         } catch (e) {
           root.statusMessage = "Failed to update config."
           root.logError("omarchy:ui", "Failed to parse updated config: " + e)
@@ -2433,6 +2439,7 @@ Item {
               has_session: true
             })
             root.refreshAuthStatus()
+            root.refreshConfig()
             if (statusVal === "unlocked") {
               root.loadVaultItems()
               root.syncVault(true, true)
