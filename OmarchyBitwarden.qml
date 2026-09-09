@@ -157,19 +157,66 @@ Item {
     })
   }
 
+  function clearSensitiveState() {
+    root.rawVaultItems = []
+    root.filteredItems = []
+    root.lastVaultItemsRawText = ""
+    root.lastSyncTime = 0
+    root.searchQuery = ""
+    root.activeCategory = "all"
+    root.activeVaultScope = "all"
+    root.activeFolderScope = "all"
+    root.selectedIndex = 0
+
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.showCardNumberRevealed = false
+    root.showCardCodeRevealed = false
+    root.showCustomHiddenRevealed = false
+    root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+
+    root.showActionPalette = false
+    root.actionPaletteIndex = 0
+    root.currentAvailableActions = []
+
+    root.showPasswordHistoryModal = false
+    root.activePasswordHistoryItem = null
+
+    root.showSshKeyModal = false
+    root.sshKeyModalItem = null
+
+    root.activeAttachmentPreview = null
+    root.loadingAttachmentId = ""
+
+    if (authViewComponent && typeof authViewComponent.clearInputs === "function") {
+      authViewComponent.clearInputs()
+    }
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
-    root.showActionPalette = false
-    root.showSshKeyModal = false
-    root.showPasswordRevealed = false
-    root.showPrivateKeyRevealed = false
-    root.activeAttachmentPreview = null
-    root.loadingAttachmentId = ""
     root.searchQuery = ""
     root.selectedIndex = 0
+    if (!root.authState || root.authState.status !== "unlocked") {
+      root.clearSensitiveState()
+    } else {
+      root.showActionPalette = false
+      root.showSshKeyModal = false
+      root.showPasswordHistoryModal = false
+      root.showPasswordRevealed = false
+      root.showPrivateKeyRevealed = false
+      root.showCardNumberRevealed = false
+      root.showCardCodeRevealed = false
+      root.showCustomHiddenRevealed = false
+      root.activeAttachmentPreview = null
+      root.activePasswordHistoryItem = null
+      root.sshKeyModalItem = null
+      root.currentAvailableActions = []
+      root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+    }
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
@@ -188,6 +235,17 @@ Item {
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.showCardNumberRevealed = false
+    root.showCardCodeRevealed = false
+    root.showCustomHiddenRevealed = false
+    root.activeAttachmentPreview = null
+    root.activePasswordHistoryItem = null
+    root.sshKeyModalItem = null
+    root.currentAvailableActions = []
+    root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+    root.searchQuery = ""
   }
 
   function dismiss() {
@@ -1349,22 +1407,13 @@ Item {
 
   function doLock() {
     root.logInfo("omarchy:auth", "Locking vault...")
-    if (authViewComponent) authViewComponent.clearInputs()
+    root.clearSensitiveState()
     root.authState = ({
       status: "locked",
       server_url: (root.authState && root.authState.server_url) || "",
       user_email: (root.authState && root.authState.user_email) || "",
-      has_session: false
+      has_session: Boolean(root.authState && root.authState.has_session)
     })
-    root.rawVaultItems = []
-    root.filteredItems = []
-    root.lastVaultItemsRawText = ""
-    root.lastSyncTime = 0
-    root.searchQuery = ""
-    root.activeCategory = "all"
-    root.activeVaultScope = "all"
-    root.activeFolderScope = "all"
-    root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Locking vault..."
     authLockProc.command = [root.helperPath, "auth", "lock"]
@@ -1405,23 +1454,14 @@ Item {
 
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
+    root.clearSensitiveState()
     root.show2FAField = false
-    if (authViewComponent) authViewComponent.clearInputs()
     root.authState = ({
       status: "unauthenticated",
-      server_url: "",
+      server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
       user_email: "",
       has_session: false
     })
-    root.rawVaultItems = []
-    root.filteredItems = []
-    root.lastVaultItemsRawText = ""
-    root.lastSyncTime = 0
-    root.searchQuery = ""
-    root.activeCategory = "all"
-    root.activeVaultScope = "all"
-    root.activeFolderScope = "all"
-    root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Logging out..."
     authLogoutProc.command = [root.helperPath, "auth", "logout"]
@@ -1452,6 +1492,14 @@ Item {
         root.updateTotpForSelected()
       }
     }
+  }
+
+  Timer {
+    id: lockSyncTimer
+    interval: 10000
+    running: Boolean(root.opened && root.authState && root.authState.status === "unlocked")
+    repeat: true
+    onTriggered: root.refreshAuthStatus()
   }
 
   function restoreSearchFocus() {
@@ -2054,6 +2102,11 @@ Item {
       onStreamFinished: {
         root.isBusy = false
         if (sshKeyModalComponent) sshKeyModalComponent.isBusy = false
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showSshKeyModal = false
+          root.sshKeyModalItem = null
+          return
+        }
         var raw = text.trim()
         var jsonRes = null
         try {
@@ -2303,9 +2356,7 @@ Item {
                 root.syncVault(true, false)
               }
             } else {
-              root.rawVaultItems = []
-              root.filteredItems = []
-              root.lastVaultItemsRawText = ""
+              root.clearSensitiveState()
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
@@ -2314,6 +2365,7 @@ Item {
             })
           }
         } catch (e) {
+          root.clearSensitiveState()
           root.authState = ({
             status: "unauthenticated",
             server_url: "",
@@ -2330,6 +2382,7 @@ Item {
     }
     onExited: function(code) {
       if (code !== 0) {
+        root.clearSensitiveState()
         root.authState = ({
           status: "unauthenticated",
           server_url: "",
@@ -2476,16 +2529,13 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.clearSensitiveState()
         root.authState = ({
           status: "locked",
           server_url: (root.authState && root.authState.server_url) || "",
           user_email: (root.authState && root.authState.user_email) || "",
-          has_session: false
+          has_session: Boolean(root.authState && root.authState.has_session)
         })
-        root.rawVaultItems = []
-        root.filteredItems = []
-        root.lastVaultItemsRawText = ""
-        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -2505,16 +2555,13 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.clearSensitiveState()
         root.authState = ({
           status: "unauthenticated",
-          server_url: "",
+          server_url: (root.config && root.config.server_url) || "",
           user_email: "",
           has_session: false
         })
-        root.rawVaultItems = []
-        root.filteredItems = []
-        root.lastVaultItemsRawText = ""
-        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -2542,14 +2589,13 @@ Item {
             root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
             var errStr = String(res.error || "")
             if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
+              root.clearSensitiveState()
               root.authState = ({
                 status: "unauthenticated",
                 server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
                 user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
                 has_session: false
               })
-              root.rawVaultItems = []
-              root.filteredItems = []
               root.currentView = "auto"
             }
             return
@@ -2557,11 +2603,13 @@ Item {
         } catch (e) {
           // Non-JSON output
         }
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.clearSensitiveState()
+          return
+        }
         root.lastSyncTime = Date.now()
         root.statusMessage = "Vault synchronized."
-        if (root.authState && root.authState.status === "unlocked") {
-          root.loadVaultItems()
-        }
+        root.loadVaultItems()
         Qt.callLater(function() {
           if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
             searchHeader.searchField.forceActiveFocus()
@@ -2590,6 +2638,10 @@ Item {
       onStreamFinished: {
         try {
           root.isLoadingVault = false
+          if (!root.authState || root.authState.status !== "unlocked") {
+            root.clearSensitiveState()
+            return
+          }
           var cleanText = (text || "").trim()
           if (cleanText === root.lastVaultItemsRawText && root.rawVaultItems && root.rawVaultItems.length > 0) {
             Qt.callLater(function() {
@@ -2666,6 +2718,10 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+          return
+        }
         var cleanText = (text || "").trim()
         if (!cleanText) return
         try {
@@ -2701,6 +2757,10 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.loadingAttachmentId = ""
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.activeAttachmentPreview = null
+          return
+        }
         try {
           var data = JSON.parse(text)
           if (data.ok) {
