@@ -108,8 +108,8 @@ enum Commands {
     },
     #[command(about = "Run omawarden background daemon")]
     Daemon {
-        #[arg(long, default_value = "15")]
-        auto_lock: u64,
+        #[arg(long)]
+        auto_lock: Option<u64>,
     },
 }
 
@@ -354,9 +354,18 @@ fn main() -> ExitCode {
 
     match cli.command {
         Commands::Daemon { auto_lock } => {
+            let default_auto_lock = if cfg.auto_lock_minutes >= 0 {
+                cfg.auto_lock_minutes as u64
+            } else {
+                15
+            };
+            let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
             let storage_mgr = StorageManager::default();
-            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock));
-            println!("Starting omawarden daemon (auto_lock: {}m)...", auto_lock);
+            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
+            println!(
+                "Starting omawarden daemon (auto_lock: {}m)...",
+                auto_lock_mins
+            );
             if let Err(e) = run_daemon_server(state) {
                 eprintln!("Daemon server error: {}", e);
                 ExitCode::FAILURE
@@ -438,6 +447,12 @@ fn main() -> ExitCode {
                         }
                     };
                 cfg = updated_cfg;
+                if let Some(lock_mins) = auto_lock {
+                    let _ = send_daemon_request(&json!({
+                        "action": "set_auto_lock",
+                        "auto_lock_minutes": lock_mins
+                    }));
+                }
                 let safe_url = if cfg.server_url.is_empty() {
                     "default (official)".to_string()
                 } else if let Ok(parsed) = url::Url::parse(&cfg.server_url) {
@@ -1050,7 +1065,8 @@ fn main() -> ExitCode {
                     let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
                         let daemon_res = send_daemon_request(&json!({
                             "action": "get_item",
-                            "query": q
+                            "query": q,
+                            "touch": false
                         }));
                         daemon_res
                             .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
@@ -1681,5 +1697,23 @@ mod tests {
         let (pwd, code) = parse_auth_payload("  \r\n");
         assert_eq!(pwd, "");
         assert_eq!(code, None);
+    }
+
+    #[test]
+    fn test_cli_daemon_auto_lock_arg_parsing() {
+        // Without --auto-lock flag, auto_lock should be None so it can inherit from config
+        let cli_default = Cli::try_parse_from(["omawarden", "daemon"]).unwrap();
+        match cli_default.command {
+            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, None),
+            _ => panic!("Expected Commands::Daemon"),
+        }
+
+        // With --auto-lock flag, auto_lock should be Some(N)
+        let cli_explicit =
+            Cli::try_parse_from(["omawarden", "daemon", "--auto-lock", "45"]).unwrap();
+        match cli_explicit.command {
+            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
+            _ => panic!("Expected Commands::Daemon"),
+        }
     }
 }
