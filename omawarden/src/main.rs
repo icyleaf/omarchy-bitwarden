@@ -2,10 +2,11 @@ use clap::{Parser, Subcommand};
 use omawarden::attachment::get_attachment;
 use omawarden::auth::AuthManager;
 use omawarden::clipboard::ClipboardManager;
-use omawarden::config::ConfigManager;
+use omawarden::config::{ConfigManager, ConfigUpdateOptions};
 use omawarden::daemon::{run_daemon_server, send_daemon_request, DaemonState};
 use omawarden::health::check_system_health;
 use omawarden::hook::install_lock_hook;
+use omawarden::keyring::KeyringManager;
 use omawarden::ssh::{
     generate_keypair, parse_private_key, write_keypair_files, write_keypair_files_named,
     SshAlgorithm,
@@ -157,6 +158,13 @@ enum AuthAction {
         email: String,
         #[arg(long, help = "Optional two-factor authentication (2FA) code")]
         code: Option<String>,
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            help = "Remember email address in configuration"
+        )]
+        remember_email: Option<String>,
     },
     #[command(about = "Login using API Key (client_secret read from stdin)")]
     LoginApikey {
@@ -402,43 +410,47 @@ fn main() -> ExitCode {
                 remember_email,
                 log_level,
             } => {
-                if let Some(v) = server_url {
-                    cfg.server_url = v;
-                }
-                if let Some(v) = identity_url {
-                    let trimmed = v.trim();
-                    if trimmed.is_empty() {
-                        cfg.identity_url = None;
-                    } else {
-                        cfg.identity_url = Some(trimmed.to_string());
+                let storage_mgr = match cli.config.as_deref() {
+                    Some(cp) => {
+                        if let Some(parent) = cp.parent() {
+                            StorageManager::new(
+                                parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                            )
+                        } else {
+                            StorageManager::default()
+                        }
                     }
-                }
-                if let Some(v) = bw_path {
-                    cfg.bw_path = v;
-                }
-                if let Some(v) = download_dir {
-                    cfg.download_dir = v;
-                }
-                if let Some(v) = auto_lock {
-                    cfg.auto_lock_minutes = v;
-                }
-                if let Some(v) = clipboard_clear {
-                    cfg.clipboard_clear_seconds = v;
-                }
-                if let Some(v) = max_output_mb {
-                    cfg.max_output_mb = v;
-                }
-                if let Some(v) = email {
-                    cfg.email = v;
-                }
-                if let Some(v) = remember_email {
+                    None => StorageManager::default(),
+                };
+                let keyring_mgr = KeyringManager::default();
+
+                let parsed_remember_email = remember_email.map(|v| {
                     let lower = v.trim().to_lowercase();
-                    cfg.remember_email = matches!(lower.as_str(), "true" | "1" | "yes");
-                }
-                if let Some(v) = log_level {
-                    cfg.log_level = v.to_lowercase();
-                }
-                let _ = config_mgr.save(&cfg);
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
+                let options = ConfigUpdateOptions {
+                    server_url,
+                    identity_url,
+                    bw_path,
+                    download_dir,
+                    auto_lock_minutes: auto_lock,
+                    clipboard_clear_seconds: clipboard_clear,
+                    max_output_mb,
+                    email,
+                    remember_email: parsed_remember_email,
+                    log_level,
+                };
+
+                let (updated_cfg, _server_changed) =
+                    match config_mgr.update_config(options, &storage_mgr, &keyring_mgr) {
+                        Ok(res) => res,
+                        Err(e) => {
+                            eprintln!("Failed to save configuration: {}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                cfg = updated_cfg;
                 let safe_url = if cfg.server_url.is_empty() {
                     "default (official)".to_string()
                 } else if let Ok(parsed) = url::Url::parse(&cfg.server_url) {
@@ -496,11 +508,12 @@ fn main() -> ExitCode {
         }
 
         Commands::Auth { action } => {
-            let auth_mgr = AuthManager::with_identity_url(
+            let auth_mgr = AuthManager::with_config(
                 &cfg.server_url,
                 cfg.identity_url.as_deref(),
                 None,
                 None,
+                Some(config_mgr.clone()),
             );
             match action {
                 AuthAction::Status => {
@@ -509,7 +522,11 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
                 }
-                AuthAction::LoginPassword { email, code } => {
+                AuthAction::LoginPassword {
+                    email,
+                    code,
+                    remember_email,
+                } => {
                     let (pwd, stdin_code) = if io::stdin().is_terminal() {
                         let p = rpassword::prompt_password("Enter Master Password: ")
                             .unwrap_or_default();
@@ -519,6 +536,20 @@ fn main() -> ExitCode {
                     };
                     let effective_code = code.or(stdin_code);
                     let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    if res.ok {
+                        if let Some(ref rem) = remember_email {
+                            let should_remember =
+                                matches!(rem.to_lowercase().as_str(), "true" | "1" | "yes");
+                            let mut latest_cfg = config_mgr.load();
+                            latest_cfg.remember_email = should_remember;
+                            if should_remember {
+                                latest_cfg.email = email.trim().to_lowercase();
+                            } else {
+                                latest_cfg.email.clear();
+                            }
+                            let _ = config_mgr.save(&latest_cfg);
+                        }
+                    }
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
                         ExitCode::SUCCESS
