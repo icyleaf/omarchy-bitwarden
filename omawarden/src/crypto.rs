@@ -497,6 +497,8 @@ pub fn decrypt_attachment_blob(
         return Ok(Vec::new());
     }
 
+    let mac_key = key.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
+
     // Standard Bitwarden EncArrayBuffer format:
     // Format 1: [1 byte encType == 2][16 bytes IV][32 bytes MAC][Ciphertext]
     if blob.len() >= 49 && blob[0] == 2 {
@@ -510,7 +512,6 @@ pub fn decrypt_attachment_blob(
             ));
         }
 
-        let mac_key = key.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
         let mut hmac = HmacSha256::new_from_slice(mac_key)
             .map_err(|_| CryptoError::DecryptionFailed("Invalid MAC key".to_string()))?;
         hmac.update(iv);
@@ -526,75 +527,43 @@ pub fn decrypt_attachment_blob(
         return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
     }
 
-    // Format 2: [1 byte encType == 0][16 bytes IV][Ciphertext]
-    if blob.len() >= 17 && blob[0] == 0 {
-        let iv = &blob[1..17];
-        let ct = &blob[17..];
-        if !ct.len().is_multiple_of(16) {
-            return Err(CryptoError::DecryptionFailed(
-                "Attachment ciphertext length is not a multiple of 16 (incomplete download)"
-                    .to_string(),
-            ));
-        }
-        return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
-    }
-
-    // Format 3: [16 bytes IV][32 bytes MAC][Ciphertext] (no leading encType byte)
+    // Format 2: [16 bytes IV][32 bytes MAC][Ciphertext] (headerless layout)
     if blob.len() >= 48 {
         let iv = &blob[0..16];
         let mac = &blob[16..48];
         let ct = &blob[48..];
         if ct.len().is_multiple_of(16) {
-            if let Some(mac_key) = key.mac_key.as_ref() {
-                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
-                    hmac.update(iv);
-                    hmac.update(ct);
-                    let calculated_mac = hmac.finalize().into_bytes();
-                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
-                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                            return Ok(decrypted);
-                        }
-                    }
+            if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                hmac.update(iv);
+                hmac.update(ct);
+                let calculated_mac = hmac.finalize().into_bytes();
+                if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                    return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
                 }
             }
         }
     }
 
-    // Format 4: [16 bytes IV][Ciphertext][32 bytes MAC] (trailing MAC)
+    // Format 3: [16 bytes IV][Ciphertext][32 bytes MAC] (trailing MAC layout)
     if blob.len() >= 48 {
         let iv = &blob[0..16];
         let ct_len = blob.len() - 48;
         if ct_len.is_multiple_of(16) {
             let ct = &blob[16..16 + ct_len];
             let mac = &blob[16 + ct_len..];
-            if let Some(mac_key) = key.mac_key.as_ref() {
-                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
-                    hmac.update(iv);
-                    hmac.update(ct);
-                    let calculated_mac = hmac.finalize().into_bytes();
-                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
-                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                            return Ok(decrypted);
-                        }
-                    }
+            if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                hmac.update(iv);
+                hmac.update(ct);
+                let calculated_mac = hmac.finalize().into_bytes();
+                if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                    return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
                 }
             }
         }
     }
 
-    // Format 5: [16 bytes IV][Ciphertext]
-    if blob.len() >= 16 {
-        let iv = &blob[0..16];
-        let ct = &blob[16..];
-        if ct.len().is_multiple_of(16) {
-            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                return Ok(decrypted);
-            }
-        }
-    }
-
     Err(CryptoError::DecryptionFailed(
-        "Attachment blob does not match any valid encrypted format or decryption failed"
+        "Attachment blob does not match any authenticated format or HMAC verification failed"
             .to_string(),
     ))
 }
@@ -872,13 +841,40 @@ fn test_decrypt_attachment_blob() {
     let decrypted1 = decrypt_attachment_blob(&bitwarden_blob, &key).unwrap();
     assert_eq!(decrypted1, plaintext);
 
-    // Test Format 5: [16 bytes IV][ciphertext]
-    let mut blob = Vec::new();
-    blob.extend_from_slice(&iv);
-    blob.extend_from_slice(&ciphertext);
-
-    let decrypted2 = decrypt_attachment_blob(&blob, &key).unwrap();
+    // Test authenticated Format 2 (headerless [16 bytes IV][32 bytes MAC][Ciphertext])
+    let mut headerless_blob = Vec::new();
+    headerless_blob.extend_from_slice(&iv);
+    headerless_blob.extend_from_slice(&mac);
+    headerless_blob.extend_from_slice(&ciphertext);
+    let decrypted2 = decrypt_attachment_blob(&headerless_blob, &key).unwrap();
     assert_eq!(decrypted2, plaintext);
+
+    // Test authenticated Format 3 (trailing MAC [16 bytes IV][Ciphertext][32 bytes MAC])
+    let mut trailing_mac_blob = Vec::new();
+    trailing_mac_blob.extend_from_slice(&iv);
+    trailing_mac_blob.extend_from_slice(&ciphertext);
+    trailing_mac_blob.extend_from_slice(&mac);
+    let decrypted3 = decrypt_attachment_blob(&trailing_mac_blob, &key).unwrap();
+    assert_eq!(decrypted3, plaintext);
+
+    // Unauthenticated blob (raw [16 bytes IV][ciphertext] without MAC) MUST be rejected
+    let mut unauthenticated_blob = Vec::new();
+    unauthenticated_blob.extend_from_slice(&iv);
+    unauthenticated_blob.extend_from_slice(&ciphertext);
+    assert!(
+        decrypt_attachment_blob(&unauthenticated_blob, &key).is_err(),
+        "Unauthenticated attachment blob (no MAC) must be rejected"
+    );
+
+    // Legacy unauthenticated format [0x00][16 bytes IV][ciphertext] MUST be rejected
+    let mut legacy_unauthenticated_blob = Vec::new();
+    legacy_unauthenticated_blob.push(0u8);
+    legacy_unauthenticated_blob.extend_from_slice(&iv);
+    legacy_unauthenticated_blob.extend_from_slice(&ciphertext);
+    assert!(
+        decrypt_attachment_blob(&legacy_unauthenticated_blob, &key).is_err(),
+        "Unauthenticated attachment blob with encType 0 must be rejected"
+    );
 
     // Truncated blob (incomplete download) MUST fail decryption rather than returning raw ciphertext
     let truncated_blob = &bitwarden_blob[..bitwarden_blob.len() - 5];
@@ -893,5 +889,24 @@ fn test_decrypt_attachment_blob() {
     assert!(
         decrypt_attachment_blob(&bad_mac_blob, &key).is_err(),
         "Corrupted MAC attachment blob must return Err, not Ok"
+    );
+
+    // Tampered ciphertext with original MAC MUST fail decryption
+    let mut tampered_ct_blob = bitwarden_blob.clone();
+    let last_idx = tampered_ct_blob.len() - 1;
+    tampered_ct_blob[last_idx] ^= 0x01;
+    assert!(
+        decrypt_attachment_blob(&tampered_ct_blob, &key).is_err(),
+        "Tampered ciphertext with mismatched MAC must fail decryption"
+    );
+
+    // Decryption with key missing mac_key MUST be rejected
+    let enc_only_key = SymmetricCryptoKey {
+        enc_key: key.enc_key.clone(),
+        mac_key: None,
+    };
+    assert!(
+        decrypt_attachment_blob(&bitwarden_blob, &enc_only_key).is_err(),
+        "Decryption with key missing mac_key must fail"
     );
 }
