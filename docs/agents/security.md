@@ -117,16 +117,18 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ### Rule 6: Local IPC Socket Authentication (`SO_PEERCRED`) & Memory Hygiene
 
-**Principle**: Local Unix domain sockets connect processes under the operating system; they do not automatically guarantee that only the owner process is communicating.
+**Principle**: Local Unix domain sockets connect processes under the operating system; they do not automatically guarantee that only the owner process is communicating or listening.
 
 - ❌ **Anti-Pattern**:
-  Trusting any connection that reaches the socket file simply because the socket file mode is `0600` (e.g. in containerized, shared runtime, or misconfigured permission scenarios).
+  - Trusting any connection that reaches the socket file simply because the socket file mode is `0600` (e.g. in containerized, shared runtime, or misconfigured permission scenarios).
+  - Clients blindly connecting to `/tmp/omawarden-{uid}.sock` or `XDG_RUNTIME_DIR` sockets without verifying that the socket and its parent directory are owned by current UID, free of symlinks, and that the listening server UID matches caller UID before transmitting plaintext credentials (such as master password on unlock).
 - ✅ **Required Pattern**:
-  - **Socket Peer Verification**: On connection accept, query the peer process credentials using `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` on Linux and ensure `ucred.uid == libc::getuid()`. Reject foreign UIDs immediately before reading any input.
+  - **Mutual Peer Verification**: Both server AND client perform peer credential verification. On connection accept, the server queries caller process credentials using `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` on Linux and ensures `ucred.uid == libc::getuid()`. Similarly, the client verifies the server process credentials immediately upon `connect()` before transmitting any request payload.
+  - **Path & Directory Hardening**: Socket paths and parent runtime directories are validated with `symlink_metadata()` to reject symlinks and foreign ownership. Fallback runtime directories in `/tmp` must be created atomically as dedicated `0700` directories (`/tmp/omawarden-runtime-{uid}/`).
   - **Cryptographic Memory Hygiene**: Master keys, derived cryptographic keys, and master passwords in memory MUST implement `zeroize::Zeroize` and be scrubbed on lock.
   - **Threat Boundary Clarity**: Document clearly that processes running as the *same OS user* share access under the same UID; defense against same-user memory scraping requires OS sandboxing.
 - 🧪 **Mandatory Verification**:
-  Unit test must assert that `verify_peer_credentials` succeeds for valid socket pairs and rejects mismatched client connections.
+  Unit test must assert that `verify_peer_credentials` succeeds for valid socket pairs, rejects foreign/mismatched connections, and `validate_socket_path` rejects symlinks and foreign socket files.
 
 ---
 
@@ -157,7 +159,7 @@ Before submitting any code changes touching authentication, crypto, networking, 
 - [ ] Keyring failures fail-closed (no fallback to plaintext files).
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
-- [ ] Socket handlers verify peer UID (SO_PEERCRED) on connection.
+- [ ] Sockets enforce mutual peer UID (SO_PEERCRED) verification and validate paths/symlinks.
 - [ ] Master keys and cryptographic keys use page-aligned physical memory locks (LockedKey32 / mlock).
 - [ ] Process anti-dump protection (PR_SET_DUMPABLE = 0) is active.
 - [ ] Installers / downloaders enforce fail-closed checksum checks.
