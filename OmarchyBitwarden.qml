@@ -274,6 +274,7 @@ Item {
 
   function refreshConfig() {
     root.showWebsiteIcons = false
+    if (configGetProc.running) return
     root.configSeq++
     configGetProc.seq = root.configSeq
     configGetProc.command = [root.helperPath, "config", "get"]
