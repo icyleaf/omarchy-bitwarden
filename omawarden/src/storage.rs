@@ -79,50 +79,12 @@ impl StorageManager {
 
     pub fn save(&self, data: &VaultStorage) -> std::io::Result<()> {
         if let Some(parent) = self.file_path.parent() {
-            fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = fs::metadata(parent) {
-                    let mut perms = metadata.permissions();
-                    if perms.mode() & 0o777 != 0o700 {
-                        perms.set_mode(0o700);
-                        let _ = fs::set_permissions(parent, perms);
-                    }
-                }
-            }
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
         }
         let content = serde_json::to_string_pretty(data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            options.mode(0o600);
-
-            let mut file = options.open(&self.file_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-
-            let metadata = file.metadata()?;
-            let mut perms = metadata.permissions();
-            if perms.mode() & 0o777 != 0o600 {
-                perms.set_mode(0o600);
-                fs::set_permissions(&self.file_path, perms)?;
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            fs::write(&self.file_path, content)?;
-        }
-
-        Ok(())
+        crate::fs_util::atomic_write_str(&self.file_path, &content, 0o600)
     }
 
     pub fn unlock_user_key(
