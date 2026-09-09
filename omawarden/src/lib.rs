@@ -9,6 +9,7 @@ pub mod fs_util;
 pub mod health;
 pub mod hook;
 pub mod keyring;
+pub mod locked;
 pub mod logging;
 pub mod ssh;
 pub mod storage;
