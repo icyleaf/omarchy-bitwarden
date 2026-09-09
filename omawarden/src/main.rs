@@ -154,6 +154,8 @@ enum ConfigAction {
         remember_email: Option<String>,
         #[arg(long)]
         log_level: Option<String>,
+        #[arg(long)]
+        show_website_icons: Option<String>,
     },
 }
 
@@ -412,6 +414,7 @@ fn main() -> ExitCode {
                         "email" => println!("{}", cfg.email),
                         "remember_email" => println!("{}", cfg.remember_email),
                         "log_level" => println!("{}", cfg.log_level),
+                        "show_website_icons" => println!("{}", cfg.show_website_icons),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -431,6 +434,7 @@ fn main() -> ExitCode {
                 email,
                 remember_email,
                 log_level,
+                show_website_icons,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -451,6 +455,11 @@ fn main() -> ExitCode {
                     matches!(lower.as_str(), "true" | "1" | "yes")
                 });
 
+                let parsed_show_website_icons = show_website_icons.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
                 let options = ConfigUpdateOptions {
                     server_url,
                     identity_url,
@@ -460,6 +469,7 @@ fn main() -> ExitCode {
                     email,
                     remember_email: parsed_remember_email,
                     log_level,
+                    show_website_icons: parsed_show_website_icons,
                 };
 
                 let (updated_cfg, _server_changed) =
