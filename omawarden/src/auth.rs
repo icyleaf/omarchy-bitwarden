@@ -812,6 +812,15 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
+    fn create_test_mock_keyring(dir: &std::path::Path) -> KeyringManager {
+        let script_path = dir.join("mock-secret-tool");
+        fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        KeyringManager::new(script_path.to_str().unwrap())
+    }
+
     #[test]
     fn test_sanitize_auth_error_patterns() {
         assert_eq!(
@@ -990,8 +999,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_404_data.json");
         let storage_mgr = StorageManager::new(storage_path);
-
-        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), None);
+        let mock_keyring = create_test_mock_keyring(dir.path());
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
         let res = auth_mgr.login_password("test@example.com", "password123", None);
         assert!(!res.ok);
         assert_eq!(
@@ -1043,8 +1052,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_2fa_data.json");
         let storage_mgr = StorageManager::new(storage_path);
+        let mock_keyring = create_test_mock_keyring(dir.path());
 
-        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), None);
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
         let res = auth_mgr.login_password("user@example.com", "password123", None);
         assert!(!res.ok);
         assert_eq!(res.status.as_deref(), Some("unauthenticated"));
@@ -1674,11 +1684,12 @@ esac
         cfg.email = String::new();
         config_mgr.save(&cfg).unwrap();
 
+        let mock_keyring = create_test_mock_keyring(dir.path());
         let auth_mgr = AuthManager::with_config(
             &server_url,
             None,
             Some(storage_mgr),
-            None,
+            Some(mock_keyring.clone()),
             Some(config_mgr.clone()),
         );
 
@@ -1775,7 +1786,7 @@ esac
             &server_url2,
             None,
             Some(storage_mgr2),
-            None,
+            Some(mock_keyring),
             Some(config_mgr.clone()),
         );
 
