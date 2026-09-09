@@ -164,11 +164,13 @@ impl SymmetricCryptoKey {
             }
         }
 
-        // 3. Direct master key as encryption key
-        candidate_keys.push(SymmetricCryptoKey {
-            enc_key: *master_key,
-            mac_key: None,
-        });
+        // 3. Direct master key as encryption key (only for legacy unauthenticated enc_type == 0)
+        if enc.enc_type == 0 {
+            candidate_keys.push(SymmetricCryptoKey {
+                enc_key: *master_key,
+                mac_key: None,
+            });
+        }
 
         let mut last_err =
             CryptoError::DecryptionFailed("No matching candidate key found".to_string());
@@ -176,20 +178,6 @@ impl SymmetricCryptoKey {
             match enc.decrypt(key) {
                 Ok(bytes) => return Ok(bytes),
                 Err(e) => last_err = e,
-            }
-        }
-
-        // Fallback: if MAC failed on all keys, try AES-CBC decrypt without enforcing MAC
-        for key in &candidate_keys {
-            if enc.iv.len() == 16 {
-                let mut buf = enc.ciphertext.clone();
-                if let Ok(dec) = Aes256CbcDec::new_from_slices(&key.enc_key, &enc.iv) {
-                    if let Ok(slice) = dec.decrypt_padded_mut::<Pkcs7>(&mut buf) {
-                        if slice.len() == 32 || slice.len() == 64 {
-                            return Ok(slice.to_vec());
-                        }
-                    }
-                }
             }
         }
 
@@ -235,22 +223,18 @@ impl SymmetricCryptoKey {
             .len();
         let ct = &buf[..ct_len];
 
-        let mac_str = if let Some(ref mac_k) = self.mac_key {
-            let mut hmac = HmacSha256::new_from_slice(mac_k)
-                .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid mac key: {}", e)))?;
-            hmac.update(&iv);
-            hmac.update(ct);
-            let mac = hmac.finalize().into_bytes();
-            format!("|{}", BASE64.encode(mac))
-        } else {
-            String::new()
-        };
+        let mac_k = self.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
+        let mut hmac = HmacSha256::new_from_slice(mac_k)
+            .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid mac key: {}", e)))?;
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
 
         Ok(format!(
-            "2.{}|{}{}",
+            "2.{}|{}|{}",
             BASE64.encode(iv),
             BASE64.encode(ct),
-            mac_str
+            BASE64.encode(mac)
         ))
     }
 }
@@ -343,26 +327,24 @@ impl EncString {
 
     pub fn decrypt(&self, key: &SymmetricCryptoKey) -> Result<Vec<u8>, CryptoError> {
         match self.enc_type {
-            0 | 2 => {
+            0 => {
                 if self.iv.len() != 16 {
                     return Err(CryptoError::DecryptionFailed(
                         "Invalid IV length".to_string(),
                     ));
                 }
 
-                // If MAC is present, verify MAC
-                let mut mac_valid = false;
+                // enc_type 0: AesCbc256_B64 (legacy unauthenticated CBC)
                 if let (Some(expected_mac), Some(mac_key)) = (&self.mac, &key.mac_key) {
-                    if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
-                        hmac.update(&self.iv);
-                        hmac.update(&self.ciphertext);
-                        let calculated_mac = hmac.finalize().into_bytes();
-                        if expected_mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
-                            mac_valid = true;
-                        }
+                    let mut hmac = HmacSha256::new_from_slice(mac_key).map_err(|e| {
+                        CryptoError::DecryptionFailed(format!("Invalid MAC key: {}", e))
+                    })?;
+                    hmac.update(&self.iv);
+                    hmac.update(&self.ciphertext);
+                    let calculated_mac = hmac.finalize().into_bytes();
+                    if expected_mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
+                        return Err(CryptoError::MacMismatch);
                     }
-                } else {
-                    mac_valid = true;
                 }
 
                 let mut buf = self.ciphertext.clone();
@@ -373,10 +355,38 @@ impl EncString {
                     .decrypt_padded_mut::<Pkcs7>(&mut buf)
                     .map_err(|e| CryptoError::DecryptionFailed(format!("{:?}", e)))?;
 
-                if !mac_valid && self.mac.is_some() && key.mac_key.is_some() {
-                    // Decryption succeeded even though MAC differed
-                    return Ok(decrypted_slice.to_vec());
+                Ok(decrypted_slice.to_vec())
+            }
+            2 => {
+                if self.iv.len() != 16 {
+                    return Err(CryptoError::DecryptionFailed(
+                        "Invalid IV length".to_string(),
+                    ));
                 }
+
+                // enc_type 2: AesCbc256_HmacSha256_B64 (MAC is mandatory)
+                let expected_mac = self.mac.as_deref().ok_or(CryptoError::MacMismatch)?;
+                let mac_key = key.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
+
+                let mut hmac = HmacSha256::new_from_slice(mac_key).map_err(|e| {
+                    CryptoError::DecryptionFailed(format!("Invalid MAC key: {}", e))
+                })?;
+                hmac.update(&self.iv);
+                hmac.update(&self.ciphertext);
+                let calculated_mac = hmac.finalize().into_bytes();
+
+                if expected_mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
+                    return Err(CryptoError::MacMismatch);
+                }
+
+                // Decrypt ONLY after HMAC verification passes (Encrypt-then-MAC)
+                let mut buf = self.ciphertext.clone();
+                let dec = Aes256CbcDec::new_from_slices(&key.enc_key, &self.iv)
+                    .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
+
+                let decrypted_slice = dec
+                    .decrypt_padded_mut::<Pkcs7>(&mut buf)
+                    .map_err(|e| CryptoError::DecryptionFailed(format!("{:?}", e)))?;
 
                 Ok(decrypted_slice.to_vec())
             }
@@ -385,19 +395,7 @@ impl EncString {
     }
 
     pub fn decrypt_string(&self, key: &SymmetricCryptoKey) -> Result<String, CryptoError> {
-        let bytes = self.decrypt(key).or_else(|_| {
-            if self.iv.len() == 16 {
-                let mut buf = self.ciphertext.clone();
-                if let Ok(dec) = Aes256CbcDec::new_from_slices(&key.enc_key, &self.iv) {
-                    if let Ok(slice) = dec.decrypt_padded_mut::<Pkcs7>(&mut buf) {
-                        return Ok(slice.to_vec());
-                    }
-                }
-            }
-            Err(CryptoError::DecryptionFailed(
-                "Decryption failed".to_string(),
-            ))
-        })?;
+        let bytes = self.decrypt(key)?;
         String::from_utf8(bytes).map_err(|_| CryptoError::Utf8Error)
     }
 }
@@ -498,17 +496,17 @@ pub fn decrypt_attachment_blob(
             ));
         }
 
-        if let Some(mac_key) = key.mac_key.as_ref() {
-            let mut hmac = HmacSha256::new_from_slice(mac_key)
-                .map_err(|_| CryptoError::DecryptionFailed("Invalid MAC key".to_string()))?;
-            hmac.update(iv);
-            hmac.update(ct);
-            let calculated_mac = hmac.finalize().into_bytes();
-            if mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
-                return Err(CryptoError::DecryptionFailed(
-                    "Attachment HMAC integrity verification failed (corrupted or incomplete download)".to_string(),
-                ));
-            }
+        let mac_key = key.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
+        let mut hmac = HmacSha256::new_from_slice(mac_key)
+            .map_err(|_| CryptoError::DecryptionFailed("Invalid MAC key".to_string()))?;
+        hmac.update(iv);
+        hmac.update(ct);
+        let calculated_mac = hmac.finalize().into_bytes();
+        if mac.ct_eq(&calculated_mac).unwrap_u8() != 1 {
+            return Err(CryptoError::DecryptionFailed(
+                "Attachment HMAC integrity verification failed (corrupted or incomplete download)"
+                    .to_string(),
+            ));
         }
 
         return decrypt_aes_cbc_bytes(ct, iv, &key.enc_key);
@@ -554,8 +552,18 @@ pub fn decrypt_attachment_blob(
         let ct_len = blob.len() - 48;
         if ct_len.is_multiple_of(16) {
             let ct = &blob[16..16 + ct_len];
-            if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
-                return Ok(decrypted);
+            let mac = &blob[16 + ct_len..];
+            if let Some(mac_key) = key.mac_key.as_ref() {
+                if let Ok(mut hmac) = HmacSha256::new_from_slice(mac_key) {
+                    hmac.update(iv);
+                    hmac.update(ct);
+                    let calculated_mac = hmac.finalize().into_bytes();
+                    if mac.ct_eq(&calculated_mac).unwrap_u8() == 1 {
+                        if let Ok(decrypted) = decrypt_aes_cbc_bytes(ct, iv, &key.enc_key) {
+                            return Ok(decrypted);
+                        }
+                    }
+                }
             }
         }
     }
@@ -636,6 +644,153 @@ mod tests {
 
         let decrypted = parsed.decrypt_string(&key).unwrap();
         assert_eq!(decrypted, "Hello, Bitwarden Native Rust!");
+    }
+
+    #[test]
+    fn test_hmac_verification_rejects_tampered_mac() {
+        let raw_key = [7u8; 64];
+        let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+        let encrypted = key.encrypt_string("https://vault.bitwarden.com").unwrap();
+        let mut parsed = EncString::parse(&encrypted).unwrap();
+
+        // Corrupt MAC byte
+        if let Some(ref mut mac) = parsed.mac {
+            mac[0] ^= 0xFF;
+        }
+
+        assert_eq!(
+            parsed.decrypt(&key).unwrap_err(),
+            CryptoError::MacMismatch,
+            "Altered MAC must be strictly rejected with MacMismatch"
+        );
+        assert_eq!(
+            parsed.decrypt_string(&key).unwrap_err(),
+            CryptoError::MacMismatch,
+            "decrypt_string must not fall back to unauthenticated CBC decryption"
+        );
+    }
+
+    #[test]
+    fn test_hmac_verification_rejects_altered_iv_cbc_bit_flipping() {
+        let raw_key = [11u8; 64];
+        let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+        // Plaintext: "https://good.example/login"
+        let plaintext = "https://good.example/login";
+        let encrypted = key.encrypt_string(plaintext).unwrap();
+        let mut parsed = EncString::parse(&encrypted).unwrap();
+
+        // CBC bit-flip: "https://" is 8 chars, 'g' is index 8 in plaintext block 0.
+        // Changing IV[8] by ('g' ^ 'b') would flip 'g' to 'b' in CBC mode without MAC.
+        parsed.iv[8] ^= b'g' ^ b'b';
+
+        let res = parsed.decrypt_string(&key);
+        assert!(
+            res.is_err(),
+            "CBC bit flipping attack on IV must be rejected by HMAC verification"
+        );
+        assert_eq!(res.unwrap_err(), CryptoError::MacMismatch);
+    }
+
+    #[test]
+    fn test_hmac_verification_rejects_altered_ciphertext() {
+        let raw_key = [13u8; 64];
+        let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+        let encrypted = key.encrypt_string("SuperSecretPassword123!").unwrap();
+        let mut parsed = EncString::parse(&encrypted).unwrap();
+
+        // Tamper ciphertext
+        parsed.ciphertext[5] ^= 0xAA;
+
+        let res = parsed.decrypt_string(&key);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), CryptoError::MacMismatch);
+    }
+
+    #[test]
+    fn test_hmac_verification_rejects_missing_mac_on_type_2() {
+        let raw_key = [17u8; 64];
+        let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+        let encrypted = key.encrypt_string("Secret Data").unwrap();
+        let mut parsed = EncString::parse(&encrypted).unwrap();
+        parsed.mac = None; // Strip MAC
+
+        let res = parsed.decrypt_string(&key);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), CryptoError::MacMismatch);
+    }
+
+    #[test]
+    fn test_hmac_verification_rejects_key_missing_mac_key() {
+        let raw_key = [19u8; 64];
+        let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+        let encrypted = key.encrypt_string("Secret Data").unwrap();
+        let parsed = EncString::parse(&encrypted).unwrap();
+
+        let key_without_mac = SymmetricCryptoKey {
+            enc_key: key.enc_key,
+            mac_key: None,
+        };
+
+        let res = parsed.decrypt_string(&key_without_mac);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), CryptoError::MacMismatch);
+    }
+
+    #[test]
+    fn test_decrypt_with_master_key_rejects_tampered_mac() {
+        let master_key = [23u8; 32];
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let user_key_raw = [42u8; 64];
+        let encrypted_user_key = sym_key
+            .encrypt_string(&BASE64.encode(user_key_raw))
+            .unwrap();
+        let mut parsed = EncString::parse(&encrypted_user_key).unwrap();
+
+        // Tamper MAC
+        if let Some(ref mut mac) = parsed.mac {
+            mac[0] ^= 0xEE;
+        }
+
+        let res = SymmetricCryptoKey::decrypt_with_master_key(&parsed, &master_key);
+        assert!(
+            res.is_err(),
+            "decrypt_with_master_key must reject tampered MAC without unauthenticated fallback"
+        );
+    }
+
+    #[test]
+    fn test_legacy_type_0_roundtrip() {
+        let enc_key = [31u8; 32];
+        let iv = [5u8; 16];
+        let plaintext = b"Legacy Type 0 unauthenticated data";
+
+        use cbc::cipher::BlockEncryptMut;
+        let cipher = cbc::Encryptor::<Aes256>::new((&enc_key).into(), (&iv).into());
+        let mut buf = vec![0u8; plaintext.len() + 16];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+        let ct_len = cipher
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let enc_str_val = format!("0.{}|{}", BASE64.encode(iv), BASE64.encode(ct));
+        let parsed = EncString::parse(&enc_str_val).unwrap();
+        assert_eq!(parsed.enc_type, 0);
+        assert!(parsed.mac.is_none());
+
+        let key = SymmetricCryptoKey {
+            enc_key,
+            mac_key: None,
+        };
+        let decrypted = parsed.decrypt_string(&key).unwrap();
+        assert_eq!(decrypted, "Legacy Type 0 unauthenticated data");
     }
 }
 
