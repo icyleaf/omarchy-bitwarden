@@ -15,6 +15,7 @@ Item {
   property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
+  property bool showWebsiteIcons: false
 
   signal itemSelected(int index)
   signal itemTriggered(int index)
@@ -50,6 +51,7 @@ Item {
   }
 
   function getFaviconUrl(item) {
+    if (!showWebsiteIcons) return ""
     if (!item) return ""
     if (item.type_name !== "login" && item.category !== "login") return ""
     if (!item.login || !item.login.uris || item.login.uris.length === 0) return ""

@@ -18,6 +18,7 @@ ScrollView {
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
+  property bool showWebsiteIcons: false
   readonly property int keyPixelSize: 10
   readonly property int valuePixelSize: 12
 
@@ -104,6 +105,7 @@ ScrollView {
   }
 
   function getFaviconUrl(item) {
+    if (!showWebsiteIcons) return ""
     if (!item) return ""
     if (item.type_name !== "login" && item.category !== "login") return ""
     if (!item.login || !item.login.uris || item.login.uris.length === 0) return ""

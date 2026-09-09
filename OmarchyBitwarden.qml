@@ -7,6 +7,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "./components"
+import "./components/iconpolicy.js" as IconPolicy
 
 Item {
   id: root
@@ -49,9 +50,11 @@ Item {
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
     email: "",
-    remember_email: true
+    remember_email: true,
+    show_website_icons: true
   })
   property bool rememberEmailChecked: true
+  property bool showWebsiteIcons: false
   property bool show2FAField: false
 
   property var cliHealth: ({
@@ -1860,6 +1863,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
               Layout.minimumWidth: 260
@@ -1896,6 +1900,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
                 currentTotp: root.currentTotp
@@ -2177,6 +2182,7 @@ Item {
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
         } catch (e) {
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
