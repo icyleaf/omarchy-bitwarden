@@ -30,6 +30,14 @@ struct Cli {
     #[arg(long, value_name = "CONFIG_PATH", help = "Path to config.json")]
     config: Option<PathBuf>,
 
+    #[arg(
+        long,
+        global = true,
+        env = "OMAWARDEN_SESSION",
+        help = "Session token for daemon operations (also reads OMAWARDEN_SESSION or BW_SESSION)"
+    )]
+    session: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -362,6 +370,9 @@ fn main() -> ExitCode {
     let _ = omawarden::locked::disable_dumpable();
 
     let cli = Cli::parse();
+    if let Some(ref session) = cli.session {
+        std::env::set_var("OMAWARDEN_SESSION", session);
+    }
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();
 
@@ -603,16 +614,26 @@ fn main() -> ExitCode {
                     };
                     omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
+                        if let Some(ref tok) = res.session {
+                            std::env::set_var("OMAWARDEN_SESSION", tok);
+                            if io::stdout().is_terminal() {
+                                eprintln!("\nVault unlocked successfully.");
+                                eprintln!("To set your session in this shell, run:");
+                                eprintln!("  export OMAWARDEN_SESSION=\"{}\"", tok);
+                            }
+                        }
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
                         ExitCode::SUCCESS
                     } else {
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
                         ExitCode::FAILURE
                     }
                 }
                 AuthAction::Lock => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.lock();
+                    std::env::remove_var("OMAWARDEN_SESSION");
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     ExitCode::SUCCESS
                 }
@@ -710,6 +731,23 @@ fn main() -> ExitCode {
                         );
                         return ExitCode::FAILURE;
                     }
+                    if is_unlocked && !vault_mgr.is_unlocked() {
+                        if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" }))
+                        {
+                            if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::FAILURE;
+                            }
+                            if let Ok(items) = serde_json::from_value::<
+                                Vec<omawarden::vault::VaultItem>,
+                            >(daemon_resp)
+                            {
+                                let filtered = vault_mgr.search(&items, "", category.as_deref());
+                                println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
                     let items = vault_mgr.get_items();
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
@@ -733,6 +771,25 @@ fn main() -> ExitCode {
                             .unwrap()
                         );
                         return ExitCode::FAILURE;
+                    }
+                    if is_unlocked && !vault_mgr.is_unlocked() {
+                        if let Some(daemon_resp) = send_daemon_request(&json!({
+                            "action": "search",
+                            "query": query,
+                            "category": category
+                        })) {
+                            if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::FAILURE;
+                            }
+                            if let Ok(items) = serde_json::from_value::<
+                                Vec<omawarden::vault::VaultItem>,
+                            >(daemon_resp)
+                            {
+                                println!("{}", serde_json::to_string_pretty(&items).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
                     }
                     let results = vault_mgr.search_items(&query, category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());

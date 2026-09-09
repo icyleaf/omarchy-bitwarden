@@ -6,7 +6,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-## The 8 Mandatory Security Principles
+## The 9 Mandatory Security Principles
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -20,6 +20,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 6. IPC SO_PEERCRED Auth      │ Verify caller UID on all socket requests     │
 │ 7. Memory Locking (mlock)    │ Page-aligned physical RAM lock & no coredump │
 │ 8. Authenticated Encryption  │ Encrypt-then-MAC mandatory; no unauth cipher │
+│ 9. Ephemeral Session Token   │ Same-user socket authorization & max watchdog│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -172,6 +173,32 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
+### Rule 9: Ephemeral Session Token Authorization & Max Lifetime Watchdog for Local IPC Daemon
+
+**Principle**: `SO_PEERCRED` establishes caller user identity (preventing cross-user attacks on multi-user systems), but does NOT protect against unauthorized processes running under the *same UID* from connecting to `/run/user/<uid>/omawarden.sock` and dumping decrypted secrets or executing privileged commands without user consent.
+
+- ❌ **Anti-Pattern**:
+  - Exposing an unrestricted "same-user zero-auth vault API" where any process running as the current UID can execute `{"action": "list"}` or `{"action": "search"}` to dump all decrypted passwords, TOTP seeds, cards, notes, and SSH keys.
+  - Allowing unauthenticated connections (e.g. rogue scripts polling `ping` or `status`) to touch daemon activity, preventing idle auto-lock indefinitely.
+  - Allowing unauthenticated processes to terminate the unlocked daemon via `{"action": "stop"}`.
+  - Allowing indefinite vault unlock without an absolute maximum session lifetime limit.
+- ✅ **Required Pattern**:
+  - **Cryptographic Ephemeral Session Token**: Upon `unlock`, the daemon generates a cryptographically random, high-entropy 256-bit ephemeral session token (`session_token`) using `rand_core::OsRng` encoded in URL-safe base64.
+  - **Privileged Action Protection**: All privileged operations (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `ssh_key_create`, `sync`, `totp` with query, and `stop` when unlocked) strictly require a valid `session_token`.
+  - **Constant-Time Verification**: Session token validation MUST use constant-time byte comparison (`subtle::ConstantTimeEq`).
+  - **No Keep-Alive Leakage**: Unauthenticated requests (or requests failing token verification) are rejected immediately and MUST NOT touch activity; they cannot bypass idle auto-lock.
+  - **Absolute Maximum Lifetime Watchdog**: Implement a hard ceiling (`max_session_lifetime`, default 12 hours) from `unlocked_at`. The daemon locks the vault when this limit elapses, regardless of continuous user activity.
+  - **Safe Environment Passing**: Pass the session token to child processes via process environment (`QProcessEnvironment` in QML / `OMAWARDEN_SESSION` in CLI), NEVER via command-line arguments (which are readable via `/proc/<pid>/cmdline`).
+  - **Immediate Zeroization**: The session token resides in `Zeroizing<String>` memory and is scrubbed immediately upon `lock`, `stop`, or timeout.
+- 🧪 **Mandatory Verification**:
+  Unit tests must assert that:
+  1. Privileged actions (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `sync`, `totp` with query, `stop`) without a session token or with an invalid token return `Unauthorized`.
+  2. Unauthenticated requests do NOT touch activity.
+  3. `lock()` clears the session token and invalidates subsequent privileged calls.
+  4. `check_auto_lock()` triggers when `max_session_lifetime` is exceeded even if `last_activity` is recent.
+
+---
+
 ## Agent Checklist Before Opening a PR
 
 Before submitting any code changes touching authentication, crypto, networking, IPC, or storage:
@@ -182,11 +209,12 @@ Before submitting any code changes touching authentication, crypto, networking, 
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
 - [ ] Sockets enforce mutual peer UID (SO_PEERCRED) verification and validate paths/symlinks.
+- [ ] Daemon privileged actions require ephemeral session token verified in constant time.
 - [ ] Master keys and cryptographic keys use page-aligned physical memory locks (LockedKey32 / mlock).
 - [ ] Symmetric decryption strictly requires and verifies HMAC-SHA256 (no unauthenticated fallback).
 - [ ] Process anti-dump protection (PR_SET_DUMPABLE = 0) is active.
 - [ ] Installers / downloaders enforce fail-closed checksum checks.
-- [ ] Vault locks cleanly upon screen-lock, sleep, or idle timeout.
+- [ ] Vault locks cleanly upon screen-lock, sleep, idle timeout, or max session lifetime.
 - [ ] Sensitive memory structures implement Zeroize.
 - [ ] cargo fmt --check, cargo clippy -- -D warnings, and full cargo test pass.
 ```

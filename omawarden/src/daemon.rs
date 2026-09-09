@@ -9,6 +9,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand_core::{OsRng, RngCore};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
+
 use crate::crypto::{Engine, BASE64};
 use crate::storage::StorageManager;
 use crate::vault::VaultManager;
@@ -175,7 +180,23 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
         return None;
     }
 
-    let payload = format!("{}\n", req);
+    // Automatically propagate active session token from environment if not explicitly specified
+    let mut payload_value = req.clone();
+    if payload_value.get("session_token").is_none() && payload_value.get("session").is_none() {
+        if let Ok(token) = env::var("OMAWARDEN_SESSION").or_else(|_| env::var("BW_SESSION")) {
+            let token = token.trim();
+            if !token.is_empty() {
+                if let Some(map) = payload_value.as_object_mut() {
+                    map.insert(
+                        "session_token".to_string(),
+                        Value::String(token.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    let payload = format!("{}\n", payload_value);
     stream.write_all(payload.as_bytes()).ok()?;
     stream.flush().ok()?;
 
@@ -190,6 +211,9 @@ pub struct DaemonState {
     pub vault_mgr: Arc<VaultManager>,
     pub last_activity: Mutex<Instant>,
     pub auto_lock_duration: Mutex<Duration>,
+    pub session_token: Mutex<Option<Zeroizing<String>>>,
+    pub unlocked_at: Mutex<Option<Instant>>,
+    pub max_session_lifetime: Mutex<Duration>,
 }
 
 impl DaemonState {
@@ -199,6 +223,9 @@ impl DaemonState {
             vault_mgr,
             last_activity: Mutex::new(Instant::now()),
             auto_lock_duration: Mutex::new(Duration::from_secs(auto_lock_minutes * 60)),
+            session_token: Mutex::new(None),
+            unlocked_at: Mutex::new(None),
+            max_session_lifetime: Mutex::new(Duration::from_secs(12 * 3600)),
         }
     }
 
@@ -212,18 +239,71 @@ impl DaemonState {
         self.set_auto_lock_duration(Duration::from_secs(minutes * 60));
     }
 
+    pub fn is_session_valid(&self, candidate_token: &str) -> bool {
+        if candidate_token.is_empty() || !self.vault_mgr.is_unlocked() {
+            return false;
+        }
+        if let Ok(guard) = self.session_token.lock() {
+            if let Some(expected) = guard.as_ref() {
+                let exp_bytes = expected.as_bytes();
+                let cand_bytes = candidate_token.as_bytes();
+                return exp_bytes.ct_eq(cand_bytes).unwrap_u8() == 1;
+            }
+        }
+        false
+    }
+
     pub fn check_auto_lock(&self) -> bool {
         if self.vault_mgr.is_unlocked() {
-            if let Ok(dur) = self.auto_lock_duration.lock() {
-                if !dur.is_zero() {
-                    if let Ok(last) = self.last_activity.lock() {
-                        if last.elapsed() > *dur {
-                            self.lock();
-                            crate::attachment::clear_preview_attachments(None);
-                            return true;
+            // 1. Check absolute maximum session lifetime (e.g. 12 hours)
+            let max_lifetime_expired = {
+                if let Ok(ua_guard) = self.unlocked_at.lock() {
+                    if let Some(unlocked_time) = *ua_guard {
+                        if let Ok(max_dur) = self.max_session_lifetime.lock() {
+                            !max_dur.is_zero() && unlocked_time.elapsed() > *max_dur
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
+            };
+
+            if max_lifetime_expired {
+                crate::log_info!(
+                    "omawarden:daemon",
+                    "Maximum session lifetime reached; locking vault"
+                );
+                self.lock();
+                crate::attachment::clear_preview_attachments(None);
+                return true;
+            }
+
+            // 2. Check idle inactivity timeout
+            let idle_expired = {
+                if let Ok(dur) = self.auto_lock_duration.lock() {
+                    if !dur.is_zero() {
+                        if let Ok(last) = self.last_activity.lock() {
+                            last.elapsed() > *dur
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if idle_expired {
+                crate::log_info!("omawarden:daemon", "Idle timeout elapsed; locking vault");
+                self.lock();
+                crate::attachment::clear_preview_attachments(None);
+                return true;
             }
         }
         false
@@ -252,15 +332,29 @@ impl DaemonState {
     }
 
     pub fn lock(&self) {
+        if let Ok(mut tok) = self.session_token.lock() {
+            *tok = None;
+        }
+        if let Ok(mut ua) = self.unlocked_at.lock() {
+            *ua = None;
+        }
         self.vault_mgr.lock();
     }
 
-    pub fn unlock(&self, password: &str) -> Result<usize, String> {
-        let res = self.vault_mgr.unlock(password);
-        if res.is_ok() {
-            self.touch_activity();
+    pub fn unlock(&self, password: &str) -> Result<(usize, String), String> {
+        let count = self.vault_mgr.unlock(password)?;
+        let mut token_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut token_bytes);
+        let token = URL_SAFE_NO_PAD.encode(token_bytes);
+
+        if let Ok(mut tok_guard) = self.session_token.lock() {
+            *tok_guard = Some(Zeroizing::new(token.clone()));
         }
-        res
+        if let Ok(mut ua_guard) = self.unlocked_at.lock() {
+            *ua_guard = Some(Instant::now());
+        }
+        self.touch_activity();
+        Ok((count, token))
     }
 
     pub fn sync(&self) -> Result<usize, String> {
@@ -514,6 +608,53 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     };
 
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let candidate_token = req
+        .get("session_token")
+        .or_else(|| req.get("session"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let is_privileged = matches!(
+        action,
+        "list"
+            | "search"
+            | "get_item"
+            | "get_ssh_key"
+            | "get_attachment_key"
+            | "ssh_key_create"
+            | "sync"
+    ) || (action == "totp"
+        && (req.get("query").is_some() || req.get("id").is_some()))
+        || (action == "stop" && state.vault_mgr.is_unlocked());
+
+    if is_privileged {
+        if !state.vault_mgr.is_unlocked() {
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
+            );
+            return Ok(());
+        }
+
+        if !state.is_session_valid(candidate_token) {
+            crate::log_warn!(
+                "omawarden:daemon",
+                "Unauthorized access attempt for action '{}' without valid session token",
+                action
+            );
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "error": "Unauthorized: valid session token required"
+                })
+            );
+            return Ok(());
+        }
+    }
+
     if should_touch_activity(action, &req) {
         state.touch_activity();
     }
@@ -526,15 +667,33 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             "commit": env!("GIT_HASH"),
         }),
         "stop" => {
+            state.lock();
+            crate::attachment::clear_preview_attachments(None);
             let _ = writeln!(stream, "{}", json!({ "ok": true }));
             let _ = stream.flush();
             std::process::exit(0);
         }
-        "status" => state.vault_mgr.get_status(),
+        "status" => {
+            let mut st = state.vault_mgr.get_status();
+            let has_session = state
+                .session_token
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            if let Some(map) = st.as_object_mut() {
+                map.insert("has_session".to_string(), Value::Bool(has_session));
+            }
+            st
+        }
         "unlock" => {
             let pwd = req.get("password").and_then(|v| v.as_str()).unwrap_or("");
             match state.unlock(pwd) {
-                Ok(count) => json!({ "ok": true, "status": "unlocked", "items_count": count }),
+                Ok((count, token)) => json!({
+                    "ok": true,
+                    "status": "unlocked",
+                    "items_count": count,
+                    "session_token": token
+                }),
                 Err(e) => json!({ "ok": false, "status": "locked", "error": e }),
             }
         }
@@ -849,6 +1008,10 @@ mod tests {
         let storage_mgr = StorageManager::new(path);
         let state = Arc::new(DaemonState::new(storage_mgr, 15));
 
+        let token = "test-valid-session-token-123";
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        *state.session_token.lock().unwrap() = Some(Zeroizing::new(token.to_string()));
+
         // Set initial activity to a known point in the past
         let past = Instant::now() - Duration::from_secs(10);
         *state.last_activity.lock().unwrap() = past;
@@ -880,16 +1043,26 @@ mod tests {
         let _ = send_req(json!({ "action": "status" }));
         assert_eq!(*state.last_activity.lock().unwrap(), past);
 
-        // 3. "totp" should not touch activity
+        // 3. "totp" with raw secret should not touch activity
         let _ = send_req(json!({ "action": "totp", "secret": "JBSWY3DPEHPK3PXP" }));
         assert_eq!(*state.last_activity.lock().unwrap(), past);
 
         // 4. "get_item" with explicit touch: false should not touch activity
-        let _ = send_req(json!({ "action": "get_item", "query": "none", "touch": false }));
+        let _ = send_req(
+            json!({ "action": "get_item", "query": "none", "touch": false, "session_token": token }),
+        );
         assert_eq!(*state.last_activity.lock().unwrap(), past);
 
-        // 5. Active action (e.g. "search") should touch activity
-        let _ = send_req(json!({ "action": "search", "query": "test" }));
+        // 5. Unauthenticated privileged action ("search" without valid token) must NOT touch activity
+        let unauth_res =
+            send_req(json!({ "action": "search", "query": "test", "session_token": "wrong" }));
+        assert_eq!(unauth_res.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 6. Active action (e.g. "search" with valid token) should touch activity
+        let auth_res =
+            send_req(json!({ "action": "search", "query": "test", "session_token": token }));
+        assert!(auth_res.is_array());
         assert!(*state.last_activity.lock().unwrap() > past);
     }
 
@@ -1065,5 +1238,141 @@ mod tests {
             let meta = fs::metadata(&runtime_dir).unwrap();
             assert_eq!(meta.uid(), unsafe { libc::getuid() });
         }
+    }
+
+    #[test]
+    fn test_session_token_validation_and_lock_clearing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = DaemonState::new(storage_mgr, 15);
+
+        assert!(!state.is_session_valid("any-token"));
+        assert!(!state.is_session_valid(""));
+
+        let token = "my-secret-session-token-456";
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        *state.session_token.lock().unwrap() = Some(Zeroizing::new(token.to_string()));
+
+        assert!(state.is_session_valid(token));
+        assert!(!state.is_session_valid("wrong-token"));
+        assert!(!state.is_session_valid(""));
+
+        // Lock clears token
+        state.lock();
+        assert!(!state.is_session_valid(token));
+        assert!(state.session_token.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_privileged_actions_require_valid_session_token() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let valid_token = "valid-token-xyz-789";
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        *state.session_token.lock().unwrap() = Some(Zeroizing::new(valid_token.to_string()));
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", req);
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let privileged_actions = vec![
+            json!({ "action": "list" }),
+            json!({ "action": "search", "query": "test" }),
+            json!({ "action": "get_item", "query": "test" }),
+            json!({ "action": "get_ssh_key", "query": "test" }),
+            json!({ "action": "get_attachment_key", "item_id": "i", "attachment_id": "a" }),
+            json!({ "action": "sync" }),
+            json!({ "action": "totp", "query": "test" }),
+            json!({ "action": "stop" }),
+        ];
+
+        for mut req in privileged_actions {
+            let act = req.get("action").unwrap().as_str().unwrap().to_string();
+
+            // 1. Without session token -> Unauthorized
+            let res = send_req(req.clone());
+            assert_eq!(
+                res.get("ok").and_then(|v| v.as_bool()),
+                Some(false),
+                "Action '{}' should fail without session token",
+                act
+            );
+            assert!(
+                res.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .contains("Unauthorized"),
+                "Action '{}' error should mention Unauthorized",
+                act
+            );
+
+            // 2. With invalid session token -> Unauthorized
+            if let Some(map) = req.as_object_mut() {
+                map.insert("session_token".to_string(), json!("invalid-token"));
+            }
+            let res = send_req(req.clone());
+            assert_eq!(
+                res.get("ok").and_then(|v| v.as_bool()),
+                Some(false),
+                "Action '{}' should fail with invalid session token",
+                act
+            );
+
+            // 3. With valid session token -> Authorized (not rejected by session check)
+            if let Some(map) = req.as_object_mut() {
+                map.insert("session_token".to_string(), json!(valid_token));
+            }
+            // For stop and sync, skip actually executing it here since stop exits the process
+            // and sync triggers server network calls which can lock the unconfigured mock vault.
+            if act != "stop" && act != "sync" {
+                let res = send_req(req);
+                let err_str = res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(
+                    !err_str.contains("Unauthorized"),
+                    "Action '{}' should not be rejected as Unauthorized with valid token",
+                    act
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_max_session_lifetime_auto_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = DaemonState::new(storage_mgr, 15);
+
+        // Vault unlocked 2 hours ago with max lifetime of 1 hour
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        *state.session_token.lock().unwrap() = Some(Zeroizing::new("token123".to_string()));
+        *state.unlocked_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(7200));
+        *state.max_session_lifetime.lock().unwrap() = Duration::from_secs(3600);
+
+        // Keep last_activity brand new (just now) so idle timeout would NOT trigger
+        *state.last_activity.lock().unwrap() = Instant::now();
+
+        // check_auto_lock must trigger because max_session_lifetime has elapsed!
+        assert!(state.check_auto_lock());
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(state.session_token.lock().unwrap().is_none());
+        assert!(state.unlocked_at.lock().unwrap().is_none());
     }
 }

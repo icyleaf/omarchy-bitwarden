@@ -741,17 +741,28 @@ impl AuthManager {
 
                 // Auto-unlock daemon with decrypted items in memory
                 crate::daemon::ensure_daemon_running();
-                let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                let daemon_resp = crate::daemon::send_daemon_request(&serde_json::json!({
                     "action": "unlock",
                     "password": password
                 }));
+
+                let daemon_token = daemon_resp
+                    .as_ref()
+                    .and_then(|v| v.get("session_token"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let effective_session = daemon_token.or(session_val);
+                if let Some(ref tok) = effective_session {
+                    std::env::set_var("OMAWARDEN_SESSION", tok);
+                }
 
                 crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
 
                 AuthResult {
                     ok: true,
                     status: Some("unlocked".to_string()),
-                    session: session_val,
+                    session: effective_session,
                     ..Default::default()
                 }
             }
