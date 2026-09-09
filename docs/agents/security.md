@@ -41,23 +41,28 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-### Rule 2: Fail-Closed Integrity & Cryptographic Checksum Verification
+### Rule 2: Fail-Closed Integrity & Dual-Tier Provenance Verification (SHA-256 + Artifact Attestations)
 
-**Principle**: All installers, downloaders, and update bootstrap scripts (`scripts/download-engine.sh`, `check-update.sh`) MUST cryptographically verify release artifacts before extracting or executing them.
+**Principle**: All installers, downloaders, and update bootstrap scripts (`scripts/download-engine.sh`, `check-update.sh`) MUST cryptographically verify release artifacts before extracting or executing them, combining universal SHA-256 integrity with cryptographic build provenance attestations.
 
 - ❌ **Anti-Pattern**:
   - Skipping verification if a checksum file fails to download (404/network error) or is empty.
   - Parsing HTML error pages as checksum strings.
   - Reporting synthetic success (`verified: true`) when no actual verification was performed.
+  - Relying exclusively on an unauthenticated `.sha256` file without provenance verification against release tampering or compromised release assets.
 - ✅ **Required Pattern**:
-  - Checksum downloads are **mandatory and fail-closed**: if the checksum cannot be fetched, contains non-hex text, or does not match the archive's SHA-256 hash, the script MUST immediately delete the download and exit with a non-zero code.
-  - Report `verified: true` ONLY after `sha256sum -c` (or equivalent cryptographic validation) succeeds.
-  - Support pinned version arguments to bypass dynamic feed resolution during automated testing or reproducible builds.
+  - **Tier 1 (Universal Integrity Checksum)**: Checksum downloads are **mandatory and fail-closed**: if the checksum cannot be fetched, contains non-hex text, or does not match the archive's SHA-256 hash, the script MUST immediately delete the download and exit with a non-zero code.
+  - **Tier 2 (Cryptographic Build Provenance Attestation)**: Release pipelines automatically sign and attest build provenance using GitHub Artifact Attestations (`actions/attest-build-provenance` via Sigstore OIDC). When `gh` CLI is available, the downloader runs `gh attestation verify` to prove the binary originated from an official `icyleaf/omarchy-bitwarden` workflow run.
+  - **Structured Verification Reporting**: The downloader reports `verified: true`, `sha256`, and `attestation_verified: bool` in its structured JSON output for UI transparency.
+  - **Strict Policy Mode**: When `REQUIRE_ATTESTATION=1` is set, attestation verification is mandatory; missing `gh` or failed provenance verification aborts installation immediately.
 - 🧪 **Mandatory Verification**:
-  Maintain automated tests covering:
+  Maintain automated integration tests covering:
   1. Checksum mismatch aborts without extraction.
   2. 404 / missing checksum aborts without extraction.
   3. Malformed/HTML checksum aborts without extraction.
+  4. Attestation success reports `attestation_verified: true`.
+  5. Attestation failure gracefully falls back in default mode and fails closed when `REQUIRE_ATTESTATION=1`.
+  6. Missing `gh` fails closed when `REQUIRE_ATTESTATION=1`.
 
 ---
 

@@ -142,7 +142,23 @@ fi
 
 VERIFIED=true
 
-# 4. Extract and install (fail-closed: only if VERIFIED is true)
+# 4. GitHub Artifact Attestation verification (Tier 2 provenance verification)
+ATTESTATION_VERIFIED=false
+if command -v gh >/dev/null 2>&1; then
+  if gh attestation verify "$TMP_DIR/omawarden.tar.gz" --repo "$REPO" >/dev/null 2>&1; then
+    ATTESTATION_VERIFIED=true
+  else
+    if [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
+      echo "{\"ok\":false,\"error\":\"Security Alert: GitHub Artifact Attestation verification failed for $REPO\"}"
+      exit 1
+    fi
+  fi
+elif [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
+  echo "{\"ok\":false,\"error\":\"Security Alert: GitHub CLI (gh) required for strict attestation verification but not found\"}"
+  exit 1
+fi
+
+# 5. Extract and install (fail-closed: only if VERIFIED is true)
 if [ "$VERIFIED" != "true" ]; then
   echo "{\"ok\":false,\"error\":\"Installation blocked: archive failed integrity verification\"}"
   exit 1
@@ -173,4 +189,4 @@ chmod 0755 "$TARGET_DIR/omawarden"
 rm -rf "$EXTRACT_DIR"
 
 INSTALLED_VER=$("$TARGET_DIR/omawarden" --version 2>/dev/null || echo "ok")
-echo "{\"ok\":true,\"version\":\"$INSTALLED_VER\",\"path\":\"$TARGET_DIR/omawarden\",\"verified\":true}"
+echo "{\"ok\":true,\"version\":\"$INSTALLED_VER\",\"path\":\"$TARGET_DIR/omawarden\",\"verified\":true,\"sha256\":\"$ACTUAL_SHA\",\"attestation_verified\":$ATTESTATION_VERIFIED}"
