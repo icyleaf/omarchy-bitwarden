@@ -81,6 +81,19 @@ pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path)
     });
 }
 
+/// Validates that a server-provided identifier is safe to use as a single
+/// path component. Rejects traversal sequences and separators so a malicious
+/// or compromised server cannot steer preview writes or cleanup deletes
+/// (`remove_dir_all`) outside the attachments directory.
+pub fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
+}
+
 pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
     let base = if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir)
@@ -94,10 +107,9 @@ pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
         PathBuf::from(format!("/tmp/omarchy-bitwarden-{}/attachments", uid))
     };
 
-    if let Some(id) = item_id {
-        base.join(id)
-    } else {
-        base
+    match item_id {
+        Some(id) if is_safe_path_component(id) => base.join(id),
+        _ => base,
     }
 }
 
@@ -105,6 +117,16 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     #[cfg(test)]
     if item_id.is_none() {
         return;
+    }
+
+    if let Some(id) = item_id {
+        if !is_safe_path_component(id) {
+            crate::log_warn!(
+                "omawarden:attachment",
+                "Refusing preview cleanup for unsafe item id"
+            );
+            return;
+        }
     }
 
     let dir = get_preview_dir(item_id);
@@ -138,6 +160,20 @@ pub fn get_attachment(
         return AttachmentResponse {
             ok: false,
             error: Some("Item ID and Attachment ID are required.".to_string()),
+            path: None,
+            filename: None,
+            action: None,
+            is_image: None,
+            is_text: None,
+            text_content: None,
+            size: None,
+        };
+    }
+
+    if !is_safe_path_component(item_id) || !is_safe_path_component(attachment_id) {
+        return AttachmentResponse {
+            ok: false,
+            error: Some("Item ID or Attachment ID contains invalid path characters.".to_string()),
             path: None,
             filename: None,
             action: None,
@@ -1205,6 +1241,50 @@ mod tests {
         clear_preview_attachments(Some("test_item_clear"));
         assert!(!preview_file.exists());
         assert!(!preview_dir.exists());
+    }
+
+    #[test]
+    fn test_unsafe_path_components_rejected() {
+        assert!(is_safe_path_component(
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        ));
+        assert!(!is_safe_path_component(""));
+        assert!(!is_safe_path_component("."));
+        assert!(!is_safe_path_component(".."));
+        assert!(!is_safe_path_component("../../home/user"));
+        assert!(!is_safe_path_component("/home/user/Documents"));
+        assert!(!is_safe_path_component("a\\b"));
+        assert!(!is_safe_path_component("a\0b"));
+
+        // A traversal item id must never escape the attachments base directory
+        let base = get_preview_dir(None);
+        assert_eq!(get_preview_dir(Some("/etc")), base);
+        assert_eq!(get_preview_dir(Some("../../escape")), base);
+
+        // Traversal ids are refused by get_attachment before any path is built
+        let res = get_attachment(
+            "../../escape",
+            "att1",
+            "file.txt",
+            None,
+            false,
+            false,
+            Some("tok"),
+            None,
+            false,
+        );
+        assert!(!res.ok);
+        assert_eq!(
+            res.error.unwrap(),
+            "Item ID or Attachment ID contains invalid path characters."
+        );
+
+        // Cleanup with a traversal id must be a no-op instead of remove_dir_all
+        let victim = tempfile::tempdir().unwrap();
+        let marker = victim.path().join("marker.txt");
+        fs::write(&marker, b"keep").unwrap();
+        clear_preview_attachments(Some(victim.path().to_str().unwrap()));
+        assert!(marker.exists());
     }
 
     #[test]
