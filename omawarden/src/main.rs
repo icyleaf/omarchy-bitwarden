@@ -92,6 +92,26 @@ enum Commands {
         public_key: bool,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: clear clipboard after specified seconds"
+        )]
+        clear_after: Option<u64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: expected clipboard generation"
+        )]
+        expected_gen: Option<u64>,
+        #[arg(long, hide = true, help = "Internal worker: wl-copy binary path")]
+        wl_copy_path: Option<String>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: custom generation file path"
+        )]
+        gen_path: Option<std::path::PathBuf>,
     },
     #[command(
         about = "Generate TOTP verification code from vault item ID/name, secret, or otpauth URI"
@@ -828,7 +848,27 @@ fn main() -> ExitCode {
             private_key,
             public_key,
             timeout,
+            clear_after,
+            expected_gen,
+            wl_copy_path,
+            gen_path,
         } => {
+            if let Some(secs) = clear_after {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                let copy_path = wl_copy_path.as_deref().unwrap_or("wl-copy");
+                let mut mgr = ClipboardManager::new(copy_path).without_detached_worker();
+                if let Some(p) = gen_path {
+                    mgr = mgr.with_generation_path(p.clone());
+                }
+                if let Some(exp) = expected_gen {
+                    if mgr.current_generation() != exp {
+                        return ExitCode::SUCCESS;
+                    }
+                }
+                mgr.clear();
+                return ExitCode::SUCCESS;
+            }
+
             let clip_mgr = ClipboardManager::default();
             if !clip_mgr.is_available() {
                 println!(

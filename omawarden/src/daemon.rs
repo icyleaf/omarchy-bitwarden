@@ -339,6 +339,9 @@ impl DaemonState {
             *ua = None;
         }
         self.vault_mgr.lock();
+        let _ = crate::clipboard::ClipboardManager::default()
+            .without_detached_worker()
+            .clear();
     }
 
     pub fn unlock(&self, password: &str) -> Result<(usize, String), String> {
@@ -835,7 +838,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let timeout = req.get("timeout").and_then(|v| v.as_i64()).unwrap_or(30);
-            let clip_mgr = crate::clipboard::ClipboardManager::default();
+            let clip_mgr = crate::clipboard::ClipboardManager::default().without_detached_worker();
             if clip_mgr.copy(text, sensitive, timeout) {
                 json!({ "ok": true })
             } else {
