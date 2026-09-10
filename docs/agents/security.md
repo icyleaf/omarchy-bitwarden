@@ -83,14 +83,17 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-### Rule 4: Strict URL Origin Validation (RFC 6454)
+### Rule 4: Strict URL Origin Validation (RFC 6454) & Mandatory HTTPS on Remote Servers
 
-**Principle**: Never use substring or prefix matching (`starts_with`) when checking whether a target URL is authorized to receive bearer tokens or authenticated API calls.
+**Principle**: Never use substring or prefix matching (`starts_with`) when checking whether a target URL is authorized to receive bearer tokens or authenticated API calls. Furthermore, plaintext HTTP is strictly restricted to local loopback origins (`localhost`, `127.0.0.0/8`, `::1`). Any remote server or identity endpoint MUST enforce HTTPS to prevent cleartext transmission of master password hashes, 2FA codes, API secrets, and bearer tokens.
 
 - ❌ **Anti-Pattern**:
   ```rust
   // VULNERABLE: allows https://vault.bitwarden.com.evil.com to steal tokens!
   if target_url.starts_with(&server_url) { ... }
+
+  // VULNERABLE: transmitting master password hash and bearer tokens over plaintext HTTP to remote host!
+  server_url = "http://vaultwarden.mycorp.com";
   ```
 - ✅ **Required Pattern**:
   Parse both URLs with a standard-compliant URL parser (`url::Url`) and verify exact matching on scheme, host, and port:
@@ -101,8 +104,14 @@ These rules were distilled from real-world vulnerabilities and architectural pit
       u1.scheme() == u2.scheme() && u1.host() == u2.host() && u1.port_or_known_default() == u2.port_or_known_default()
   }
   ```
+  Validate server and identity URLs on configuration and resolution. Reject remote plaintext HTTP at configuration time (`validate_url_scheme_security`) and automatically upgrade to HTTPS during endpoint resolution (`EnvironmentUrls::resolve`) if an unencrypted remote URL is encountered:
+  ```rust
+  if parsed.scheme() == "http" && !is_loopback_host(&host) {
+      // Must upgrade to https or fail closed
+  }
+  ```
 - 🧪 **Mandatory Verification**:
-  Unit test must assert rejection on subdomain spoofing (`target.domain.com.attacker.com`), scheme downgrades (`https` vs `http`), and mismatched ports.
+  Unit test must assert rejection on subdomain spoofing (`target.domain.com.attacker.com`), scheme downgrades (`https` vs `http`), mismatched ports, and assert that remote plaintext HTTP is rejected on configuration and upgraded at resolution.
 
 ---
 

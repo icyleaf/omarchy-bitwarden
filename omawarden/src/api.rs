@@ -120,10 +120,23 @@ pub struct EnvironmentUrls {
     pub has_explicit_identity: bool,
 }
 
+/// Determines whether a hostname or IP address represents a local loopback origin
+/// (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `[::1]`).
+pub fn is_loopback_host(host: &str) -> bool {
+    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if clean.eq_ignore_ascii_case("localhost") || clean.to_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
 impl EnvironmentUrls {
     pub fn resolve(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
         let trimmed_server = server_url.trim();
-        let normalized_server = if trimmed_server.is_empty() {
+        let mut normalized_server = if trimmed_server.is_empty() {
             "https://vault.bitwarden.com".to_string()
         } else if !trimmed_server.starts_with("http://") && !trimmed_server.starts_with("https://")
         {
@@ -131,6 +144,18 @@ impl EnvironmentUrls {
         } else {
             trimmed_server.to_string()
         };
+
+        if let Ok(parsed) = url::Url::parse(&normalized_server) {
+            let host = parsed.host_str().unwrap_or("").to_lowercase();
+            if parsed.scheme() == "http" && !is_loopback_host(&host) {
+                crate::log_warn!(
+                    "omawarden:api",
+                    "Plaintext HTTP is forbidden for remote server host '{}'. Upgrading to HTTPS to protect credentials in transit.",
+                    host
+                );
+                normalized_server = format!("https://{}", &normalized_server["http://".len()..]);
+            }
+        }
 
         let parsed = url::Url::parse(&normalized_server).ok();
         let host = parsed
@@ -185,6 +210,17 @@ impl EnvironmentUrls {
                 };
                 if let Some(stripped) = norm_explicit.strip_suffix("/connect/token") {
                     norm_explicit = stripped.trim_end_matches('/').to_string();
+                }
+                if let Ok(parsed) = url::Url::parse(&norm_explicit) {
+                    let host = parsed.host_str().unwrap_or("").to_lowercase();
+                    if parsed.scheme() == "http" && !is_loopback_host(&host) {
+                        crate::log_warn!(
+                            "omawarden:api",
+                            "Plaintext HTTP is forbidden for remote identity host '{}'. Upgrading to HTTPS to protect credentials in transit.",
+                            host
+                        );
+                        norm_explicit = format!("https://{}", &norm_explicit["http://".len()..]);
+                    }
                 }
                 identity_url = norm_explicit;
             }
@@ -1968,6 +2004,51 @@ mod tests {
         assert_eq!(urls.base_url, "https://mybitwarden.com");
         assert_eq!(urls.api_url, "https://mybitwarden.com/api");
         assert_eq!(urls.identity_url, "https://mybitwarden.com/identity");
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("sub.localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.2"));
+        assert!(is_loopback_host("127.255.255.254"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+
+        assert!(!is_loopback_host("vaultwarden.example.com"));
+        assert!(!is_loopback_host("192.168.1.1"));
+        assert!(!is_loopback_host("10.0.0.1"));
+        assert!(!is_loopback_host("172.16.0.1"));
+        assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn test_endpoint_resolver_enforces_https_for_remote_http() {
+        // Plaintext HTTP remote server is upgraded to HTTPS
+        let urls = EnvironmentUrls::resolve("http://vaultwarden.example.com", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Plaintext HTTP remote identity override is upgraded to HTTPS
+        let urls = EnvironmentUrls::resolve(
+            "https://vaultwarden.example.com",
+            Some("http://identity.example.com"),
+        );
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.identity_url, "https://identity.example.com");
+
+        // Loopback HTTP addresses are preserved
+        let urls = EnvironmentUrls::resolve("http://localhost:8080", None);
+        assert_eq!(urls.base_url, "http://localhost:8080");
+
+        let urls = EnvironmentUrls::resolve("http://[::1]:8080", None);
+        assert_eq!(urls.base_url, "http://[::1]:8080");
     }
 
     #[test]
