@@ -7,6 +7,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "./components"
+import "./components/iconpolicy.js" as IconPolicy
 
 Item {
   id: root
@@ -49,9 +50,12 @@ Item {
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
     email: "",
-    remember_email: true
+    remember_email: true,
+    show_website_icons: true
   })
   property bool rememberEmailChecked: true
+  property bool showWebsiteIcons: false
+  property int configSeq: 0
   property bool show2FAField: false
 
   property var cliHealth: ({
@@ -269,6 +273,10 @@ Item {
   }
 
   function refreshConfig() {
+    root.showWebsiteIcons = false
+    if (configGetProc.running) return
+    root.configSeq++
+    configGetProc.seq = root.configSeq
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
   }
@@ -1355,6 +1363,7 @@ Item {
   }
 
   function saveSettings(settings) {
+    root.configSeq++
     root.isBusy = true
     root.logInfo("omarchy:settings", "Saving configuration (log_level: " + (settings.log_level || "error") + ")...")
     root.statusMessage = "Saving configuration..."
@@ -1365,6 +1374,7 @@ Item {
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
+    if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1860,6 +1870,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
               Layout.minimumWidth: 260
@@ -1896,6 +1907,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
                 currentTotp: root.currentTotp
@@ -2167,17 +2179,21 @@ Item {
   }
   Process {
     id: configGetProc
+    property int seq: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (configGetProc.seq !== root.configSeq) return
         try {
           var data = JSON.parse(text)
           root.config = data
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
         } catch (e) {
+          root.showWebsiteIcons = false
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
       }
@@ -2198,10 +2214,12 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
           root.refreshAuthStatus()
         } catch (e) {
+          root.showWebsiteIcons = false
           root.statusMessage = "Failed to update config."
           root.logError("omarchy:ui", "Failed to parse updated config: " + e)
         }

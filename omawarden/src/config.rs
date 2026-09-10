@@ -10,6 +10,7 @@ pub const DEFAULT_CLIPBOARD_CLEAR_SECONDS: i64 = 30;
 pub const DEFAULT_EMAIL: &str = "";
 pub const DEFAULT_REMEMBER_EMAIL: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
+pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -29,6 +30,8 @@ pub struct Config {
     pub remember_email: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_show_website_icons")]
+    pub show_website_icons: bool,
 }
 
 fn default_server_url() -> String {
@@ -52,6 +55,9 @@ fn default_remember_email() -> bool {
 fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.to_string()
 }
+fn default_show_website_icons() -> bool {
+    DEFAULT_SHOW_WEBSITE_ICONS
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -64,6 +70,7 @@ impl Default for Config {
             email: default_email(),
             remember_email: default_remember_email(),
             log_level: default_log_level(),
+            show_website_icons: default_show_website_icons(),
         }
     }
 }
@@ -192,6 +199,9 @@ impl ConfigManager {
         if let Some(v) = options.log_level {
             cfg.log_level = v.to_lowercase();
         }
+        if let Some(v) = options.show_website_icons {
+            cfg.show_website_icons = v;
+        }
 
         self.save(&cfg)?;
         Ok((cfg, server_changed))
@@ -208,6 +218,7 @@ pub struct ConfigUpdateOptions {
     pub email: Option<String>,
     pub remember_email: Option<bool>,
     pub log_level: Option<String>,
+    pub show_website_icons: Option<bool>,
 }
 
 #[cfg(test)]
@@ -509,5 +520,41 @@ esac
             keyring_mgr.get_token("access_token"),
             Some("valid-token".to_string())
         );
+    }
+
+    #[test]
+    fn test_show_website_icons_default_and_update() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        assert!(Config::default().show_website_icons);
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    show_website_icons: Some(false),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert!(!updated_cfg.show_website_icons);
+
+        // Persisted to disk
+        let reloaded = ConfigManager::new(Some(&config_path)).load();
+        assert!(!reloaded.show_website_icons);
+
+        // Upgrade path: config written before the key existed must default to true
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        let legacy = ConfigManager::new(Some(&legacy_path)).load();
+        assert!(legacy.show_website_icons);
     }
 }
