@@ -573,6 +573,14 @@ fn main() -> ExitCode {
                     let effective_code = code.or(stdin_code);
                     let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
                     if res.ok {
+                        if let Some(ref tok) = res.session {
+                            std::env::set_var("OMAWARDEN_SESSION", tok);
+                            if io::stdout().is_terminal() {
+                                eprintln!("\nLogged in and vault unlocked successfully.");
+                                eprintln!("To set your session in this shell, run:");
+                                eprintln!("  export OMAWARDEN_SESSION=\"{}\"", tok);
+                            }
+                        }
                         if let Some(ref rem) = remember_email {
                             let should_remember =
                                 matches!(rem.to_lowercase().as_str(), "true" | "1" | "yes");
