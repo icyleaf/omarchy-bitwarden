@@ -24,6 +24,7 @@ Item {
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property color mutedForeground: Qt.darker(foreground, 1.8)
   property string fontFamily: ""
+  property bool checkUpdatesChecked: true
 
   Timer {
     id: latestTimer
@@ -49,7 +50,10 @@ Item {
   property string selectedLogLevel: (config && config.log_level) ? config.log_level.toLowerCase() : "error"
   property bool showWebsiteIconsChecked: true
 
-  onConfigChanged: if (config && config.show_website_icons !== undefined) showWebsiteIconsChecked = (config.show_website_icons !== false)
+  onConfigChanged: {
+    if (config && config.check_updates !== undefined) checkUpdatesChecked = (config.check_updates !== false)
+    if (config && config.show_website_icons !== undefined) showWebsiteIconsChecked = (config.show_website_icons !== false)
+  }
 
   function buildPayload() {
     return {
@@ -59,7 +63,8 @@ Item {
       auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
       clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
       log_level: settingsRoot.selectedLogLevel,
-      show_website_icons: settingsRoot.showWebsiteIconsChecked
+      show_website_icons: settingsRoot.showWebsiteIconsChecked,
+      check_updates: settingsRoot.checkUpdatesChecked
     }
   }
 
@@ -625,6 +630,35 @@ Item {
                   }
                 }
               }
+            }
+          }
+
+          // Automatic Update Check Toggle
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.checkUpdatesChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
+              }
+              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              wrapMode: Text.WordWrap
             }
           }
         }

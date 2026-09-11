@@ -173,6 +173,8 @@ enum ConfigAction {
         #[arg(long)]
         remember_email: Option<String>,
         #[arg(long)]
+        check_updates: Option<String>,
+        #[arg(long)]
         log_level: Option<String>,
         #[arg(long)]
         show_website_icons: Option<String>,
@@ -433,6 +435,7 @@ fn main() -> ExitCode {
                         }
                         "email" => println!("{}", cfg.email),
                         "remember_email" => println!("{}", cfg.remember_email),
+                        "check_updates" => println!("{}", cfg.check_updates),
                         "log_level" => println!("{}", cfg.log_level),
                         "show_website_icons" => println!("{}", cfg.show_website_icons),
                         _ => {
@@ -453,6 +456,7 @@ fn main() -> ExitCode {
                 clipboard_clear,
                 email,
                 remember_email,
+                check_updates,
                 log_level,
                 show_website_icons,
             } => {
@@ -474,6 +478,10 @@ fn main() -> ExitCode {
                     let lower = v.trim().to_lowercase();
                     matches!(lower.as_str(), "true" | "1" | "yes")
                 });
+                let parsed_check_updates = check_updates.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
 
                 let parsed_show_website_icons = show_website_icons.map(|v| {
                     let lower = v.trim().to_lowercase();
@@ -488,6 +496,7 @@ fn main() -> ExitCode {
                     clipboard_clear_seconds: clipboard_clear,
                     email,
                     remember_email: parsed_remember_email,
+                    check_updates: parsed_check_updates,
                     log_level,
                     show_website_icons: parsed_show_website_icons,
                 };
@@ -1899,6 +1908,36 @@ mod tests {
         match cli_explicit.command {
             Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
             _ => panic!("Expected Commands::Daemon"),
+        }
+    }
+
+    #[test]
+    fn test_cli_check_updates_arg_parsing() {
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_false =
+            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "false"])
+                .unwrap();
+        match cli_false.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates.as_deref(), Some("false")),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_true =
+            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "true"]).unwrap();
+        match cli_true.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates.as_deref(), Some("true")),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
         }
     }
 

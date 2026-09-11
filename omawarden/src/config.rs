@@ -9,6 +9,7 @@ pub const DEFAULT_AUTO_LOCK_MINUTES: i64 = 15;
 pub const DEFAULT_CLIPBOARD_CLEAR_SECONDS: i64 = 30;
 pub const DEFAULT_EMAIL: &str = "";
 pub const DEFAULT_REMEMBER_EMAIL: bool = true;
+pub const DEFAULT_CHECK_UPDATES: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 
@@ -28,6 +29,8 @@ pub struct Config {
     pub email: String,
     #[serde(default = "default_remember_email")]
     pub remember_email: bool,
+    #[serde(default = "default_check_updates")]
+    pub check_updates: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_show_website_icons")]
@@ -52,6 +55,9 @@ fn default_email() -> String {
 fn default_remember_email() -> bool {
     DEFAULT_REMEMBER_EMAIL
 }
+fn default_check_updates() -> bool {
+    DEFAULT_CHECK_UPDATES
+}
 fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.to_string()
 }
@@ -69,6 +75,7 @@ impl Default for Config {
             clipboard_clear_seconds: default_clipboard_clear_seconds(),
             email: default_email(),
             remember_email: default_remember_email(),
+            check_updates: default_check_updates(),
             log_level: default_log_level(),
             show_website_icons: default_show_website_icons(),
         }
@@ -229,6 +236,9 @@ impl ConfigManager {
         if let Some(v) = options.remember_email {
             cfg.remember_email = v;
         }
+        if let Some(v) = options.check_updates {
+            cfg.check_updates = v;
+        }
         if let Some(v) = options.log_level {
             cfg.log_level = v.to_lowercase();
         }
@@ -250,6 +260,7 @@ pub struct ConfigUpdateOptions {
     pub clipboard_clear_seconds: Option<i64>,
     pub email: Option<String>,
     pub remember_email: Option<bool>,
+    pub check_updates: Option<bool>,
     pub log_level: Option<String>,
     pub show_website_icons: Option<bool>,
 }
@@ -553,6 +564,39 @@ esac
             keyring_mgr.get_token("access_token"),
             Some("valid-token".to_string())
         );
+    }
+
+    #[test]
+    fn test_check_updates_default_and_update() {
+        assert!(Config::default().check_updates);
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(dir.path().join("data.json"));
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _server_changed) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    check_updates: Some(false),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert!(!updated_cfg.check_updates);
+
+        // Round-trips through config.json
+        assert!(!ConfigManager::new(Some(&config_path)).load().check_updates);
+
+        // Existing configs written before this key existed keep the default
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        assert!(ConfigManager::new(Some(&legacy_path)).load().check_updates);
     }
 
     #[test]

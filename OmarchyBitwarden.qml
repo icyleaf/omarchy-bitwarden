@@ -50,10 +50,12 @@ Item {
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
     email: "",
-    remember_email: true,
+    check_updates: true,
     show_website_icons: true
   })
   property bool rememberEmailChecked: true
+  property bool checkUpdatesEnabled: false
+  property bool pendingUpdateCheck: false
   property bool showWebsiteIcons: false
   property int configSeq: 0
   property bool show2FAField: false
@@ -273,6 +275,7 @@ Item {
   }
 
   function refreshConfig() {
+    root.checkUpdatesEnabled = false
     root.showWebsiteIcons = false
     if (configGetProc.running) return
     root.configSeq++
@@ -324,6 +327,7 @@ Item {
   }
 
   function checkUpdates(isManual) {
+    if (!isManual && !root.checkUpdatesEnabled) { root.pendingUpdateCheck = true; return }
     if (root.isCheckingUpdate) return
     root.isCheckingUpdate = true
     if (isManual) {
@@ -1375,6 +1379,7 @@ Item {
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
     if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
+    if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -2192,8 +2197,14 @@ Item {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
+          root.checkUpdatesEnabled = (data.check_updates !== false)
+          if (root.checkUpdatesEnabled && root.pendingUpdateCheck) {
+            root.pendingUpdateCheck = false
+            root.checkUpdates(false)
+          }
         } catch (e) {
           root.showWebsiteIcons = false
+          root.checkUpdatesEnabled = false
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
       }
@@ -2215,6 +2226,7 @@ Item {
           var data = JSON.parse(text)
           root.config = data
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
+          root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
           root.refreshAuthStatus()
