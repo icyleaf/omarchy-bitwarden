@@ -2,10 +2,11 @@ use clap::{Parser, Subcommand};
 use omawarden::attachment::get_attachment;
 use omawarden::auth::AuthManager;
 use omawarden::clipboard::ClipboardManager;
-use omawarden::config::ConfigManager;
+use omawarden::config::{ConfigManager, ConfigUpdateOptions};
 use omawarden::daemon::{run_daemon_server, send_daemon_request, DaemonState};
 use omawarden::health::check_system_health;
 use omawarden::hook::install_lock_hook;
+use omawarden::keyring::KeyringManager;
 use omawarden::ssh::{
     generate_keypair, parse_private_key, write_keypair_files, write_keypair_files_named,
     SshAlgorithm,
@@ -41,10 +42,7 @@ enum Commands {
         action: ConfigAction,
     },
     #[command(about = "Check CLI health and installation")]
-    Health {
-        #[arg(long, help = "Override bw binary path to check")]
-        bw_path: Option<String>,
-    },
+    Health,
     #[command(about = "Manage Bitwarden authentication and vault sessions")]
     Auth {
         #[command(subcommand)]
@@ -86,15 +84,39 @@ enum Commands {
         public_key: bool,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: clear clipboard after specified seconds"
+        )]
+        clear_after: Option<u64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: expected clipboard generation"
+        )]
+        expected_gen: Option<u64>,
+        #[arg(long, hide = true, help = "Internal worker: wl-copy binary path")]
+        wl_copy_path: Option<String>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: custom generation file path"
+        )]
+        gen_path: Option<std::path::PathBuf>,
     },
-    #[command(
-        about = "Generate TOTP verification code from vault item ID/name, secret, or otpauth URI"
-    )]
+    #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
-        #[arg(index = 1, help = "Vault item ID, name query, secret, or otpauth URI")]
+        #[arg(
+            index = 1,
+            help = "Vault item ID or name query in the vault (use --stdin to pipe raw secrets/URIs)"
+        )]
         query: Option<String>,
-        #[arg(long, help = "Explicit TOTP secret or otpauth URI")]
-        secret: Option<String>,
+        #[arg(
+            long,
+            help = "Read secret, otpauth URI, or query JSON from standard input"
+        )]
+        stdin: bool,
         #[arg(long, help = "Copy generated code directly to clipboard")]
         copy: bool,
     },
@@ -110,8 +132,8 @@ enum Commands {
     },
     #[command(about = "Run omawarden background daemon")]
     Daemon {
-        #[arg(long, default_value = "15")]
-        auto_lock: u64,
+        #[arg(long)]
+        auto_lock: Option<u64>,
     },
 }
 
@@ -129,21 +151,21 @@ enum ConfigAction {
         #[arg(long)]
         identity_url: Option<String>,
         #[arg(long)]
-        bw_path: Option<String>,
-        #[arg(long)]
         download_dir: Option<String>,
         #[arg(long)]
         auto_lock: Option<i64>,
         #[arg(long)]
         clipboard_clear: Option<i64>,
         #[arg(long)]
-        max_output_mb: Option<i64>,
-        #[arg(long)]
         email: Option<String>,
         #[arg(long)]
         remember_email: Option<String>,
         #[arg(long)]
+        check_updates: Option<String>,
+        #[arg(long)]
         log_level: Option<String>,
+        #[arg(long)]
+        show_website_icons: Option<String>,
     },
 }
 
@@ -155,8 +177,13 @@ enum AuthAction {
     LoginPassword {
         #[arg(long, required = true)]
         email: String,
-        #[arg(long, help = "Optional two-factor authentication (2FA) code")]
-        code: Option<String>,
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            help = "Remember email address in configuration"
+        )]
+        remember_email: Option<String>,
     },
     #[command(about = "Login using API Key (client_secret read from stdin)")]
     LoginApikey {
@@ -173,7 +200,9 @@ enum AuthAction {
 
 #[derive(Subcommand)]
 enum HookAction {
-    #[command(about = "Install system-lock hook into Omarchy hooks directory")]
+    #[command(
+        about = "Install optional system-lock hook into Omarchy hooks directory (daemon also auto-detects locks natively)"
+    )]
     Install,
 }
 
@@ -347,15 +376,27 @@ fn read_auth_payload() -> (String, Option<String>) {
 }
 
 fn main() -> ExitCode {
+    // Disable process tracing (ptrace) and core dump generation for memory defense
+    let _ = omawarden::locked::disable_dumpable();
+
     let cli = Cli::parse();
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();
 
     match cli.command {
         Commands::Daemon { auto_lock } => {
+            let default_auto_lock = if cfg.auto_lock_minutes >= 0 {
+                cfg.auto_lock_minutes as u64
+            } else {
+                15
+            };
+            let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
             let storage_mgr = StorageManager::default();
-            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock));
-            println!("Starting omawarden daemon (auto_lock: {}m)...", auto_lock);
+            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
+            println!(
+                "Starting omawarden daemon (auto_lock: {}m)...",
+                auto_lock_mins
+            );
             if let Err(e) = run_daemon_server(state) {
                 eprintln!("Daemon server error: {}", e);
                 ExitCode::FAILURE
@@ -370,16 +411,16 @@ fn main() -> ExitCode {
                     match k.as_str() {
                         "server_url" => println!("{}", cfg.server_url),
                         "identity_url" => println!("{}", cfg.identity_url.as_deref().unwrap_or("")),
-                        "bw_path" => println!("{}", cfg.bw_path),
                         "download_dir" => println!("{}", cfg.download_dir),
                         "auto_lock_minutes" | "auto_lock" => println!("{}", cfg.auto_lock_minutes),
                         "clipboard_clear_seconds" | "clipboard_clear" => {
                             println!("{}", cfg.clipboard_clear_seconds)
                         }
-                        "max_output_mb" => println!("{}", cfg.max_output_mb),
                         "email" => println!("{}", cfg.email),
                         "remember_email" => println!("{}", cfg.remember_email),
+                        "check_updates" => println!("{}", cfg.check_updates),
                         "log_level" => println!("{}", cfg.log_level),
+                        "show_website_icons" => println!("{}", cfg.show_website_icons),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -393,52 +434,71 @@ fn main() -> ExitCode {
             ConfigAction::Set {
                 server_url,
                 identity_url,
-                bw_path,
                 download_dir,
                 auto_lock,
                 clipboard_clear,
-                max_output_mb,
                 email,
                 remember_email,
+                check_updates,
                 log_level,
+                show_website_icons,
             } => {
-                if let Some(v) = server_url {
-                    cfg.server_url = v;
-                }
-                if let Some(v) = identity_url {
-                    let trimmed = v.trim();
-                    if trimmed.is_empty() {
-                        cfg.identity_url = None;
-                    } else {
-                        cfg.identity_url = Some(trimmed.to_string());
+                let storage_mgr = match cli.config.as_deref() {
+                    Some(cp) => {
+                        if let Some(parent) = cp.parent() {
+                            StorageManager::new(
+                                parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                            )
+                        } else {
+                            StorageManager::default()
+                        }
                     }
-                }
-                if let Some(v) = bw_path {
-                    cfg.bw_path = v;
-                }
-                if let Some(v) = download_dir {
-                    cfg.download_dir = v;
-                }
-                if let Some(v) = auto_lock {
-                    cfg.auto_lock_minutes = v;
-                }
-                if let Some(v) = clipboard_clear {
-                    cfg.clipboard_clear_seconds = v;
-                }
-                if let Some(v) = max_output_mb {
-                    cfg.max_output_mb = v;
-                }
-                if let Some(v) = email {
-                    cfg.email = v;
-                }
-                if let Some(v) = remember_email {
+                    None => StorageManager::default(),
+                };
+                let keyring_mgr = KeyringManager::default();
+
+                let parsed_remember_email = remember_email.map(|v| {
                     let lower = v.trim().to_lowercase();
-                    cfg.remember_email = matches!(lower.as_str(), "true" | "1" | "yes");
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+                let parsed_check_updates = check_updates.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
+                let parsed_show_website_icons = show_website_icons.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
+                let options = ConfigUpdateOptions {
+                    server_url,
+                    identity_url,
+                    download_dir,
+                    auto_lock_minutes: auto_lock,
+                    clipboard_clear_seconds: clipboard_clear,
+                    email,
+                    remember_email: parsed_remember_email,
+                    check_updates: parsed_check_updates,
+                    log_level,
+                    show_website_icons: parsed_show_website_icons,
+                };
+
+                let (updated_cfg, _server_changed) =
+                    match config_mgr.update_config(options, &storage_mgr, &keyring_mgr) {
+                        Ok(res) => res,
+                        Err(e) => {
+                            eprintln!("Failed to save configuration: {}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                cfg = updated_cfg;
+                if let Some(lock_mins) = auto_lock {
+                    let _ = send_daemon_request(&json!({
+                        "action": "set_auto_lock",
+                        "auto_lock_minutes": lock_mins
+                    }));
                 }
-                if let Some(v) = log_level {
-                    cfg.log_level = v.to_lowercase();
-                }
-                let _ = config_mgr.save(&cfg);
                 let safe_url = if cfg.server_url.is_empty() {
                     "default (official)".to_string()
                 } else if let Ok(parsed) = url::Url::parse(&cfg.server_url) {
@@ -489,18 +549,19 @@ fn main() -> ExitCode {
             }
         },
 
-        Commands::Health { bw_path: _ } => {
+        Commands::Health => {
             let status = check_system_health(&cfg.server_url);
             println!("{}", serde_json::to_string_pretty(&status).unwrap());
             ExitCode::SUCCESS
         }
 
         Commands::Auth { action } => {
-            let auth_mgr = AuthManager::with_identity_url(
+            let auth_mgr = AuthManager::with_config(
                 &cfg.server_url,
                 cfg.identity_url.as_deref(),
                 None,
                 None,
+                Some(config_mgr.clone()),
             );
             match action {
                 AuthAction::Status => {
@@ -509,7 +570,10 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
                 }
-                AuthAction::LoginPassword { email, code } => {
+                AuthAction::LoginPassword {
+                    email,
+                    remember_email,
+                } => {
                     let (pwd, stdin_code) = if io::stdin().is_terminal() {
                         let p = rpassword::prompt_password("Enter Master Password: ")
                             .unwrap_or_default();
@@ -517,8 +581,35 @@ fn main() -> ExitCode {
                     } else {
                         read_auth_payload()
                     };
-                    let effective_code = code.or(stdin_code);
-                    let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    let mut effective_code = stdin_code;
+                    let mut res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    if !res.ok
+                        && res.two_factor_required == Some(true)
+                        && effective_code.is_none()
+                        && io::stdin().is_terminal()
+                    {
+                        let prompt_code =
+                            rpassword::prompt_password("Enter Two-Factor (2FA) Code: ")
+                                .unwrap_or_default();
+                        if !prompt_code.trim().is_empty() {
+                            effective_code = Some(prompt_code.trim().to_string());
+                            res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                        }
+                    }
+                    if res.ok {
+                        if let Some(ref rem) = remember_email {
+                            let should_remember =
+                                matches!(rem.to_lowercase().as_str(), "true" | "1" | "yes");
+                            let mut latest_cfg = config_mgr.load();
+                            latest_cfg.remember_email = should_remember;
+                            if should_remember {
+                                latest_cfg.email = email.trim().to_lowercase();
+                            } else {
+                                latest_cfg.email.clear();
+                            }
+                            let _ = config_mgr.save(&latest_cfg);
+                        }
+                    }
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
                         ExitCode::SUCCESS
@@ -584,7 +675,8 @@ fn main() -> ExitCode {
                 Ok(path) => {
                     let json_val = serde_json::json!({
                         "ok": true,
-                        "installed_path": path.to_string_lossy()
+                        "installed_path": path.to_string_lossy(),
+                        "note": "Lock hook installed. omawarden daemon also natively auto-detects screen lock, sleep, and Omarchy shell lock."
                     });
                     println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
                     ExitCode::SUCCESS
@@ -663,6 +755,23 @@ fn main() -> ExitCode {
                         );
                         return ExitCode::FAILURE;
                     }
+                    if is_unlocked && !vault_mgr.is_unlocked() {
+                        if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" }))
+                        {
+                            if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::FAILURE;
+                            }
+                            if let Ok(items) = serde_json::from_value::<
+                                Vec<omawarden::vault::VaultItem>,
+                            >(daemon_resp)
+                            {
+                                let filtered = vault_mgr.search(&items, "", category.as_deref());
+                                println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
                     let items = vault_mgr.get_items();
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
@@ -687,6 +796,25 @@ fn main() -> ExitCode {
                         );
                         return ExitCode::FAILURE;
                     }
+                    if is_unlocked && !vault_mgr.is_unlocked() {
+                        if let Some(daemon_resp) = send_daemon_request(&json!({
+                            "action": "search",
+                            "query": query,
+                            "category": category
+                        })) {
+                            if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
+                                println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
+                                return ExitCode::FAILURE;
+                            }
+                            if let Ok(items) = serde_json::from_value::<
+                                Vec<omawarden::vault::VaultItem>,
+                            >(daemon_resp)
+                            {
+                                println!("{}", serde_json::to_string_pretty(&items).unwrap());
+                                return ExitCode::SUCCESS;
+                            }
+                        }
+                    }
                     let results = vault_mgr.search_items(&query, category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
@@ -706,7 +834,27 @@ fn main() -> ExitCode {
             private_key,
             public_key,
             timeout,
+            clear_after,
+            expected_gen,
+            wl_copy_path,
+            gen_path,
         } => {
+            if let Some(secs) = clear_after {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                let copy_path = wl_copy_path.as_deref().unwrap_or("wl-copy");
+                let mut mgr = ClipboardManager::new(copy_path).without_detached_worker();
+                if let Some(p) = gen_path {
+                    mgr = mgr.with_generation_path(p.clone());
+                }
+                if let Some(exp) = expected_gen {
+                    if mgr.current_generation() != exp {
+                        return ExitCode::SUCCESS;
+                    }
+                }
+                mgr.clear();
+                return ExitCode::SUCCESS;
+            }
+
             let clip_mgr = ClipboardManager::default();
             if !clip_mgr.is_available() {
                 println!(
@@ -1001,19 +1149,65 @@ fn main() -> ExitCode {
             }
         }
 
-        Commands::Totp {
-            query,
-            secret,
-            copy,
-        } => {
+        Commands::Totp { query, stdin, copy } => {
             let clip_mgr = ClipboardManager::default();
 
-            let (totp_res, item_info) = if let Some(sec) = secret {
-                (generate_totp(&sec, None, 6, 30), None)
+            let (totp_res, item_info) = if stdin {
+                let stdin_val = read_secret_stdin();
+                if stdin_val.is_empty() {
+                    (None, None)
+                } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
+                    if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
+                        (generate_totp(sec, None, 6, 30), None)
+                    } else if let Some(q) = val
+                        .get("query")
+                        .or_else(|| val.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let daemon_res = send_daemon_request(&json!({
+                            "action": "totp",
+                            "query": q
+                        }));
+                        if let Some(res) = daemon_res {
+                            if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                let code = res
+                                    .get("code")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let period =
+                                    res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
+                                let name =
+                                    res.get("name").and_then(|v| v.as_str()).map(String::from);
+                                let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
+                                (
+                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                    if let (Some(id), Some(name)) = (id, name) {
+                                        Some((id, name))
+                                    } else {
+                                        None
+                                    },
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (generate_totp(&stdin_val, None, 6, 30), None)
+                    }
+                } else {
+                    (generate_totp(&stdin_val, None, 6, 30), None)
+                }
             } else if let Some(q) = query {
                 let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
                 if is_uri {
-                    (generate_totp(&q, None, 6, 30), None)
+                    eprintln!(
+                        "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | omawarden totp --stdin"
+                    );
+                    return ExitCode::FAILURE;
                 } else {
                     omawarden::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
@@ -1032,7 +1226,8 @@ fn main() -> ExitCode {
                     let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
                         let daemon_res = send_daemon_request(&json!({
                             "action": "get_item",
-                            "query": q
+                            "query": q,
+                            "touch": false
                         }));
                         daemon_res
                             .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
@@ -1663,5 +1858,150 @@ mod tests {
         let (pwd, code) = parse_auth_payload("  \r\n");
         assert_eq!(pwd, "");
         assert_eq!(code, None);
+    }
+
+    #[test]
+    fn test_cli_daemon_auto_lock_arg_parsing() {
+        // Without --auto-lock flag, auto_lock should be None so it can inherit from config
+        let cli_default = Cli::try_parse_from(["omawarden", "daemon"]).unwrap();
+        match cli_default.command {
+            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, None),
+            _ => panic!("Expected Commands::Daemon"),
+        }
+
+        // With --auto-lock flag, auto_lock should be Some(N)
+        let cli_explicit =
+            Cli::try_parse_from(["omawarden", "daemon", "--auto-lock", "45"]).unwrap();
+        match cli_explicit.command {
+            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
+            _ => panic!("Expected Commands::Daemon"),
+        }
+    }
+
+    #[test]
+    fn test_cli_check_updates_arg_parsing() {
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_false =
+            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "false"])
+                .unwrap();
+        match cli_false.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates.as_deref(), Some("false")),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_true =
+            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "true"]).unwrap();
+        match cli_true.command {
+            Commands::Config {
+                action: ConfigAction::Set { check_updates, .. },
+            } => assert_eq!(check_updates.as_deref(), Some("true")),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+    }
+
+    #[test]
+    fn test_cli_show_website_icons_arg_parsing() {
+        // Without the flag, show_website_icons should be None so config keeps its value
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_false = Cli::try_parse_from([
+            "omawarden",
+            "config",
+            "set",
+            "--show-website-icons",
+            "false",
+        ])
+        .unwrap();
+        match cli_false.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("false".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_true =
+            Cli::try_parse_from(["omawarden", "config", "set", "--show-website-icons", "true"])
+                .unwrap();
+        match cli_true.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("true".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+    }
+
+    #[test]
+    fn test_cli_totp_stdin_and_query_arg_parsing() {
+        let cli_stdin = Cli::try_parse_from(["omawarden", "totp", "--stdin"]).unwrap();
+        match cli_stdin.command {
+            Commands::Totp { stdin, query, .. } => {
+                assert!(stdin);
+                assert_eq!(query, None);
+            }
+            _ => panic!("Expected Commands::Totp"),
+        }
+
+        let cli_query = Cli::try_parse_from(["omawarden", "totp", "my-github-item"]).unwrap();
+        match cli_query.command {
+            Commands::Totp { stdin, query, .. } => {
+                assert!(!stdin);
+                assert_eq!(query.as_deref(), Some("my-github-item"));
+            }
+            _ => panic!("Expected Commands::Totp"),
+        }
+    }
+
+    #[test]
+    fn test_cli_zero_argv_sensitive_args_rejected() {
+        // Assert --session is rejected
+        assert!(
+            Cli::try_parse_from(["omawarden", "--session", "dummy_token", "vault", "sync"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["omawarden", "vault", "sync", "--session", "dummy_token"])
+                .is_err()
+        );
+
+        // Assert --secret is rejected from totp
+        assert!(
+            Cli::try_parse_from(["omawarden", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).is_err()
+        );
+
+        // Assert --code is rejected from auth login-password
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "auth",
+            "login-password",
+            "--email",
+            "test@example.com",
+            "--code",
+            "123456"
+        ])
+        .is_err());
     }
 }

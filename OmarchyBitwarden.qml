@@ -7,6 +7,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "./components"
+import "./components/iconpolicy.js" as IconPolicy
 
 Item {
   id: root
@@ -21,6 +22,11 @@ Item {
   property var shell: null
   property var manifest: null
   property bool opened: false
+  onOpenedChanged: {
+    if (root.opened) {
+      root.refreshAuthStatus()
+    }
+  }
   function toLocalPath(url) {
     if (!url) return ""
     var str = url.toString ? url.toString() : String(url)
@@ -43,11 +49,15 @@ Item {
     download_dir: "~/Downloads",
     auto_lock_minutes: 15,
     clipboard_clear_seconds: 30,
-    max_output_mb: 10,
     email: "",
-    remember_email: true
+    check_updates: true,
+    show_website_icons: true
   })
   property bool rememberEmailChecked: true
+  property bool checkUpdatesEnabled: false
+  property bool pendingUpdateCheck: false
+  property bool showWebsiteIcons: false
+  property int configSeq: 0
   property bool show2FAField: false
 
   property var cliHealth: ({
@@ -60,6 +70,7 @@ Item {
     error: "Checking CLI status..."
   })
   property bool isDownloadingCli: false
+  property bool engineAttestationVerified: false
   property string latestVersion: ""
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
@@ -158,19 +169,66 @@ Item {
     })
   }
 
+  function clearSensitiveState() {
+    root.rawVaultItems = []
+    root.filteredItems = []
+    root.lastVaultItemsRawText = ""
+    root.lastSyncTime = 0
+    root.searchQuery = ""
+    root.activeCategory = "all"
+    root.activeVaultScope = "all"
+    root.activeFolderScope = "all"
+    root.selectedIndex = 0
+
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.showCardNumberRevealed = false
+    root.showCardCodeRevealed = false
+    root.showCustomHiddenRevealed = false
+    root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+
+    root.showActionPalette = false
+    root.actionPaletteIndex = 0
+    root.currentAvailableActions = []
+
+    root.showPasswordHistoryModal = false
+    root.activePasswordHistoryItem = null
+
+    root.showSshKeyModal = false
+    root.sshKeyModalItem = null
+
+    root.activeAttachmentPreview = null
+    root.loadingAttachmentId = ""
+
+    if (authViewComponent && typeof authViewComponent.clearInputs === "function") {
+      authViewComponent.clearInputs()
+    }
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
-    root.showActionPalette = false
-    root.showSshKeyModal = false
-    root.showPasswordRevealed = false
-    root.showPrivateKeyRevealed = false
-    root.activeAttachmentPreview = null
-    root.loadingAttachmentId = ""
     root.searchQuery = ""
     root.selectedIndex = 0
+    if (!root.authState || root.authState.status !== "unlocked") {
+      root.clearSensitiveState()
+    } else {
+      root.showActionPalette = false
+      root.showSshKeyModal = false
+      root.showPasswordHistoryModal = false
+      root.showPasswordRevealed = false
+      root.showPrivateKeyRevealed = false
+      root.showCardNumberRevealed = false
+      root.showCardCodeRevealed = false
+      root.showCustomHiddenRevealed = false
+      root.activeAttachmentPreview = null
+      root.activePasswordHistoryItem = null
+      root.sshKeyModalItem = null
+      root.currentAvailableActions = []
+      root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+    }
     root.refreshHealth()
     root.refreshConfig()
     root.refreshAuthStatus()
@@ -189,6 +247,17 @@ Item {
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
+    root.showPasswordRevealed = false
+    root.showPrivateKeyRevealed = false
+    root.showCardNumberRevealed = false
+    root.showCardCodeRevealed = false
+    root.showCustomHiddenRevealed = false
+    root.activeAttachmentPreview = null
+    root.activePasswordHistoryItem = null
+    root.sshKeyModalItem = null
+    root.currentAvailableActions = []
+    root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+    root.searchQuery = ""
   }
 
   function dismiss() {
@@ -204,24 +273,16 @@ Item {
   }
 
   function refreshConfig() {
+    root.checkUpdatesEnabled = false
+    root.showWebsiteIcons = false
+    if (configGetProc.running) return
+    root.configSeq++
+    configGetProc.seq = root.configSeq
     configGetProc.command = [root.helperPath, "config", "get"]
     configGetProc.running = true
   }
 
-  function updateConfig(options) {
-    var cmd = [root.helperPath, "config", "set"]
-    if (options.server_url !== undefined) cmd.push("--server-url", options.server_url)
-    if (options.download_dir !== undefined) cmd.push("--download-dir", options.download_dir)
-    if (options.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(options.auto_lock_minutes))
-    if (options.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(options.clipboard_clear_seconds))
-    if (options.max_output_mb !== undefined) cmd.push("--max-output-mb", String(options.max_output_mb))
-    if (options.email !== undefined) cmd.push("--email", options.email)
-    if (options.remember_email !== undefined) cmd.push("--remember-email", options.remember_email ? "true" : "false")
-    configSetProc.command = cmd
-    configSetProc.running = true
-  }
-
-  function downloadCli() {
+  function downloadCli(pinnedTag) {
     if (root.isDownloadingCli) return
     root.isDownloadingCli = true
     root.isBusy = true
@@ -233,8 +294,13 @@ Item {
     var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
     var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/download-engine.sh"))
 
+    var targetTag = pinnedTag || (root.latestVersion ? ("omawarden-v" + root.latestVersion) : "")
     downloadCliProc.running = false
-    downloadCliProc.command = ["bash", scriptPath, baseDir]
+    if (targetTag) {
+      downloadCliProc.command = ["bash", scriptPath, baseDir, "icyleaf/omarchy-bitwarden", targetTag]
+    } else {
+      downloadCliProc.command = ["bash", scriptPath, baseDir]
+    }
     downloadCliProc.running = true
   }
 
@@ -259,6 +325,7 @@ Item {
   }
 
   function checkUpdates(isManual) {
+    if (!isManual && !root.checkUpdatesEnabled) { root.pendingUpdateCheck = true; return }
     if (root.isCheckingUpdate) return
     root.isCheckingUpdate = true
     if (isManual) {
@@ -1298,6 +1365,7 @@ Item {
   }
 
   function saveSettings(settings) {
+    root.configSeq++
     root.isBusy = true
     root.logInfo("omarchy:settings", "Saving configuration (log_level: " + (settings.log_level || "error") + ")...")
     root.statusMessage = "Saving configuration..."
@@ -1307,8 +1375,9 @@ Item {
     if (settings.download_dir !== undefined) cmd.push("--download-dir", settings.download_dir)
     if (settings.auto_lock_minutes !== undefined) cmd.push("--auto-lock", String(settings.auto_lock_minutes))
     if (settings.clipboard_clear_seconds !== undefined) cmd.push("--clipboard-clear", String(settings.clipboard_clear_seconds))
-    if (settings.max_output_mb !== undefined) cmd.push("--max-output-mb", String(settings.max_output_mb))
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
+    if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
+    if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1332,6 +1401,7 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
+    report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
     report += "#### Recent Logs (" + (root.logBuffer ? root.logBuffer.length : 0) + " entries):\n\n```text\n"
@@ -1364,22 +1434,13 @@ Item {
 
   function doLock() {
     root.logInfo("omarchy:auth", "Locking vault...")
-    if (authViewComponent) authViewComponent.clearInputs()
+    root.clearSensitiveState()
     root.authState = ({
       status: "locked",
       server_url: (root.authState && root.authState.server_url) || "",
       user_email: (root.authState && root.authState.user_email) || "",
-      has_session: false
+      has_session: Boolean(root.authState && root.authState.has_session)
     })
-    root.rawVaultItems = []
-    root.filteredItems = []
-    root.lastVaultItemsRawText = ""
-    root.lastSyncTime = 0
-    root.searchQuery = ""
-    root.activeCategory = "all"
-    root.activeVaultScope = "all"
-    root.activeFolderScope = "all"
-    root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Locking vault..."
     authLockProc.command = [root.helperPath, "auth", "lock"]
@@ -1393,6 +1454,11 @@ Item {
     root.errorMessage = ""
     root.statusMessage = "Logging in to Bitwarden..."
     var cmd = [root.helperPath, "auth", "login-password", "--email", email]
+    if (root.rememberEmailChecked) {
+      cmd.push("--remember-email", "true")
+    } else {
+      cmd.push("--remember-email", "false")
+    }
     if (code) {
       authLoginProc.secret = JSON.stringify({ password: password, code: code })
     } else {
@@ -1415,23 +1481,14 @@ Item {
 
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
+    root.clearSensitiveState()
     root.show2FAField = false
-    if (authViewComponent) authViewComponent.clearInputs()
     root.authState = ({
       status: "unauthenticated",
-      server_url: "",
+      server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
       user_email: "",
       has_session: false
     })
-    root.rawVaultItems = []
-    root.filteredItems = []
-    root.lastVaultItemsRawText = ""
-    root.lastSyncTime = 0
-    root.searchQuery = ""
-    root.activeCategory = "all"
-    root.activeVaultScope = "all"
-    root.activeFolderScope = "all"
-    root.selectedIndex = 0
     root.isBusy = true
     root.statusMessage = "Logging out..."
     authLogoutProc.command = [root.helperPath, "auth", "logout"]
@@ -1462,6 +1519,14 @@ Item {
         root.updateTotpForSelected()
       }
     }
+  }
+
+  Timer {
+    id: lockSyncTimer
+    interval: 3000
+    running: Boolean(root.opened && root.authState && root.authState.status === "unlocked")
+    repeat: true
+    onTriggered: root.refreshAuthStatus()
   }
 
   function restoreSearchFocus() {
@@ -1808,6 +1873,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
               Layout.minimumWidth: 260
@@ -1844,6 +1910,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
                 currentTotp: root.currentTotp
@@ -2064,6 +2131,11 @@ Item {
       onStreamFinished: {
         root.isBusy = false
         if (sshKeyModalComponent) sshKeyModalComponent.isBusy = false
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showSshKeyModal = false
+          root.sshKeyModalItem = null
+          return
+        }
         var raw = text.trim()
         var jsonRes = null
         try {
@@ -2109,17 +2181,27 @@ Item {
   }
   Process {
     id: configGetProc
+    property int seq: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (configGetProc.seq !== root.configSeq) return
         try {
           var data = JSON.parse(text)
           root.config = data
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
+          root.checkUpdatesEnabled = (data.check_updates !== false)
+          if (root.checkUpdatesEnabled && root.pendingUpdateCheck) {
+            root.pendingUpdateCheck = false
+            root.checkUpdates(false)
+          }
         } catch (e) {
+          root.showWebsiteIcons = false
+          root.checkUpdatesEnabled = false
           root.logError("omarchy:ui", "Failed to parse config: " + e)
         }
       }
@@ -2140,9 +2222,13 @@ Item {
         try {
           var data = JSON.parse(text)
           root.config = data
+          root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
+          root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
           root.refreshHealth()
+          root.refreshAuthStatus()
         } catch (e) {
+          root.showWebsiteIcons = false
           root.statusMessage = "Failed to update config."
           root.logError("omarchy:ui", "Failed to parse updated config: " + e)
         }
@@ -2227,7 +2313,12 @@ Item {
           var cleanText = (text || "").trim()
           var data = JSON.parse(cleanText)
           if (data && data.ok) {
-            root.statusMessage = "omawarden engine updated successfully."
+            root.engineAttestationVerified = Boolean(data.attestation_verified)
+            if (data.attestation_verified) {
+              root.statusMessage = "omawarden engine updated successfully (✓ GitHub Attestation verified)."
+            } else {
+              root.statusMessage = "omawarden engine updated successfully (SHA-256 verified)."
+            }
             root.errorMessage = ""
             root.refreshHealth()
             root.refreshConfig()
@@ -2312,9 +2403,7 @@ Item {
                 root.syncVault(true, false)
               }
             } else {
-              root.rawVaultItems = []
-              root.filteredItems = []
-              root.lastVaultItemsRawText = ""
+              root.clearSensitiveState()
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
@@ -2323,6 +2412,7 @@ Item {
             })
           }
         } catch (e) {
+          root.clearSensitiveState()
           root.authState = ({
             status: "unauthenticated",
             server_url: "",
@@ -2339,6 +2429,7 @@ Item {
     }
     onExited: function(code) {
       if (code !== 0) {
+        root.clearSensitiveState()
         root.authState = ({
           status: "unauthenticated",
           server_url: "",
@@ -2433,6 +2524,7 @@ Item {
               has_session: true
             })
             root.refreshAuthStatus()
+            root.refreshConfig()
             if (statusVal === "unlocked") {
               root.loadVaultItems()
               root.syncVault(true, true)
@@ -2484,16 +2576,13 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.clearSensitiveState()
         root.authState = ({
           status: "locked",
           server_url: (root.authState && root.authState.server_url) || "",
           user_email: (root.authState && root.authState.user_email) || "",
-          has_session: false
+          has_session: Boolean(root.authState && root.authState.has_session)
         })
-        root.rawVaultItems = []
-        root.filteredItems = []
-        root.lastVaultItemsRawText = ""
-        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -2513,16 +2602,13 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.clearSensitiveState()
         root.authState = ({
           status: "unauthenticated",
-          server_url: "",
+          server_url: (root.config && root.config.server_url) || "",
           user_email: "",
           has_session: false
         })
-        root.rawVaultItems = []
-        root.filteredItems = []
-        root.lastVaultItemsRawText = ""
-        root.lastSyncTime = 0
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -2550,14 +2636,13 @@ Item {
             root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
             var errStr = String(res.error || "")
             if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
+              root.clearSensitiveState()
               root.authState = ({
                 status: "unauthenticated",
                 server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
                 user_email: (root.authState && root.authState.user_email) || (root.config && root.config.email) || "",
                 has_session: false
               })
-              root.rawVaultItems = []
-              root.filteredItems = []
               root.currentView = "auto"
             }
             return
@@ -2565,11 +2650,13 @@ Item {
         } catch (e) {
           // Non-JSON output
         }
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.clearSensitiveState()
+          return
+        }
         root.lastSyncTime = Date.now()
         root.statusMessage = "Vault synchronized."
-        if (root.authState && root.authState.status === "unlocked") {
-          root.loadVaultItems()
-        }
+        root.loadVaultItems()
         Qt.callLater(function() {
           if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
             searchHeader.searchField.forceActiveFocus()
@@ -2598,6 +2685,10 @@ Item {
       onStreamFinished: {
         try {
           root.isLoadingVault = false
+          if (!root.authState || root.authState.status !== "unlocked") {
+            root.clearSensitiveState()
+            return
+          }
           var cleanText = (text || "").trim()
           if (cleanText === root.lastVaultItemsRawText && root.rawVaultItems && root.rawVaultItems.length > 0) {
             Qt.callLater(function() {
@@ -2674,6 +2765,10 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+          return
+        }
         var cleanText = (text || "").trim()
         if (!cleanText) return
         try {
@@ -2709,6 +2804,10 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.loadingAttachmentId = ""
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.activeAttachmentPreview = null
+          return
+        }
         try {
           var data = JSON.parse(text)
           if (data.ok) {

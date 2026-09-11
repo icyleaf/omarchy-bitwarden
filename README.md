@@ -23,7 +23,7 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | **Token & Secret Storage**     | **System Keyring Isolation** (0 plaintext tokens in local cache)     | Desktop Keychain / Electron store  | Stored in plaintext cache file or relies on insecure, leak-prone `BW_SESSION` env export |
 | **Local Data Caching**         | **Zero-Knowledge Ciphertext Cache** (fast offline search, no tokens) | Local cache file mixed with session tokens                         | Local cache file mixed with session tokens                                   |
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
-| **Lock-Screen Sync**           | **Native D-Bus / Hyprlock hooks**                                   | App idle timeout only              | None (manual lock required)                                                  |
+| **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
 ---
 
@@ -92,7 +92,6 @@ omarchy plugin update icyleaf.bitwarden
 ```bash
 killall omawarden
 omarchy plugin remove icyleaf.bitwarden
-rm -rf ~/.config/omarchy/hooks/system-lock.d/99-bitwarden-lock.sh
 ```
 
 ---
@@ -174,8 +173,8 @@ flowchart TD
 
 1. **Zero Command-Line (`argv`) Credential Leakage**: Master passwords, client secrets, 2FA codes, TOTP seeds, and clipboard text are **never passed as command-line arguments**. By delivering all sensitive data exclusively through protected `stdin` streams or `0600` Unix domain sockets, command line inspection reveals zero sensitive credentials.
 2. **Zero Process Environment (`env`) Secret Spillage**: API client secrets, passwords, and live session tokens are never exported to process environment variables (`/proc/<pid>/environ`).
-3. **Strict Owner-Only File & Socket Permissions (`0600`)**: The local vault cache file and the daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce `0600` permissions (readable and writable exclusively by the owner).
-4. **Deterministic Zero-Memory Destruction (`zeroize`)**: All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate hashes implement `zeroize::ZeroizeOnDrop` to overwrite volatile memory with zeros upon drop. When the vault is locked, all decrypted items and keys are immediately purged from daemon memory.
+3. **Strict Owner-Only File & Socket Permissions (`0600`) & Peer UID Verification**: The local vault cache file, downloaded attachments, and daemon Unix socket (`/run/user/<UID>/omawarden.sock`) enforce strict `0600` permissions and kernel-level peer UID verification (`SO_PEERCRED`), isolating endpoints across user accounts. Note: processes running under the same OS user account share UID privileges; process-level sandboxing (e.g. Bubblewrap/Flatpak) is recommended for isolating local untrusted applications.
+4. **Deterministic Master Key Zeroization (`zeroize`)**: All cryptographic keys (`SymmetricCryptoKey`), derived master keys, and intermediate crypto buffers implement `zeroize::ZeroizeOnDrop` to overwrite key memory with zeros upon drop. When the vault is locked, all decrypted vault records in daemon memory are immediately cleared and dropped.
 5. **Native FreeDesktop Secret Service Keyring Lifecycle**: Bearer tokens (`access_token`, `refresh_token`), API key secrets (`client_secret`), and active session tokens are stored securely inside the system Keyring (GNOME Keyring / KWallet / KeePassXC) via D-Bus Secret Service protocols. **The local cache file is a pure zero-knowledge ciphertext store with zero plaintext bearer tokens or master passwords on disk**. Immediate session destruction occurs on lock (<kbd>Ctrl</kbd>+<kbd>L</kbd>), screen-lock events (`hyprlock`/`swaylock`), or idle timeout.
 6. **Ephemeral Clipboard Auto-Clearing (30s TTL)**: When copying passwords, TOTP codes, card CVVs, or SSH private keys, sensitive values are piped directly to `wl-copy` without entering shell logs. A dedicated timer daemon automatically clears the Wayland clipboard after 30 seconds (configurable in Settings).
 7. **Zero External Runtime Dependencies**: 100% pure Rust binary. No external Node.js, Python, or official `bw` CLI binary is required at runtime.

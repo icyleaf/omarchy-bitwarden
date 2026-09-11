@@ -10,7 +10,7 @@
 
 ### Vault & Session Lifecycle
 - **Vault**: The encrypted collection of user credentials, folders, organization collections, and attachments synced from a Bitwarden / Vaultwarden server.
-- **Server Address (`server_url`)**: The base endpoint of the Bitwarden instance (e.g., official cloud `https://vault.bitwarden.com` or custom self-hosted Vaultwarden instance).
+- **Server Address (`server_url`) & Instance Isolation**: The base endpoint of the Bitwarden instance (e.g., official cloud `https://vault.bitwarden.com` or custom self-hosted Vaultwarden instance). Updating the configuration to a different `server_url` automatically triggers instance-isolation cleanup, atomically wiping stale credentials (email, API key `client_id`, API `client_secret`), destroying active sessions (tokens and daemon memory), and purging local cache files (`data.json`, `/tmp` attachments) to prevent cross-server credential or data contamination (see `docs/adr/0008-server-switching-credential-and-cache-invalidation.md`).
 - **Authentication Modes**:
   - **Master Password Login**: Email + Master Password with PBKDF2/Argon2id client-side key derivation and 2FA challenge support.
   - **API Key Login**: Standard OAuth2 `client_credentials` flow using `client_id` and `client_secret`.
@@ -22,7 +22,7 @@
 ### Keyring & Security Policies
 - **System Keyring & Credential Persistence**: Secret storage backend (via FreeDesktop Secret Service / `secret-tool` / D-Bus) used to securely persist `access_token`, `refresh_token`, and API `client_secret` across app invocations, ensuring `data.json` on disk remains a pure zero-knowledge ciphertext store (see `docs/adr/0007-keyring-credential-persistence-and-silent-reauth.md`).
 - **Silent Background Re-authentication**: Seamless re-authentication via API `client_secret` or OAuth2 `refresh_token` when tokens expire (~2h TTL) or return 401/403, preventing disruption during background sync.
-- **Atomic Credential Erasure**: Calling `auth logout` triggers `clear_all()` across all `service=omarchy-bitwarden` entries in the OS keyring.
+- **Atomic Credential Erasure**: Calling `auth logout` or updating to a different `server_url` triggers `clear_all()` across all `service=omarchy-bitwarden` entries in the OS keyring and purges local storage (see `docs/adr/0008-server-switching-credential-and-cache-invalidation.md`).
 - **Zero-Leakage Memory Policy**: Sensitive cryptographic keys (`SymmetricCryptoKey`) and intermediate hashes derive `Zeroize` and `#[zeroize(drop)]` to enforce volatile memory destruction on drop.
 - **Zero-Argv / Zero-Environ Security Seam**: To prevent credential leakage across Linux processes (`/proc/<pid>/cmdline` and `/proc/<pid>/environ`), secrets (Master Passwords, API Secrets, TOTP seeds, Clipboard text) are delivered exclusively through protected `stdin` streams or `0600` Unix Domain Sockets.
 - **Strict File & Socket Permissions**: Disk storage (`data.json`) and the daemon Unix socket (`omawarden.sock`) enforce `0600` owner-only permissions.
@@ -57,7 +57,7 @@
   - **Conjunctive Filter Pipeline**: Orthogonal multi-layer query evaluation (`Query ∧ Category ∧ VaultScope ∧ FolderScope`), enabling precise credential narrowing.
 - **Inspector Pane**: Side panel rendering details, masked secrets, live TOTP countdown, custom fields, organization/folder tags, attachments, and password history entry.
 - **Action Palette (`Ctrl+K`)**: Modal listing all contextual operations (Copy Password `↵`, Copy TOTP `Ctrl+↵`, Copy Username `Ctrl+U`, Toggle Field Visibility `Ctrl+T`, View Password History `Ctrl+H`, Open Website `Ctrl+O`, Filter by Vault/Org, Filter by Folder, Copy Organization Name, Copy Folder Name, Copy Card/Identity attributes, Copy Public/Private Key, View/Download Attachments, Lock Vault `Ctrl+L`, Sync `Ctrl+R`).
-- **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, `max_output_mb`, and `log_level`, with real-time CLI readiness indicators and an embedded Logs Viewer.
+- **Config & Settings View**: Allows user configuration of `server_url`, `download_dir`, `auto_lock_minutes`, `clipboard_clear_seconds`, and `log_level`, with real-time CLI readiness indicators and an embedded Logs Viewer.
 - **Observability & Diagnostics**: Dual-channel structured logging across `omawarden` (`stderr`) and Quickshell (`console.error`), featuring module prefixes (`[omawarden:cli]`, `[omarchy:ui]`), configurable log levels (`error` by default), zero-knowledge credential and custom server URL redaction, and one-click "Copy Diagnostics" for privacy-safe GitHub issue reporting (see `docs/adr/0004-structured-logging-and-diagnostics.md`).
 
 ## Boundaries & Non-Goals

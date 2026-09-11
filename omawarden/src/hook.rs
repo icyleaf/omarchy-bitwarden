@@ -52,6 +52,11 @@ pub fn resolve_helper_executable(hint_path: Option<&str>) -> String {
     "omawarden".to_string()
 }
 
+/// Generates a bash script that executes `auth lock` when invoked by an external hook runner.
+///
+/// Note: In modern Omarchy and standard Linux desktop environments, the `omawarden daemon`
+/// automatically detects screen-locking (Omarchy shell lock, hyprlock, swaylock, waylock, gtklock)
+/// and system sleep/suspend via its background watchdog thread without requiring manual hook scripts.
 pub fn get_lock_hook_script(helper_path: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash
@@ -62,6 +67,10 @@ pub fn get_lock_hook_script(helper_path: &str) -> String {
     )
 }
 
+/// Installs a system-lock hook script into `~/.config/omarchy/hooks/system-lock.d/`.
+///
+/// This provides compatibility with hook-runner environments. Modern Omarchy installations
+/// and Wayland compositors are also covered by the daemon's native auto-lock watchdog.
 pub fn install_lock_hook(
     helper_path: Option<&str>,
     hooks_base_dir: Option<&Path>,

@@ -57,6 +57,14 @@ Item {
     }
   }
 
+  onConfigChanged: {
+    if (loginEmailInput && authRoot.config && authRoot.config.email && authRoot.rememberEmailChecked) {
+      if (!loginEmailInput.text || loginEmailInput.text.trim() === "") {
+        loginEmailInput.text = authRoot.config.email
+      }
+    }
+  }
+
   Flickable {
     id: authFlickable
     anchors.fill: parent
@@ -276,7 +284,11 @@ Item {
                   id: loginEmailInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: loginPwdInput
+                  KeyNavigation.backtab: authRoot.show2FAField ? login2FAInput : loginPwdInput
                   text: (authRoot.config && authRoot.config.email) ? authRoot.config.email : ""
+                  onAccepted: loginPwdInput.forceActiveFocus()
                 }
               }
             }
@@ -291,6 +303,9 @@ Item {
                   id: loginPwdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: authRoot.show2FAField ? login2FAInput : loginEmailInput
+                  KeyNavigation.backtab: loginEmailInput
                   onAccepted: {
                     if (authRoot.show2FAField && !login2FAInput.text.trim()) {
                       login2FAInput.forceActiveFocus()
@@ -313,6 +328,9 @@ Item {
                   id: login2FAInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: loginEmailInput
+                  KeyNavigation.backtab: loginPwdInput
                   onAccepted: {
                     authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
                   }
@@ -363,7 +381,15 @@ Item {
               Text { text: "API Client ID (`user.xxxxxxxx`):"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientIdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
-                TextInput { id: apiClientIdInput; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true }
+                TextInput {
+                  id: apiClientIdInput
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: apiClientSecInput
+                  KeyNavigation.backtab: apiClientSecInput
+                  onAccepted: apiClientSecInput.forceActiveFocus()
+                }
               }
             }
 
@@ -373,7 +399,17 @@ Item {
               Text { text: "API Client Secret:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientSecInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
-                TextInput { id: apiClientSecInput; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true }
+                TextInput {
+                  id: apiClientSecInput
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: apiClientIdInput
+                  KeyNavigation.backtab: apiClientIdInput
+                  onAccepted: {
+                    authRoot.loginApiKeyRequested(apiClientIdInput.text.trim(), apiClientSecInput.text.trim())
+                  }
+                }
               }
             }
 

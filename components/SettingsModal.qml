@@ -24,6 +24,7 @@ Item {
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property color mutedForeground: Qt.darker(foreground, 1.8)
   property string fontFamily: ""
+  property bool checkUpdatesChecked: true
 
   Timer {
     id: latestTimer
@@ -47,6 +48,25 @@ Item {
   property string activeTab: "general" // "general" | "logs"
   property string logFilter: "all" // "all" | "error" | "warn"
   property string selectedLogLevel: (config && config.log_level) ? config.log_level.toLowerCase() : "error"
+  property bool showWebsiteIconsChecked: true
+
+  onConfigChanged: {
+    if (config && config.check_updates !== undefined) checkUpdatesChecked = (config.check_updates !== false)
+    if (config && config.show_website_icons !== undefined) showWebsiteIconsChecked = (config.show_website_icons !== false)
+  }
+
+  function buildPayload() {
+    return {
+      server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
+      identity_url: idUrlInput.text.trim(),
+      download_dir: dlDirInput.text.trim() || "~/Downloads",
+      auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
+      clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
+      log_level: settingsRoot.selectedLogLevel,
+      show_website_icons: settingsRoot.showWebsiteIconsChecked,
+      check_updates: settingsRoot.checkUpdatesChecked
+    }
+  }
 
   signal saveRequested(var newSettings)
   signal closeRequested()
@@ -448,6 +468,9 @@ Item {
               TextInput {
                 id: sUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: idUrlInput
+                KeyNavigation.backtab: clipSecInput
                 text: (settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "https://vault.bitwarden.com"
               }
             }
@@ -467,6 +490,9 @@ Item {
               TextInput {
                 id: idUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: dlDirInput
+                KeyNavigation.backtab: sUrlInput
                 text: (settingsRoot.config && settingsRoot.config.identity_url) ? settingsRoot.config.identity_url : ""
               }
               Text {
@@ -489,6 +515,9 @@ Item {
               TextInput {
                 id: dlDirInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                activeFocusOnTab: true
+                KeyNavigation.tab: lockMinInput
+                KeyNavigation.backtab: idUrlInput
                 text: (settingsRoot.config && settingsRoot.config.download_dir) ? settingsRoot.config.download_dir : "~/Downloads"
               }
             }
@@ -509,6 +538,9 @@ Item {
                 TextInput {
                   id: lockMinInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: clipSecInput
+                  KeyNavigation.backtab: dlDirInput
                   text: (settingsRoot.config && settingsRoot.config.auto_lock_minutes) ? String(settingsRoot.config.auto_lock_minutes) : "15"
                 }
               }
@@ -524,9 +556,41 @@ Item {
                 TextInput {
                   id: clipSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: sUrlInput
+                  KeyNavigation.backtab: lockMinInput
                   text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
                 }
               }
+            }
+          }
+
+          // Show Website Icons Checkbox
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.showWebsiteIconsChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.showWebsiteIconsChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.showWebsiteIconsChecked = !settingsRoot.showWebsiteIconsChecked }
+              }
+              Text { text: "Show website icons"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              text: "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              Layout.fillWidth: true
+              wrapMode: Text.WordWrap
             }
           }
 
@@ -566,6 +630,35 @@ Item {
                   }
                 }
               }
+            }
+          }
+
+          // Automatic Update Check Toggle
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.checkUpdatesChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
+              }
+              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              wrapMode: Text.WordWrap
             }
           }
         }
@@ -619,17 +712,7 @@ Item {
             MouseArea {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                var payload = {
-                  server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
-                  identity_url: idUrlInput.text.trim(),
-                  download_dir: dlDirInput.text.trim() || "~/Downloads",
-                  auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
-                  clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
-                  log_level: settingsRoot.selectedLogLevel
-                }
-                settingsRoot.saveRequested(payload)
-              }
+              onClicked: settingsRoot.saveRequested(settingsRoot.buildPayload())
             }
           }
         }

@@ -31,6 +31,19 @@ pub struct AttachmentResponse {
     pub size: Option<u64>,
 }
 
+/// Compares two URLs to verify they share the exact same origin (scheme, host, and port).
+/// Protects against bearer token leakage via prefix matching (e.g. `https://vault.example.com.attacker.com`).
+pub fn is_same_origin(u1_str: &str, u2_str: &str) -> bool {
+    match (url::Url::parse(u1_str), url::Url::parse(u2_str)) {
+        (Ok(u1), Ok(u2)) => {
+            u1.scheme() == u2.scheme()
+                && u1.host() == u2.host()
+                && u1.port_or_known_default() == u2.port_or_known_default()
+        }
+        _ => false,
+    }
+}
+
 pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path) {
     let t = title.to_string();
     let b = body.to_string();
@@ -68,6 +81,19 @@ pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path)
     });
 }
 
+/// Validates that a server-provided identifier is safe to use as a single
+/// path component. Rejects traversal sequences and separators so a malicious
+/// or compromised server cannot steer preview writes or cleanup deletes
+/// (`remove_dir_all`) outside the attachments directory.
+pub fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
+}
+
 pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
     let base = if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir)
@@ -81,10 +107,9 @@ pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
         PathBuf::from(format!("/tmp/omarchy-bitwarden-{}/attachments", uid))
     };
 
-    if let Some(id) = item_id {
-        base.join(id)
-    } else {
-        base
+    match item_id {
+        Some(id) if is_safe_path_component(id) => base.join(id),
+        _ => base,
     }
 }
 
@@ -92,6 +117,16 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     #[cfg(test)]
     if item_id.is_none() {
         return;
+    }
+
+    if let Some(id) = item_id {
+        if !is_safe_path_component(id) {
+            crate::log_warn!(
+                "omawarden:attachment",
+                "Refusing preview cleanup for unsafe item id"
+            );
+            return;
+        }
     }
 
     let dir = get_preview_dir(item_id);
@@ -135,6 +170,20 @@ pub fn get_attachment(
         };
     }
 
+    if !is_safe_path_component(item_id) || !is_safe_path_component(attachment_id) {
+        return AttachmentResponse {
+            ok: false,
+            error: Some("Item ID or Attachment ID contains invalid path characters.".to_string()),
+            path: None,
+            filename: None,
+            action: None,
+            is_image: None,
+            is_text: None,
+            text_content: None,
+            size: None,
+        };
+    }
+
     let cfg = ConfigManager::new(None).load();
     let storage_mgr = StorageManager::default();
     let storage = storage_mgr.load();
@@ -167,8 +216,8 @@ pub fn get_attachment(
 
     let initial_token = session_token
         .map(|s| s.to_string())
-        .or_else(|| keyring_mgr.get_token(crate::keyring::KIND_ACCESS_TOKEN))
-        .or_else(|| keyring_mgr.get_session())
+        .or_else(|| keyring_mgr.get_token(initial_server_url, crate::keyring::KIND_ACCESS_TOKEN))
+        .or_else(|| keyring_mgr.get_session(initial_server_url))
         .or_else(|| storage.access_token.clone());
 
     let token_val = match initial_token {
@@ -221,7 +270,13 @@ pub fn get_attachment(
         PathBuf::from(expanded)
     };
 
-    if let Err(e) = fs::create_dir_all(&target_dir) {
+    let dir_res = if open_file || preview {
+        crate::fs_util::create_secure_dir_all(&target_dir, 0o700)
+    } else {
+        fs::create_dir_all(&target_dir)
+    };
+
+    if let Err(e) = dir_res {
         return AttachmentResponse {
             ok: false,
             error: Some(format!("Failed to create target directory: {}", e)),
@@ -235,12 +290,6 @@ pub fn get_attachment(
         };
     }
 
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700));
-    }
-
     let dest_path = target_dir.join(&safe_filename);
 
     let preview_cached_path = get_preview_dir(Some(item_id)).join(&safe_filename);
@@ -249,6 +298,7 @@ pub fn get_attachment(
     if (!open_file && !preview) && preview_cached_path.is_file() {
         if preview_cached_path != dest_path {
             let _ = fs::copy(&preview_cached_path, &dest_path);
+            let _ = crate::fs_util::ensure_secure_permissions(&dest_path, 0o600);
         }
         if let Ok(cached_bytes) = fs::read(&dest_path) {
             if is_cached_file_valid(&dest_path, expected_size, &cached_bytes) {
@@ -400,7 +450,7 @@ pub fn get_attachment(
                         };
 
                     let mut req = client.get(&full_signed_url);
-                    if full_signed_url.starts_with(&env_urls.base_url)
+                    if is_same_origin(&full_signed_url, &env_urls.base_url)
                         && !full_signed_url.contains("token=")
                     {
                         req = req.header("Authorization", format!("Bearer {}", active_token));
@@ -653,11 +703,10 @@ pub fn get_attachment(
         };
     };
 
-    let temp_part_path = target_dir.join(format!("{}.part_{}", safe_filename, std::process::id()));
-    if let Err(e) = fs::write(&temp_part_path, &bytes) {
+    if let Err(e) = crate::fs_util::atomic_write_file(&dest_path, &bytes, 0o600) {
         return AttachmentResponse {
             ok: false,
-            error: Some(format!("Failed to write temporary file to disk: {}", e)),
+            error: Some(format!("Failed to write downloaded file: {}", e)),
             path: None,
             filename: None,
             action: None,
@@ -666,33 +715,6 @@ pub fn get_attachment(
             text_content: None,
             size: None,
         };
-    }
-
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&temp_part_path, fs::Permissions::from_mode(0o600));
-    }
-
-    if let Err(e) = fs::rename(&temp_part_path, &dest_path) {
-        let _ = fs::remove_file(&temp_part_path);
-        return AttachmentResponse {
-            ok: false,
-            error: Some(format!("Failed to finalize downloaded file: {}", e)),
-            path: None,
-            filename: None,
-            action: None,
-            is_image: None,
-            is_text: None,
-            text_content: None,
-            size: None,
-        };
-    }
-
-    #[cfg(unix)]
-    if open_file || preview {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600));
     }
 
     build_attachment_response(
@@ -722,12 +744,12 @@ fn attempt_attachment_token_refresh(
 
     // 1. Try refresh_token
     let refresh_token = keyring_mgr
-        .get_token(crate::keyring::KIND_REFRESH_TOKEN)
+        .get_token(server_url, crate::keyring::KIND_REFRESH_TOKEN)
         .or_else(|| storage.refresh_token.clone());
 
     if let Some(ref ref_tok) = refresh_token {
         if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
-            persist_attachment_tokens(storage_mgr, keyring_mgr, &tok_resp);
+            persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
             return Some(tok_resp.access_token);
         }
     }
@@ -736,7 +758,7 @@ fn attempt_attachment_token_refresh(
     if let Some(ref cid) = storage.client_id {
         if let Some(sec) = keyring_mgr.get_api_secret(server_url, cid) {
             if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
-                persist_attachment_tokens(storage_mgr, keyring_mgr, &tok_resp);
+                persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
                 return Some(tok_resp.access_token);
             }
         }
@@ -746,17 +768,27 @@ fn attempt_attachment_token_refresh(
 }
 
 fn persist_attachment_tokens(
+    server_url: &str,
     storage_mgr: &StorageManager,
     keyring_mgr: &KeyringManager,
     tok_resp: &crate::api::TokenResponse,
 ) {
     let mut fresh_st = storage_mgr.load();
+    let s_url = if !fresh_st.server_url.is_empty() {
+        fresh_st.server_url.as_str()
+    } else {
+        server_url
+    };
     if keyring_mgr.is_available() {
-        let s1 = keyring_mgr.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
+        let s1 = keyring_mgr.store_token(
+            s_url,
+            crate::keyring::KIND_ACCESS_TOKEN,
+            &tok_resp.access_token,
+        );
         let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
-            keyring_mgr.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+            keyring_mgr.store_token(s_url, crate::keyring::KIND_REFRESH_TOKEN, new_ref)
         } else {
-            keyring_mgr.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
+            keyring_mgr.clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
             true
         };
         if s1 && s2 {
@@ -1091,6 +1123,16 @@ mod tests {
             fs::read_to_string(&dest).unwrap(),
             "cached attachment secret content 12345"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&dest).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "Downloaded attachment must have 0600 permissions"
+            );
+        }
 
         // Cleanup
         let _ = fs::remove_file(&preview_file);
@@ -1209,5 +1251,83 @@ mod tests {
         clear_preview_attachments(Some("test_item_clear"));
         assert!(!preview_file.exists());
         assert!(!preview_dir.exists());
+    }
+
+    #[test]
+    fn test_unsafe_path_components_rejected() {
+        assert!(is_safe_path_component(
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        ));
+        assert!(!is_safe_path_component(""));
+        assert!(!is_safe_path_component("."));
+        assert!(!is_safe_path_component(".."));
+        assert!(!is_safe_path_component("../../home/user"));
+        assert!(!is_safe_path_component("/home/user/Documents"));
+        assert!(!is_safe_path_component("a\\b"));
+        assert!(!is_safe_path_component("a\0b"));
+
+        // A traversal item id must never escape the attachments base directory
+        let base = get_preview_dir(None);
+        assert_eq!(get_preview_dir(Some("/etc")), base);
+        assert_eq!(get_preview_dir(Some("../../escape")), base);
+
+        // Traversal ids are refused by get_attachment before any path is built
+        let res = get_attachment(
+            "../../escape",
+            "att1",
+            "file.txt",
+            None,
+            false,
+            false,
+            Some("tok"),
+            None,
+            false,
+        );
+        assert!(!res.ok);
+        assert_eq!(
+            res.error.unwrap(),
+            "Item ID or Attachment ID contains invalid path characters."
+        );
+
+        // Cleanup with a traversal id must be a no-op instead of remove_dir_all
+        let victim = tempfile::tempdir().unwrap();
+        let marker = victim.path().join("marker.txt");
+        fs::write(&marker, b"keep").unwrap();
+        clear_preview_attachments(Some(victim.path().to_str().unwrap()));
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn test_is_same_origin() {
+        let base = "https://vault.example.com";
+
+        // Same origin paths and subpaths
+        assert!(is_same_origin(
+            "https://vault.example.com/attachments/123",
+            base
+        ));
+        assert!(is_same_origin(
+            "https://vault.example.com/api/ciphers/abc/attachment/xyz",
+            base
+        ));
+
+        // Prefix match on different domain must FAIL (mitigates bearer token exfiltration)
+        assert!(!is_same_origin(
+            "https://vault.example.com.attacker.com/leak",
+            base
+        ));
+        assert!(!is_same_origin(
+            "https://vault.example.com-evil.org/download",
+            base
+        ));
+
+        // Different subdomain
+        assert!(!is_same_origin("https://evil.example.com", base));
+
+        // Different scheme
+        assert!(!is_same_origin("http://vault.example.com", base));
+
+        // Different port
+        assert!(!is_same_origin("https://vault.example.com:8443", base));
     }
 }

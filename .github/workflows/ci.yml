@@ -13,6 +13,8 @@ on:
       - refactor/*
     paths:
       - "omawarden/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches:
@@ -20,6 +22,8 @@ on:
       - develop
     paths:
       - "omawarden/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -32,6 +36,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -51,3 +60,6 @@ jobs:
 
       - name: Run test suite
         run: cargo test --all-targets
+
+      - name: Run downloader integration tests
+        run: python3 ../tests/test_downloader.py
