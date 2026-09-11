@@ -37,6 +37,8 @@ commit_preprocessors = [
 commit_parsers = [
   # 0. Commits to skip entirely
   { message = "^Merge pull request", skip = true },
+  { message = "^Merge branch", skip = true },
+  { message = ".*merge branch.*", skip = true },
   { message = "^\\[ImgBot\\]", skip = true },
   { message = "^bump", skip = true },
   { message = "^chore\\(release\\)", skip = true },
