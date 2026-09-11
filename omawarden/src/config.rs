@@ -11,6 +11,7 @@ pub const DEFAULT_EMAIL: &str = "";
 pub const DEFAULT_REMEMBER_EMAIL: bool = true;
 pub const DEFAULT_CHECK_UPDATES: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
+pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -32,6 +33,8 @@ pub struct Config {
     pub check_updates: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_show_website_icons")]
+    pub show_website_icons: bool,
 }
 
 fn default_server_url() -> String {
@@ -58,6 +61,9 @@ fn default_check_updates() -> bool {
 fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.to_string()
 }
+fn default_show_website_icons() -> bool {
+    DEFAULT_SHOW_WEBSITE_ICONS
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -71,6 +77,7 @@ impl Default for Config {
             remember_email: default_remember_email(),
             check_updates: default_check_updates(),
             log_level: default_log_level(),
+            show_website_icons: default_show_website_icons(),
         }
     }
 }
@@ -127,6 +134,32 @@ impl ConfigManager {
         crate::fs_util::atomic_write_str(&self.config_path, &content, 0o600)
     }
 
+    pub fn validate_url_scheme_security(url_str: &str, field_name: &str) -> std::io::Result<()> {
+        let trimmed = url_str.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let norm = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+            format!("https://{}", trimmed)
+        } else {
+            trimmed.to_string()
+        };
+
+        if let Ok(parsed) = url::Url::parse(&norm) {
+            let host = parsed.host_str().unwrap_or("");
+            if parsed.scheme() == "http" && !crate::api::is_loopback_host(host) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Insecure {} '{}': Plaintext HTTP is only permitted for local loopback addresses (localhost, 127.0.0.1, [::1]). Remote servers must use HTTPS.",
+                        field_name, trimmed
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn update_config(
         &self,
         options: ConfigUpdateOptions,
@@ -134,6 +167,13 @@ impl ConfigManager {
         keyring_mgr: &crate::keyring::KeyringManager,
     ) -> std::io::Result<(Config, bool)> {
         let mut cfg = self.load();
+
+        if let Some(ref v) = options.server_url {
+            Self::validate_url_scheme_security(v, "server_url")?;
+        }
+        if let Some(ref v) = options.identity_url {
+            Self::validate_url_scheme_security(v, "identity_url")?;
+        }
 
         let old_server_norm = cfg.server_url.trim().trim_end_matches('/');
         let server_changed = if let Some(ref new_url) = options.server_url {
@@ -202,6 +242,9 @@ impl ConfigManager {
         if let Some(v) = options.log_level {
             cfg.log_level = v.to_lowercase();
         }
+        if let Some(v) = options.show_website_icons {
+            cfg.show_website_icons = v;
+        }
 
         self.save(&cfg)?;
         Ok((cfg, server_changed))
@@ -219,6 +262,7 @@ pub struct ConfigUpdateOptions {
     pub remember_email: Option<bool>,
     pub check_updates: Option<bool>,
     pub log_level: Option<String>,
+    pub show_website_icons: Option<bool>,
 }
 
 #[cfg(test)]
@@ -553,5 +597,119 @@ esac
         let legacy_path = dir.path().join("legacy.json");
         fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
         assert!(ConfigManager::new(Some(&legacy_path)).load().check_updates);
+    }
+
+    #[test]
+    fn test_show_website_icons_default_and_update() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        assert!(Config::default().show_website_icons);
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    show_website_icons: Some(false),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert!(!updated_cfg.show_website_icons);
+
+        // Persisted to disk
+        let reloaded = ConfigManager::new(Some(&config_path)).load();
+        assert!(!reloaded.show_website_icons);
+
+        // Upgrade path: config written before the key existed must default to true
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        let legacy = ConfigManager::new(Some(&legacy_path)).load();
+        assert!(legacy.show_website_icons);
+    }
+
+    #[test]
+    fn test_validate_url_scheme_security() {
+        // Valid secure or loopback URLs
+        assert!(ConfigManager::validate_url_scheme_security(
+            "https://vault.bitwarden.com",
+            "server_url"
+        )
+        .is_ok());
+        assert!(ConfigManager::validate_url_scheme_security(
+            "https://vaultwarden.custom.corp",
+            "server_url"
+        )
+        .is_ok());
+        assert!(
+            ConfigManager::validate_url_scheme_security("http://localhost:8080", "server_url")
+                .is_ok()
+        );
+        assert!(
+            ConfigManager::validate_url_scheme_security("http://127.0.0.1:8080", "server_url")
+                .is_ok()
+        );
+        assert!(
+            ConfigManager::validate_url_scheme_security("http://[::1]:8080", "server_url").is_ok()
+        );
+        assert!(ConfigManager::validate_url_scheme_security(
+            "vaultwarden.custom.corp",
+            "server_url"
+        )
+        .is_ok());
+        assert!(ConfigManager::validate_url_scheme_security("", "server_url").is_ok());
+
+        // Insecure plaintext HTTP remote URLs rejected
+        let err = ConfigManager::validate_url_scheme_security(
+            "http://vaultwarden.custom.corp",
+            "server_url",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err
+            .to_string()
+            .contains("Plaintext HTTP is only permitted for local loopback"));
+
+        let err = ConfigManager::validate_url_scheme_security(
+            "http://192.168.1.100:8080",
+            "identity_url",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err
+            .to_string()
+            .contains("Plaintext HTTP is only permitted for local loopback"));
+    }
+
+    #[test]
+    fn test_update_config_rejects_insecure_remote_http() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let res = config_mgr.update_config(
+            ConfigUpdateOptions {
+                server_url: Some("http://vaultwarden.remote.corp".to_string()),
+                ..Default::default()
+            },
+            &storage_mgr,
+            &keyring_mgr,
+        );
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Remote servers must use HTTPS"));
     }
 }

@@ -129,6 +129,8 @@ pub struct AuthResult {
     pub ok: bool,
     pub status: Option<String>,
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_required: Option<bool>,
@@ -361,6 +363,7 @@ impl AuthManager {
                 error: Some(err_msg.to_string()),
                 two_factor_required: None,
                 two_factor_providers: None,
+                ..Default::default()
             };
         }
         let client =
@@ -383,6 +386,7 @@ impl AuthManager {
                     error: Some("Two-factor authentication required or invalid code.".to_string()),
                     two_factor_required: Some(true),
                     two_factor_providers: Some(providers),
+                    ..Default::default()
                 };
             }
             Err(e) => {
@@ -398,6 +402,7 @@ impl AuthManager {
                     error: Some(err_msg),
                     two_factor_required: if is_2fa { Some(true) } else { None },
                     two_factor_providers: None,
+                    ..Default::default()
                 };
             }
         };
@@ -423,6 +428,7 @@ impl AuthManager {
                 error: Some(err_msg.to_string()),
                 two_factor_required: None,
                 two_factor_providers: None,
+                ..Default::default()
             };
         }
 
@@ -439,6 +445,7 @@ impl AuthManager {
                 error: Some(err_msg.to_string()),
                 two_factor_required: None,
                 two_factor_providers: None,
+                ..Default::default()
             };
         }
 
@@ -454,6 +461,7 @@ impl AuthManager {
                     error: Some(err_msg.to_string()),
                     two_factor_required: None,
                     two_factor_providers: None,
+                    ..Default::default()
                 };
             }
         }
@@ -499,10 +507,21 @@ impl AuthManager {
 
         // Auto-unlock daemon with decrypted items in memory
         crate::daemon::ensure_daemon_running();
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+        let daemon_resp = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "unlock",
             "password": password
         }));
+
+        let daemon_token = daemon_resp
+            .as_ref()
+            .and_then(|v| v.get("session_token"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let effective_session = daemon_token.or(Some(token_resp.access_token));
+        if let Some(ref tok) = effective_session {
+            std::env::set_var("OMAWARDEN_SESSION", tok);
+        }
 
         crate::log_info!(
             "omawarden:auth",
@@ -514,7 +533,8 @@ impl AuthManager {
         AuthResult {
             ok: true,
             status: Some("unlocked".to_string()),
-            session: Some(token_resp.access_token),
+            session: effective_session.clone(),
+            session_token: effective_session,
             ..Default::default()
         }
     }
@@ -762,7 +782,8 @@ impl AuthManager {
                 AuthResult {
                     ok: true,
                     status: Some("unlocked".to_string()),
-                    session: effective_session,
+                    session: effective_session.clone(),
+                    session_token: effective_session,
                     ..Default::default()
                 }
             }
@@ -2050,5 +2071,220 @@ esac
         }
 
         let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_propagates_daemon_session_token() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        use crate::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+
+        let email = "daemon_test@example.com";
+        let password = "password123";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [3u8; 16];
+        let plaintext = [4u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let enc_user_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", http_port);
+
+        let key_clone = enc_user_key.clone();
+        let http_handle = thread::spawn(move || {
+            for mut stream in http_listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = format!(
+                        r#"{{"access_token":"remote_jwt_access_token_123","token_type":"Bearer","Key":"{}"}}"#,
+                        key_clone
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"profile":{"id":"user-99","email":"daemon_test@example.com"},"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let runtime_dir = dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let old_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
+        let socket_path = runtime_dir.join("omawarden.sock");
+
+        let unix_listener = UnixListener::bind(&socket_path).unwrap();
+        let stop_daemon = Arc::new(AtomicBool::new(false));
+        let stop_daemon_clone = stop_daemon.clone();
+
+        let daemon_handle = thread::spawn(move || {
+            unix_listener.set_nonblocking(true).unwrap();
+            while !stop_daemon_clone.load(Ordering::Relaxed) {
+                match unix_listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                                let resp = match action {
+                                    "ping" => {
+                                        serde_json::json!({ "ok": true, "commit": env!("GIT_HASH") })
+                                    }
+                                    "unlock" => serde_json::json!({
+                                        "ok": true,
+                                        "status": "unlocked",
+                                        "session_token": "daemon-ephemeral-token-xyz-123"
+                                    }),
+                                    "sync" => {
+                                        let cand = v
+                                            .get("session_token")
+                                            .or_else(|| v.get("session"))
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("");
+                                        if cand == "daemon-ephemeral-token-xyz-123" {
+                                            serde_json::json!({ "ok": true, "ciphers_count": 0 })
+                                        } else {
+                                            serde_json::json!({ "ok": false, "error": "Unauthorized: valid session token required" })
+                                        }
+                                    }
+                                    _ => {
+                                        serde_json::json!({ "ok": false, "error": "unknown action" })
+                                    }
+                                };
+                                let _ = writeln!(stream, "{}", resp);
+                            }
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let storage_path = dir.path().join("daemon_test_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+        let config_path = dir.path().join("config.json");
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let mock_keyring = create_test_mock_keyring(dir.path());
+
+        let auth_mgr = AuthManager::with_config(
+            &server_url,
+            None,
+            Some(storage_mgr),
+            Some(mock_keyring),
+            Some(config_mgr),
+        );
+
+        let res = auth_mgr.login_password(email, password, None);
+        assert!(res.ok, "Login should succeed: {:?}", res.error);
+
+        // Crucial invariant: res.session must be the DAEMON session token, not the remote OAuth JWT!
+        assert_eq!(
+            res.session.as_deref(),
+            Some("daemon-ephemeral-token-xyz-123"),
+            "res.session must be populated with daemon session token"
+        );
+        assert_eq!(
+            res.session_token.as_deref(),
+            Some("daemon-ephemeral-token-xyz-123"),
+            "res.session_token must be populated with daemon session token"
+        );
+        assert_eq!(
+            std::env::var("OMAWARDEN_SESSION").ok().as_deref(),
+            Some("daemon-ephemeral-token-xyz-123"),
+            "OMAWARDEN_SESSION must be exported with daemon session token"
+        );
+
+        // Privileged sync request using the exported session succeeds
+        let sync_ok =
+            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "sync" })).unwrap();
+        assert_eq!(sync_ok.get("ok"), Some(&serde_json::Value::Bool(true)));
+
+        // Privileged sync request using the remote OAuth JWT fails with the exact symptom the user observed
+        let sync_fail = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "sync",
+            "session_token": "remote_jwt_access_token_123"
+        }))
+        .unwrap();
+        assert_eq!(sync_fail.get("ok"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            sync_fail.get("error").and_then(|e| e.as_str()),
+            Some("Unauthorized: valid session token required")
+        );
+
+        stop_daemon.store(true, Ordering::Relaxed);
+        let _ = daemon_handle.join();
+        let _ = http_handle.join();
+
+        if let Some(prev) = old_xdg {
+            std::env::set_var("XDG_RUNTIME_DIR", prev);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
     }
 }

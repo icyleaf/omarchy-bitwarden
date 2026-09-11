@@ -92,6 +92,26 @@ enum Commands {
         public_key: bool,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: clear clipboard after specified seconds"
+        )]
+        clear_after: Option<u64>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: expected clipboard generation"
+        )]
+        expected_gen: Option<u64>,
+        #[arg(long, hide = true, help = "Internal worker: wl-copy binary path")]
+        wl_copy_path: Option<String>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Internal worker: custom generation file path"
+        )]
+        gen_path: Option<std::path::PathBuf>,
     },
     #[command(
         about = "Generate TOTP verification code from vault item ID/name, secret, or otpauth URI"
@@ -156,6 +176,8 @@ enum ConfigAction {
         check_updates: Option<String>,
         #[arg(long)]
         log_level: Option<String>,
+        #[arg(long)]
+        show_website_icons: Option<String>,
     },
 }
 
@@ -415,6 +437,7 @@ fn main() -> ExitCode {
                         "remember_email" => println!("{}", cfg.remember_email),
                         "check_updates" => println!("{}", cfg.check_updates),
                         "log_level" => println!("{}", cfg.log_level),
+                        "show_website_icons" => println!("{}", cfg.show_website_icons),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -435,6 +458,7 @@ fn main() -> ExitCode {
                 remember_email,
                 check_updates,
                 log_level,
+                show_website_icons,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -459,6 +483,11 @@ fn main() -> ExitCode {
                     matches!(lower.as_str(), "true" | "1" | "yes")
                 });
 
+                let parsed_show_website_icons = show_website_icons.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
                 let options = ConfigUpdateOptions {
                     server_url,
                     identity_url,
@@ -469,6 +498,7 @@ fn main() -> ExitCode {
                     remember_email: parsed_remember_email,
                     check_updates: parsed_check_updates,
                     log_level,
+                    show_website_icons: parsed_show_website_icons,
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -572,6 +602,14 @@ fn main() -> ExitCode {
                     let effective_code = code.or(stdin_code);
                     let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
                     if res.ok {
+                        if let Some(ref tok) = res.session {
+                            std::env::set_var("OMAWARDEN_SESSION", tok);
+                            if io::stdout().is_terminal() {
+                                eprintln!("\nLogged in and vault unlocked successfully.");
+                                eprintln!("To set your session in this shell, run:");
+                                eprintln!("  export OMAWARDEN_SESSION=\"{}\"", tok);
+                            }
+                        }
                         if let Some(ref rem) = remember_email {
                             let should_remember =
                                 matches!(rem.to_lowercase().as_str(), "true" | "1" | "yes");
@@ -819,7 +857,27 @@ fn main() -> ExitCode {
             private_key,
             public_key,
             timeout,
+            clear_after,
+            expected_gen,
+            wl_copy_path,
+            gen_path,
         } => {
+            if let Some(secs) = clear_after {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                let copy_path = wl_copy_path.as_deref().unwrap_or("wl-copy");
+                let mut mgr = ClipboardManager::new(copy_path).without_detached_worker();
+                if let Some(p) = gen_path {
+                    mgr = mgr.with_generation_path(p.clone());
+                }
+                if let Some(exp) = expected_gen {
+                    if mgr.current_generation() != exp {
+                        return ExitCode::SUCCESS;
+                    }
+                }
+                mgr.clear();
+                return ExitCode::SUCCESS;
+            }
+
             let clip_mgr = ClipboardManager::default();
             if !clip_mgr.is_available() {
                 println!(
@@ -1879,6 +1937,52 @@ mod tests {
             Commands::Config {
                 action: ConfigAction::Set { check_updates, .. },
             } => assert_eq!(check_updates.as_deref(), Some("true")),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+    }
+
+    #[test]
+    fn test_cli_show_website_icons_arg_parsing() {
+        // Without the flag, show_website_icons should be None so config keeps its value
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_false = Cli::try_parse_from([
+            "omawarden",
+            "config",
+            "set",
+            "--show-website-icons",
+            "false",
+        ])
+        .unwrap();
+        match cli_false.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("false".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_true =
+            Cli::try_parse_from(["omawarden", "config", "set", "--show-website-icons", "true"])
+                .unwrap();
+        match cli_true.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        show_website_icons, ..
+                    },
+            } => assert_eq!(show_website_icons, Some("true".to_string())),
             _ => panic!("Expected Commands::Config with ConfigAction::Set"),
         }
     }

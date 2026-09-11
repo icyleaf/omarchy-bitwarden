@@ -3,17 +3,33 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-pub const PAGE_SIZE: usize = 4096;
+/// OS page size resolved at runtime. Hardcoding 4096 is wrong on 16K/64K-page
+/// kernels (common on aarch64): allocations from different keys could share
+/// one real page, and `munlock` on a dropped key would unlock its neighbors.
+pub fn page_size() -> usize {
+    static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let ret = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if ret > 0 {
+                return ret as usize;
+            }
+        }
+        4096
+    })
+}
 
 static MLOCK_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Page-aligned, mlocked memory container for sensitive cryptographic secrets.
 ///
 /// Ensures:
-/// 1. Page-aligned allocation (4096 bytes) to eliminate mlock/munlock cross-key race conditions.
+/// 1. Page-aligned allocation (one OS page) to eliminate mlock/munlock cross-key race conditions.
 /// 2. Physical RAM locking via `libc::mlock` to prevent swapping to disk.
 /// 3. Secure zeroization (`Zeroize`) of the entire allocated page prior to deallocation.
 /// 4. Disables debug printing of raw secret bytes.
@@ -31,24 +47,25 @@ pub type LockedKey64 = LockedMemory<64>;
 
 impl<const N: usize> LockedMemory<N> {
     pub fn new_zeroed() -> Self {
+        let page = page_size();
         assert!(
-            N <= PAGE_SIZE,
-            "LockedMemory payload must fit in PAGE_SIZE ({PAGE_SIZE} bytes)"
+            N <= page,
+            "LockedMemory payload must fit in one OS page ({page} bytes)"
         );
-        let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE)
-            .expect("Invalid page layout for LockedMemory");
+        let layout =
+            Layout::from_size_align(page, page).expect("Invalid page layout for LockedMemory");
         let raw_ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(raw_ptr).expect("Memory allocation failed for LockedMemory");
 
         // Zero out the freshly allocated page
         unsafe {
-            std::slice::from_raw_parts_mut(ptr.as_ptr(), PAGE_SIZE).zeroize();
+            std::slice::from_raw_parts_mut(ptr.as_ptr(), page).zeroize();
         }
 
         let mut is_locked = false;
         #[cfg(unix)]
         {
-            let ret = unsafe { libc::mlock(ptr.as_ptr() as *const libc::c_void, PAGE_SIZE) };
+            let ret = unsafe { libc::mlock(ptr.as_ptr() as *const libc::c_void, page) };
             if ret == 0 {
                 is_locked = true;
             } else if !MLOCK_WARNED.swap(true, Ordering::Relaxed) {
@@ -208,10 +225,11 @@ mod tests {
     fn test_locked_memory_allocation_and_alignment() {
         let key = LockedKey32::new_zeroed();
         let addr = key.ptr.as_ptr() as usize;
+        let page = page_size();
         assert_eq!(
-            addr % PAGE_SIZE,
+            addr % page,
             0,
-            "Memory buffer must be page-aligned to {PAGE_SIZE} bytes"
+            "Memory buffer must be page-aligned to {page} bytes"
         );
         assert_eq!(key.as_slice(), &[0u8; 32]);
     }
