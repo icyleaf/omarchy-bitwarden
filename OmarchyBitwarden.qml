@@ -90,7 +90,6 @@ Item {
     user_email: "",
     has_session: false
   })
-  property string sessionToken: ""
 
   // Vault Items & Search State
   property var rawVaultItems: []
@@ -200,7 +199,6 @@ Item {
 
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
-    root.sessionToken = ""
 
     if (authViewComponent && typeof authViewComponent.clearInputs === "function") {
       authViewComponent.clearInputs()
@@ -2128,7 +2126,6 @@ Item {
     property string actionType: "create"
     property string actionName: ""
     command: []
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -2460,7 +2457,6 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
-            root.sessionToken = (data && (data.session_token || data.session)) || ""
             root.statusMessage = "Vault unlocked successfully."
             root.searchQuery = ""
             if (authViewComponent) authViewComponent.clearInputs()
@@ -2511,9 +2507,6 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
-            if (data.session_token || data.session) {
-              root.sessionToken = data.session_token || data.session || ""
-            }
             var statusVal = data.status || "unlocked"
             if (statusVal === "locked") {
               root.statusMessage = "API Key authenticated. Please enter Master Password to unlock."
@@ -2632,7 +2625,6 @@ Item {
   Process {
     id: vaultSyncProc
     command: []
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -2688,7 +2680,6 @@ Item {
   Process {
     id: vaultListProc
     command: []
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -2747,7 +2738,6 @@ Item {
     id: clipCopyProc
     property string secret: ""
     stdinEnabled: true
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     onStarted: {
       if (secret) {
         write(secret + "\n")
@@ -2765,7 +2755,6 @@ Item {
     id: totpGenProc
     property string secret: ""
     stdinEnabled: true
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     onStarted: {
       if (secret) {
         write(secret + "\n")
@@ -2811,7 +2800,6 @@ Item {
     property string activeAttachmentId: ""
     property string activeItemId: ""
     command: []
-    environment: root.sessionToken ? ({ "OMAWARDEN_SESSION": root.sessionToken }) : ({})
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

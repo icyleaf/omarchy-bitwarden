@@ -20,9 +20,9 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 6. IPC SO_PEERCRED Auth      │ Verify caller UID on all socket requests     │
 │ 7. Memory Locking (mlock)    │ Page-aligned physical RAM lock & no coredump │
 │ 8. Authenticated Encryption  │ Encrypt-then-MAC mandatory; no unauth cipher │
-│ 9. Ephemeral Session Token   │ Same-user socket authorization & max watchdog│
+│ 9. Max Lifetime Watchdog     │ Enforce hard ceiling on unlocked daemon state │
 │ 10. Keyring Server Isolation │ Access/refresh tokens isolated by server_url │
-│ 11. Zero-Argv Principle      │ Credentials & tokens NEVER passed via argv   │
+│ 11. Zero-Argv & Zero-Environ │ Credentials NEVER in process argv or environ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -189,29 +189,24 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-### Rule 9: Ephemeral Session Token Authorization & Max Lifetime Watchdog for Local IPC Daemon
+### Rule 9: Max Lifetime Watchdog & Peer Credential Access Control for Local IPC Daemon
 
-**Principle**: `SO_PEERCRED` establishes caller user identity (preventing cross-user attacks on multi-user systems), but does NOT protect against unauthorized processes running under the *same UID* from connecting to `/run/user/<uid>/omawarden.sock` and dumping decrypted secrets or executing privileged commands without user consent.
+**Principle**: The background daemon relies on operating system process boundary isolation (`0600` socket permissions with mutual `SO_PEERCRED` caller UID verification) rather than complex ephemeral token handshakes over environment variables. Ephemeral tokens passed via environment variables (`BW_SESSION`, `OMAWARDEN_SESSION`) violate the Zero-Environ principle and expose secrets to `/proc/<pid>/environ`. Protection against unauthorized access is maintained through OS socket permissions, mutual peer credential verification, active session watchdogs, and an absolute maximum session lifetime.
 
 - ❌ **Anti-Pattern**:
-  - Exposing an unrestricted "same-user zero-auth vault API" where any process running as the current UID can execute `{"action": "list"}` or `{"action": "search"}` to dump all decrypted passwords, TOTP seeds, cards, notes, and SSH keys.
+  - Re-introducing environment variables (`BW_SESSION`, `OMAWARDEN_SESSION`) to pass tokens between UI and CLI processes.
   - Allowing unauthenticated connections (e.g. rogue scripts polling `ping` or `status`) to touch daemon activity, preventing idle auto-lock indefinitely.
-  - Allowing unauthenticated processes to terminate the unlocked daemon via `{"action": "stop"}`.
   - Allowing indefinite vault unlock without an absolute maximum session lifetime limit.
 - ✅ **Required Pattern**:
-  - **Cryptographic Ephemeral Session Token**: Upon `unlock`, the daemon generates a cryptographically random, high-entropy 256-bit ephemeral session token (`session_token`) using `rand_core::OsRng` encoded in URL-safe base64.
-  - **Privileged Action Protection**: All privileged operations (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `ssh_key_create`, `sync`, `totp` with query, and `stop` or `set_auto_lock` when unlocked) strictly require a valid `session_token`.
-  - **Constant-Time Verification**: Session token validation MUST use constant-time byte comparison (`subtle::ConstantTimeEq`).
-  - **No Keep-Alive Leakage**: Unauthenticated requests (or requests failing token verification) are rejected immediately and MUST NOT touch activity (even if `touch: true` is passed); they cannot bypass idle auto-lock.
-  - **Absolute Maximum Lifetime Watchdog**: Implement a hard ceiling (`max_session_lifetime`, default 12 hours) from `unlocked_at`. The daemon locks the vault when this limit elapses, regardless of continuous user activity.
-  - **Safe Environment Passing**: Pass the session token to child processes via process environment (`QProcessEnvironment` in QML / `OMAWARDEN_SESSION` in CLI), NEVER via command-line arguments (which are readable via `/proc/<pid>/cmdline`).
-  - **Immediate Zeroization**: The session token resides in `Zeroizing<String>` memory and is scrubbed immediately upon `lock`, `stop`, or timeout.
+  - **Mutual Peer Verification**: Both server and client perform kernel-level `SO_PEERCRED` UID checks on `/run/user/<uid>/omawarden.sock` (mode `0600`).
+  - **No Keep-Alive Leakage**: Background polling (`ping`, `status` without explicit `touch: true`) MUST NOT touch daemon activity; only genuine user actions (`search`, `list`, `sync`, `copy`, `totp`) refresh the idle timer.
+  - **Absolute Maximum Lifetime Watchdog**: Enforce a hard ceiling (`max_session_lifetime`, default 12 hours) from `unlocked_at`. The daemon locks the vault when this limit elapses, regardless of continuous user activity.
+  - **Zero-Environ & Zero-Argv Compliance**: No session tokens, credentials, or 2FA codes are ever exported to `std::env` or passed via CLI flags.
 - 🧪 **Mandatory Verification**:
   Unit tests must assert that:
-  1. Privileged actions (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `sync`, `totp` with query, `stop`, `set_auto_lock`) without a session token or with an invalid token return `Unauthorized`.
-  2. Unauthenticated requests do NOT touch activity (including `ping`/`status` with explicit `touch: true`).
-  3. `lock()` clears the session token and invalidates subsequent privileged calls.
-  4. `check_auto_lock()` triggers when `max_session_lifetime` is exceeded even if `last_activity` is recent.
+  1. Privileged actions (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `sync`, `totp`) fail when the vault is locked.
+  2. Background `ping` and `status` requests do not touch activity.
+  3. `check_auto_lock()` triggers when `max_session_lifetime` is exceeded even if `last_activity` is recent.
 
 ---
 
@@ -236,19 +231,20 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-### Rule 11: Zero-Argv Principle for Sensitive Credentials
+### Rule 11: Zero-Argv & Zero-Environ Principle for Sensitive Credentials
 
-**Principle**: Master passwords, session tokens, TOTP secrets, two-factor authentication (2FA) verification codes, and private keys MUST NEVER be accepted or passed as command-line arguments (`argv`). On Linux, command-line arguments are globally readable by any process running under the same user UID via `/proc/<pid>/cmdline` and process listings (`ps`, `top`, audit logs).
+**Principle**: Master passwords, session tokens, TOTP secrets, two-factor authentication (2FA) verification codes, and private keys MUST NEVER be accepted or passed as command-line arguments (`argv`) OR environment variables (`environ`). On Linux, command-line arguments are globally readable via `/proc/<pid>/cmdline`, and environment variables are readable via `/proc/<pid>/environ` by any process running under the same user UID.
 
 - ❌ **Anti-Pattern**:
   - Providing flags like `--session <token>`, `--secret <base32/uri>`, or `--code <2fa_code>` on the CLI.
   - Allowing raw `otpauth://` URIs or plaintext secrets as positional CLI arguments (e.g. `omawarden totp otpauth://totp/...`).
+  - Reading credentials or session tokens from environment variables (`BW_SESSION`, `OMAWARDEN_SESSION`, `BW_2FA_CODE`, `OMAWARDEN_2FA_CODE`).
   - Relying on command-line argument masking, which contains unavoidable kernel-level race conditions before the process mutates its `argv`.
 - ✅ **Required Pattern**:
   - **Standard Input**: Pass secrets via standard input piping (`--stdin` flag reading JSON payloads or raw strings).
-  - **Environment Variables**: Read credentials from process environment variables (`OMAWARDEN_SESSION` / `BW_SESSION`, `OMAWARDEN_2FA_CODE` / `BW_2FA_CODE`). Child processes spawned by the UI (Quickshell) inject tokens securely into `QProcessEnvironment`.
   - **Secure Terminal Prompting**: For interactive terminal logins, prompt using non-echoing terminal readers (`rpassword::prompt_password`).
   - **Fail-Closed Parser Rejection**: The CLI parser MUST fail with an error if sensitive flags are supplied, preventing inadvertent cleartext leakage into process lists.
+  - **Zero Environment Credential Residue**: The CLI and daemon must never read or set credentials or session tokens in process environment variables.
 - 🧪 **Mandatory Verification**:
   Unit tests must assert that:
   1. `Cli::try_parse_from` rejects `--session`, `--secret`, and `--code` CLI arguments with parse errors.
@@ -263,13 +259,13 @@ Before submitting any code changes touching authentication, crypto, networking, 
 
 ```markdown
 - [ ] No tokens, secrets, or master passwords are written to disk or logs.
-- [ ] Zero-Argv principle enforced: no tokens, secrets, or 2FA codes accepted via CLI argv.
+- [ ] Zero-Argv & Zero-Environ principle enforced: no tokens, secrets, or 2FA codes in argv or environ.
 - [ ] Keyring failures fail-closed (no fallback to plaintext files).
 - [ ] All Keyring tokens and secrets are strictly scoped to normalized server_url.
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
 - [ ] Sockets enforce mutual peer UID (SO_PEERCRED) verification and validate paths/symlinks.
-- [ ] Daemon privileged actions require ephemeral session token verified in constant time.
+- [ ] Daemon privileged actions require unlocked vault and verify caller credentials via SO_PEERCRED.
 - [ ] Master keys and cryptographic keys use page-aligned physical memory locks (LockedKey32 / mlock).
 - [ ] Symmetric decryption strictly requires and verifies HMAC-SHA256 (no unauthenticated fallback).
 - [ ] Process anti-dump protection (PR_SET_DUMPABLE = 0) is active.

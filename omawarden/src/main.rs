@@ -380,9 +380,6 @@ fn main() -> ExitCode {
     let _ = omawarden::locked::disable_dumpable();
 
     let cli = Cli::parse();
-    if let Ok(sess) = std::env::var("OMAWARDEN_SESSION").or_else(|_| std::env::var("BW_SESSION")) {
-        std::env::set_var("OMAWARDEN_SESSION", sess);
-    }
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();
 
@@ -584,10 +581,7 @@ fn main() -> ExitCode {
                     } else {
                         read_auth_payload()
                     };
-                    let env_code = std::env::var("OMAWARDEN_2FA_CODE")
-                        .or_else(|_| std::env::var("BW_2FA_CODE"))
-                        .ok();
-                    let mut effective_code = stdin_code.or(env_code);
+                    let mut effective_code = stdin_code;
                     let mut res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
                     if !res.ok
                         && res.two_factor_required == Some(true)
@@ -603,14 +597,6 @@ fn main() -> ExitCode {
                         }
                     }
                     if res.ok {
-                        if let Some(ref tok) = res.session {
-                            std::env::set_var("OMAWARDEN_SESSION", tok);
-                            if io::stdout().is_terminal() {
-                                eprintln!("\nLogged in and vault unlocked successfully.");
-                                eprintln!("To set your session in this shell, run:");
-                                eprintln!("  export OMAWARDEN_SESSION=\"{}\"", tok);
-                            }
-                        }
                         if let Some(ref rem) = remember_email {
                             let should_remember =
                                 matches!(rem.to_lowercase().as_str(), "true" | "1" | "yes");
@@ -662,26 +648,16 @@ fn main() -> ExitCode {
                     };
                     omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     if res.ok {
-                        if let Some(ref tok) = res.session {
-                            std::env::set_var("OMAWARDEN_SESSION", tok);
-                            if io::stdout().is_terminal() {
-                                eprintln!("\nVault unlocked successfully.");
-                                eprintln!("To set your session in this shell, run:");
-                                eprintln!("  export OMAWARDEN_SESSION=\"{}\"", tok);
-                            }
-                        }
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
                         ExitCode::SUCCESS
                     } else {
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
                         ExitCode::FAILURE
                     }
                 }
                 AuthAction::Lock => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.lock();
-                    std::env::remove_var("OMAWARDEN_SESSION");
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     ExitCode::SUCCESS
                 }

@@ -1,7 +1,7 @@
 # ADR 0010: Daemon Ephemeral Session Token and Access Control Architecture
 
 ## Status
-Accepted
+Superseded (Reverted to pure ADR 0003 resident daemon architecture with 0600 socket + SO_PEERCRED peer credential model and max lifetime watchdog; ephemeral session token mechanism and environment variable propagation (`OMAWARDEN_SESSION` / `BW_SESSION`) completely eliminated to uphold Zero-Environ + Zero-Argv principles).
 
 ## Context
 
@@ -62,23 +62,20 @@ We introduce an **Ephemeral Session Token Authorization** and **Max Session Life
 - An absolute maximum session lifetime (default 12 hours) is enforced in `check_auto_lock()`.
 - When elapsed, the daemon locks the vault and purges all decrypted keys and session tokens, even if continuous user activity has kept the idle timer fresh.
 
-### 5. Secure Token Propagation (Zero Process Argv Leaks)
-- In the Quickshell UI (`OmarchyBitwarden.qml`), the session token received from the `unlock` response is retained in the root component state.
-- When launching child `Process` blocks (`vaultSyncProc`, `vaultListProc`, `clipCopyProc`, `totpGenProc`, `attachmentProc`, `sshKeyActionProc`), the token is injected into the child process environment via `environment: ({ "OMAWARDEN_SESSION": root.sessionToken })`.
-- This ensures tokens are strictly in-memory and **never passed via CLI command-line arguments**, preventing leakage to `/proc/<pid>/cmdline`.
-- In `omawarden` CLI, commands read `OMAWARDEN_SESSION` or `BW_SESSION` from the environment and automatically inject it into daemon requests. Passing `--session` on CLI is explicitly forbidden under the Zero-Argv security policy.
+### 5. Return to Pure Socket Access Control (Zero-Environ + Zero-Argv)
+- In the initial iteration of ADR 0010, `OMAWARDEN_SESSION` was passed via process environment.
+- However, Linux `/proc/<pid>/environ` exposes environment variables to any process running as the same UID, re-introducing the very vulnerability and cognitive dissonance that ADR 0001 and ADR 0003 sought to eliminate.
+- Consequently, all ephemeral session token mechanisms, CLI session parameters, and environment variable lookups (`BW_SESSION`, `OMAWARDEN_SESSION`, `BW_2FA_CODE`, `OMAWARDEN_2FA_CODE`) have been completely purged from the codebase.
+- Daemon access is strictly governed by local Unix socket file permissions (`0600`), kernel-enforced `SO_PEERCRED` caller UID verification, and the auto-lock watchdog (idle timeout + max session lifetime).
 
 ---
 
 ## Consequences
 
 ### Positive
-- **Complete Same-UID Isolation**: Rogue or unvetted scripts running as the same user can no longer dump decrypted vault items or steal credentials from the daemon.
-- **Auto-Lock Invariant Guaranteed**: Unauthenticated requests cannot refresh the idle watchdog.
-- **Hard Ceiling on Unlocked State**: 12-hour max lifetime enforces periodic re-authentication even on unattended systems with simulated mouse/keyboard activity.
-- **Zero Disk or Argv Leakage**: Ephemeral tokens stay in process RAM and environment variables, never entering `argv` or disk, and are zeroized upon lock.
+- **True Zero-Argv & Zero-Environ**: Zero credentials, tokens, or 2FA codes are ever exposed in `/proc/<pid>/cmdline` or `/proc/<pid>/environ`.
+- **Pure Local Architecture**: Quickshell and CLI interact directly with `/run/user/<uid>/omawarden.sock` without managing or propagating ephemeral tokens.
+- **Auto-Lock Invariant Guaranteed**: Background pings cannot refresh the idle watchdog.
+- **Hard Ceiling on Unlocked State**: 12-hour max session lifetime enforces periodic re-authentication.
 
-### Trade-offs & Operational Impact
-- External shell scripts interacting with the daemon must export `OMAWARDEN_SESSION` upon `omawarden auth unlock` (e.g. `export OMAWARDEN_SESSION="..."`). CLI flags like `--session` are not permitted.
-- The CLI outputs a shell export snippet (`export OMAWARDEN_SESSION="..."`) when `omawarden auth unlock` is run in an interactive terminal.
 

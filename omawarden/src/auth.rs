@@ -518,21 +518,10 @@ impl AuthManager {
 
         // Auto-unlock daemon with decrypted items in memory
         crate::daemon::ensure_daemon_running();
-        let daemon_resp = crate::daemon::send_daemon_request(&serde_json::json!({
+        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "unlock",
             "password": password
         }));
-
-        let daemon_token = daemon_resp
-            .as_ref()
-            .and_then(|v| v.get("session_token"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let effective_session = daemon_token.or(Some(token_resp.access_token));
-        if let Some(ref tok) = effective_session {
-            std::env::set_var("OMAWARDEN_SESSION", tok);
-        }
 
         crate::log_info!(
             "omawarden:auth",
@@ -544,8 +533,6 @@ impl AuthManager {
         AuthResult {
             ok: true,
             status: Some("unlocked".to_string()),
-            session: effective_session.clone(),
-            session_token: effective_session,
             ..Default::default()
         }
     }
@@ -771,41 +758,25 @@ impl AuthManager {
                     .or_else(|| self.keyring_mgr.get_session(s_url))
                     .or_else(|| storage.access_token.clone());
 
-                let session_val = if let Some(ref token) = token_opt {
+                if let Some(ref token) = token_opt {
                     if token != "session_unlocked" && !token.is_empty() {
                         self.keyring_mgr
                             .store_token(s_url, KIND_ACCESS_TOKEN, token);
                     }
-                    Some(token.clone())
-                } else {
-                    None
-                };
+                }
 
                 // Auto-unlock daemon with decrypted items in memory
                 crate::daemon::ensure_daemon_running();
-                let daemon_resp = crate::daemon::send_daemon_request(&serde_json::json!({
+                let _ = crate::daemon::send_daemon_request(&serde_json::json!({
                     "action": "unlock",
                     "password": password
                 }));
-
-                let daemon_token = daemon_resp
-                    .as_ref()
-                    .and_then(|v| v.get("session_token"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                let effective_session = daemon_token.or(session_val);
-                if let Some(ref tok) = effective_session {
-                    std::env::set_var("OMAWARDEN_SESSION", tok);
-                }
 
                 crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
 
                 AuthResult {
                     ok: true,
                     status: Some("unlocked".to_string()),
-                    session: effective_session.clone(),
-                    session_token: effective_session,
                     ..Default::default()
                 }
             }
@@ -2112,7 +2083,7 @@ esac
     }
 
     #[test]
-    fn test_login_password_propagates_daemon_session_token() {
+    fn test_login_password_auto_unlocks_daemon() {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::os::unix::net::UnixListener;
@@ -2237,16 +2208,7 @@ esac
                                         "session_token": "daemon-ephemeral-token-xyz-123"
                                     }),
                                     "sync" => {
-                                        let cand = v
-                                            .get("session_token")
-                                            .or_else(|| v.get("session"))
-                                            .and_then(|s| s.as_str())
-                                            .unwrap_or("");
-                                        if cand == "daemon-ephemeral-token-xyz-123" {
-                                            serde_json::json!({ "ok": true, "ciphers_count": 0 })
-                                        } else {
-                                            serde_json::json!({ "ok": false, "error": "Unauthorized: valid session token required" })
-                                        }
+                                        serde_json::json!({ "ok": true, "ciphers_count": 0 })
                                     }
                                     _ => {
                                         serde_json::json!({ "ok": false, "error": "unknown action" })
@@ -2281,39 +2243,10 @@ esac
         let res = auth_mgr.login_password(email, password, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
 
-        // Crucial invariant: res.session must be the DAEMON session token, not the remote OAuth JWT!
-        assert_eq!(
-            res.session.as_deref(),
-            Some("daemon-ephemeral-token-xyz-123"),
-            "res.session must be populated with daemon session token"
-        );
-        assert_eq!(
-            res.session_token.as_deref(),
-            Some("daemon-ephemeral-token-xyz-123"),
-            "res.session_token must be populated with daemon session token"
-        );
-        assert_eq!(
-            std::env::var("OMAWARDEN_SESSION").ok().as_deref(),
-            Some("daemon-ephemeral-token-xyz-123"),
-            "OMAWARDEN_SESSION must be exported with daemon session token"
-        );
-
-        // Privileged sync request using the exported session succeeds
+        // Privileged sync request succeeds directly over socket
         let sync_ok =
             crate::daemon::send_daemon_request(&serde_json::json!({ "action": "sync" })).unwrap();
         assert_eq!(sync_ok.get("ok"), Some(&serde_json::Value::Bool(true)));
-
-        // Privileged sync request using the remote OAuth JWT fails with the exact symptom the user observed
-        let sync_fail = crate::daemon::send_daemon_request(&serde_json::json!({
-            "action": "sync",
-            "session_token": "remote_jwt_access_token_123"
-        }))
-        .unwrap();
-        assert_eq!(sync_fail.get("ok"), Some(&serde_json::Value::Bool(false)));
-        assert_eq!(
-            sync_fail.get("error").and_then(|e| e.as_str()),
-            Some("Unauthorized: valid session token required")
-        );
 
         stop_daemon.store(true, Ordering::Relaxed);
         let _ = daemon_handle.join();
