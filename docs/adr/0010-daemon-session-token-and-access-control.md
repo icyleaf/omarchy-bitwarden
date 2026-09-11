@@ -66,7 +66,7 @@ We introduce an **Ephemeral Session Token Authorization** and **Max Session Life
 - In the Quickshell UI (`OmarchyBitwarden.qml`), the session token received from the `unlock` response is retained in the root component state.
 - When launching child `Process` blocks (`vaultSyncProc`, `vaultListProc`, `clipCopyProc`, `totpGenProc`, `attachmentProc`, `sshKeyActionProc`), the token is injected into the child process environment via `environment: ({ "OMAWARDEN_SESSION": root.sessionToken })`.
 - This ensures tokens are strictly in-memory and **never passed via CLI command-line arguments**, preventing leakage to `/proc/<pid>/cmdline`.
-- In `omawarden` CLI, commands read `OMAWARDEN_SESSION` or `BW_SESSION` from the environment or via `--session <token>` and automatically inject it into daemon requests.
+- In `omawarden` CLI, commands read `OMAWARDEN_SESSION` or `BW_SESSION` from the environment and automatically inject it into daemon requests. Passing `--session` on CLI is explicitly forbidden under the Zero-Argv security policy.
 
 ---
 
@@ -76,8 +76,9 @@ We introduce an **Ephemeral Session Token Authorization** and **Max Session Life
 - **Complete Same-UID Isolation**: Rogue or unvetted scripts running as the same user can no longer dump decrypted vault items or steal credentials from the daemon.
 - **Auto-Lock Invariant Guaranteed**: Unauthenticated requests cannot refresh the idle watchdog.
 - **Hard Ceiling on Unlocked State**: 12-hour max lifetime enforces periodic re-authentication even on unattended systems with simulated mouse/keyboard activity.
-- **Zero Disk or Argv Leakage**: Ephemeral tokens stay in process RAM and are zeroized upon lock.
+- **Zero Disk or Argv Leakage**: Ephemeral tokens stay in process RAM and environment variables, never entering `argv` or disk, and are zeroized upon lock.
 
 ### Trade-offs & Operational Impact
-- External shell scripts interacting with the daemon must capture `OMAWARDEN_SESSION` upon `omawarden auth unlock` or provide it via `--session`.
+- External shell scripts interacting with the daemon must export `OMAWARDEN_SESSION` upon `omawarden auth unlock` (e.g. `export OMAWARDEN_SESSION="..."`). CLI flags like `--session` are not permitted.
 - The CLI outputs a shell export snippet (`export OMAWARDEN_SESSION="..."`) when `omawarden auth unlock` is run in an interactive terminal.
+

@@ -6,7 +6,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-## The 10 Mandatory Security Principles
+## The 11 Mandatory Security Principles
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -22,6 +22,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 8. Authenticated Encryption  │ Encrypt-then-MAC mandatory; no unauth cipher │
 │ 9. Ephemeral Session Token   │ Same-user socket authorization & max watchdog│
 │ 10. Keyring Server Isolation │ Access/refresh tokens isolated by server_url │
+│ 11. Zero-Argv Principle      │ Credentials & tokens NEVER passed via argv   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -235,12 +236,34 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
+### Rule 11: Zero-Argv Principle for Sensitive Credentials
+
+**Principle**: Master passwords, session tokens, TOTP secrets, two-factor authentication (2FA) verification codes, and private keys MUST NEVER be accepted or passed as command-line arguments (`argv`). On Linux, command-line arguments are globally readable by any process running under the same user UID via `/proc/<pid>/cmdline` and process listings (`ps`, `top`, audit logs).
+
+- ❌ **Anti-Pattern**:
+  - Providing flags like `--session <token>`, `--secret <base32/uri>`, or `--code <2fa_code>` on the CLI.
+  - Allowing raw `otpauth://` URIs or plaintext secrets as positional CLI arguments (e.g. `omawarden totp otpauth://totp/...`).
+  - Relying on command-line argument masking, which contains unavoidable kernel-level race conditions before the process mutates its `argv`.
+- ✅ **Required Pattern**:
+  - **Standard Input**: Pass secrets via standard input piping (`--stdin` flag reading JSON payloads or raw strings).
+  - **Environment Variables**: Read credentials from process environment variables (`OMAWARDEN_SESSION` / `BW_SESSION`, `OMAWARDEN_2FA_CODE` / `BW_2FA_CODE`). Child processes spawned by the UI (Quickshell) inject tokens securely into `QProcessEnvironment`.
+  - **Secure Terminal Prompting**: For interactive terminal logins, prompt using non-echoing terminal readers (`rpassword::prompt_password`).
+  - **Fail-Closed Parser Rejection**: The CLI parser MUST fail with an error if sensitive flags are supplied, preventing inadvertent cleartext leakage into process lists.
+- 🧪 **Mandatory Verification**:
+  Unit tests must assert that:
+  1. `Cli::try_parse_from` rejects `--session`, `--secret`, and `--code` CLI arguments with parse errors.
+  2. Passing `otpauth://` or `otpauth-migration://` as a positional query argument to `totp` fails closed with an actionable error.
+  3. `totp --stdin` successfully accepts secrets from STDIN.
+
+---
+
 ## Agent Checklist Before Opening a PR
 
 Before submitting any code changes touching authentication, crypto, networking, IPC, or storage:
 
 ```markdown
 - [ ] No tokens, secrets, or master passwords are written to disk or logs.
+- [ ] Zero-Argv principle enforced: no tokens, secrets, or 2FA codes accepted via CLI argv.
 - [ ] Keyring failures fail-closed (no fallback to plaintext files).
 - [ ] All Keyring tokens and secrets are strictly scoped to normalized server_url.
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
@@ -255,3 +278,4 @@ Before submitting any code changes touching authentication, crypto, networking, 
 - [ ] Sensitive memory structures implement Zeroize.
 - [ ] cargo fmt --check, cargo clippy -- -D warnings, and full cargo test pass.
 ```
+

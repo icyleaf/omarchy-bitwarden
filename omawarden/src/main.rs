@@ -30,14 +30,6 @@ struct Cli {
     #[arg(long, value_name = "CONFIG_PATH", help = "Path to config.json")]
     config: Option<PathBuf>,
 
-    #[arg(
-        long,
-        global = true,
-        env = "OMAWARDEN_SESSION",
-        help = "Session token for daemon operations (also reads OMAWARDEN_SESSION or BW_SESSION)"
-    )]
-    session: Option<String>,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -113,22 +105,18 @@ enum Commands {
         )]
         gen_path: Option<std::path::PathBuf>,
     },
-    #[command(
-        about = "Generate TOTP verification code from vault item ID/name, secret, or otpauth URI"
-    )]
+    #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
-        #[arg(index = 1, help = "Vault item ID, name query, secret, or otpauth URI")]
+        #[arg(
+            index = 1,
+            help = "Vault item ID or name query in the vault (use --stdin to pipe raw secrets/URIs)"
+        )]
         query: Option<String>,
         #[arg(
             long,
             help = "Read secret, otpauth URI, or query JSON from standard input"
         )]
         stdin: bool,
-        #[arg(
-            long,
-            help = "Explicit TOTP secret or otpauth URI (deprecated: use STDIN for secret hygiene)"
-        )]
-        secret: Option<String>,
         #[arg(long, help = "Copy generated code directly to clipboard")]
         copy: bool,
     },
@@ -189,8 +177,6 @@ enum AuthAction {
     LoginPassword {
         #[arg(long, required = true)]
         email: String,
-        #[arg(long, help = "Optional two-factor authentication (2FA) code")]
-        code: Option<String>,
         #[arg(
             long,
             num_args = 0..=1,
@@ -394,8 +380,8 @@ fn main() -> ExitCode {
     let _ = omawarden::locked::disable_dumpable();
 
     let cli = Cli::parse();
-    if let Some(ref session) = cli.session {
-        std::env::set_var("OMAWARDEN_SESSION", session);
+    if let Ok(sess) = std::env::var("OMAWARDEN_SESSION").or_else(|_| std::env::var("BW_SESSION")) {
+        std::env::set_var("OMAWARDEN_SESSION", sess);
     }
     let config_mgr = ConfigManager::new(cli.config.as_deref());
     let mut cfg = config_mgr.load();
@@ -589,7 +575,6 @@ fn main() -> ExitCode {
                 }
                 AuthAction::LoginPassword {
                     email,
-                    code,
                     remember_email,
                 } => {
                     let (pwd, stdin_code) = if io::stdin().is_terminal() {
@@ -599,8 +584,24 @@ fn main() -> ExitCode {
                     } else {
                         read_auth_payload()
                     };
-                    let effective_code = code.or(stdin_code);
-                    let res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    let env_code = std::env::var("OMAWARDEN_2FA_CODE")
+                        .or_else(|_| std::env::var("BW_2FA_CODE"))
+                        .ok();
+                    let mut effective_code = stdin_code.or(env_code);
+                    let mut res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    if !res.ok
+                        && res.two_factor_required == Some(true)
+                        && effective_code.is_none()
+                        && io::stdin().is_terminal()
+                    {
+                        let prompt_code =
+                            rpassword::prompt_password("Enter Two-Factor (2FA) Code: ")
+                                .unwrap_or_default();
+                        if !prompt_code.trim().is_empty() {
+                            effective_code = Some(prompt_code.trim().to_string());
+                            res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                        }
+                    }
                     if res.ok {
                         if let Some(ref tok) = res.session {
                             std::env::set_var("OMAWARDEN_SESSION", tok);
@@ -1172,12 +1173,7 @@ fn main() -> ExitCode {
             }
         }
 
-        Commands::Totp {
-            query,
-            stdin,
-            secret,
-            copy,
-        } => {
+        Commands::Totp { query, stdin, copy } => {
             let clip_mgr = ClipboardManager::default();
 
             let (totp_res, item_info) = if stdin {
@@ -1229,18 +1225,13 @@ fn main() -> ExitCode {
                 } else {
                     (generate_totp(&stdin_val, None, 6, 30), None)
                 }
-            } else if let Some(sec) = secret {
-                eprintln!(
-                    "Warning: Passing secret via --secret CLI argument is insecure and visible in /proc. Pass via STDIN instead."
-                );
-                (generate_totp(&sec, None, 6, 30), None)
             } else if let Some(q) = query {
                 let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
                 if is_uri {
                     eprintln!(
-                        "Warning: Passing otpauth URI containing secrets in CLI arguments is insecure and visible in /proc. Pass via STDIN instead."
+                        "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | omawarden totp --stdin"
                     );
-                    (generate_totp(&q, None, 6, 30), None)
+                    return ExitCode::FAILURE;
                 } else {
                     omawarden::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
@@ -1988,33 +1979,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_totp_stdin_and_secret_arg_parsing() {
+    fn test_cli_totp_stdin_and_query_arg_parsing() {
         let cli_stdin = Cli::try_parse_from(["omawarden", "totp", "--stdin"]).unwrap();
         match cli_stdin.command {
-            Commands::Totp {
-                stdin,
-                secret,
-                query,
-                ..
-            } => {
+            Commands::Totp { stdin, query, .. } => {
                 assert!(stdin);
-                assert_eq!(secret, None);
-                assert_eq!(query, None);
-            }
-            _ => panic!("Expected Commands::Totp"),
-        }
-
-        let cli_secret =
-            Cli::try_parse_from(["omawarden", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).unwrap();
-        match cli_secret.command {
-            Commands::Totp {
-                stdin,
-                secret,
-                query,
-                ..
-            } => {
-                assert!(!stdin);
-                assert_eq!(secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
                 assert_eq!(query, None);
             }
             _ => panic!("Expected Commands::Totp"),
@@ -2022,17 +1991,41 @@ mod tests {
 
         let cli_query = Cli::try_parse_from(["omawarden", "totp", "my-github-item"]).unwrap();
         match cli_query.command {
-            Commands::Totp {
-                stdin,
-                secret,
-                query,
-                ..
-            } => {
+            Commands::Totp { stdin, query, .. } => {
                 assert!(!stdin);
-                assert_eq!(secret, None);
                 assert_eq!(query.as_deref(), Some("my-github-item"));
             }
             _ => panic!("Expected Commands::Totp"),
         }
+    }
+
+    #[test]
+    fn test_cli_zero_argv_sensitive_args_rejected() {
+        // Assert --session is rejected
+        assert!(
+            Cli::try_parse_from(["omawarden", "--session", "dummy_token", "vault", "sync"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["omawarden", "vault", "sync", "--session", "dummy_token"])
+                .is_err()
+        );
+
+        // Assert --secret is rejected from totp
+        assert!(
+            Cli::try_parse_from(["omawarden", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).is_err()
+        );
+
+        // Assert --code is rejected from auth login-password
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "auth",
+            "login-password",
+            "--email",
+            "test@example.com",
+            "--code",
+            "123456"
+        ])
+        .is_err());
     }
 }
