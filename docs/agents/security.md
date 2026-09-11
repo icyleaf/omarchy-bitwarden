@@ -198,16 +198,16 @@ These rules were distilled from real-world vulnerabilities and architectural pit
   - Allowing indefinite vault unlock without an absolute maximum session lifetime limit.
 - ✅ **Required Pattern**:
   - **Cryptographic Ephemeral Session Token**: Upon `unlock`, the daemon generates a cryptographically random, high-entropy 256-bit ephemeral session token (`session_token`) using `rand_core::OsRng` encoded in URL-safe base64.
-  - **Privileged Action Protection**: All privileged operations (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `ssh_key_create`, `sync`, `totp` with query, and `stop` when unlocked) strictly require a valid `session_token`.
+  - **Privileged Action Protection**: All privileged operations (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `ssh_key_create`, `sync`, `totp` with query, and `stop` or `set_auto_lock` when unlocked) strictly require a valid `session_token`.
   - **Constant-Time Verification**: Session token validation MUST use constant-time byte comparison (`subtle::ConstantTimeEq`).
-  - **No Keep-Alive Leakage**: Unauthenticated requests (or requests failing token verification) are rejected immediately and MUST NOT touch activity; they cannot bypass idle auto-lock.
+  - **No Keep-Alive Leakage**: Unauthenticated requests (or requests failing token verification) are rejected immediately and MUST NOT touch activity (even if `touch: true` is passed); they cannot bypass idle auto-lock.
   - **Absolute Maximum Lifetime Watchdog**: Implement a hard ceiling (`max_session_lifetime`, default 12 hours) from `unlocked_at`. The daemon locks the vault when this limit elapses, regardless of continuous user activity.
   - **Safe Environment Passing**: Pass the session token to child processes via process environment (`QProcessEnvironment` in QML / `OMAWARDEN_SESSION` in CLI), NEVER via command-line arguments (which are readable via `/proc/<pid>/cmdline`).
   - **Immediate Zeroization**: The session token resides in `Zeroizing<String>` memory and is scrubbed immediately upon `lock`, `stop`, or timeout.
 - 🧪 **Mandatory Verification**:
   Unit tests must assert that:
-  1. Privileged actions (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `sync`, `totp` with query, `stop`) without a session token or with an invalid token return `Unauthorized`.
-  2. Unauthenticated requests do NOT touch activity.
+  1. Privileged actions (`list`, `search`, `get_item`, `get_ssh_key`, `get_attachment_key`, `sync`, `totp` with query, `stop`, `set_auto_lock`) without a session token or with an invalid token return `Unauthorized`.
+  2. Unauthenticated requests do NOT touch activity (including `ping`/`status` with explicit `touch: true`).
   3. `lock()` clears the session token and invalidates subsequent privileged calls.
   4. `check_auto_lock()` triggers when `max_session_lifetime` is exceeded even if `last_activity` is recent.
 
