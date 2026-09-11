@@ -6,7 +6,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-## The 9 Mandatory Security Principles
+## The 10 Mandatory Security Principles
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -21,6 +21,7 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 │ 7. Memory Locking (mlock)    │ Page-aligned physical RAM lock & no coredump │
 │ 8. Authenticated Encryption  │ Encrypt-then-MAC mandatory; no unauth cipher │
 │ 9. Ephemeral Session Token   │ Same-user socket authorization & max watchdog│
+│ 10. Keyring Server Isolation │ Access/refresh tokens isolated by server_url │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -213,6 +214,27 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
+### Rule 10: Server-URL Scoped Keyring Token Isolation
+
+**Principle**: All bearer tokens (access tokens, refresh tokens, and session credentials) stored in the system keyring MUST be explicitly scoped by the normalized Bitwarden server origin (`server_url`). Keyring queries and deletions must never operate globally or un-scoped, preventing cross-server token contamination, privilege confusion, or unintended credential deletion when switching between official cloud and self-hosted instances.
+
+- ❌ **Anti-Pattern**:
+  - Storing access or refresh tokens with only `{ "service": "omarchy-bitwarden", "kind": "access_token" }` without `server_url`.
+  - Switching `server_url` from `https://vault.bitwarden.com` to `https://vault.corp.internal` and inadvertently sending cloud bearer tokens to the internal server (or vice versa).
+  - Calling un-scoped `secret-tool clear` which accidentally clears tokens belonging to a different server instance.
+- ✅ **Required Pattern**:
+  - All token store/lookup/clear calls (`store_token`, `get_token`, `clear_token`, `store_session`, `get_session`, `clear_session`) require `server_url: &str`.
+  - Server URLs are normalized (trimmed whitespace and trailing slashes removed) before keyring storage and retrieval.
+  - `get_token` performs a scoped lookup first; backwards-compatible fallback to legacy un-scoped tokens is permitted only for zero-friction user upgrades.
+  - `clear_token` and `clear_session` strictly target the specified `server_url` attribute to ensure cross-server isolation.
+- 🧪 **Mandatory Verification**:
+  Unit tests must assert that:
+  1. Storing tokens for Server A does not return them when querying Server B.
+  2. Clearing tokens for Server A leaves Server B's tokens intact.
+  3. Empty `server_url` or token inputs fail closed and return `false`/`None`.
+
+---
+
 ## Agent Checklist Before Opening a PR
 
 Before submitting any code changes touching authentication, crypto, networking, IPC, or storage:
@@ -220,6 +242,7 @@ Before submitting any code changes touching authentication, crypto, networking, 
 ```markdown
 - [ ] No tokens, secrets, or master passwords are written to disk or logs.
 - [ ] Keyring failures fail-closed (no fallback to plaintext files).
+- [ ] All Keyring tokens and secrets are strictly scoped to normalized server_url.
 - [ ] All file writes with sensitive data enforce 0600 permissions atomically.
 - [ ] All URLs sending Auth headers use exact RFC 6454 same-origin checks.
 - [ ] Sockets enforce mutual peer UID (SO_PEERCRED) verification and validate paths/symlinks.
