@@ -198,11 +198,17 @@ impl AuthManager {
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
         let mut storage = self.storage_mgr.load();
 
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+
         // 1. Resolve active access token from Keyring or Storage fallback
         let active_token = self
             .keyring_mgr
-            .get_token(KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session())
+            .get_token(s_url, KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session(s_url))
             .or_else(|| storage.access_token.clone());
 
         // 2. Migration: If keyring is available and plaintext tokens are in storage, migrate them to Keyring safely
@@ -211,11 +217,13 @@ impl AuthManager {
         {
             let mut access_saved = true;
             if let Some(ref tok) = storage.access_token {
-                access_saved = self.keyring_mgr.store_token(KIND_ACCESS_TOKEN, tok);
+                access_saved = self.keyring_mgr.store_token(s_url, KIND_ACCESS_TOKEN, tok);
             }
             let mut refresh_saved = true;
             if let Some(ref ref_tok) = storage.refresh_token {
-                refresh_saved = self.keyring_mgr.store_token(KIND_REFRESH_TOKEN, ref_tok);
+                refresh_saved = self
+                    .keyring_mgr
+                    .store_token(s_url, KIND_REFRESH_TOKEN, ref_tok);
             }
 
             // Only scrub from disk if store was confirmed successful
@@ -231,13 +239,11 @@ impl AuthManager {
         }
 
         // Detect renewal capabilities using correct server URL precedence
-        let has_refresh = self.keyring_mgr.get_token(KIND_REFRESH_TOKEN).is_some()
+        let has_refresh = self
+            .keyring_mgr
+            .get_token(s_url, KIND_REFRESH_TOKEN)
+            .is_some()
             || storage.refresh_token.is_some();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
         let has_api_secret = storage
             .client_id
             .as_ref()
@@ -269,8 +275,8 @@ impl AuthManager {
                         "omawarden:auth",
                         "Stored session token has expired and cannot be renewed. Invalidation required."
                     );
-                    self.keyring_mgr.clear_token(KIND_ACCESS_TOKEN);
-                    self.keyring_mgr.clear_session();
+                    self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
+                    self.keyring_mgr.clear_session(s_url);
                     storage.access_token = None;
                     let _ = self.storage_mgr.save(&storage);
                     let _ = crate::daemon::send_daemon_request(
@@ -432,10 +438,11 @@ impl AuthManager {
             };
         }
 
-        if !self
-            .keyring_mgr
-            .store_token(KIND_ACCESS_TOKEN, &token_resp.access_token)
-        {
+        if !self.keyring_mgr.store_token(
+            &self.server_url,
+            KIND_ACCESS_TOKEN,
+            &token_resp.access_token,
+        ) {
             let err_msg = "Failed to store access token in system keyring.";
             crate::log_error!("omawarden:auth", "{}", err_msg);
             return AuthResult {
@@ -450,8 +457,12 @@ impl AuthManager {
         }
 
         if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self.keyring_mgr.store_token(KIND_REFRESH_TOKEN, ref_tok) {
-                self.keyring_mgr.clear_token(KIND_ACCESS_TOKEN);
+            if !self
+                .keyring_mgr
+                .store_token(&self.server_url, KIND_REFRESH_TOKEN, ref_tok)
+            {
+                self.keyring_mgr
+                    .clear_token(&self.server_url, KIND_ACCESS_TOKEN);
                 let err_msg = "Failed to store refresh token in system keyring.";
                 crate::log_error!("omawarden:auth", "{}", err_msg);
                 return AuthResult {
@@ -596,9 +607,15 @@ impl AuthManager {
             };
         }
 
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+
         if !self
             .keyring_mgr
-            .store_token(KIND_ACCESS_TOKEN, &token_resp.access_token)
+            .store_token(s_url, KIND_ACCESS_TOKEN, &token_resp.access_token)
         {
             let err_msg = "Failed to store access token in system keyring.";
             crate::log_error!("omawarden:auth", "{}", err_msg);
@@ -612,8 +629,11 @@ impl AuthManager {
         }
 
         if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self.keyring_mgr.store_token(KIND_REFRESH_TOKEN, ref_tok) {
-                self.keyring_mgr.clear_token(KIND_ACCESS_TOKEN);
+            if !self
+                .keyring_mgr
+                .store_token(s_url, KIND_REFRESH_TOKEN, ref_tok)
+            {
+                self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
                 let err_msg = "Failed to store refresh token in system keyring.";
                 crate::log_error!("omawarden:auth", "{}", err_msg);
                 return AuthResult {
@@ -626,17 +646,12 @@ impl AuthManager {
             }
         }
 
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
         if !self
             .keyring_mgr
             .store_api_secret(s_url, client_id.trim(), client_secret.trim())
         {
-            self.keyring_mgr.clear_token(KIND_ACCESS_TOKEN);
-            self.keyring_mgr.clear_token(KIND_REFRESH_TOKEN);
+            self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
+            self.keyring_mgr.clear_token(s_url, KIND_REFRESH_TOKEN);
             let err_msg = "Failed to store API secret in system keyring.";
             crate::log_error!("omawarden:auth", "{}", err_msg);
             return AuthResult {
@@ -744,15 +759,22 @@ impl AuthManager {
             .unlock_user_key(&password_zeroizing, &storage)
         {
             Ok(_user_key) => {
+                let s_url = if !storage.server_url.is_empty() {
+                    &storage.server_url
+                } else {
+                    &self.server_url
+                };
+
                 let token_opt = self
                     .keyring_mgr
-                    .get_token(KIND_ACCESS_TOKEN)
-                    .or_else(|| self.keyring_mgr.get_session())
+                    .get_token(s_url, KIND_ACCESS_TOKEN)
+                    .or_else(|| self.keyring_mgr.get_session(s_url))
                     .or_else(|| storage.access_token.clone());
 
                 let session_val = if let Some(ref token) = token_opt {
                     if token != "session_unlocked" && !token.is_empty() {
-                        self.keyring_mgr.store_token(KIND_ACCESS_TOKEN, token);
+                        self.keyring_mgr
+                            .store_token(s_url, KIND_ACCESS_TOKEN, token);
                     }
                     Some(token.clone())
                 } else {
@@ -802,7 +824,13 @@ impl AuthManager {
     }
 
     pub fn lock(&self) -> AuthResult {
-        self.keyring_mgr.clear_session();
+        let storage = self.storage_mgr.load();
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+        self.keyring_mgr.clear_session(s_url);
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
@@ -817,8 +845,14 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> AuthResult {
+        let storage = self.storage_mgr.load();
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
         self.keyring_mgr.clear_all();
-        self.keyring_mgr.clear_session();
+        self.keyring_mgr.clear_session(s_url);
         let _ = self.storage_mgr.save(&VaultStorage::default());
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
@@ -1283,7 +1317,11 @@ esac
             "user.test-client-id",
             "secret_xyz_123"
         ));
-        assert!(mock_keyring.store_token(KIND_ACCESS_TOKEN, &expired_token));
+        assert!(mock_keyring.store_token(
+            "https://vault.example.com",
+            KIND_ACCESS_TOKEN,
+            &expired_token
+        ));
 
         let storage = VaultStorage {
             server_url: "https://vault.example.com".to_string(),
@@ -1394,11 +1432,11 @@ esac
 
         // Verify tokens migrated to Keyring
         assert_eq!(
-            mock_keyring.get_token(KIND_ACCESS_TOKEN),
+            mock_keyring.get_token("https://vault.example.com", KIND_ACCESS_TOKEN),
             Some("plaintext_access_123".to_string())
         );
         assert_eq!(
-            mock_keyring.get_token(KIND_REFRESH_TOKEN),
+            mock_keyring.get_token("https://vault.example.com", KIND_REFRESH_TOKEN),
             Some("plaintext_refresh_456".to_string())
         );
 
@@ -1538,7 +1576,7 @@ esac
         let past_payload = serde_json::json!({ "exp": now - 50 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
-        assert!(mock_keyring.store_token(KIND_ACCESS_TOKEN, &expired_token));
+        assert!(mock_keyring.store_token(custom_url, KIND_ACCESS_TOKEN, &expired_token));
 
         let storage = VaultStorage {
             server_url: custom_url.to_string(),

@@ -201,7 +201,7 @@ impl ConfigManager {
             }
 
             keyring_mgr.clear_all();
-            keyring_mgr.clear_session();
+            keyring_mgr.clear_session(&cfg.server_url);
 
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
             crate::attachment::clear_preview_attachments(None);
@@ -465,7 +465,11 @@ esac
         };
         storage_mgr.save(&initial_storage).unwrap();
 
-        assert!(keyring_mgr.store_token("access_token", "old-access-token"));
+        assert!(keyring_mgr.store_token(
+            "https://vault.bitwarden.com",
+            "access_token",
+            "old-access-token"
+        ));
         assert!(keyring_mgr.store_api_secret(
             "https://vault.bitwarden.com",
             "user.test-api-key-id",
@@ -474,7 +478,9 @@ esac
 
         assert_eq!(config_mgr.load().email, "user@example.com");
         assert!(storage_path.exists());
-        assert!(keyring_mgr.get_token("access_token").is_some());
+        assert!(keyring_mgr
+            .get_token("https://vault.bitwarden.com", "access_token")
+            .is_some());
         assert!(keyring_mgr
             .get_api_secret("https://vault.bitwarden.com", "user.test-api-key-id")
             .is_some());
@@ -503,7 +509,9 @@ esac
             "data.json cache file must be deleted when server changes"
         );
         assert!(
-            keyring_mgr.get_token("access_token").is_none(),
+            keyring_mgr
+                .get_token("https://vault.bitwarden.com", "access_token")
+                .is_none(),
             "Session/token in keyring must be cleared when server changes"
         );
         assert!(
@@ -541,7 +549,11 @@ esac
             ..Default::default()
         };
         storage_mgr.save(&initial_storage).unwrap();
-        assert!(keyring_mgr.store_token("access_token", "valid-token"));
+        assert!(keyring_mgr.store_token(
+            "https://vault.bitwarden.com",
+            "access_token",
+            "valid-token"
+        ));
 
         // Update other settings, with same server_url (even with trailing slash)
         let (updated_cfg, server_changed) = config_mgr
@@ -561,7 +573,7 @@ esac
         assert_eq!(updated_cfg.auto_lock_minutes, 30);
         assert!(storage_path.exists());
         assert_eq!(
-            keyring_mgr.get_token("access_token"),
+            keyring_mgr.get_token("https://vault.bitwarden.com", "access_token"),
             Some("valid-token".to_string())
         );
     }
