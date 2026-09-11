@@ -1,7 +1,7 @@
 # ADR 0010: Daemon Ephemeral Session Token and Access Control Architecture
 
 ## Status
-Superseded (Reverted to pure ADR 0003 resident daemon architecture with 0600 socket + SO_PEERCRED peer credential model and max lifetime watchdog; ephemeral session token mechanism and environment variable propagation (`OMAWARDEN_SESSION` / `BW_SESSION`) completely eliminated to uphold Zero-Environ + Zero-Argv principles).
+Superseded by [ADR 0003](0003-omawarden-rust-native-helper-and-daemon-architecture.md) & [Security Rule 11 (Zero-Argv & Zero-Environ Principle)](../agents/security.md#rule-11-zero-argv--zero-environ-principle-for-sensitive-credentials) (Reverted to pure ADR 0003 resident daemon architecture with 0600 socket + SO_PEERCRED peer credential model and max lifetime watchdog; ephemeral session token mechanism and environment variable propagation (`OMAWARDEN_SESSION` / `BW_SESSION`) completely eliminated to uphold Zero-Environ + Zero-Argv principles).
 
 ## Context
 
@@ -25,44 +25,51 @@ Communication between the UI (Quickshell frontend) or CLI and the daemon occurs 
 
 ## Decision
 
-We introduce an **Ephemeral Session Token Authorization** and **Max Session Lifetime Watchdog** model for the `omawarden` daemon:
+> [!CAUTION]
+> ### ⚠️ DEPRECATION NOTICE: Ephemeral Session Token Design Revoked & Superseded
+> Sections 1, 2, and 3 below describing the **Ephemeral Session Token** design have been **completely deprecated, revoked, and removed** from `omarchy-bitwarden`.
+>
+> **Rationale**: Passing session tokens via environment variables (`OMAWARDEN_SESSION` / `BW_SESSION`) violates the project's **Zero-Environ** principle because Linux exposes `/proc/<pid>/environ` to all processes running under the same UID. Adding an in-memory token passed via env offered zero real security boundary against malicious same-UID processes while introducing architectural complexity and violating core project rules.
+>
+> The project has reverted to the pure [ADR 0003](0003-omawarden-rust-native-helper-and-daemon-architecture.md) model:
+> - Direct communication over `/run/user/<uid>/omawarden.sock` (mode `0600`).
+> - Kernel-enforced caller UID validation via `SO_PEERCRED`.
+> - Privileged actions require the vault to be unlocked (`vault_mgr.is_unlocked()`), with zero token checks.
+>
+> **Retained Decisions**: Only Section 4 (**Absolute Maximum Session Lifetime Watchdog**) and non-privileged activity isolation remain active from this ADR.
 
-### 1. High-Entropy Ephemeral Session Token
-- Upon successful `unlock` (via master password or quick PIN), the daemon generates a cryptographically random, 256-bit (32 bytes) token using OS entropy (`rand_core::OsRng`) encoded as URL-safe base64 without padding.
-- The session token is wrapped in `Zeroizing<String>` in physical memory and associated with the daemon state.
-- Upon `lock` (manual lock, idle timeout, screen lock, sleep, or max lifetime expiration) or daemon exit, the session token is scrubbed with zeroes and reset to `None`.
+### 1. ~~[REVOKED / DEPRECATED] High-Entropy Ephemeral Session Token~~
+- *This section is obsolete and no longer implemented.*
+- ~~Upon successful `unlock` (via master password or quick PIN), the daemon generates a cryptographically random, 256-bit (32 bytes) token using OS entropy (`rand_core::OsRng`) encoded as URL-safe base64 without padding.~~
+- ~~The session token is wrapped in `Zeroizing<String>` in physical memory and associated with the daemon state.~~
+- ~~Upon `lock` (manual lock, idle timeout, screen lock, sleep, or max lifetime expiration) or daemon exit, the session token is scrubbed with zeroes and reset to `None`.~~
 
-### 2. Privileged Action Enforcement
-- Privileged operations strictly require a valid `session_token` in the request payload (`session_token` or `session` field):
-  - `list` (vault item export/dump)
-  - `search` (vault item search)
-  - `get_item` (decrypted item retrieval)
-  - `get_ssh_key` (SSH private/public key retrieval)
-  - `get_attachment_key` (decryption key for encrypted attachments)
-  - `ssh_key_create` (vault item modification)
-  - `sync` (vault synchronization)
-  - `totp` with item query (`query` or `id`)
-  - `stop` when the vault is unlocked
-- Non-privileged actions (which do not require token) include:
-  - `ping` (health check)
-  - `status` (lock status and version check)
-  - `unlock` (authentication handshake)
-  - `lock` (defensive action; any local process can defensively lock the vault)
-  - `totp` with raw secret (stateless cryptographic utility)
-  - `copy` (clipboard utility)
-  - `set_auto_lock` (timeout configuration)
+### 2. ~~[REVOKED / DEPRECATED] Privileged Action Enforcement via Session Token~~
+- *This section is obsolete and no longer implemented.*
+- ~~Privileged operations strictly require a valid `session_token` in the request payload (`session_token` or `session` field):~~
+  - ~~`list` (vault item export/dump)~~
+  - ~~`search` (vault item search)~~
+  - ~~`get_item` (decrypted item retrieval)~~
+  - ~~`get_ssh_key` (SSH private/public key retrieval)~~
+  - ~~`get_attachment_key` (decryption key for encrypted attachments)~~
+  - ~~`ssh_key_create` (vault item modification)~~
+  - ~~`sync` (vault synchronization)~~
+  - ~~`totp` with item query (`query` or `id`)~~
+  - ~~`stop` when the vault is unlocked~~
+- *Current behavior (ADR 0003)*: Privileged operations simply check whether the vault is unlocked (`if !state.vault_mgr.is_unlocked() { return Err("Vault is locked"); }`).
 
-### 3. Constant-Time Verification & Fail-Closed Policy
-- Token comparison is performed in constant time using `subtle::ConstantTimeEq` to eliminate timing side-channels.
-- Requests failing session verification are rejected immediately with `{"ok": false, "error": "Unauthorized: valid session token required"}`.
-- Unauthenticated or rejected requests **NEVER touch activity**, guaranteeing that rogue polling cannot prevent idle auto-locking.
+### 3. ~~[REVOKED / DEPRECATED] Constant-Time Verification & Fail-Closed Policy~~
+- *This section is obsolete and no longer implemented.*
+- ~~Token comparison is performed in constant time using `subtle::ConstantTimeEq` to eliminate timing side-channels.~~
+- ~~Requests failing session verification are rejected immediately with `{"ok": false, "error": "Unauthorized: valid session token required"}`.~~
+- *Retained behavior*: Background/unauthenticated `ping` and `status` requests **NEVER touch activity**, guaranteeing that rogue polling cannot prevent idle auto-locking.
 
-### 4. Absolute Maximum Session Lifetime (`max_session_lifetime`)
+### 4. [ACTIVE] Absolute Maximum Session Lifetime (`max_session_lifetime`)
 - Alongside the idle inactivity timeout, the daemon tracks `unlocked_at: Instant`.
 - An absolute maximum session lifetime (default 12 hours) is enforced in `check_auto_lock()`.
-- When elapsed, the daemon locks the vault and purges all decrypted keys and session tokens, even if continuous user activity has kept the idle timer fresh.
+- When elapsed, the daemon locks the vault and purges all decrypted keys from physical memory, even if continuous user activity has kept the idle timer fresh.
 
-### 5. Return to Pure Socket Access Control (Zero-Environ + Zero-Argv)
+### 5. [ACTIVE] Return to Pure Socket Access Control (Zero-Environ + Zero-Argv)
 - In the initial iteration of ADR 0010, `OMAWARDEN_SESSION` was passed via process environment.
 - However, Linux `/proc/<pid>/environ` exposes environment variables to any process running as the same UID, re-introducing the very vulnerability and cognitive dissonance that ADR 0001 and ADR 0003 sought to eliminate.
 - Consequently, all ephemeral session token mechanisms, CLI session parameters, and environment variable lookups (`BW_SESSION`, `OMAWARDEN_SESSION`, `BW_2FA_CODE`, `OMAWARDEN_2FA_CODE`) have been completely purged from the codebase.
