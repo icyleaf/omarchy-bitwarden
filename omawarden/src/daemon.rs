@@ -617,6 +617,9 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let is_unlocked = state.vault_mgr.is_unlocked();
+    let has_valid_session = state.is_session_valid(candidate_token);
+
     let is_privileged = matches!(
         action,
         "list"
@@ -628,10 +631,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             | "sync"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()))
-        || (action == "stop" && state.vault_mgr.is_unlocked());
+        || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
 
     if is_privileged {
-        if !state.vault_mgr.is_unlocked() {
+        if !is_unlocked {
             let _ = writeln!(
                 stream,
                 "{}",
@@ -640,7 +643,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             return Ok(());
         }
 
-        if !state.is_session_valid(candidate_token) {
+        if !has_valid_session {
             crate::log_warn!(
                 "omawarden:daemon",
                 "Unauthorized access attempt for action '{}' without valid session token",
@@ -659,7 +662,12 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     }
 
     if should_touch_activity(action, &req) {
-        state.touch_activity();
+        // Enforce Rule 9: When the vault is unlocked, touching activity strictly requires
+        // a valid session token. Unauthenticated requests (e.g. ping/status with touch: true)
+        // are forbidden from resetting idle timeout to prevent keep-alive bypasses.
+        if !is_unlocked || has_valid_session {
+            state.touch_activity();
+        }
     }
 
     let response = match action {
@@ -1062,6 +1070,31 @@ mod tests {
         assert_eq!(unauth_res.get("ok").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(*state.last_activity.lock().unwrap(), past);
 
+        // 5a. Unauthenticated "ping" with explicit touch: true must NOT touch activity on unlocked vault
+        let ping_touch_res = send_req(json!({ "action": "ping", "touch": true }));
+        assert_eq!(
+            ping_touch_res.get("pong").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 5b. Unauthenticated "status" with explicit touch: true must NOT touch activity on unlocked vault
+        let status_touch_res = send_req(json!({ "action": "status", "touch": true }));
+        assert!(status_touch_res.get("status").is_some());
+        assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+        // 5c. Authenticated "ping" with explicit touch: true DOES touch activity
+        let ping_auth_touch_res =
+            send_req(json!({ "action": "ping", "touch": true, "session_token": token }));
+        assert_eq!(
+            ping_auth_touch_res.get("pong").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(*state.last_activity.lock().unwrap() > past);
+
+        // Reset past activity for subsequent test
+        *state.last_activity.lock().unwrap() = past;
+
         // 6. Active action (e.g. "search" with valid token) should touch activity
         let auth_res =
             send_req(json!({ "action": "search", "query": "test", "session_token": token }));
@@ -1304,6 +1337,7 @@ mod tests {
             json!({ "action": "sync" }),
             json!({ "action": "totp", "query": "test" }),
             json!({ "action": "stop" }),
+            json!({ "action": "set_auto_lock", "auto_lock_seconds": 30 }),
         ];
 
         for mut req in privileged_actions {
