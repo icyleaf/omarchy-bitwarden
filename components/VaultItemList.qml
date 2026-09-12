@@ -1,9 +1,12 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "./iconpolicy.js" as IconPolicy
 
 Item {
   id: itemListRoot
+
+  property string serverUrl: ""
 
   property var items: []
   property int selectedIndex: 0
@@ -61,7 +64,7 @@ Item {
       if (!uriStr || isAppScheme(uriStr)) continue
       var domain = getHostname(uriStr)
       if (domain && domain.indexOf(".") !== -1) {
-        return "https://icons.bitwarden.net/" + domain + "/icon.png"
+        return IconPolicy.resolveIconUrl(itemListRoot.serverUrl, domain)
       }
     }
     return ""

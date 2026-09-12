@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "./iconpolicy.js" as IconPolicy
 
 Item {
   id: settingsRoot
@@ -604,10 +605,15 @@ Item {
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.showWebsiteIconsChecked = !settingsRoot.showWebsiteIconsChecked }
               }
-              Text { text: "Show website icons"; color: settingsRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Show Website Icons"; color: settingsRoot.foreground; font.pixelSize: 11 }
             }
             Text {
-              text: "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
+              readonly property string curServerUrl: (sUrlInput && sUrlInput.text.trim()) ? sUrlInput.text.trim() : ((settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "")
+              readonly property bool isOfficial: IconPolicy.isOfficialServer(curServerUrl)
+              readonly property string serverHost: IconPolicy.extractHost(curServerUrl)
+              text: isOfficial
+                    ? "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
+                    : ("Fetches icons directly from your vault server (" + (serverHost || "self-hosted") + ").")
               color: settingsRoot.mutedForeground
               font.pixelSize: 10
               Layout.fillWidth: true
@@ -633,7 +639,7 @@ Item {
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
               }
-              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Check For Updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
             }
             Text {
               Layout.fillWidth: true

@@ -249,6 +249,12 @@ Item {
     return compareSemVer(latestVersion, currentVer) > 0
   }
 
+  readonly property string effectiveServerUrl: {
+    if (root.authState && root.authState.server_url) return root.authState.server_url
+    if (root.config && root.config.server_url) return root.config.server_url
+    return "https://vault.bitwarden.com"
+  }
+
   property var authState: ({
     status: "unauthenticated",
     server_url: "",
@@ -2044,6 +2050,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              serverUrl: root.effectiveServerUrl
               showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
@@ -2081,6 +2088,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                serverUrl: root.effectiveServerUrl
                 showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem

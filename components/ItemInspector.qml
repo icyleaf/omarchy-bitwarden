@@ -1,9 +1,12 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "./iconpolicy.js" as IconPolicy
 
 ScrollView {
   id: inspectorRoot
+
+  property string serverUrl: ""
 
   property var item: null
   property var currentTotp: ({ code: "", ttl: 30, period: 30 })
@@ -115,7 +118,7 @@ ScrollView {
       if (!uriStr || isAppScheme(uriStr)) continue
       var domain = getHostname(uriStr)
       if (domain && domain.indexOf(".") !== -1) {
-        return "https://icons.bitwarden.net/" + domain + "/icon.png"
+        return IconPolicy.resolveIconUrl(inspectorRoot.serverUrl, domain)
       }
     }
     return ""
