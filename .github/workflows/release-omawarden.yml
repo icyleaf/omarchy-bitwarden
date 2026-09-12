@@ -143,3 +143,82 @@ jobs:
           prerelease: false
           make_latest: true
 
+  publish-aur:
+    name: Publish to AUR
+    needs: [build-release, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate PKGBUILD
+        id: pkgbuild
+        run: |
+          RAW_TAG="${{ inputs.tag || github.ref_name }}"
+          RAW_TAG="${RAW_TAG#refs/tags/}"
+          VERSION="${RAW_TAG#omawarden-}"
+          PKGVER="${VERSION#v}"
+
+          echo "Resolving SHA256 checksums from build artifacts..."
+          TAR_X86=$(find artifacts -name "*x86_64*.tar.gz" -not -name "omawarden-x86_64-unknown-linux-gnu.tar.gz" | head -n 1)
+          if [ -z "$TAR_X86" ]; then
+            TAR_X86=$(find artifacts -name "*x86_64*.tar.gz" | head -n 1)
+          fi
+          TAR_AARCH64=$(find artifacts -name "*aarch64*.tar.gz" -not -name "omawarden-aarch64-unknown-linux-gnu.tar.gz" | head -n 1)
+          if [ -z "$TAR_AARCH64" ]; then
+            TAR_AARCH64=$(find artifacts -name "*aarch64*.tar.gz" | head -n 1)
+          fi
+
+          SHA_X86=$(sha256sum "$TAR_X86" | awk '{print $1}')
+          SHA_AARCH64=$(sha256sum "$TAR_AARCH64" | awk '{print $1}')
+
+          echo "Version: ${PKGVER} (Tag: ${RAW_TAG})"
+          echo "SHA256 x86_64: ${SHA_X86}"
+          echo "SHA256 aarch64: ${SHA_AARCH64}"
+
+          mkdir -p dist/aur
+          sed -e 's/^          //' << EOF > dist/aur/PKGBUILD
+          # Maintainer: icyleaf <icyleaf.cn at gmail dot com>
+
+          pkgname=omawarden-bin
+          pkgver=${PKGVER}
+          pkgrel=1
+          pkgdesc="High-performance Bitwarden CLI and resident daemon (Designed for Omarchy)"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/${{ github.repository }}"
+          license=('MIT')
+          depends=('libsecret' 'wl-clipboard')
+          provides=('omawarden')
+          conflicts=('omawarden')
+          source_x86_64=("\${pkgname}-\${pkgver}-x86_64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${RAW_TAG}/omawarden-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")
+          sha256sums_x86_64=('${SHA_X86}')
+          source_aarch64=("\${pkgname}-\${pkgver}-aarch64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${RAW_TAG}/omawarden-${VERSION}-aarch64-unknown-linux-gnu.tar.gz")
+          sha256sums_aarch64=('${SHA_AARCH64}')
+
+          package() {
+              install -Dm755 "\${srcdir}"/omawarden-*/omawarden "\${pkgdir}/usr/bin/omawarden"
+              install -Dm644 "\${srcdir}"/omawarden-*/LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+          }
+          EOF
+
+          echo "Generated PKGBUILD:"
+          cat dist/aur/PKGBUILD
+          echo "pkgver=${PKGVER}" >> $GITHUB_OUTPUT
+
+      - name: Publish AUR package
+        env:
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        if: env.AUR_KEY != ''
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: omawarden-bin
+          pkgbuild: ./dist/aur/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_KEY }}
+          commit_message: "upgpkg: omawarden-bin ${{ steps.pkgbuild.outputs.pkgver }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+
