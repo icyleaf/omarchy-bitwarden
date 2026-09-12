@@ -13,9 +13,7 @@ Item {
   id: root
 
   Component.onCompleted: {
-    root.refreshConfig()
-    root.refreshHealth()
-    root.refreshAuthStatus()
+    root.resolveHelper()
     root.checkUpdates(false)
   }
 
@@ -33,14 +31,41 @@ Item {
     return str.replace(/^file:\/+/i, "/")
   }
 
-  property string helperPath: {
-    var custom = Quickshell.env("OMARCHY_BITWARDEN_HELPER")
-    if (custom) return custom
-    var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-    if (localPath) return localPath
-    var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-    var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
-    return baseDir + "/omawarden"
+  property string helperPath: "omawarden"
+
+  function resolveHelper() {
+    resolveHelperProc.running = false
+    resolveHelperProc.command = ["which", "omawarden"]
+    resolveHelperProc.running = true
+  }
+
+  Process {
+    id: resolveHelperProc
+    command: ["which", "omawarden"]
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var p = (text || "").trim()
+        if (p.length > 0) {
+          root.helperPath = p
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) {
+        var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+        if (localPath) {
+          root.helperPath = localPath
+        } else {
+          var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+          root.helperPath = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
+        }
+      }
+      root.refreshConfig()
+      root.refreshHealth()
+      root.refreshAuthStatus()
+    }
   }
 
   // Configuration & Engine Health State
