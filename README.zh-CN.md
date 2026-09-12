@@ -216,6 +216,40 @@ flowchart TD
 
 ---
 
+## 贡献指南
+
+我们非常欢迎社区的各类贡献！为了确保顺畅的协作体验并支持基于 `git-cliff` 的自动化变更日志生成，请遵循以下开发流程：
+
+1. **基于 `develop` 分支开发**：`main` 分支仅保留给已打标签的稳定发行版。所有特性开发、问题修复与代码重构均应从 `develop` 分支切出：
+   ```bash
+   git checkout develop && git pull
+   git checkout -b <type>/<short-description>
+   # 类型前缀：feat/, fix/, chore/, refactor/, sec/
+   ```
+2. **本地验证**：在提交前确保代码格式化、Lint 检查和测试全部通过：
+   ```bash
+   cd omawarden
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   XDG_RUNTIME_DIR=/tmp cargo test
+   ```
+   *(可选)* 如果已安装 [`mise`](https://mise.jdx.dev/)，可直接使用 `mise run build` 或 `mise run dev-deploy` 进行本地联调与部署。
+3. **提交信息规范**：编写符合 Conventional Commits 规范的 Commit（如 `feat(daemon): ...`、`fix(ui): ...`）。
+4. **向 `develop` 提交 PR**：创建 Pull Request 并指定基准分支（base branch）为 `develop`。
+
+完整开发与贡献细节请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+---
+
+## 致谢 / Credits
+
+`omarchy-bitwarden` 得益于开源社区的优秀成果与深厚积淀，特别致谢：
+
+- **[Bitwarden CLI (`bw`)](https://github.com/bitwarden/clients)**：感谢 Bitwarden 官方团队提供的完整协议设计、数据模型与标准参考客户端。
+- **[rbw](https://github.com/doy/rbw)**：衷心感谢 `rbw` 开创性地实现了基于 Rust 的高性能零知识常驻 daemon 架构，为 `omawarden` 的核心设计带来了重要启发与实现灵感。
+
+---
+
 ## 开源许可
 
 本项目基于 [MIT License](LICENSE) 开源发布。
