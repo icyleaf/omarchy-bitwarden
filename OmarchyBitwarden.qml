@@ -100,6 +100,21 @@ Item {
     installDependenciesProc.running = true
   }
 
+  // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
+  property bool allowLocalBinaryFallback: true
+
+  function finalizeDependencyCheck() {
+    root.isCheckingDependencies = false
+    if (dependencyCheckView) {
+      var missing = dependencyCheckView.finalizeCheck()
+      root.missingDependencyPackages = missing
+      root.dependenciesMissing = (missing.length > 0)
+      if (!root.dependenciesMissing) {
+        root.resolveHelper()
+      }
+    }
+  }
+
   Process {
     id: pacmanCheckProc
     running: false
@@ -123,15 +138,44 @@ Item {
     }
 
     onExited: function(code) {
-      root.isCheckingDependencies = false
-      if (dependencyCheckView) {
-        var missing = dependencyCheckView.finalizeCheck()
-        root.missingDependencyPackages = missing
-        root.dependenciesMissing = (missing.length > 0)
-        if (!root.dependenciesMissing) {
-          root.resolveHelper()
+      if (dependencyCheckView && root.allowLocalBinaryFallback) {
+        var omawardenInstalled = false
+        for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+          var item = dependencyCheckView.dependencyModel.get(i)
+          if (item.pkgName === "omawarden" && item.status === "installed") {
+            omawardenInstalled = true
+            break
+          }
+        }
+        if (!omawardenInstalled) {
+          var localBin = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+          var targetBin = (root.helperPath && root.helperPath !== "omawarden") ? root.helperPath : localBin
+          checkFallbackProc.running = false
+          checkFallbackProc.command = [targetBin, "-V"]
+          checkFallbackProc.running = true
+          return
         }
       }
+      root.finalizeDependencyCheck()
+    }
+  }
+
+  Process {
+    id: checkFallbackProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var out = (text || "").trim()
+        var match = out.match(/^omawarden\s+([^\s(]+)/)
+        var ver = match ? match[1] : ""
+        if (dependencyCheckView && ver.length > 0) {
+          dependencyCheckView.setFallbackInstalled("omawarden", ver)
+        }
+      }
+    }
+    onExited: function(code) {
+      root.finalizeDependencyCheck()
     }
   }
 

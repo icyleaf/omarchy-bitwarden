@@ -31,6 +31,7 @@ Item {
       description: "High-performance Rust backend providing end-to-end encryption, TOTP generation, and Unix domain socket IPC (distributed via AUR omawarden-bin)."
       status: "idle"     // "idle" | "checking" | "installed" | "missing"
       version: ""
+      isLocalFallback: false
     }
 
     ListElement {
@@ -41,6 +42,7 @@ Item {
       description: "Provides secret-tool CLI for securely persisting vault session tokens and API credentials in the system keyring."
       status: "idle"
       version: ""
+      isLocalFallback: false
     }
 
     ListElement {
@@ -51,6 +53,7 @@ Item {
       description: "Provides wl-copy and wl-paste for secure password and TOTP copying with auto-clearing timeout."
       status: "idle"
       version: ""
+      isLocalFallback: false
     }
   }
 
@@ -69,6 +72,7 @@ Item {
           if (item.pkgName === name || item.aurPkgName === name || (item.pkgName === "omawarden" && name === "omawarden-bin")) {
             dependencyModel.setProperty(j, "status", "installed")
             dependencyModel.setProperty(j, "version", ver)
+            dependencyModel.setProperty(j, "isLocalFallback", false)
             break
           }
         }
@@ -90,9 +94,22 @@ Item {
           if (item.pkgName === missingName || item.aurPkgName === missingName) {
             dependencyModel.setProperty(j, "status", "missing")
             dependencyModel.setProperty(j, "version", "")
+            dependencyModel.setProperty(j, "isLocalFallback", false)
             break
           }
         }
+      }
+    }
+  }
+
+  function setFallbackInstalled(pkgName, ver) {
+    for (var j = 0; j < dependencyModel.count; j++) {
+      var item = dependencyModel.get(j)
+      if (item.pkgName === pkgName) {
+        dependencyModel.setProperty(j, "status", "installed")
+        dependencyModel.setProperty(j, "version", ver ? (ver + " (local)") : "local")
+        dependencyModel.setProperty(j, "isLocalFallback", true)
+        break
       }
     }
   }
@@ -117,6 +134,7 @@ Item {
     for (var i = 0; i < dependencyModel.count; i++) {
       dependencyModel.setProperty(i, "status", "checking")
       dependencyModel.setProperty(i, "version", "")
+      dependencyModel.setProperty(i, "isLocalFallback", false)
     }
   }
 
@@ -263,8 +281,16 @@ Item {
                     Text {
                       id: reqTagText
                       anchors.centerIn: parent
-                      text: (model.pkgName === "omawarden") ? "AUR: omawarden-bin" : "Core System Package"
-                      color: (model.pkgName === "omawarden") ? depViewRoot.accent : Qt.darker(depViewRoot.foreground, 1.4)
+                      text: {
+                        if (Boolean(model.isLocalFallback)) return "Local Binary Fallback"
+                        if (model.pkgName === "omawarden") return "AUR: omawarden-bin"
+                        return "Core System Package"
+                      }
+                      color: {
+                        if (Boolean(model.isLocalFallback)) return "#a6e3a1"
+                        if (model.pkgName === "omawarden") return depViewRoot.accent
+                        return Qt.darker(depViewRoot.foreground, 1.4)
+                      }
                       font.pixelSize: 10
                       font.bold: true
                     }
