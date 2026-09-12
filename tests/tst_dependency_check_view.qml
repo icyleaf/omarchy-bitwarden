@@ -129,6 +129,21 @@ Item {
     check(cmd.indexOf("yay -S --needed") !== -1, "Install command checks yay")
     check(cmd.indexOf("sudo pacman -S --needed") !== -1, "Install command falls back to pacman")
 
+    // 11. Local binary fallback support during transition phase
+    depView.resetToChecking()
+    depView.parsePacmanStdout("libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\n")
+    depView.parsePacmanStderr("error: package 'omawarden' was not found\n")
+    check(depView.dependencyModel.get(0).status === "missing", "omawarden initially missing from pacman")
+
+    // In transition phase: local binary is detected
+    depView.setFallbackInstalled("omawarden", "0.7.0")
+    check(depView.dependencyModel.get(0).status === "installed", "omawarden satisfied via local fallback binary")
+    check(depView.dependencyModel.get(0).isLocalFallback === true, "omawarden has isLocalFallback true")
+    check(depView.dependencyModel.get(0).version.indexOf("local") !== -1, "omawarden version indicates local")
+
+    var missingWithFallback = depView.finalizeCheck()
+    check(missingWithFallback.length === 0, "no missing packages when omawarden local fallback is present")
+
     console.log("ALL DEPENDENCY CHECK VIEW TESTS PASSED!")
     Qt.exit(failures === 0 ? 0 : 1)
   }
