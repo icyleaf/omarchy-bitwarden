@@ -13,6 +13,7 @@ Item {
   id: root
 
   Component.onCompleted: {
+    root.checkDependencies()
     root.resolveHelper()
     root.checkUpdates(false)
   }
@@ -65,6 +66,81 @@ Item {
       root.refreshConfig()
       root.refreshHealth()
       root.refreshAuthStatus()
+    }
+  }
+
+  // Dependency Checking & One-Click Installer State
+  property bool dependenciesMissing: false
+  property bool isCheckingDependencies: false
+  property bool isInstallingDependencies: false
+  property var missingDependencyPackages: []
+
+  function checkDependencies() {
+    if (dependencyCheckView) {
+      dependencyCheckView.resetToChecking()
+    }
+    root.isCheckingDependencies = true
+    pacmanCheckProc.running = false
+    pacmanCheckProc.command = ["pacman", "-Q", "omawarden", "libsecret", "wl-clipboard"]
+    pacmanCheckProc.running = true
+  }
+
+  function installMissingDependencies() {
+    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
+    if (missing.length === 0) return
+
+    var pkgs = missing.join(" ")
+    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + pkgs +
+                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + pkgs +
+                     "; else sudo pacman -S --needed " + pkgs + "; fi"
+
+    root.isInstallingDependencies = true
+    installDependenciesProc.running = false
+    installDependenciesProc.command = ["omarchy-launch-floating-terminal-with-presentation", installCmd]
+    installDependenciesProc.running = true
+  }
+
+  Process {
+    id: pacmanCheckProc
+    running: false
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (dependencyCheckView) {
+          dependencyCheckView.parsePacmanStdout(text)
+        }
+      }
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (dependencyCheckView) {
+          dependencyCheckView.parsePacmanStderr(text)
+        }
+      }
+    }
+
+    onExited: function(code) {
+      root.isCheckingDependencies = false
+      if (dependencyCheckView) {
+        var missing = dependencyCheckView.finalizeCheck()
+        root.missingDependencyPackages = missing
+        root.dependenciesMissing = (missing.length > 0)
+        if (!root.dependenciesMissing) {
+          root.resolveHelper()
+        }
+      }
+    }
+  }
+
+  Process {
+    id: installDependenciesProc
+    running: false
+    onExited: function(code) {
+      root.isInstallingDependencies = false
+      root.checkDependencies()
     }
   }
 
@@ -171,6 +247,7 @@ Item {
   }
 
   readonly property string effectiveView: {
+    if (dependenciesMissing && currentView !== "settings") return "dependency_check"
     if (currentView !== "auto") return currentView
     if (authState.status === "unlocked" && Boolean(authState.has_session)) return "search"
     if (authState.status === "locked" && Boolean(authState.has_session)) return "unlock"
@@ -188,7 +265,7 @@ Item {
     Qt.callLater(function() {
       if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
         searchHeader.searchField.forceActiveFocus()
-      } else if (root.opened && authViewComponent && authViewComponent.unlockInput) {
+      } else if (root.opened && root.effectiveView !== "dependency_check" && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
     })
@@ -254,14 +331,18 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
-    root.refreshHealth()
-    root.refreshConfig()
-    root.refreshAuthStatus()
-    root.checkUpdates(false)
+    if (root.dependenciesMissing) {
+      root.checkDependencies()
+    } else {
+      root.refreshHealth()
+      root.refreshConfig()
+      root.refreshAuthStatus()
+      root.checkUpdates(false)
+    }
     Qt.callLater(function() {
       if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
         searchHeader.searchField.forceActiveFocus()
-      } else if (authViewComponent && authViewComponent.unlockInput) {
+      } else if (root.effectiveView !== "dependency_check" && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
     })
@@ -2044,6 +2125,21 @@ Item {
             onCopyDiagnosticsRequested: { root.copyDiagnostics() }
             onClearLogsRequested: { root.logBuffer = [] }
           }
+
+          // Mode D: Dependency Check View (Prerequisite Setup)
+          DependencyCheckView {
+            id: dependencyCheckView
+            anchors.fill: parent
+            visible: root.effectiveView === "dependency_check"
+            isChecking: root.isCheckingDependencies
+            isInstalling: root.isInstallingDependencies
+            fontFamily: root.fontFamily
+            foreground: root.foreground
+            accent: root.accent
+            borderColor: root.borderColor
+            onRecheckRequested: root.checkDependencies()
+            onInstallRequested: root.installMissingDependencies()
+          }
         }
 
         // 3. Footer Bar (Bottom Left: Actions, Sync, Lock, Settings; Bottom Right: Versions & Actions)
@@ -2052,7 +2148,7 @@ Item {
           isBusy: root.isBusy
           overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
           backendVersion: (root.cliHealth && root.cliHealth.version) || ""
-          isEngineInstalled: Boolean(root.cliHealth && root.cliHealth.installed)
+          isEngineInstalled: !root.dependenciesMissing && Boolean(root.cliHealth && root.cliHealth.installed)
           isDownloadingCli: root.isDownloadingCli
           updateAvailable: root.updateAvailable
           latestVersion: root.latestVersion
