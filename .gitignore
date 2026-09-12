@@ -10,3 +10,4 @@ config.json
 data.json
 target/
 bin/
+dist/

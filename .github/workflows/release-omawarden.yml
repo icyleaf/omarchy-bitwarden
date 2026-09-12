@@ -3,8 +3,8 @@ name: Release Omawarden CLI
 on:
   push:
     tags:
-      - "omawarden-*"
-      - "omawarden-v*"
+      - "omawarden-[0-9]*"
+      - "omawarden-v[0-9]*"
   workflow_dispatch:
     inputs:
       tag:

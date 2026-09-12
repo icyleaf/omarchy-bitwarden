@@ -33,6 +33,10 @@ depends = ["build-release", "dev-update-omarchy-plugin"]
 depends_post = ["dev-restart-omarchy"]
 run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f bin/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
 
+[tasks.pkg-dev]
+description = "Build and package omawarden as a local Arch Linux package (omawarden-bin)"
+run = "./scripts/package-dev.sh $@"
+
 [tasks.version]
 description = "Show the latest version of the project"
 run = """

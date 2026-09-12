@@ -244,6 +244,8 @@ Item {
     if (!latestVersion) return false
     var currentVer = (cliHealth && cliHealth.version) ? cliHealth.version : ""
     if (!currentVer) return false
+    // Suppress regular release update notifications when running development builds
+    if (currentVer.indexOf("-dev") !== -1 || currentVer.indexOf(".dev") !== -1) return false
     return compareSemVer(latestVersion, currentVer) > 0
   }
 
