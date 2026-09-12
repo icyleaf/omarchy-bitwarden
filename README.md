@@ -216,6 +216,40 @@ flowchart TD
 
 ---
 
+## Contributing
+
+We welcome contributions of all kinds! To ensure smooth collaboration and automated changelog generation, please follow our development workflow:
+
+1. **Branch off `develop`**: The `main` branch is reserved for tagged releases. All active development (features, bug fixes, refactors) branches off `develop`:
+   ```bash
+   git checkout develop && git pull
+   git checkout -b <type>/<short-description>
+   # Types: feat/, fix/, chore/, refactor/, sec/
+   ```
+2. **Local Verification**: Ensure formatting, lints, and tests pass before committing:
+   ```bash
+   cd omawarden
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   XDG_RUNTIME_DIR=/tmp cargo test
+   ```
+   *(Optional)* If you use [`mise`](https://mise.jdx.dev/), you can run `mise run build` or `mise run dev-deploy` for local testing.
+3. **Conventional Commits**: Write clear commit messages following Conventional Commits (e.g., `feat(daemon): ...`, `fix(ui): ...`).
+4. **Submit PR against `develop`**: Open your Pull Request targeting the `develop` branch.
+
+For complete development details, please see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Credits
+
+`omarchy-bitwarden` is built upon the great foundation and inspirations of the open-source community:
+
+- **[Bitwarden CLI (`bw`)](https://github.com/bitwarden/clients)**: Gratitude to the official Bitwarden team for their protocol specifications, API designs, and comprehensive reference client.
+- **[rbw](https://github.com/doy/rbw)**: Tremendous appreciation to `rbw` for pioneering a lightning-fast, zero-knowledge resident Rust daemon architecture, which served as a major inspiration for `omawarden`.
+
+---
+
 ## License
 
 This project is open-sourced under the [MIT License](LICENSE).
