@@ -30,6 +30,7 @@
 - **Strict File & Socket Permissions**: Disk storage (`data.json`) and the daemon Unix socket (`omawarden.sock`) enforce `0600` owner-only permissions.
 - **Daemon In-Memory Cache & Scrubbing**: Decrypted vault items and keys are held exclusively in daemon memory while unlocked. Manual `auth lock`, `auth logout`, idle timeouts, or screen-lock events immediately trigger `{"action": "lock"}` IPC to purge all decrypted items and keys from memory.
 - **Clipboard Guard**: Ephemeral clipboard management using Wayland native `wl-copy` with automatic 30-second TTL cleanup for copied passwords, PINs, and TOTPs.
+- **Website Icon Privacy & Endpoint Isolation**: Resolution policy governing website favicon retrieval. Official Bitwarden cloud instances query `https://icons.bitwarden.net/{domain}/icon.png`. Self-hosted instances (e.g. Vaultwarden or self-hosted Bitwarden) strictly query the user's configured server endpoint (`${server_root}/icons/{domain}/icon.png`), preventing leakage of intranet or private domain names to public third-party services. If self-hosted icon retrieval fails (such as on air-gapped networks or when server icon proxying is disabled), the UI fails closed to default category icons (`\uf084`) and never falls back to public servers (see `docs/adr/0014-self-hosted-icon-service-endpoint-and-privacy-isolation.md`).
 
 ### Cryptographic Hierarchy & Organization Domain
 - **User Master Key**: Derived via PBKDF2-HMAC-SHA256 or Argon2id, used to decrypt the User Symmetric Key (`enc_user_key`).

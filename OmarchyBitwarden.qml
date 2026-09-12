@@ -7,7 +7,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "./components"
-import "./components/iconpolicy.js" as IconPolicy
+import "./components/IconPolicy.js" as IconPolicy
 
 Item {
   id: root
@@ -247,6 +247,12 @@ Item {
     // Suppress regular release update notifications when running development builds
     if (currentVer.indexOf("-dev") !== -1 || currentVer.indexOf(".dev") !== -1) return false
     return compareSemVer(latestVersion, currentVer) > 0
+  }
+
+  readonly property string effectiveServerUrl: {
+    if (root.authState && root.authState.server_url) return root.authState.server_url
+    if (root.config && root.config.server_url) return root.config.server_url
+    return "https://vault.bitwarden.com"
   }
 
   property var authState: ({
@@ -2044,6 +2050,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              serverUrl: root.effectiveServerUrl
               showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
@@ -2081,6 +2088,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                serverUrl: root.effectiveServerUrl
                 showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
