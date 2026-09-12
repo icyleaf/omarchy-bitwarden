@@ -7,6 +7,7 @@ Item {
 
   property var config: ({})
   property var cliHealth: ({})
+  property string engineSource: "builtin"
   property var logBuffer: []
   property bool isDownloadingCli: false
   property bool isBusy: false
@@ -331,6 +332,26 @@ Item {
                   font.pixelSize: 10
                 }
 
+                // Source badge (AUR vs builtin)
+                Rectangle {
+                  visible: engineBadgeBox.isInstalled && Boolean(settingsRoot.engineSource)
+                  implicitHeight: 16
+                  implicitWidth: engineSourceText.implicitWidth + 10
+                  radius: 3
+                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.2, 0.5, 0.8, 0.2) : Qt.rgba(0.8, 0.6, 0.2, 0.2)
+                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.4, 0.7, 1.0, 0.4) : Qt.rgba(0.8, 0.6, 0.2, 0.4)
+                  border.width: 1
+
+                  Text {
+                    id: engineSourceText
+                    anchors.centerIn: parent
+                    text: (settingsRoot.engineSource.toLowerCase() === "aur") ? "AUR" : "builtin"
+                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
+                    font.pixelSize: 9
+                    font.weight: Font.DemiBold
+                  }
+                }
+
                 // Inline update tag when update is available
                 Rectangle {
                   visible: engineBadgeBox.hasUpdate
@@ -594,6 +615,35 @@ Item {
             }
           }
 
+          // Automatic Update Check Toggle
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.checkUpdatesChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
+              }
+              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              wrapMode: Text.WordWrap
+            }
+          }
+
           // Log Level Selection
           ColumnLayout {
             Layout.fillWidth: true
@@ -630,35 +680,6 @@ Item {
                   }
                 }
               }
-            }
-          }
-
-          // Automatic Update Check Toggle
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 3
-            RowLayout {
-              spacing: 6
-              Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
-                Text {
-                  anchors.centerIn: parent
-                  visible: settingsRoot.checkUpdatesChecked
-                  text: "\uf00c"
-                  font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
-                  font.pixelSize: 9
-                }
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
-              }
-              Text { text: "Check for updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
-            }
-            Text {
-              Layout.fillWidth: true
-              text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
-              color: settingsRoot.mutedForeground
-              font.pixelSize: 10
-              wrapMode: Text.WordWrap
             }
           }
         }
