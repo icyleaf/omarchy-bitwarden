@@ -7,6 +7,7 @@ Item {
 
   property var config: ({})
   property var cliHealth: ({})
+  property string engineSource: "builtin"
   property var logBuffer: []
   property bool isDownloadingCli: false
   property bool isBusy: false
@@ -329,6 +330,26 @@ Item {
                   text: "Engine: " + (settingsRoot.cliHealth.version || (engineBadgeBox.isInstalled ? "Ready" : "Missing"))
                   color: settingsRoot.foreground
                   font.pixelSize: 10
+                }
+
+                // Source badge (AUR vs builtin)
+                Rectangle {
+                  visible: engineBadgeBox.isInstalled && Boolean(settingsRoot.engineSource)
+                  implicitHeight: 16
+                  implicitWidth: engineSourceText.implicitWidth + 10
+                  radius: 3
+                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.2, 0.5, 0.8, 0.2) : Qt.rgba(0.8, 0.6, 0.2, 0.2)
+                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.4, 0.7, 1.0, 0.4) : Qt.rgba(0.8, 0.6, 0.2, 0.4)
+                  border.width: 1
+
+                  Text {
+                    id: engineSourceText
+                    anchors.centerIn: parent
+                    text: (settingsRoot.engineSource.toLowerCase() === "aur") ? "AUR" : "builtin"
+                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
+                    font.pixelSize: 9
+                    font.weight: Font.DemiBold
+                  }
                 }
 
                 // Inline update tag when update is available

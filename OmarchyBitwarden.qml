@@ -103,6 +103,24 @@ Item {
   // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
   property bool allowLocalBinaryFallback: true
 
+  readonly property string engineSource: {
+    if (dependencyCheckView) {
+      for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+        var item = dependencyCheckView.dependencyModel.get(i)
+        if (item.pkgName === "omawarden") {
+          if (item.isLocalFallback) return "builtin"
+          if (item.status === "installed") return "aur"
+        }
+      }
+    }
+    if (root.helperPath && root.helperPath !== "omawarden") {
+      if (root.helperPath.indexOf("/usr/") === 0 || root.helperPath === "/usr/bin/omawarden") {
+        return "aur"
+      }
+    }
+    return "builtin"
+  }
+
   function finalizeDependencyCheck() {
     root.isCheckingDependencies = false
     if (dependencyCheckView) {
@@ -1551,6 +1569,7 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
+    report += "- **Engine Source**: " + (root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN") + "\n"
     report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
@@ -2144,6 +2163,7 @@ Item {
             visible: root.effectiveView === "settings"
             config: root.config
             cliHealth: root.cliHealth
+            engineSource: root.engineSource
             logBuffer: root.logBuffer
             isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
