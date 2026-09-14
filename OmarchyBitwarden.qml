@@ -546,6 +546,35 @@ Item {
     vaultSyncProc.running = true
   }
 
+  function formatSyncError(err) {
+    if (!err) return "Vault sync failed."
+    var str = String(err).trim()
+
+    var isTokenRefresh = str.toLowerCase().indexOf("token refresh") !== -1 || str.toLowerCase().indexOf("refresh token") !== -1
+    var isApiAuth = str.toLowerCase().indexOf("api auth") !== -1 || str.toLowerCase().indexOf("api key") !== -1
+
+    var httpMatch = str.match(/HTTP\s+(\d{3}(?:\s+[A-Za-z]+){0,4})/i)
+    if (httpMatch && httpMatch[1]) {
+      var httpCode = "HTTP " + httpMatch[1].trim()
+      if (isTokenRefresh) {
+        return "Token refresh failed: " + httpCode
+      } else if (isApiAuth) {
+        return "API auth failed: " + httpCode
+      } else {
+        return "Vault sync failed: " + httpCode
+      }
+    }
+
+    if (str.toLowerCase().indexOf("connection refused") !== -1) {
+      return (isTokenRefresh ? "Token refresh failed: " : "Vault sync failed: ") + "Connection refused"
+    }
+    if (str.toLowerCase().indexOf("timed out") !== -1 || str.toLowerCase().indexOf("timeout") !== -1) {
+      return (isTokenRefresh ? "Token refresh failed: " : "Vault sync failed: ") + "Request timed out"
+    }
+
+    return str
+  }
+
   function loadVaultItems() {
     root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
@@ -2827,9 +2856,10 @@ Item {
         try {
           var res = JSON.parse(text)
           if (res && res.ok === false) {
-            root.errorMessage = res.error || "Vault sync failed."
-            root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
-            var errStr = String(res.error || "")
+            var rawError = String(res.error || "Vault sync failed.")
+            root.logError("omarchy:vault", "Vault sync failed: " + rawError)
+            root.errorMessage = root.formatSyncError(rawError)
+            var errStr = rawError
             if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
               root.clearSensitiveState()
               root.authState = ({
