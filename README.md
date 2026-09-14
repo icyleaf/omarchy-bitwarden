@@ -25,6 +25,34 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
 | **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
+
+### Why omawarden instead of rbw?
+
+`rbw` is an outstanding unofficial Rust CLI client in the Linux ecosystem that pioneered a zero-knowledge resident daemon architecture, serving as a major inspiration for `omawarden`. Both tools uphold high standards for cryptographic memory safety, featuring physical memory locking (`mlock`) and immediate memory zeroization (`zeroize`).
+
+The difference between them is not "CLI vs Desktop", but rather **the distinct design trade-offs made across feature completeness, system dependencies, and workflows**:
+
+#### Core Feature Comparison
+
+| Dimension | `omawarden` (Builtin Engine & Standalone CLI) | `rbw` (Unofficial Rust CLI) |
+| :--- | :--- | :--- |
+| **Item Type Support Depth** | **First-Class 5 Types**: Dedicated extraction flags and structured UI inspection for Logins, Cards (CVV/number), Identities, Notes, and SSH Keys | Primarily targets password and TOTP; viewing cards/identities requires dumping unformatted raw JSON (`--raw`) |
+| **Attachment Decryption** | **Native**: Downloads encrypted blobs and decrypts binary payloads via `AES-256-CBC` for preview/export | **Not supported** (see open feature request [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
+| **Password Revision History** | **Native**: Decrypts and displays item password revision history | **Not supported** |
+| **Organizations & Collections** | **Full Support**: `RSA-OAEP-SHA1` Org key unwrapping, Multi-Org & Collection filtering | **Basic Support**: Focused on personal vault; limited organization & collection support ([doy/rbw#351](https://github.com/doy/rbw/issues/351)) |
+| **SSH Key Capabilities** | **Keypair Generation & Management**: Generates Ed25519/RSA keypairs locally, calculates fingerprints, and exports keys | **OpenSSH Agent Proxy**: Implements `SSH_AUTH_SOCK` to sign requests in-memory without keys touching disk (cannot generate keypairs) |
+| **Lock Screen Security Integration** | **Active Zeroize on Lock**: Listens to Hyprlock, Omarchy lock, D-Bus `logind` sleep/lock signals | **Passive Idle Timeout**: Secrets remain in memory during sleep/lock if idle timer hasn't expired |
+| **Authentication & Secret Storage** | **System Keyring (Secret Service) Integration**: Silent background token renewal without interrupting workflow | **GnuPG / pinentry Interaction**: Standard pinentry (supports TTY `pinentry-curses`); independent of desktop keyring |
+| **GUI IPC Integration** | **Dedicated Structured JSON IPC Socket**: Designed for high-throughput, instant desktop overlay rendering (<1ms) | Plain text stdout/stderr intended for terminal pipelines |
+
+#### Current Limitations of omawarden compared to rbw
+
+In the following scenarios, `rbw` holds clear advantages, allowing users to choose the best fit for their workflow:
+1. **Distribution Packaging & Maturity**: `rbw` is packaged in official repositories across Arch, Debian, Fedora, Alpine, NixOS, and macOS Homebrew for one-command installation. `omawarden` is primarily distributed via AUR and GitHub Releases, and is not yet in other official distribution repositories.
+2. **Headless & Server Compatibility**: `rbw` paired with `pinentry-curses` works seamlessly in pure TTYs, servers, or minimal Docker containers without Secret Service daemons. `omawarden` relies on system Secret Service keyrings for secure token persistence.
+3. **Real-time OpenSSH Agent Proxy**: `rbw` acts as an active `SSH_AUTH_SOCK` agent, signing requests in-memory without keys ever touching disk. `omawarden` does not yet implement the OpenSSH agent protocol and currently focuses on key generation, inspection, and local export.
+4. **Interactive CLI Editing**: `rbw` provides `rbw edit` to open `$EDITOR` and modify vault items directly from the terminal. `omawarden` currently focuses on read, extract, copy, and generation workflows, and terminal-based vault item mutation is not yet supported (planned for future releases).
+
 ---
 
 ## Keyboard Shortcuts
