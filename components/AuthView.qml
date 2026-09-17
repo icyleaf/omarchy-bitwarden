@@ -13,6 +13,7 @@ Item {
   property string loginMethod: "password"
   property bool rememberEmailChecked: true
   property bool show2FAField: false
+  property bool isNewDeviceVerification: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -33,6 +34,7 @@ Item {
     if (loginPwdInput) loginPwdInput.text = ""
     if (login2FAInput) login2FAInput.text = ""
     if (apiClientSecInput) apiClientSecInput.text = ""
+    authRoot.isNewDeviceVerification = false
   }
 
   onVisibleChanged: {
@@ -44,6 +46,7 @@ Item {
   onLoginMethodChanged: {
     clearInputs()
     authRoot.show2FAField = false
+    authRoot.isNewDeviceVerification = false
   }
 
   onAuthStateChanged: {
@@ -321,7 +324,14 @@ Item {
               visible: authRoot.show2FAField
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Two-Factor Authentication (2FA) Code:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text {
+                text: authRoot.isNewDeviceVerification
+                  ? "New Device Verification Code (check email):"
+                  : "Two-Factor Authentication (2FA) Code:"
+                color: authRoot.foreground
+                font.pixelSize: 11
+                font.weight: Font.Medium
+              }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {

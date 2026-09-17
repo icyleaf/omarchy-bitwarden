@@ -17,6 +17,7 @@ pub enum ApiError {
     Json(String),
     AuthFailed(String),
     TwoFactorRequired { providers: Vec<i32> },
+    NewDeviceVerificationRequired,
     Crypto(String),
 }
 
@@ -29,6 +30,9 @@ impl std::fmt::Display for ApiError {
             ApiError::Json(s) => write!(f, "JSON decode error: {}", s),
             ApiError::AuthFailed(s) => write!(f, "API authentication failed: {}", s),
             ApiError::TwoFactorRequired { .. } => write!(f, "Two-factor authentication required"),
+            ApiError::NewDeviceVerificationRequired => {
+                write!(f, "New device verification required")
+            }
             ApiError::Crypto(s) => write!(f, "Cryptographic error: {}", s),
         }
     }
@@ -379,6 +383,7 @@ impl BitwardenApiClient {
         email: &str,
         password: &str,
         two_factor_token: Option<&str>,
+        new_device_otp: Option<&str>,
     ) -> Result<(TokenResponse, SymmetricCryptoKey), ApiError> {
         let prelogin = self.prelogin(email)?;
         let kdf_type = KdfType::from(prelogin.kdf.unwrap_or(0));
@@ -406,48 +411,55 @@ impl BitwardenApiClient {
         form_params.insert("deviceIdentifier", get_device_identifier());
         form_params.insert("deviceName", "linux".to_string());
 
-        if let Some(code) = two_factor_token {
+        if let Some(otp) = new_device_otp {
+            form_params.insert("newDeviceOtp", otp.trim().to_string());
+        } else if let Some(code) = two_factor_token {
             form_params.insert("twoFactorToken", code.trim().to_string());
             form_params.insert("twoFactorProvider", "0".to_string()); // Authenticator
             form_params.insert("twoFactorRemember", "1".to_string());
         }
+
+        let parse_and_decrypt_token =
+            |body: &str| -> Result<(TokenResponse, SymmetricCryptoKey), ApiError> {
+                let mut token_resp = serde_json::from_str::<TokenResponse>(body)
+                    .map_err(|e| ApiError::Json(e.to_string()))?;
+
+                if token_resp.kdf.is_none() {
+                    token_resp.kdf = prelogin.kdf;
+                }
+                if token_resp.kdf_iterations.is_none() {
+                    token_resp.kdf_iterations = prelogin.kdf_iterations;
+                }
+                if token_resp.kdf_memory.is_none() {
+                    token_resp.kdf_memory = prelogin.kdf_memory;
+                }
+                if token_resp.kdf_parallelism.is_none() {
+                    token_resp.kdf_parallelism = prelogin.kdf_parallelism;
+                }
+
+                // Decrypt User Key
+                let enc_user_key = token_resp.key.as_ref().ok_or_else(|| {
+                    ApiError::Crypto("User key missing in login response".to_string())
+                })?;
+                let parsed_enc_key =
+                    EncString::parse(enc_user_key).map_err(|e| ApiError::Crypto(e.to_string()))?;
+
+                let decrypted_raw_user_key =
+                    SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)
+                        .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
+
+                let user_key = SymmetricCryptoKey::from_raw_bytes(&decrypted_raw_user_key)
+                    .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
+
+                Ok((token_resp, user_key))
+            };
 
         let resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
         let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
 
         if status.is_success() {
-            let mut token_resp = serde_json::from_str::<TokenResponse>(&body_text)
-                .map_err(|e| ApiError::Json(e.to_string()))?;
-
-            if token_resp.kdf.is_none() {
-                token_resp.kdf = prelogin.kdf;
-            }
-            if token_resp.kdf_iterations.is_none() {
-                token_resp.kdf_iterations = prelogin.kdf_iterations;
-            }
-            if token_resp.kdf_memory.is_none() {
-                token_resp.kdf_memory = prelogin.kdf_memory;
-            }
-            if token_resp.kdf_parallelism.is_none() {
-                token_resp.kdf_parallelism = prelogin.kdf_parallelism;
-            }
-
-            // Decrypt User Key
-            let enc_user_key = token_resp.key.as_ref().ok_or_else(|| {
-                ApiError::Crypto("User key missing in login response".to_string())
-            })?;
-            let parsed_enc_key =
-                EncString::parse(enc_user_key).map_err(|e| ApiError::Crypto(e.to_string()))?;
-
-            let decrypted_raw_user_key =
-                SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)
-                    .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
-
-            let user_key = SymmetricCryptoKey::from_raw_bytes(&decrypted_raw_user_key)
-                .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
-
-            Ok((token_resp, user_key))
+            parse_and_decrypt_token(&body_text)
         } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
             Err(ApiError::HttpStatus(
                 status,
@@ -456,11 +468,6 @@ impl BitwardenApiClient {
         } else {
             let body_lower = body_text.to_lowercase();
             if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
-                let has_2fa_field = err_json.get("TwoFactorProviders").is_some()
-                    || err_json.get("twoFactorProviders").is_some()
-                    || err_json.get("TwoFactorProviders2").is_some()
-                    || err_json.get("twoFactorProviders2").is_some()
-                    || body_lower.contains("twofactorproviders");
                 let err_desc = err_json
                     .get("error_description")
                     .and_then(|v| v.as_str())
@@ -468,10 +475,50 @@ impl BitwardenApiClient {
                 let err_msg = err_json
                     .get("Message")
                     .or_else(|| err_json.get("message"))
+                    .or_else(|| {
+                        err_json
+                            .get("ErrorModel")
+                            .and_then(|em| em.get("Message").or_else(|| em.get("message")))
+                    })
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let err_code = err_json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+
                 let err_desc_lower = err_desc.to_lowercase();
                 let err_msg_lower = err_msg.to_lowercase();
+
+                let is_new_device = err_desc_lower.contains("new device verification")
+                    || err_msg_lower.contains("new device verification")
+                    || body_lower.contains("new device verification required")
+                    || (err_code == "device_error" && body_lower.contains("verification"));
+
+                if is_new_device {
+                    if let Some(code) = two_factor_token {
+                        if new_device_otp.is_none() && !code.trim().is_empty() {
+                            let mut retry_params = form_params.clone();
+                            retry_params.remove("twoFactorToken");
+                            retry_params.remove("twoFactorProvider");
+                            retry_params.remove("twoFactorRemember");
+                            retry_params.insert("newDeviceOtp", code.trim().to_string());
+                            if let Ok(retry_resp) = self.post_identity_connect_token(&retry_params)
+                            {
+                                let retry_status = retry_resp.status();
+                                if let Ok(retry_body) = retry_resp.text() {
+                                    if retry_status.is_success() {
+                                        return parse_and_decrypt_token(&retry_body);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Err(ApiError::NewDeviceVerificationRequired);
+                }
+
+                let has_2fa_field = err_json.get("TwoFactorProviders").is_some()
+                    || err_json.get("twoFactorProviders").is_some()
+                    || err_json.get("TwoFactorProviders2").is_some()
+                    || err_json.get("twoFactorProviders2").is_some()
+                    || body_lower.contains("twofactorproviders");
 
                 if has_2fa_field
                     || err_desc_lower.contains("two factor")
@@ -2263,13 +2310,230 @@ mod tests {
 
         let client = BitwardenApiClient::new(&server_url);
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
-        let res = client.login_password("user@example.com", &pwd, None);
+        let res = client.login_password("user@example.com", &pwd, None, None);
         match res {
             Err(ApiError::TwoFactorRequired { providers }) => {
                 assert_eq!(providers, vec![0, 1]);
             }
             other => panic!("Expected TwoFactorRequired, got {:?}", other),
         }
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_new_device_verification_challenge_and_otp() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [3u8; 16];
+        let plaintext = [4u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("newDeviceOtp=654321") {
+                        // Successful response when newDeviceOtp is provided
+                        let body = format!(
+                            r#"{{"access_token":"token123","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        break;
+                    } else {
+                        // Return official Bitwarden New Device Verification challenge
+                        let body = r#"{"error":"device_error","error_description":"New device verification required","ErrorModel":{"Message":"new device verification required"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // First attempt without OTP -> triggers NewDeviceVerificationRequired
+        let res1 = client.login_password("user@example.com", &pwd, None, None);
+        match res1 {
+            Err(ApiError::NewDeviceVerificationRequired) => {}
+            other => panic!("Expected NewDeviceVerificationRequired, got {:?}", other),
+        }
+
+        // Second attempt with new_device_otp -> succeeds
+        let res2 = client.login_password("user@example.com", &pwd, None, Some("654321"));
+        assert!(
+            res2.is_ok(),
+            "Expected login with new_device_otp to succeed: {:?}",
+            res2.err()
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_new_device_otp_auto_retry_from_2fa_token() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [3u8; 16];
+        let plaintext = [4u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("twoFactorToken=999888") {
+                        // Server refuses twoFactorToken with New device verification required challenge
+                        let body = r#"{"error":"device_error","error_description":"New device verification required"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    } else if req.contains("newDeviceOtp=999888") {
+                        // Automatic retry with newDeviceOtp succeeds!
+                        let body = format!(
+                            r#"{{"access_token":"token123","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        break;
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // Passed as twoFactorToken, client auto-retries with newDeviceOtp and succeeds!
+        let res = client.login_password("user@example.com", &pwd, Some("999888"), None);
+        assert!(
+            res.is_ok(),
+            "Expected auto-retry with newDeviceOtp to succeed: {:?}",
+            res.err()
+        );
+
         let _ = handle.join();
     }
 }
