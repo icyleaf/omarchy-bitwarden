@@ -142,6 +142,8 @@ pub struct AuthResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_provider: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_factor_providers2: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub new_device_verification_required: Option<bool>,
 }
 
@@ -400,20 +402,73 @@ impl AuthManager {
             new_device_otp,
         ) {
             Ok(r) => r,
-            Err(crate::api::ApiError::TwoFactorRequired { providers }) => {
+            Err(crate::api::ApiError::TwoFactorRequired {
+                providers,
+                providers2,
+            }) => {
                 crate::log_info!(
                     "omawarden:auth",
                     "Two-factor authentication required for {}",
                     email
                 );
+
+                // If WebAuthn (provider 7) is requested (or is the sole provider) and token was not provided,
+                // automatically attempt FIDO2 assertion with a connected security key.
+                let is_webauthn_target = two_factor_provider == Some(7)
+                    || (two_factor_provider.is_none() && providers == vec![7]);
+                if is_webauthn_target && code.is_none() {
+                    if let Some(ref p2) = providers2 {
+                        if let Some(ch) =
+                            crate::webauthn::parse_webauthn_challenge(p2, &self.server_url)
+                        {
+                            crate::log_info!(
+                                "omawarden:auth",
+                                "Attempting FIDO2 WebAuthn assertion with security key..."
+                            );
+                            match crate::webauthn::create_webauthn_two_factor_token(&ch) {
+                                Ok(token) => {
+                                    return self.login_password(
+                                        email,
+                                        password,
+                                        Some(&token),
+                                        Some(7),
+                                        new_device_otp,
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::log_warn!(
+                                        "omawarden:auth",
+                                        "WebAuthn assertion failed: {}",
+                                        e
+                                    );
+                                    return AuthResult {
+                                        ok: false,
+                                        status: Some("unauthenticated".to_string()),
+                                        error: Some(format!("Security key error: {}", e)),
+                                        two_factor_required: Some(true),
+                                        two_factor_providers: Some(providers),
+                                        two_factor_provider: Some(7),
+                                        two_factor_providers2: providers2,
+                                        ..Default::default()
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let default_provider = if providers.contains(&0) {
                     0
+                } else if providers.contains(&7) {
+                    7
                 } else if providers.contains(&1) {
                     1
                 } else {
                     *providers.first().unwrap_or(&0)
                 };
-                let err_text = if default_provider == 1 {
+                let err_text = if default_provider == 7 {
+                    "WebAuthn security key authentication required. Please insert and touch your security key."
+                } else if default_provider == 1 {
                     "Email two-factor authentication required. Please check your email for the verification code."
                 } else {
                     "Two-factor authentication required or invalid code."
@@ -426,6 +481,7 @@ impl AuthManager {
                     two_factor_required: Some(true),
                     two_factor_providers: Some(providers),
                     two_factor_provider: Some(default_provider),
+                    two_factor_providers2: providers2,
                     ..Default::default()
                 };
             }

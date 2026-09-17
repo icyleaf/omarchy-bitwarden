@@ -16,7 +16,10 @@ pub enum ApiError {
     Http(String),
     Json(String),
     AuthFailed(String),
-    TwoFactorRequired { providers: Vec<i32> },
+    TwoFactorRequired {
+        providers: Vec<i32>,
+        providers2: Option<serde_json::Value>,
+    },
     NewDeviceVerificationRequired,
     Crypto(String),
 }
@@ -627,7 +630,11 @@ impl BitwardenApiClient {
                         }
                     }
 
-                    return Err(ApiError::TwoFactorRequired { providers });
+                    let providers2 = err_json.get("TwoFactorProviders2").cloned();
+                    return Err(ApiError::TwoFactorRequired {
+                        providers,
+                        providers2,
+                    });
                 }
 
                 if !err_desc.is_empty() {
@@ -2432,7 +2439,7 @@ mod tests {
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
         let res = client.login_password("user@example.com", &pwd, None, None, None);
         match res {
-            Err(ApiError::TwoFactorRequired { providers }) => {
+            Err(ApiError::TwoFactorRequired { providers, .. }) => {
                 assert_eq!(providers, vec![0, 1]);
             }
             other => panic!("Expected TwoFactorRequired, got {:?}", other),

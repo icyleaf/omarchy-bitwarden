@@ -657,10 +657,6 @@ fn main() -> ExitCode {
                                 res.two_factor_providers.clone().unwrap_or_else(|| vec![0]);
                             let chosen_provider = if providers.len() == 1 {
                                 providers[0]
-                            } else if providers.contains(&0) && !providers.contains(&1) {
-                                0
-                            } else if !providers.contains(&0) && providers.contains(&1) {
-                                1
                             } else {
                                 eprintln!("\nTwo-Factor Authentication Methods:");
                                 for (idx, p) in providers.iter().enumerate() {
@@ -668,6 +664,7 @@ fn main() -> ExitCode {
                                         0 => "Authenticator App (TOTP)",
                                         1 => "Email Verification Code",
                                         3 => "YubiKey OTP",
+                                        7 => "WebAuthn / Passkey / Security Key",
                                         _ => "Other",
                                     };
                                     eprintln!("  [{}] {}", idx + 1, label);
@@ -683,24 +680,29 @@ fn main() -> ExitCode {
                             };
 
                             effective_provider = Some(chosen_provider);
-                            let prompt_label = match chosen_provider {
-                                1 => {
-                                    "Enter Email Two-Factor Verification Code (check your email): "
+                            if chosen_provider == 7 {
+                                eprintln!("Please touch your WebAuthn security key (waiting for touch)...");
+                                res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
+                            } else {
+                                let prompt_label = match chosen_provider {
+                                    1 => {
+                                        "Enter Email Two-Factor Verification Code (check your email): "
+                                    }
+                                    3 => "Touch your YubiKey or enter OTP: ",
+                                    _ => "Enter Two-Factor (2FA) Code: ",
+                                };
+                                let prompt_code =
+                                    rpassword::prompt_password(prompt_label).unwrap_or_default();
+                                if !prompt_code.trim().is_empty() {
+                                    effective_code = Some(prompt_code.trim().to_string());
+                                    res = auth_mgr.login_password(
+                                        &email,
+                                        &pwd,
+                                        effective_code.as_deref(),
+                                        effective_provider,
+                                        None,
+                                    );
                                 }
-                                3 => "Touch your YubiKey or enter OTP: ",
-                                _ => "Enter Two-Factor (2FA) Code: ",
-                            };
-                            let prompt_code =
-                                rpassword::prompt_password(prompt_label).unwrap_or_default();
-                            if !prompt_code.trim().is_empty() {
-                                effective_code = Some(prompt_code.trim().to_string());
-                                res = auth_mgr.login_password(
-                                    &email,
-                                    &pwd,
-                                    effective_code.as_deref(),
-                                    effective_provider,
-                                    None,
-                                );
                             }
                         }
                     }
