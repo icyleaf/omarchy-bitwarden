@@ -138,6 +138,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum ConfigAction {
     #[command(about = "Get current configuration or a specific key")]
     Get {
@@ -166,6 +167,8 @@ enum ConfigAction {
         log_level: Option<String>,
         #[arg(long)]
         show_website_icons: Option<String>,
+        #[arg(long)]
+        remember_last_search: Option<String>,
     },
 }
 
@@ -421,6 +424,7 @@ fn main() -> ExitCode {
                         "check_updates" => println!("{}", cfg.check_updates),
                         "log_level" => println!("{}", cfg.log_level),
                         "show_website_icons" => println!("{}", cfg.show_website_icons),
+                        "remember_last_search" => println!("{}", cfg.remember_last_search),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -442,6 +446,7 @@ fn main() -> ExitCode {
                 check_updates,
                 log_level,
                 show_website_icons,
+                remember_last_search,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -471,6 +476,11 @@ fn main() -> ExitCode {
                     matches!(lower.as_str(), "true" | "1" | "yes")
                 });
 
+                let parsed_remember_last_search = remember_last_search.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
                 let options = ConfigUpdateOptions {
                     server_url,
                     identity_url,
@@ -482,6 +492,7 @@ fn main() -> ExitCode {
                     check_updates: parsed_check_updates,
                     log_level,
                     show_website_icons: parsed_show_website_icons,
+                    remember_last_search: parsed_remember_last_search,
                 };
 
                 let (updated_cfg, _server_changed) =
