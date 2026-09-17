@@ -222,6 +222,7 @@ Item {
   property bool showWebsiteIcons: false
   property int configSeq: 0
   property bool show2FAField: false
+  property bool isNewDeviceVerification: false
 
   property var cliHealth: ({
     installed: false,
@@ -1688,7 +1689,11 @@ Item {
       cmd.push("--remember-email", "false")
     }
     if (code) {
-      authLoginProc.secret = JSON.stringify({ password: password, code: code })
+      var payload = { password: password, code: code }
+      if (root.isNewDeviceVerification) {
+        payload.new_device_otp = code
+      }
+      authLoginProc.secret = JSON.stringify(payload)
     } else {
       authLoginProc.secret = JSON.stringify({ password: password })
     }
@@ -1711,6 +1716,7 @@ Item {
     root.logInfo("omarchy:auth", "Logging out session...")
     root.clearSensitiveState()
     root.show2FAField = false
+    root.isNewDeviceVerification = false
     root.authState = ({
       status: "unauthenticated",
       server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2210,6 +2216,7 @@ Item {
             loginMethod: root.loginMethod
             rememberEmailChecked: root.rememberEmailChecked
             show2FAField: root.show2FAField
+            isNewDeviceVerification: root.isNewDeviceVerification
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
@@ -2771,6 +2778,7 @@ Item {
             if (authViewComponent) authViewComponent.clearInputs()
 
             root.show2FAField = false
+            root.isNewDeviceVerification = false
             root.authState = ({
               status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2787,7 +2795,10 @@ Item {
             root.errorMessage = data.error || "Login failed."
             root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
-            var is2FA = Boolean(data.two_factor_required)
+            var isNewDevice = Boolean(data.new_device_verification_required)
+                || errLower.indexOf("new device verification") !== -1
+            var is2FA = isNewDevice
+                || Boolean(data.two_factor_required)
                 || errLower.indexOf("two-step") !== -1
                 || errLower.indexOf("two-factor") !== -1
                 || errLower.indexOf("two factor") !== -1
@@ -2796,6 +2807,7 @@ Item {
                 || errLower.indexOf("verification code") !== -1
                 || errLower.indexOf("authenticator code") !== -1
                 || errLower.indexOf("security code") !== -1
+            root.isNewDeviceVerification = isNewDevice
             if (is2FA) {
               root.show2FAField = true
               if (authViewComponent && authViewComponent.twoFactorInput) {
