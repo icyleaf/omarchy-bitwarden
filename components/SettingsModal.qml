@@ -51,10 +51,12 @@ Item {
   property string logFilter: "all" // "all" | "error" | "warn"
   property string selectedLogLevel: (config && config.log_level) ? config.log_level.toLowerCase() : "error"
   property bool showWebsiteIconsChecked: true
+  property bool rememberLastSearchChecked: false
 
   onConfigChanged: {
-    if (config && config.check_updates !== undefined) checkUpdatesChecked = (config.check_updates !== false)
-    if (config && config.show_website_icons !== undefined) showWebsiteIconsChecked = (config.show_website_icons !== false)
+    if (config) checkUpdatesChecked = (config.check_updates !== false)
+    if (config) showWebsiteIconsChecked = (config.show_website_icons !== false)
+    if (config) rememberLastSearchChecked = (config.remember_last_search === true)
   }
 
   function buildPayload() {
@@ -66,7 +68,8 @@ Item {
       clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
       log_level: settingsRoot.selectedLogLevel,
       show_website_icons: settingsRoot.showWebsiteIconsChecked,
-      check_updates: settingsRoot.checkUpdatesChecked
+      check_updates: settingsRoot.checkUpdatesChecked,
+      remember_last_search: settingsRoot.rememberLastSearchChecked
     }
   }
 
@@ -644,6 +647,35 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: 10
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          // Remember Last Search Toggle
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.rememberLastSearchChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.rememberLastSearchChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: 9
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.rememberLastSearchChecked = !settingsRoot.rememberLastSearchChecked }
+              }
+              Text { text: "Remember Last Search State"; color: settingsRoot.foreground; font.pixelSize: 11 }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "Retains previous search query, category, and selection when reopening while vault is unlocked."
               color: settingsRoot.mutedForeground
               font.pixelSize: 10
               wrapMode: Text.WordWrap

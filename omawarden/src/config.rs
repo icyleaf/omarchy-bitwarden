@@ -12,6 +12,7 @@ pub const DEFAULT_REMEMBER_EMAIL: bool = true;
 pub const DEFAULT_CHECK_UPDATES: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
+pub const DEFAULT_REMEMBER_LAST_SEARCH: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -35,6 +36,8 @@ pub struct Config {
     pub log_level: String,
     #[serde(default = "default_show_website_icons")]
     pub show_website_icons: bool,
+    #[serde(default = "default_remember_last_search")]
+    pub remember_last_search: bool,
 }
 
 fn default_server_url() -> String {
@@ -64,6 +67,9 @@ fn default_log_level() -> String {
 fn default_show_website_icons() -> bool {
     DEFAULT_SHOW_WEBSITE_ICONS
 }
+fn default_remember_last_search() -> bool {
+    DEFAULT_REMEMBER_LAST_SEARCH
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -78,6 +84,7 @@ impl Default for Config {
             check_updates: default_check_updates(),
             log_level: default_log_level(),
             show_website_icons: default_show_website_icons(),
+            remember_last_search: default_remember_last_search(),
         }
     }
 }
@@ -245,6 +252,9 @@ impl ConfigManager {
         if let Some(v) = options.show_website_icons {
             cfg.show_website_icons = v;
         }
+        if let Some(v) = options.remember_last_search {
+            cfg.remember_last_search = v;
+        }
 
         self.save(&cfg)?;
         Ok((cfg, server_changed))
@@ -263,6 +273,7 @@ pub struct ConfigUpdateOptions {
     pub check_updates: Option<bool>,
     pub log_level: Option<String>,
     pub show_website_icons: Option<bool>,
+    pub remember_last_search: Option<bool>,
 }
 
 #[cfg(test)]
@@ -281,6 +292,7 @@ mod tests {
         assert_eq!(cfg.email, "");
         assert!(cfg.remember_email);
         assert_eq!(cfg.log_level, "error");
+        assert!(!cfg.remember_last_search);
     }
 
     #[test]
@@ -645,6 +657,42 @@ esac
         fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
         let legacy = ConfigManager::new(Some(&legacy_path)).load();
         assert!(legacy.show_website_icons);
+    }
+
+    #[test]
+    fn test_remember_last_search_default_and_update() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        assert!(!Config::default().remember_last_search);
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    remember_last_search: Some(true),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert!(updated_cfg.remember_last_search);
+
+        // Persisted to disk
+        let reloaded = ConfigManager::new(Some(&config_path)).load();
+        assert!(reloaded.remember_last_search);
+
+        // Upgrade path: config written before the key existed must default to false
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        let legacy = ConfigManager::new(Some(&legacy_path)).load();
+        assert!(!legacy.remember_last_search);
     }
 
     #[test]

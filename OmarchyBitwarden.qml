@@ -382,8 +382,21 @@ Item {
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
-    root.searchQuery = ""
-    root.selectedIndex = 0
+    var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+    if (!canRemember) {
+      root.searchQuery = ""
+      root.selectedIndex = 0
+    } else {
+      if (root.filteredItems && root.filteredItems.length > 0) {
+        if (root.selectedIndex < 0) {
+          root.selectedIndex = 0
+        } else if (root.selectedIndex >= root.filteredItems.length) {
+          root.selectedIndex = root.filteredItems.length - 1
+        }
+      } else {
+        root.selectedIndex = 0
+      }
+    }
     if (!root.authState || root.authState.status !== "unlocked") {
       root.clearSensitiveState()
     } else {
@@ -409,9 +422,12 @@ Item {
       root.refreshAuthStatus()
       root.checkUpdates(false)
     }
+    if (root.effectiveView === "search" && root.selectedItem) {
+      root.handleSelectedItemChanged()
+    }
     Qt.callLater(function() {
-      if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
-        searchHeader.searchField.forceActiveFocus()
+      if (root.effectiveView === "search" && searchHeader) {
+        searchHeader.focusSearch(canRemember)
       } else if (root.effectiveView !== "dependency_check" && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
@@ -420,6 +436,7 @@ Item {
 
   function close() {
     root.opened = false
+    totpGenProc.running = false
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
@@ -433,7 +450,11 @@ Item {
     root.sshKeyModalItem = null
     root.currentAvailableActions = []
     root.currentTotp = ({ code: "", ttl: 30, period: 30 })
-    root.searchQuery = ""
+    var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+    if (!canRemember) {
+      root.searchQuery = ""
+      root.selectedIndex = 0
+    }
   }
 
   function dismiss() {
@@ -1242,7 +1263,7 @@ Item {
       if (item.login.username) {
         actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "\uf007", shortcut: "Ctrl+U", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
       }
-      if ((item.login.totp) || (root.currentTotp && root.currentTotp.code)) {
+      if ((item.login.totp || item.login.has_totp) || (root.currentTotp && root.currentTotp.code)) {
         var totpLabel = "Copy TOTP Code" + ((root.currentTotp && root.currentTotp.code) ? (" (" + root.currentTotp.code + ")") : "")
         actions.push({
           label: totpLabel,
@@ -1583,6 +1604,7 @@ Item {
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
     if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
     if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
+    if (settings.remember_last_search !== undefined) cmd.push("--remember-last-search", String(settings.remember_last_search))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1716,12 +1738,12 @@ Item {
 
   Timer {
     interval: 1000
-    running: Boolean(root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp)
+    running: Boolean(root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && (root.selectedItem.login.totp || root.selectedItem.login.has_totp))
     repeat: true
     onTriggered: {
-      if (root.currentTotp.ttl > 1) {
+      if (root.currentTotp && root.currentTotp.code && root.currentTotp.ttl > 1) {
         root.currentTotp = ({ code: root.currentTotp.code, ttl: root.currentTotp.ttl - 1, period: root.currentTotp.period })
-      } else {
+      } else if (!totpGenProc.running) {
         root.updateTotpForSelected()
       }
     }
@@ -1735,11 +1757,12 @@ Item {
     onTriggered: root.refreshAuthStatus()
   }
 
-  function restoreSearchFocus() {
+  function restoreSearchFocus(cursorAtEnd) {
+    var atEnd = (cursorAtEnd === true)
     Qt.callLater(function() {
       if (root.opened && root.effectiveView === "search") {
         if (focusRoot) focusRoot.forceActiveFocus()
-        if (searchHeader) searchHeader.focusSearch()
+        if (searchHeader) searchHeader.focusSearch(atEnd)
       } else if (root.opened && (root.effectiveView === "unlock" || root.effectiveView === "login") && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
@@ -1760,7 +1783,11 @@ Item {
 
     onVisibleChanged: {
       if (visible) {
-        root.restoreSearchFocus()
+        var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+        root.restoreSearchFocus(canRemember)
+        if (root.effectiveView === "search" && root.selectedItem) {
+          root.handleSelectedItemChanged()
+        }
       }
     }
 
@@ -2631,7 +2658,10 @@ Item {
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
-                searchHeader.searchField.forceActiveFocus()
+                if (!searchHeader.searchField.activeFocus) {
+                  var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+                  searchHeader.focusSearch(canRemember)
+                }
               }
             })
           }

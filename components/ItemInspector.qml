@@ -777,7 +777,7 @@ ScrollView {
 
           // Divider (if totp)
           Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.totp || inspectorRoot.item.login.has_totp))
             Layout.fillWidth: true
             height: 1
             color: Qt.rgba(255, 255, 255, 0.05)
@@ -785,7 +785,7 @@ ScrollView {
 
           // TOTP Countdown & Verification Code
           ColumnLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.totp || inspectorRoot.item.login.has_totp))
             Layout.fillWidth: true
             spacing: 4
 

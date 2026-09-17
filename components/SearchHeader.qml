@@ -131,8 +131,12 @@ ColumnLayout {
     return list
   }
 
-  function focusSearch() {
+  function focusSearch(cursorAtEnd) {
     searchInputField.forceActiveFocus()
+    if (cursorAtEnd && searchInputField.text.length > 0) {
+      searchInputField.cursorPosition = searchInputField.text.length
+      searchInputField.deselect()
+    }
   }
 
   spacing: 6
@@ -141,7 +145,7 @@ ColumnLayout {
   onVisibleChanged: {
     if (visible) {
       Qt.callLater(function() {
-        focusSearch()
+        focusSearch(true)
       })
     }
   }
