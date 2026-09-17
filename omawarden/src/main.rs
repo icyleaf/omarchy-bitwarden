@@ -394,7 +394,18 @@ fn main() -> ExitCode {
                 15
             };
             let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
-            let storage_mgr = StorageManager::default();
+            let storage_mgr = match cli.config.as_deref() {
+                Some(cp) => {
+                    if let Some(parent) = cp.parent() {
+                        StorageManager::new(
+                            parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                        )
+                    } else {
+                        StorageManager::default()
+                    }
+                }
+                None => StorageManager::default(),
+            };
             let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
             println!(
                 "Starting omawarden daemon (auto_lock: {}m)...",

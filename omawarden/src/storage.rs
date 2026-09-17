@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use crate::crypto::{derive_master_key, EncString, KdfType, SymmetricCryptoKey};
 
@@ -45,20 +46,64 @@ pub struct StorageManager {
     pub file_path: PathBuf,
 }
 
+pub fn resolve_legacy_storage_path() -> PathBuf {
+    let xdg_config = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        });
+    xdg_config
+        .join("omarchy")
+        .join("plugins")
+        .join("icyleaf.bitwarden")
+        .join(DEFAULT_STORAGE_FILENAME)
+}
+
+pub fn migrate_legacy_storage_file(legacy_path: &Path, target_path: &Path) {
+    if legacy_path != target_path && legacy_path.exists() {
+        if !target_path.exists() {
+            if let Some(parent) = target_path.parent() {
+                let _ = crate::fs_util::create_secure_dir_all(parent, 0o700);
+            }
+            if fs::rename(legacy_path, target_path).is_err()
+                && fs::copy(legacy_path, target_path).is_ok()
+            {
+                let _ = fs::remove_file(legacy_path);
+            }
+            let _ = fs::set_permissions(target_path, fs::Permissions::from_mode(0o600));
+        } else {
+            let _ = fs::remove_file(legacy_path);
+        }
+    }
+}
+
+pub fn resolve_default_storage_path() -> PathBuf {
+    if let Ok(custom_dir) = env::var("OMAWARDEN_DATA_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_STORAGE_FILENAME);
+        }
+    }
+
+    let xdg_data = env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".local").join("share")
+        });
+    let target_path = xdg_data.join("omawarden").join(DEFAULT_STORAGE_FILENAME);
+    let legacy_path = resolve_legacy_storage_path();
+
+    migrate_legacy_storage_file(&legacy_path, &target_path);
+
+    target_path
+}
+
 impl Default for StorageManager {
     fn default() -> Self {
-        let xdg_config = env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".config")
-            });
-        let file_path = xdg_config
-            .join("omarchy")
-            .join("plugins")
-            .join("icyleaf.bitwarden")
-            .join(DEFAULT_STORAGE_FILENAME);
-        Self { file_path }
+        Self {
+            file_path: resolve_default_storage_path(),
+        }
     }
 }
 
@@ -217,5 +262,75 @@ mod tests {
             !raw.contains("secret_refresh_token_67890"),
             "Refresh token value must never be written to disk"
         );
+    }
+
+    #[test]
+    fn test_default_storage_path_not_in_watched_plugin_directory() {
+        let storage_mgr = StorageManager::default();
+        let path_str = storage_mgr.file_path.to_string_lossy();
+        assert!(
+            !path_str.contains("omarchy/plugins"),
+            "Storage file path must not reside inside watched omarchy/plugins directory, was: {}",
+            path_str
+        );
+        assert!(
+            path_str.ends_with("omawarden/data.json"),
+            "Storage file path must end with omawarden/data.json, was: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_migrate_legacy_storage_file_moves_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_file = legacy_dir.join("data.json");
+        fs::write(
+            &legacy_file,
+            "{\"server_url\":\"https://vault.example.com\"}",
+        )
+        .unwrap();
+
+        let target_dir = dir.path().join("target");
+        let target_file = target_dir.join("data.json");
+
+        assert!(legacy_file.exists());
+        assert!(!target_file.exists());
+
+        migrate_legacy_storage_file(&legacy_file, &target_file);
+
+        assert!(
+            !legacy_file.exists(),
+            "Legacy file must be removed after migration"
+        );
+        assert!(
+            target_file.exists(),
+            "Target file must exist after migration"
+        );
+
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"server_url\":\"https://vault.example.com\"}");
+
+        let metadata = fs::metadata(&target_file).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Migrated file must have 0600 permissions");
+    }
+
+    #[test]
+    fn test_migrate_legacy_storage_cleans_up_when_target_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_file = dir.path().join("legacy.json");
+        fs::write(&legacy_file, "{\"old\":true}").unwrap();
+
+        let target_file = dir.path().join("target.json");
+        fs::write(&target_file, "{\"new\":true}").unwrap();
+
+        migrate_legacy_storage_file(&legacy_file, &target_file);
+
+        assert!(!legacy_file.exists(), "Legacy file must be cleaned up");
+        assert!(target_file.exists(), "Target file must be preserved");
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"new\":true}");
     }
 }
