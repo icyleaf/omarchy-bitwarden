@@ -140,6 +140,8 @@ pub struct AuthResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_providers: Option<Vec<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_factor_provider: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub new_device_verification_required: Option<bool>,
 }
 
@@ -363,6 +365,7 @@ impl AuthManager {
         email: &str,
         password: &str,
         code: Option<&str>,
+        two_factor_provider: Option<i32>,
         new_device_otp: Option<&str>,
     ) -> AuthResult {
         crate::log_info!(
@@ -380,6 +383,7 @@ impl AuthManager {
                 error: Some(err_msg.to_string()),
                 two_factor_required: None,
                 two_factor_providers: None,
+                two_factor_provider: None,
                 new_device_verification_required: None,
                 ..Default::default()
             };
@@ -392,6 +396,7 @@ impl AuthManager {
             email,
             &password_zeroizing,
             code,
+            two_factor_provider,
             new_device_otp,
         ) {
             Ok(r) => r,
@@ -401,13 +406,26 @@ impl AuthManager {
                     "Two-factor authentication required for {}",
                     email
                 );
+                let default_provider = if providers.contains(&0) {
+                    0
+                } else if providers.contains(&1) {
+                    1
+                } else {
+                    *providers.first().unwrap_or(&0)
+                };
+                let err_text = if default_provider == 1 {
+                    "Email two-factor authentication required. Please check your email for the verification code."
+                } else {
+                    "Two-factor authentication required or invalid code."
+                };
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
                     session: None,
-                    error: Some("Two-factor authentication required or invalid code.".to_string()),
+                    error: Some(err_text.to_string()),
                     two_factor_required: Some(true),
                     two_factor_providers: Some(providers),
+                    two_factor_provider: Some(default_provider),
                     ..Default::default()
                 };
             }
@@ -573,6 +591,16 @@ impl AuthManager {
             status: Some("unlocked".to_string()),
             ..Default::default()
         }
+    }
+
+    pub fn send_two_factor_email(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<(), crate::api::ApiError> {
+        let client =
+            BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
+        client.send_two_factor_email(email, password)
     }
 
     pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
@@ -1076,7 +1104,7 @@ mod tests {
         let storage_mgr = StorageManager::new(storage_path);
         let mock_keyring = create_test_mock_keyring(dir.path());
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
-        let res = auth_mgr.login_password("test@example.com", "password123", None, None);
+        let res = auth_mgr.login_password("test@example.com", "password123", None, None, None);
         assert!(!res.ok);
         assert_eq!(
             res.error.as_deref(),
@@ -1130,11 +1158,12 @@ mod tests {
         let mock_keyring = create_test_mock_keyring(dir.path());
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
-        let res = auth_mgr.login_password("user@example.com", "password123", None, None);
+        let res = auth_mgr.login_password("user@example.com", "password123", None, None, None);
         assert!(!res.ok);
         assert_eq!(res.status.as_deref(), Some("unauthenticated"));
         assert_eq!(res.two_factor_required, Some(true));
         assert_eq!(res.two_factor_providers, Some(vec![0]));
+        assert_eq!(res.two_factor_provider, Some(0));
         assert_eq!(
             res.error.as_deref(),
             Some("Two-factor authentication required or invalid code.")
@@ -1772,7 +1801,7 @@ esac
             Some(config_mgr.clone()),
         );
 
-        let res = auth_mgr.login_password("User@Example.COM", password, None, None);
+        let res = auth_mgr.login_password("User@Example.COM", password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
 
         // Verify config.json email was populated with normalized email
@@ -1869,7 +1898,7 @@ esac
             Some(config_mgr.clone()),
         );
 
-        let res2 = auth_mgr2.login_password("other@example.com", password, None, None);
+        let res2 = auth_mgr2.login_password("other@example.com", password, None, None, None);
         assert!(res2.ok, "Login should succeed: {:?}", res2.error);
 
         let updated_cfg2 = config_mgr.load();
@@ -1899,7 +1928,7 @@ esac
         );
 
         // Password login must fail closed
-        let res_pwd = auth_mgr.login_password("test@example.com", "password", None, None);
+        let res_pwd = auth_mgr.login_password("test@example.com", "password", None, None, None);
         assert!(!res_pwd.ok);
         assert!(
             res_pwd
@@ -2024,7 +2053,7 @@ esac
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr.clone()), Some(mock_keyring));
 
-        let res = auth_mgr.login_password("test@example.com", "password", None, None);
+        let res = auth_mgr.login_password("test@example.com", "password", None, None, None);
         assert!(!res.ok, "Login must fail when keyring store fails");
         assert!(
             res.error
@@ -2278,7 +2307,7 @@ esac
             Some(config_mgr),
         );
 
-        let res = auth_mgr.login_password(email, password, None, None);
+        let res = auth_mgr.login_password(email, password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
 
         // Privileged sync request succeeds directly over socket
@@ -2342,7 +2371,7 @@ esac
         let mock_keyring = create_test_mock_keyring(dir.path());
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
-        let res = auth_mgr.login_password("user@example.com", "password123", None, None);
+        let res = auth_mgr.login_password("user@example.com", "password123", None, None, None);
         assert!(!res.ok);
         assert_eq!(res.status.as_deref(), Some("unauthenticated"));
         assert_eq!(res.two_factor_required, Some(true));
@@ -2354,6 +2383,65 @@ esac
                 .contains("New device verification required"),
             "Error should mention new device verification: {:?}",
             res.error
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_email_two_factor_flow() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = r#"{"error":"invalid_grant","TwoFactorProviders":[1],"TwoFactorProviders2":{"1":null}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_email_2fa_data.json");
+        let storage_mgr = StorageManager::new(storage_path);
+        let mock_keyring = create_test_mock_keyring(dir.path());
+
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
+        let res = auth_mgr.login_password("user@example.com", "password123", None, None, None);
+        assert!(!res.ok);
+        assert_eq!(res.status.as_deref(), Some("unauthenticated"));
+        assert_eq!(res.two_factor_required, Some(true));
+        assert_eq!(res.two_factor_providers, Some(vec![1]));
+        assert_eq!(res.two_factor_provider, Some(1));
+        assert_eq!(
+            res.error.as_deref(),
+            Some("Email two-factor authentication required. Please check your email for the verification code.")
         );
 
         let _ = handle.join();

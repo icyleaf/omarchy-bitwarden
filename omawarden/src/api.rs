@@ -1,5 +1,5 @@
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -240,6 +240,53 @@ impl EnvironmentUrls {
     }
 }
 
+/// Standard Bitwarden two-factor authentication provider types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum TwoFactorProviderType {
+    Authenticator = 0,
+    Email = 1,
+    Duo = 2,
+    Yubikey = 3,
+    U2f = 4,
+    Remember = 5,
+    OrganizationDuo = 6,
+    WebAuthn = 7,
+}
+
+impl TwoFactorProviderType {
+    pub fn from_i32(val: i32) -> Option<Self> {
+        match val {
+            0 => Some(Self::Authenticator),
+            1 => Some(Self::Email),
+            2 => Some(Self::Duo),
+            3 => Some(Self::Yubikey),
+            4 => Some(Self::U2f),
+            5 => Some(Self::Remember),
+            6 => Some(Self::OrganizationDuo),
+            7 => Some(Self::WebAuthn),
+            _ => None,
+        }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        self as i32
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Authenticator => "Authenticator",
+            Self::Email => "Email",
+            Self::Duo => "Duo",
+            Self::Yubikey => "YubiKey",
+            Self::U2f => "U2F",
+            Self::Remember => "Remember",
+            Self::OrganizationDuo => "OrganizationDuo",
+            Self::WebAuthn => "WebAuthn",
+        }
+    }
+}
+
 /// Returns a stable device identifier (UUID format) for Bitwarden identity endpoints.
 /// Uses `/etc/machine-id` or `/var/lib/dbus/machine-id` if available,
 /// or falls back to an RFC 4122 v4 UUID.
@@ -383,6 +430,7 @@ impl BitwardenApiClient {
         email: &str,
         password: &str,
         two_factor_token: Option<&str>,
+        two_factor_provider: Option<i32>,
         new_device_otp: Option<&str>,
     ) -> Result<(TokenResponse, SymmetricCryptoKey), ApiError> {
         let prelogin = self.prelogin(email)?;
@@ -415,7 +463,8 @@ impl BitwardenApiClient {
             form_params.insert("newDeviceOtp", otp.trim().to_string());
         } else if let Some(code) = two_factor_token {
             form_params.insert("twoFactorToken", code.trim().to_string());
-            form_params.insert("twoFactorProvider", "0".to_string()); // Authenticator
+            let provider_val = two_factor_provider.unwrap_or(0);
+            form_params.insert("twoFactorProvider", provider_val.to_string());
             form_params.insert("twoFactorRemember", "1".to_string());
         }
 
@@ -554,6 +603,30 @@ impl BitwardenApiClient {
                             providers = parsed;
                         }
                     }
+
+                    // If caller submitted a code without specifying provider (defaulting to 0)
+                    // but server indicates Email 2FA is required (and not Authenticator 0),
+                    // auto-retry once with twoFactorProvider=1.
+                    if let Some(code) = two_factor_token {
+                        if two_factor_provider.is_none()
+                            && !providers.contains(&0)
+                            && providers.contains(&1)
+                            && !code.trim().is_empty()
+                        {
+                            let mut retry_params = form_params.clone();
+                            retry_params.insert("twoFactorProvider", "1".to_string());
+                            if let Ok(retry_resp) = self.post_identity_connect_token(&retry_params)
+                            {
+                                let retry_status = retry_resp.status();
+                                if let Ok(retry_body) = retry_resp.text() {
+                                    if retry_status.is_success() {
+                                        return parse_and_decrypt_token(&retry_body);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return Err(ApiError::TwoFactorRequired { providers });
                 }
 
@@ -571,6 +644,53 @@ impl BitwardenApiClient {
             } else {
                 Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
             }
+        }
+    }
+
+    /// Triggers sending a two-factor verification code to the user's email address.
+    pub fn send_two_factor_email(&self, email: &str, password: &str) -> Result<(), ApiError> {
+        let prelogin = self.prelogin(email)?;
+        let kdf_type = KdfType::from(prelogin.kdf.unwrap_or(0));
+        let iterations = prelogin.kdf_iterations.unwrap_or(600_000);
+
+        let master_key = derive_master_key(
+            email,
+            password,
+            kdf_type,
+            iterations,
+            prelogin.kdf_memory,
+            prelogin.kdf_parallelism,
+        )
+        .map_err(|e| ApiError::Crypto(e.to_string()))?;
+
+        let password_hash = derive_master_password_hash(&master_key, password);
+
+        let payload = serde_json::json!({
+            "email": email.trim().to_lowercase(),
+            "masterPasswordHash": password_hash,
+            "deviceIdentifier": get_device_identifier()
+        });
+
+        let primary_url = format!("{}/api/two-factor/send-email-login", self.urls.base_url);
+        let fallback_url = format!("{}/two-factor/send-email-login", self.urls.base_url);
+
+        let mut resp = self.client.post(&primary_url).json(&payload).send();
+        if let Ok(ref r) = resp {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = self.client.post(&fallback_url).json(&payload).send();
+            }
+        }
+
+        let resp = resp.map_err(ApiError::from)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Failed to send 2FA email: HTTP {} - {}", status, body),
+            ))
         }
     }
 
@@ -2310,7 +2430,7 @@ mod tests {
 
         let client = BitwardenApiClient::new(&server_url);
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
-        let res = client.login_password("user@example.com", &pwd, None, None);
+        let res = client.login_password("user@example.com", &pwd, None, None, None);
         match res {
             Err(ApiError::TwoFactorRequired { providers }) => {
                 assert_eq!(providers, vec![0, 1]);
@@ -2415,14 +2535,14 @@ mod tests {
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
 
         // First attempt without OTP -> triggers NewDeviceVerificationRequired
-        let res1 = client.login_password("user@example.com", &pwd, None, None);
+        let res1 = client.login_password("user@example.com", &pwd, None, None, None);
         match res1 {
             Err(ApiError::NewDeviceVerificationRequired) => {}
             other => panic!("Expected NewDeviceVerificationRequired, got {:?}", other),
         }
 
         // Second attempt with new_device_otp -> succeeds
-        let res2 = client.login_password("user@example.com", &pwd, None, Some("654321"));
+        let res2 = client.login_password("user@example.com", &pwd, None, None, Some("654321"));
         assert!(
             res2.is_ok(),
             "Expected login with new_device_otp to succeed: {:?}",
@@ -2527,11 +2647,138 @@ mod tests {
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
 
         // Passed as twoFactorToken, client auto-retries with newDeviceOtp and succeeds!
-        let res = client.login_password("user@example.com", &pwd, Some("999888"), None);
+        let res = client.login_password("user@example.com", &pwd, Some("999888"), None, None);
         assert!(
             res.is_ok(),
             "Expected auto-retry with newDeviceOtp to succeed: {:?}",
             res.err()
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_email_2fa_provider_and_auto_retry() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [5u8; 16];
+        let plaintext = [6u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut success_count = 0;
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("twoFactorProvider=1") && req.contains("twoFactorToken=112233")
+                    {
+                        // Successful response when email provider (1) and code is submitted
+                        let body = format!(
+                            r#"{{"access_token":"token_email_2fa","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        success_count += 1;
+                        if success_count >= 2 {
+                            break;
+                        }
+                    } else if req.contains("twoFactorProvider=0") {
+                        // Server indicates only email 2FA (provider 1) is active
+                        let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["1"]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    } else {
+                        let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["1"]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // Attempt 1: Explicitly specify two_factor_provider = Some(1)
+        let res1 = client.login_password("user@example.com", &pwd, Some("112233"), Some(1), None);
+        assert!(
+            res1.is_ok(),
+            "Expected login with explicit two_factor_provider=1 to succeed: {:?}",
+            res1.err()
+        );
+
+        // Attempt 2: Auto-retry when caller specifies two_factor_token without provider (defaults to 0),
+        // and server returns TwoFactorProviders: ["1"]
+        let res2 = client.login_password("user@example.com", &pwd, Some("112233"), None, None);
+        assert!(
+            res2.is_ok(),
+            "Expected auto-retry with two_factor_provider=1 to succeed: {:?}",
+            res2.err()
         );
 
         let _ = handle.join();
