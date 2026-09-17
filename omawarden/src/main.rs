@@ -335,10 +335,10 @@ fn read_clipboard_stdin() -> String {
     String::new()
 }
 
-fn parse_auth_payload(raw: &str) -> (String, Option<String>, Option<String>) {
+fn parse_auth_payload(raw: &str) -> (String, Option<String>, Option<i32>, Option<String>) {
     let trimmed = raw.trim_end_matches(&['\r', '\n'][..]).trim();
     if trimmed.is_empty() {
-        return (String::new(), None, None);
+        return (String::new(), None, None, None);
     }
 
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
@@ -352,12 +352,25 @@ fn parse_auth_payload(raw: &str) -> (String, Option<String>, Option<String>) {
                 .get("code")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let two_factor_provider = map
+                .get("two_factor_provider")
+                .or_else(|| map.get("twoFactorProvider"))
+                .or_else(|| map.get("provider"))
+                .and_then(|v| {
+                    if let Some(n) = v.as_i64() {
+                        Some(n as i32)
+                    } else if let Some(s) = v.as_str() {
+                        s.parse::<i32>().ok()
+                    } else {
+                        None
+                    }
+                });
             let new_device_otp = map
                 .get("new_device_otp")
                 .or_else(|| map.get("newDeviceOtp"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            return (pwd, code_val, new_device_otp);
+            return (pwd, code_val, two_factor_provider, new_device_otp);
         }
     }
 
@@ -368,17 +381,17 @@ fn parse_auth_payload(raw: &str) -> (String, Option<String>, Option<String>) {
         }
     }
 
-    (pwd, None, None)
+    (pwd, None, None, None)
 }
 
-fn read_auth_payload() -> (String, Option<String>, Option<String>) {
+fn read_auth_payload() -> (String, Option<String>, Option<i32>, Option<String>) {
     let stdin = io::stdin();
     if stdin.is_terminal() {
-        return (String::new(), None, None);
+        return (String::new(), None, None, None);
     }
     let mut buffer = String::new();
     if stdin.lock().read_line(&mut buffer).is_err() {
-        return (String::new(), None, None);
+        return (String::new(), None, None, None);
     }
     parse_auth_payload(&buffer)
 }
@@ -601,19 +614,22 @@ fn main() -> ExitCode {
                     email,
                     remember_email,
                 } => {
-                    let (pwd, stdin_code, stdin_new_device_otp) = if io::stdin().is_terminal() {
-                        let p = rpassword::prompt_password("Enter Master Password: ")
-                            .unwrap_or_default();
-                        (p, None, None)
-                    } else {
-                        read_auth_payload()
-                    };
+                    let (pwd, stdin_code, stdin_provider, stdin_new_device_otp) =
+                        if io::stdin().is_terminal() {
+                            let p = rpassword::prompt_password("Enter Master Password: ")
+                                .unwrap_or_default();
+                            (p, None, None, None)
+                        } else {
+                            read_auth_payload()
+                        };
                     let mut effective_code = stdin_code;
+                    let mut effective_provider = stdin_provider;
                     let mut effective_new_device_otp = stdin_new_device_otp;
                     let mut res = auth_mgr.login_password(
                         &email,
                         &pwd,
                         effective_code.as_deref(),
+                        effective_provider,
                         effective_new_device_otp.as_deref(),
                     );
                     if !res.ok
@@ -632,19 +648,57 @@ fn main() -> ExitCode {
                                     &email,
                                     &pwd,
                                     None,
+                                    None,
                                     effective_new_device_otp.as_deref(),
                                 );
                             }
                         } else if res.two_factor_required == Some(true) {
-                            let prompt_code =
-                                rpassword::prompt_password("Enter Two-Factor (2FA) Code: ")
+                            let providers =
+                                res.two_factor_providers.clone().unwrap_or_else(|| vec![0]);
+                            let chosen_provider = if providers.len() == 1 {
+                                providers[0]
+                            } else if providers.contains(&0) && !providers.contains(&1) {
+                                0
+                            } else if !providers.contains(&0) && providers.contains(&1) {
+                                1
+                            } else {
+                                eprintln!("\nTwo-Factor Authentication Methods:");
+                                for (idx, p) in providers.iter().enumerate() {
+                                    let label = match p {
+                                        0 => "Authenticator App (TOTP)",
+                                        1 => "Email Verification Code",
+                                        3 => "YubiKey OTP",
+                                        _ => "Other",
+                                    };
+                                    eprintln!("  [{}] {}", idx + 1, label);
+                                }
+                                let choice = rpassword::prompt_password("Select method [1]: ")
                                     .unwrap_or_default();
+                                let idx = choice
+                                    .trim()
+                                    .parse::<usize>()
+                                    .unwrap_or(1)
+                                    .saturating_sub(1);
+                                *providers.get(idx).unwrap_or(&providers[0])
+                            };
+
+                            effective_provider = Some(chosen_provider);
+                            let prompt_label = match chosen_provider {
+                                1 => {
+                                    "Enter Email Two-Factor Verification Code (check your email): "
+                                }
+                                3 => "Touch your YubiKey or enter OTP: ",
+                                _ => "Enter Two-Factor (2FA) Code: ",
+                            };
+                            let prompt_code =
+                                rpassword::prompt_password(prompt_label).unwrap_or_default();
                             if !prompt_code.trim().is_empty() {
                                 effective_code = Some(prompt_code.trim().to_string());
                                 res = auth_mgr.login_password(
                                     &email,
                                     &pwd,
                                     effective_code.as_deref(),
+                                    effective_provider,
                                     None,
                                 );
                             }
@@ -1887,50 +1941,75 @@ mod tests {
 
     #[test]
     fn test_parse_auth_payload_plain() {
-        let (pwd, code, ndv) = parse_auth_payload("mypassword\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("mypassword\n");
         assert_eq!(pwd, "mypassword");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
         assert_eq!(ndv, None);
     }
 
     #[test]
     fn test_parse_auth_payload_json_with_code() {
-        let (pwd, code, ndv) =
+        let (pwd, code, provider, ndv) =
             parse_auth_payload("{\"password\": \"secret123\", \"code\": \"654321\"}\n");
         assert_eq!(pwd, "secret123");
         assert_eq!(code.as_deref(), Some("654321"));
+        assert_eq!(provider, None);
         assert_eq!(ndv, None);
     }
 
     #[test]
     fn test_parse_auth_payload_json_with_new_device_otp() {
-        let (pwd, code, ndv) = parse_auth_payload(
+        let (pwd, code, provider, ndv) = parse_auth_payload(
             "{\"password\": \"secret123\", \"code\": \"111222\", \"new_device_otp\": \"111222\"}\n",
         );
         assert_eq!(pwd, "secret123");
         assert_eq!(code.as_deref(), Some("111222"));
+        assert_eq!(provider, None);
         assert_eq!(ndv.as_deref(), Some("111222"));
 
-        let (pwd2, code2, ndv2) =
+        let (pwd2, code2, provider2, ndv2) =
             parse_auth_payload("{\"password\": \"secret123\", \"newDeviceOtp\": \"333444\"}\n");
         assert_eq!(pwd2, "secret123");
         assert_eq!(code2, None);
+        assert_eq!(provider2, None);
         assert_eq!(ndv2.as_deref(), Some("333444"));
     }
 
     #[test]
+    fn test_parse_auth_payload_json_with_provider() {
+        let (pwd, code, provider, ndv) = parse_auth_payload(
+            "{\"password\": \"secret123\", \"code\": \"123456\", \"two_factor_provider\": 1}\n",
+        );
+        assert_eq!(pwd, "secret123");
+        assert_eq!(code.as_deref(), Some("123456"));
+        assert_eq!(provider, Some(1));
+        assert_eq!(ndv, None);
+
+        let (pwd2, code2, provider2, ndv2) = parse_auth_payload(
+            "{\"password\": \"secret123\", \"code\": \"999888\", \"provider\": \"3\"}\n",
+        );
+        assert_eq!(pwd2, "secret123");
+        assert_eq!(code2.as_deref(), Some("999888"));
+        assert_eq!(provider2, Some(3));
+        assert_eq!(ndv2, None);
+    }
+
+    #[test]
     fn test_parse_auth_payload_json_without_code() {
-        let (pwd, code, ndv) = parse_auth_payload("{\"password\": \"secret123\"}\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("{\"password\": \"secret123\"}\n");
         assert_eq!(pwd, "secret123");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
         assert_eq!(ndv, None);
     }
 
     #[test]
     fn test_parse_auth_payload_empty() {
-        let (pwd, code, ndv) = parse_auth_payload("  \r\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("  \r\n");
         assert_eq!(pwd, "");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
         assert_eq!(ndv, None);
     }
 

@@ -223,6 +223,8 @@ Item {
   property int configSeq: 0
   property bool show2FAField: false
   property bool isNewDeviceVerification: false
+  property int twoFactorProvider: 0
+  property var availableTwoFactorProviders: []
 
   property var cliHealth: ({
     installed: false,
@@ -372,6 +374,9 @@ Item {
 
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
+
+    root.twoFactorProvider = 0
+    root.availableTwoFactorProviders = []
 
     if (authViewComponent && typeof authViewComponent.clearInputs === "function") {
       authViewComponent.clearInputs()
@@ -1693,6 +1698,9 @@ Item {
       if (root.isNewDeviceVerification) {
         payload.new_device_otp = code
       }
+      if (root.twoFactorProvider !== undefined && root.twoFactorProvider !== null) {
+        payload.two_factor_provider = root.twoFactorProvider
+      }
       authLoginProc.secret = JSON.stringify(payload)
     } else {
       authLoginProc.secret = JSON.stringify({ password: password })
@@ -1717,6 +1725,8 @@ Item {
     root.clearSensitiveState()
     root.show2FAField = false
     root.isNewDeviceVerification = false
+    root.twoFactorProvider = 0
+    root.availableTwoFactorProviders = []
     root.authState = ({
       status: "unauthenticated",
       server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2217,6 +2227,8 @@ Item {
             rememberEmailChecked: root.rememberEmailChecked
             show2FAField: root.show2FAField
             isNewDeviceVerification: root.isNewDeviceVerification
+            twoFactorProvider: root.twoFactorProvider
+            availableTwoFactorProviders: root.availableTwoFactorProviders
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
@@ -2779,6 +2791,8 @@ Item {
 
             root.show2FAField = false
             root.isNewDeviceVerification = false
+            root.twoFactorProvider = 0
+            root.availableTwoFactorProviders = []
             root.authState = ({
               status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2808,6 +2822,20 @@ Item {
                 || errLower.indexOf("authenticator code") !== -1
                 || errLower.indexOf("security code") !== -1
             root.isNewDeviceVerification = isNewDevice
+            var prov = (data.two_factor_provider !== undefined && data.two_factor_provider !== null)
+                ? Number(data.two_factor_provider)
+                : 0
+            if (data.two_factor_providers && data.two_factor_providers.length > 0) {
+              root.availableTwoFactorProviders = data.two_factor_providers
+              if (data.two_factor_provider === undefined || data.two_factor_provider === null) {
+                if (data.two_factor_providers.indexOf(1) !== -1 && data.two_factor_providers.indexOf(0) === -1) {
+                  prov = 1
+                }
+              }
+            } else {
+              root.availableTwoFactorProviders = []
+            }
+            root.twoFactorProvider = prov
             if (is2FA) {
               root.show2FAField = true
               if (authViewComponent && authViewComponent.twoFactorInput) {

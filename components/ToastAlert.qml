@@ -11,6 +11,7 @@ Item {
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property string fontFamily: ""
+  property int maxMessageWidth: 560
 
   signal clearRequested()
 
@@ -42,12 +43,24 @@ Item {
       }
 
       Text {
+        id: messageText
         text: errorMessage || statusMessage || (isBusy ? "Processing..." : "")
         color: "#ffffff"
         font.pixelSize: 11
         font.weight: Font.Medium
         elide: Text.ElideRight
-        Layout.maximumWidth: 320
+        Layout.preferredWidth: implicitWidth
+        Layout.maximumWidth: toastRoot.maxMessageWidth
+
+        MouseArea {
+          id: messageHoverArea
+          anchors.fill: parent
+          hoverEnabled: true
+          acceptedButtons: Qt.NoButton
+          ToolTip.visible: containsMouse && messageText.truncated
+          ToolTip.delay: 300
+          ToolTip.text: messageText.text
+        }
       }
 
       Text {

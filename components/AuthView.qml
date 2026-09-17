@@ -14,6 +14,8 @@ Item {
   property bool rememberEmailChecked: true
   property bool show2FAField: false
   property bool isNewDeviceVerification: false
+  property int twoFactorProvider: 0
+  property var availableTwoFactorProviders: []
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -35,6 +37,8 @@ Item {
     if (login2FAInput) login2FAInput.text = ""
     if (apiClientSecInput) apiClientSecInput.text = ""
     authRoot.isNewDeviceVerification = false
+    authRoot.twoFactorProvider = 0
+    authRoot.availableTwoFactorProviders = []
   }
 
   onVisibleChanged: {
@@ -47,6 +51,8 @@ Item {
     clearInputs()
     authRoot.show2FAField = false
     authRoot.isNewDeviceVerification = false
+    authRoot.twoFactorProvider = 0
+    authRoot.availableTwoFactorProviders = []
   }
 
   onAuthStateChanged: {
@@ -327,7 +333,9 @@ Item {
               Text {
                 text: authRoot.isNewDeviceVerification
                   ? "New Device Verification Code (check email):"
-                  : "Two-Factor Authentication (2FA) Code:"
+                  : (authRoot.twoFactorProvider === 1
+                      ? "Email 2FA Verification Code (check email):"
+                      : "Two-Factor Authentication (2FA) Code:")
                 color: authRoot.foreground
                 font.pixelSize: 11
                 font.weight: Font.Medium

@@ -14,7 +14,7 @@
 - **Vault**: The encrypted collection of user credentials, folders, organization collections, and attachments synced from a Bitwarden / Vaultwarden server.
 - **Server Address (`server_url`) & Instance Isolation**: The base endpoint of the Bitwarden instance (e.g., official cloud `https://vault.bitwarden.com` or custom self-hosted Vaultwarden instance). Updating the configuration to a different `server_url` automatically triggers instance-isolation cleanup, atomically wiping stale credentials (email, API key `client_id`, API `client_secret`), destroying active sessions (tokens and daemon memory), and purging local cache files (`data.json`, `/tmp` attachments) to prevent cross-server credential or data contamination (see `docs/adr/0008-server-switching-credential-and-cache-invalidation.md`).
 - **Authentication Modes**:
-  - **Master Password Login**: Email + Master Password with PBKDF2/Argon2id client-side key derivation, 2FA challenge support, and new device email verification (`newDeviceOtp`) challenge handling (see `docs/adr/0016-new-device-verification-otp-authentication.md`).
+  - **Master Password Login**: Email + Master Password with PBKDF2/Argon2id client-side key derivation, pluggable 2FA challenge support including Authenticator TOTP and Email 2FA (provider 1) (see `docs/adr/0017-email-and-pluggable-2fa-providers.md`), and new device email verification (`newDeviceOtp`) challenge handling (see `docs/adr/0016-new-device-verification-otp-authentication.md`).
   - **API Key Login**: Standard OAuth2 `client_credentials` flow using `client_id` and `client_secret`.
 - **Vault Status**:
   - `unauthenticated`: Logged out; requires server URL configuration, auth credentials (Email + Master Password or API Key `client_id`/`client_secret`).
