@@ -200,7 +200,6 @@ pub fn perform_fido2_assertion(
         "response": {
             "authenticatorData": auth_data_b64url,
             "clientDataJSON": client_data_b64url,
-            "clientDataJson": client_data_b64url,
             "signature": signature_b64url,
             "userHandle": null
         }
@@ -276,5 +275,55 @@ mod tests {
         assert_eq!(parsed.rp_id, "bitwarden.com");
         assert_eq!(parsed.origin, "https://vault.bitwarden.com");
         assert_eq!(parsed.allow_credentials, vec!["Y3JlZF9h", "Y3JlZF9i"]);
+    }
+
+    #[test]
+    fn test_vaultwarden_public_key_credential_deserialization() {
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct MockVwPublicKeyCredential {
+            id: String,
+            raw_id: String,
+            response: MockVwResponse,
+            extensions: serde_json::Value,
+            r#type: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct MockVwResponse {
+            authenticator_data: String,
+            #[serde(rename = "clientDataJson", alias = "clientDataJSON")]
+            client_data_json: String,
+            signature: String,
+            user_handle: Option<String>,
+        }
+
+        let token_payload = serde_json::json!({
+            "id": "cred_id",
+            "rawId": "cred_id",
+            "type": "public-key",
+            "extensions": {},
+            "clientExtensionResults": {},
+            "response": {
+                "authenticatorData": "auth_data",
+                "clientDataJSON": "client_data",
+                "signature": "sig",
+                "userHandle": null
+            }
+        });
+
+        let json_str = token_payload.to_string();
+        let deserialized: Result<MockVwPublicKeyCredential, _> = serde_json::from_str(&json_str);
+        assert!(
+            deserialized.is_ok(),
+            "Deserialization failed: {:?}",
+            deserialized.err()
+        );
+        let cred = deserialized.unwrap();
+        assert_eq!(cred.id, "cred_id");
+        assert_eq!(cred.response.client_data_json, "client_data");
     }
 }
