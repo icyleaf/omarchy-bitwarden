@@ -191,6 +191,7 @@ jobs:
           url="https://github.com/${{ github.repository }}"
           license=('MIT')
           depends=('libsecret' 'wl-clipboard')
+          optdepends=('libfido2: WebAuthn / Passkey / FIDO2 security key support')
           provides=('omawarden')
           conflicts=('omawarden')
           source_x86_64=("\${pkgname}-\${pkgver}-x86_64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${RAW_TAG}/omawarden-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")

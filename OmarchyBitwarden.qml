@@ -86,10 +86,13 @@ Item {
   }
 
   function installPackage(pkgName) {
-    if (!pkgName) return
-    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + pkgName +
-                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + pkgName +
-                     "; else sudo pacman -S --needed " + pkgName + "; fi"
+    if (!pkgName || typeof pkgName !== "string") return
+    var cleanPkg = pkgName.trim()
+    if (!/^[a-zA-Z0-9_\-\.\s]+$/.test(cleanPkg)) return
+
+    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + cleanPkg +
+                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + cleanPkg +
+                     "; else sudo pacman -S --needed " + cleanPkg + "; fi"
 
     root.isInstallingDependencies = true
     installDependenciesProc.running = false
@@ -656,6 +659,7 @@ Item {
     str = str.replace(/bearer\s+[a-z0-9_\-\.]+/gi, "Bearer <REDACTED>")
     str = str.replace(/("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     str = str.replace(/("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
+    str = str.replace(/("code"|"twoFactorToken"|"newDeviceOtp"|"new_device_otp")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     return str
   }
 
