@@ -195,13 +195,15 @@ pub fn perform_fido2_assertion(
         "id": cred_id_b64url,
         "rawId": cred_id_b64url,
         "type": "public-key",
+        "extensions": {},
+        "clientExtensionResults": {},
         "response": {
             "authenticatorData": auth_data_b64url,
             "clientDataJSON": client_data_b64url,
+            "clientDataJson": client_data_b64url,
             "signature": signature_b64url,
             "userHandle": null
-        },
-        "clientExtensionResults": {}
+        }
     });
 
     Ok(token_payload)

@@ -640,14 +640,29 @@ impl BitwardenApiClient {
                 if !err_desc.is_empty() {
                     return Err(ApiError::AuthFailed(err_desc.to_string()));
                 }
-                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                if !err_msg.is_empty() {
                     return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+                if !err_code.is_empty() && !body_text.trim().is_empty() {
+                    return Err(ApiError::AuthFailed(format!(
+                        "{}: {}",
+                        err_code,
+                        body_text.trim()
+                    )));
                 }
             }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::BAD_REQUEST
             {
-                Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+                let detail = body_text.trim();
+                if detail.is_empty() {
+                    Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+                } else {
+                    Err(ApiError::AuthFailed(format!(
+                        "HTTP {} ({})",
+                        status, detail
+                    )))
+                }
             } else {
                 Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
             }
