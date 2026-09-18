@@ -191,7 +191,7 @@ pub fn perform_fido2_assertion(
         cd_hash_b64, challenge_data.rp_id, cred_id_b64
     );
 
-    eprintln!("Please touch your WebAuthn security key (waiting for touch)...");
+    eprintln!("• Waiting for security key touch...");
     let mut child = Command::new("fido2-assert")
         .arg("-G")
         .arg("-t")

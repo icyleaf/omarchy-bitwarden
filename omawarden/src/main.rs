@@ -669,7 +669,7 @@ fn main() -> ExitCode {
                                     };
                                     eprintln!("  [{}] {}", idx + 1, label);
                                 }
-                                eprint!("Select method [1-{} (default 1)]: ", providers.len());
+                                eprint!("Select method [1-{}, default: 1]: ", providers.len());
                                 let _ = io::stderr().flush();
                                 let mut choice = String::new();
                                 let _ = io::stdin().read_line(&mut choice);
@@ -683,9 +683,7 @@ fn main() -> ExitCode {
 
                             effective_provider = Some(chosen_provider);
                             if chosen_provider == 7 {
-                                eprintln!(
-                                    "Connecting to server and requesting WebAuthn challenge..."
-                                );
+                                eprintln!("• Requesting WebAuthn challenge from server...");
                                 res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
                             } else {
                                 let prompt_label = match chosen_provider {
