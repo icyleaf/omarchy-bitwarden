@@ -43,6 +43,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/icyleaf/omarchy-bitwarden"
 license=('MIT')
 depends=('libsecret' 'wl-clipboard')
+optdepends=('libfido2: WebAuthn / Passkey / FIDO2 security key support')
 provides=('omawarden')
 conflicts=('omawarden')
 source=("omawarden" "LICENSE")

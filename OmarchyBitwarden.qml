@@ -225,6 +225,7 @@ Item {
   property bool isNewDeviceVerification: false
   property int twoFactorProvider: 0
   property var availableTwoFactorProviders: []
+  property string fido2Status: ""
 
   property var cliHealth: ({
     installed: false,
@@ -1741,11 +1742,13 @@ Item {
     root.isNewDeviceVerification = false
     root.twoFactorProvider = 0
     root.availableTwoFactorProviders = []
+    root.fido2Status = ""
     if (authViewComponent) {
       authViewComponent.show2FAField = false
       authViewComponent.isNewDeviceVerification = false
       authViewComponent.twoFactorProvider = 0
       authViewComponent.availableTwoFactorProviders = []
+      authViewComponent.fido2Status = ""
     }
     root.authState = ({
       status: "unauthenticated",
@@ -2249,6 +2252,7 @@ Item {
             isNewDeviceVerification: root.isNewDeviceVerification
             twoFactorProvider: root.twoFactorProvider
             availableTwoFactorProviders: root.availableTwoFactorProviders
+            fido2Status: root.fido2Status
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
@@ -2261,6 +2265,7 @@ Item {
                 authViewComponent.twoFactorProvider = prov
               }
             }
+            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
@@ -2817,12 +2822,14 @@ Item {
             root.isNewDeviceVerification = false
             root.twoFactorProvider = 0
             root.availableTwoFactorProviders = []
+            root.fido2Status = ""
             if (authViewComponent) {
               authViewComponent.clearInputs()
               authViewComponent.show2FAField = false
               authViewComponent.isNewDeviceVerification = false
               authViewComponent.twoFactorProvider = 0
               authViewComponent.availableTwoFactorProviders = []
+              authViewComponent.fido2Status = ""
             }
             root.authState = ({
               status: statusVal,
@@ -2873,6 +2880,7 @@ Item {
               root.availableTwoFactorProviders = []
             }
             root.twoFactorProvider = prov
+            root.fido2Status = data.fido2_status || ""
             if (is2FA) {
               root.show2FAField = true
               if (prov !== 7 && authViewComponent && authViewComponent.twoFactorInput) {
@@ -2888,6 +2896,7 @@ Item {
               authViewComponent.isNewDeviceVerification = root.isNewDeviceVerification
               authViewComponent.twoFactorProvider = root.twoFactorProvider
               authViewComponent.availableTwoFactorProviders = root.availableTwoFactorProviders
+              authViewComponent.fido2Status = root.fido2Status
             }
           }
         } catch (e) {

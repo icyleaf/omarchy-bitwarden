@@ -15,6 +15,7 @@ Item {
 
   property int lastSelectedProvider: -1
   property var lastLoginRequest: null
+  property string lastCopiedText: ""
 
   AuthView {
     id: authView
@@ -24,6 +25,9 @@ Item {
     }
     onLoginPasswordRequested: function(email, pwd, code, prov) {
       testRunner.lastLoginRequest = { email: email, password: pwd, code: code, provider: prov }
+    }
+    onCopyRequested: function(txt, lbl) {
+      testRunner.lastCopiedText = txt
     }
   }
 
@@ -138,6 +142,15 @@ Item {
     check(authView.show2FAField === true, "authView show2FAField is true after sync")
     check(authView.twoFactorProvider === 7, "authView twoFactorProvider is 7 after sync")
     check(authView.availableTwoFactorProviders.length === 2, "authView availableTwoFactorProviders has 2 items after sync")
+
+    // 10. Verification of fido2Status states and copy command
+    authView.fido2Status = "tool_not_found"
+    check(authView.fido2Status === "tool_not_found", "fido2Status set to tool_not_found")
+    authView.copyRequested("sudo pacman -S libfido2", "Install command")
+    check(testRunner.lastCopiedText === "sudo pacman -S libfido2", "copyRequested emitted install command")
+
+    authView.fido2Status = "no_device"
+    check(authView.fido2Status === "no_device", "fido2Status set to no_device")
 
     Qt.exit(failures === 0 ? 0 : 1)
   }

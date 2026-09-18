@@ -132,12 +132,61 @@ pub fn parse_webauthn_challenge(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Fido2Status {
+    Available,
+    NoDevice,
+    ToolNotFound,
+    OtherError,
+}
+
+impl Fido2Status {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Fido2Status::Available => "available",
+            Fido2Status::NoDevice => "no_device",
+            Fido2Status::ToolNotFound => "tool_not_found",
+            Fido2Status::OtherError => "other_error",
+        }
+    }
+}
+
+/// Checks the operational status of the FIDO2 environment (tool presence and device detection).
+pub fn check_fido2_status() -> Fido2Status {
+    match Command::new("fido2-token").arg("-L").output() {
+        Ok(output) => {
+            if !output.status.success() {
+                return Fido2Status::OtherError;
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if let Some(pos) = trimmed.find(':') {
+                    let dev = &trimmed[..pos];
+                    if dev.starts_with("/dev/hidraw") {
+                        return Fido2Status::Available;
+                    }
+                }
+            }
+            Fido2Status::NoDevice
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Fido2Status::ToolNotFound,
+        Err(_) => Fido2Status::OtherError,
+    }
+}
+
 /// Discovers connected FIDO2 USB devices using `fido2-token -L`.
 pub fn find_fido2_device() -> Result<String, String> {
     let output = Command::new("fido2-token")
         .arg("-L")
         .output()
-        .map_err(|e| format!("Failed to execute fido2-token: {}", e))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string()
+            } else {
+                format!("Failed to execute fido2-token: {}", e)
+            }
+        })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -157,7 +206,7 @@ pub fn find_fido2_device() -> Result<String, String> {
         }
     }
 
-    Err("No FIDO2 security key found. Please insert your security key.".to_string())
+    Err("No FIDO2 security key found. Please insert your security key and try again.".to_string())
 }
 
 /// Executes `fido2-assert -G` to perform a WebAuthn CTAP2 assertion with the physical key.
@@ -201,7 +250,13 @@ pub fn perform_fido2_assertion(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to execute fido2-assert: {}", e))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string()
+            } else {
+                format!("Failed to execute fido2-assert: {}", e)
+            }
+        })?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin

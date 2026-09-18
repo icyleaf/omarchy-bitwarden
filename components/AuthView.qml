@@ -16,6 +16,7 @@ Item {
   property bool isNewDeviceVerification: false
   property int twoFactorProvider: 0
   property var availableTwoFactorProviders: []
+  property string fido2Status: ""
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -28,6 +29,7 @@ Item {
   signal downloadCliRequested()
   signal settingsRequested()
   signal twoFactorProviderSelected(int provider)
+  signal copyRequested(string text, string label)
 
   property alias unlockInput: unlockPasswordField
   property alias twoFactorInput: login2FAInput
@@ -394,10 +396,10 @@ Item {
               Rectangle {
                 visible: authRoot.twoFactorProvider === 7
                 Layout.fillWidth: true
-                implicitHeight: 56
+                implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 56
                 radius: 5
                 color: Qt.rgba(0, 0, 0, 0.25)
-                border.color: authRoot.accent
+                border.color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
                 border.width: 1
 
                 RowLayout {
@@ -406,31 +408,97 @@ Item {
                   spacing: 10
 
                   Text {
-                    text: "\uf084"
+                    text: authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf084"
                     font.family: authRoot.fontFamily
                     font.pixelSize: 20
-                    color: authRoot.accent
+                    color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
+                    Layout.alignment: Qt.AlignTop
                   }
 
                   ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 2
+                    spacing: 4
+
                     Text {
-                      text: "WebAuthn Security Key"
+                      text: authRoot.fido2Status === "tool_not_found"
+                        ? "libfido2 not installed"
+                        : "WebAuthn Security Key"
                       color: authRoot.foreground
                       font.pixelSize: 11
                       font.weight: Font.DemiBold
                     }
+
                     Text {
-                      text: authRoot.isBusy
-                        ? "Waiting for security key touch..."
-                        : "Click 'Verify with Security Key' and touch your key."
+                      text: authRoot.fido2Status === "tool_not_found"
+                        ? "Install 'libfido2' package to use security keys, or select another method:"
+                        : (authRoot.isBusy
+                            ? "Waiting for security key touch..."
+                            : (authRoot.fido2Status === "no_device"
+                                ? "No security key detected. Please insert your key and click Verify."
+                                : "Click 'Verify with Security Key' and touch your key."))
                       color: Qt.darker(authRoot.foreground, 1.4)
                       font.pixelSize: 10
-                      elide: Text.ElideRight
+                      wrapMode: Text.WordWrap
                       Layout.fillWidth: true
                     }
+
+                    // Install command box with copy button
+                    Rectangle {
+                      visible: authRoot.fido2Status === "tool_not_found"
+                      Layout.fillWidth: true
+                      implicitHeight: 24
+                      radius: 3
+                      color: Qt.rgba(0, 0, 0, 0.35)
+                      border.color: authRoot.borderColor
+                      border.width: 1
+
+                      RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 4
+                        spacing: 6
+
+                        Text {
+                          text: "sudo pacman -S libfido2"
+                          color: authRoot.foreground
+                          font.family: "monospace"
+                          font.pixelSize: 10
+                          Layout.fillWidth: true
+                          elide: Text.ElideRight
+                        }
+
+                        Rectangle {
+                          implicitWidth: copyTimer.running ? 46 : 38
+                          implicitHeight: 18
+                          radius: 2
+                          color: copyTimer.running ? "#10b981" : authRoot.accent
+
+                          Text {
+                            anchors.centerIn: parent
+                            text: copyTimer.running ? "Copied" : "Copy"
+                            color: "#ffffff"
+                            font.pixelSize: 9
+                            font.weight: Font.Medium
+                          }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              authRoot.copyRequested("sudo pacman -S libfido2", "Install command")
+                              copyTimer.restart()
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
+                }
+
+                Timer {
+                  id: copyTimer
+                  interval: 1500
+                  repeat: false
                 }
               }
 
@@ -500,7 +568,9 @@ Item {
                 anchors.centerIn: parent
                 text: authRoot.isBusy
                   ? (authRoot.twoFactorProvider === 7 ? "Waiting for key touch..." : "Logging in...")
-                  : (authRoot.show2FAField && authRoot.twoFactorProvider === 7 ? "Verify with Security Key" : "Log In")
+                  : (authRoot.show2FAField && authRoot.twoFactorProvider === 7
+                      ? (authRoot.fido2Status === "tool_not_found" ? "Install libfido2 to Verify" : "Verify with Security Key")
+                      : "Log In")
                 color: "#ffffff"
                 font.pixelSize: 12
                 font.weight: Font.Medium
@@ -508,6 +578,9 @@ Item {
               MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                 onClicked: {
+                  if (authRoot.show2FAField && authRoot.twoFactorProvider === 7 && authRoot.fido2Status === "tool_not_found") {
+                    authRoot.copyRequested("sudo pacman -S libfido2", "Install command")
+                  }
                   authRoot.loginPasswordRequested(
                     loginEmailInput.text.trim(),
                     loginPwdInput.text,

@@ -145,6 +145,8 @@ pub struct AuthResult {
     pub two_factor_providers2: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_device_verification_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fido2_status: Option<String>,
 }
 
 pub struct AuthManager {
@@ -441,6 +443,7 @@ impl AuthManager {
                                         "WebAuthn assertion failed: {}",
                                         e
                                     );
+                                    let current_fido2 = crate::webauthn::check_fido2_status();
                                     return AuthResult {
                                         ok: false,
                                         status: Some("unauthenticated".to_string()),
@@ -449,6 +452,7 @@ impl AuthManager {
                                         two_factor_providers: Some(providers),
                                         two_factor_provider: Some(7),
                                         two_factor_providers2: providers2,
+                                        fido2_status: Some(current_fido2.as_str().to_string()),
                                         ..Default::default()
                                     };
                                 }
@@ -457,17 +461,33 @@ impl AuthManager {
                     }
                 }
 
-                let default_provider = if providers.contains(&0) {
-                    0
-                } else if providers.contains(&7) {
+                let fido2_status = if providers.contains(&7) {
+                    Some(crate::webauthn::check_fido2_status())
+                } else {
+                    None
+                };
+
+                let default_provider = if providers.contains(&7)
+                    && fido2_status == Some(crate::webauthn::Fido2Status::Available)
+                {
                     7
+                } else if providers.contains(&0) {
+                    0
                 } else if providers.contains(&1) {
                     1
+                } else if providers.contains(&7) {
+                    7
                 } else {
                     *providers.first().unwrap_or(&0)
                 };
                 let err_text = if default_provider == 7 {
-                    "WebAuthn security key authentication required. Please insert and touch your security key."
+                    if fido2_status == Some(crate::webauthn::Fido2Status::ToolNotFound) {
+                        "WebAuthn security key authentication required, but libfido2 tools were not found. Please install 'libfido2' package or choose another method."
+                    } else if fido2_status == Some(crate::webauthn::Fido2Status::NoDevice) {
+                        "WebAuthn security key authentication required. Please insert your security key, or choose another method."
+                    } else {
+                        "WebAuthn security key authentication required. Please insert and touch your security key."
+                    }
                 } else if default_provider == 1 {
                     "Email two-factor authentication required. Please check your email for the verification code."
                 } else {
@@ -482,6 +502,7 @@ impl AuthManager {
                     two_factor_providers: Some(providers),
                     two_factor_provider: Some(default_provider),
                     two_factor_providers2: providers2,
+                    fido2_status: fido2_status.map(|s| s.as_str().to_string()),
                     ..Default::default()
                 };
             }
@@ -1224,6 +1245,66 @@ mod tests {
             res.error.as_deref(),
             Some("Two-factor authentication required or invalid code.")
         );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_webauthn_smart_default_provider_selection() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["1","7"],"TwoFactorProviders2":{"1":null,"7":{"challenge":"abc","rpId":"example.com","allowCredentials":[]}}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("test_smart_2fa.json");
+        let storage_mgr = StorageManager::new(storage_path);
+        let mock_keyring = create_test_mock_keyring(dir.path());
+
+        let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
+        let res = auth_mgr.login_password("user@example.com", "password123", None, None, None);
+        assert!(!res.ok);
+        assert_eq!(res.status.as_deref(), Some("unauthenticated"));
+        assert_eq!(res.two_factor_required, Some(true));
+        assert_eq!(res.two_factor_providers, Some(vec![1, 7]));
+        assert!(res.fido2_status.is_some());
+        // If FIDO2 device is available, default is 7; if no device or tool missing, smart default falls back to 1
+        if res.fido2_status.as_deref() == Some("available") {
+            assert_eq!(res.two_factor_provider, Some(7));
+        } else {
+            assert_eq!(res.two_factor_provider, Some(1));
+        }
         let _ = handle.join();
     }
 

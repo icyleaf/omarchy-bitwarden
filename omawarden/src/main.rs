@@ -655,30 +655,47 @@ fn main() -> ExitCode {
                         } else if res.two_factor_required == Some(true) {
                             let providers =
                                 res.two_factor_providers.clone().unwrap_or_else(|| vec![0]);
+                            let default_idx = if let Some(pref) = res.two_factor_provider {
+                                providers.iter().position(|p| *p == pref).unwrap_or(0)
+                            } else {
+                                0
+                            };
                             let chosen_provider = if providers.len() == 1 {
                                 providers[0]
                             } else {
                                 eprintln!("\nTwo-Factor Authentication Methods:");
                                 for (idx, p) in providers.iter().enumerate() {
                                     let label = match p {
-                                        0 => "Authenticator App (TOTP)",
-                                        1 => "Email Verification Code",
-                                        3 => "YubiKey OTP",
-                                        7 => "WebAuthn / Passkey / Security Key",
-                                        _ => "Other",
+                                        0 => "Authenticator App (TOTP)".to_string(),
+                                        1 => "Email Verification Code".to_string(),
+                                        3 => "YubiKey OTP".to_string(),
+                                        7 => match res.fido2_status.as_deref() {
+                                            Some("tool_not_found") => {
+                                                "WebAuthn / Passkey / Security Key (libfido2 not installed)".to_string()
+                                            }
+                                            Some("no_device") => {
+                                                "WebAuthn / Passkey / Security Key (no key detected)".to_string()
+                                            }
+                                            _ => "WebAuthn / Passkey / Security Key".to_string(),
+                                        },
+                                        _ => "Other".to_string(),
                                     };
                                     eprintln!("  [{}] {}", idx + 1, label);
                                 }
-                                eprint!("Select method [1-{}, default: 1]: ", providers.len());
+                                eprint!(
+                                    "Select method [1-{}, default: {}]: ",
+                                    providers.len(),
+                                    default_idx + 1
+                                );
                                 let _ = io::stderr().flush();
                                 let mut choice = String::new();
                                 let _ = io::stdin().read_line(&mut choice);
                                 let idx = choice
                                     .trim()
                                     .parse::<usize>()
-                                    .unwrap_or(1)
+                                    .unwrap_or(default_idx + 1)
                                     .saturating_sub(1);
-                                *providers.get(idx).unwrap_or(&providers[0])
+                                *providers.get(idx).unwrap_or(&providers[default_idx])
                             };
 
                             effective_provider = Some(chosen_provider);
