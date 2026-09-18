@@ -240,7 +240,7 @@ pub fn perform_fido2_assertion(
         cd_hash_b64, challenge_data.rp_id, cred_id_b64
     );
 
-    eprintln!("• Waiting for security key touch...");
+    crate::log_info!("omawarden:auth", "Waiting for security key touch...");
     let mut child = Command::new("fido2-assert")
         .arg("-G")
         .arg("-t")
@@ -273,7 +273,10 @@ pub fn perform_fido2_assertion(
         return Err(format!("FIDO2 assertion failed: {}", err_msg.trim()));
     }
 
-    eprintln!("✓ Security key verified. Authenticating with server...");
+    crate::log_info!(
+        "omawarden:auth",
+        "Security key verified. Authenticating with server..."
+    );
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout_str.lines().map(|s| s.trim()).collect();

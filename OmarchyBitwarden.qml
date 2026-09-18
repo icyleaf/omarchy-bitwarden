@@ -714,7 +714,15 @@ Item {
         else if (lvl === "WARN") console.warn(line)
         else console.log(line)
       } else {
-        root.logError(defaultSource || "omawarden:cli", line)
+        var isInfo = line.startsWith("•") || line.startsWith("✓") ||
+                     line.indexOf("Waiting for security key touch") !== -1 ||
+                     line.indexOf("Requesting WebAuthn challenge") !== -1 ||
+                     line.indexOf("Security key verified") !== -1
+        if (isInfo) {
+          root.logInfo(defaultSource || "omawarden:cli", line)
+        } else {
+          root.logError(defaultSource || "omawarden:cli", line)
+        }
       }
     }
   }

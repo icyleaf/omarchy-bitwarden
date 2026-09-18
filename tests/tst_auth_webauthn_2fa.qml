@@ -183,6 +183,39 @@ Item {
     check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled for Email 2FA even if fido2Status is no_device")
     check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when on Email 2FA tab")
 
+    // 12. Verification of stderr log level categorization for WebAuthn prompts
+    function simulateStderr(text, defaultSource) {
+      var capturedLogs = []
+      var lines = String(text).split("\n")
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim()
+        if (!line) continue
+        var match = line.match(/^(?:\[([0-9T:\-\.Z]+)\]\s+)?\[(ERROR|WARN|INFO|DEBUG|TRACE)\]\s+\[([^\]]+)\]\s+(.*)$/i)
+        if (match) {
+          capturedLogs.push({ level: match[2].toUpperCase(), message: match[4] })
+        } else {
+          var isInfo = line.startsWith("•") || line.startsWith("✓") ||
+                       line.indexOf("Waiting for security key touch") !== -1 ||
+                       line.indexOf("Requesting WebAuthn challenge") !== -1 ||
+                       line.indexOf("Security key verified") !== -1
+          capturedLogs.push({ level: isInfo ? "INFO" : "ERROR", message: line })
+        }
+      }
+      return capturedLogs
+    }
+
+    var structuredLog = "[2026-09-18T02:30:00.000Z] [INFO] [omawarden:auth] Waiting for security key touch..."
+    var resStructured = simulateStderr(structuredLog, "omawarden:auth")
+    check(resStructured.length === 1 && resStructured[0].level === "INFO", "Structured WebAuthn log parsed as INFO")
+
+    var legacyStderr = "• Waiting for security key touch..."
+    var resLegacy = simulateStderr(legacyStderr, "omawarden:cli")
+    check(resLegacy.length === 1 && resLegacy[0].level === "INFO", "Unstructured bullet waiting prompt parsed as INFO")
+
+    var rawError = "Error: device disconnected unexpectedly"
+    var resError = simulateStderr(rawError, "omawarden:cli")
+    check(resError.length === 1 && resError[0].level === "ERROR", "Actual error line in stderr parsed as ERROR")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

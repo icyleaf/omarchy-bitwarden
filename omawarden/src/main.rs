@@ -709,7 +709,10 @@ fn main() -> ExitCode {
 
                             effective_provider = Some(chosen_provider);
                             if chosen_provider == 7 {
-                                eprintln!("• Requesting WebAuthn challenge from server...");
+                                omawarden::log_info!(
+                                    "omawarden:auth",
+                                    "Requesting WebAuthn challenge from server..."
+                                );
                                 res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
                             } else {
                                 let prompt_label = match chosen_provider {
