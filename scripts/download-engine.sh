@@ -39,10 +39,13 @@ GH_HOST="${GITHUB_SERVER_URL:-https://github.com}"
 
 # 1. Resolve release tag: use pinned tag if provided, otherwise fetch latest release
 if [ -n "$TAG" ]; then
-  # Normalize tag name if only version number was supplied
-  if [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
-    CLEAN_VER="${TAG#v}"
-    TAG="omawarden-v${CLEAN_VER}"
+  # Normalize tag name: accept 0.8.0, v0.8.0, omawarden-0.8.0, omawarden-v0.8.0
+  if [[ "$TAG" =~ ^omawarden-v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+    CLEAN_VER="${BASH_REMATCH[1]}"
+    TAG="omawarden-${CLEAN_VER}"
+  elif [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+    CLEAN_VER="${BASH_REMATCH[1]}"
+    TAG="omawarden-${CLEAN_VER}"
   fi
 else
   # Fetch latest omawarden release tag via Atom feed (immune to API rate limits)
@@ -84,10 +87,12 @@ fi
 VERSION="${TAG#omawarden-}"
 VERSION="${VERSION#v}"
 
-# 2. Try candidate URLs in order of preference
+# 2. Try candidate URLs in order of preference (both standard omawarden-<ver> and legacy omawarden-v<ver>)
 CANDIDATE_URLS=(
   "${GH_HOST}/${REPO}/releases/download/${TAG}/omawarden-${VERSION}-${TRIPLE}.tar.gz"
   "${GH_HOST}/${REPO}/releases/download/${TAG}/omawarden-${TRIPLE}.tar.gz"
+  "${GH_HOST}/${REPO}/releases/download/omawarden-v${VERSION}/omawarden-${VERSION}-${TRIPLE}.tar.gz"
+  "${GH_HOST}/${REPO}/releases/download/omawarden-v${VERSION}/omawarden-${TRIPLE}.tar.gz"
 )
 
 DOWNLOADED=false
