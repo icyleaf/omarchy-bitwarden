@@ -147,7 +147,19 @@ Item {
       var missing = dependencyCheckView.finalizeCheck()
       root.missingDependencyPackages = missing
       root.dependenciesMissing = (missing.length > 0)
-      if (!root.dependenciesMissing) {
+      if (root.dependenciesMissing) {
+        if (missing.indexOf("omawarden") !== -1) {
+          root.cliHealth = ({
+            installed: false,
+            ok: false,
+            version: "",
+            server_reachable: false,
+            keyring_available: false,
+            clipboard_available: false,
+            error: "omawarden engine is missing or not installed."
+          })
+        }
+      } else {
         root.resolveHelper()
       }
     }
@@ -187,9 +199,8 @@ Item {
         }
         if (!omawardenInstalled) {
           var localBin = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-          var targetBin = (root.helperPath && root.helperPath !== "omawarden") ? root.helperPath : localBin
           checkFallbackProc.running = false
-          checkFallbackProc.command = [targetBin, "-V"]
+          checkFallbackProc.command = [localBin, "-V"]
           checkFallbackProc.running = true
           return
         }
@@ -442,9 +453,8 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
-    if (root.dependenciesMissing) {
-      root.checkDependencies()
-    } else {
+    root.checkDependencies()
+    if (!root.dependenciesMissing) {
       root.refreshHealth()
       root.refreshConfig()
       root.refreshAuthStatus()
@@ -2365,7 +2375,8 @@ Item {
             onSaveRequested: function(newSettings) { root.saveSettings(newSettings) }
             onCloseRequested: { root.currentView = "auto" }
             onRefreshHealthRequested: {
-              root.refreshHealth()
+              root.checkDependencies()
+              root.resolveHelper()
               root.refreshConfig()
             }
             onCheckUpdateRequested: { root.checkUpdates(true) }
@@ -2656,7 +2667,7 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:health")
     }
     onExited: function(code) {
-      if (code !== 0 && (!root.cliHealth || !root.cliHealth.installed)) {
+      if (code !== 0) {
         root.cliHealth = ({
           installed: false,
           ok: false,
@@ -2666,6 +2677,7 @@ Item {
           clipboard_available: false,
           error: "CLI executable not found or failed to execute."
         })
+        root.checkDependencies()
       }
     }
   }
