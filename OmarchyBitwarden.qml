@@ -127,6 +127,20 @@ Item {
     return "builtin"
   }
 
+  readonly property string enginePackage: {
+    if (dependencyCheckView) {
+      for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+        var item = dependencyCheckView.dependencyModel.get(i)
+        if (item.pkgName === "omawarden") {
+          if (item.status === "installed" && item.installedPackage) {
+            return item.installedPackage
+          }
+        }
+      }
+    }
+    return ""
+  }
+
   function finalizeDependencyCheck() {
     root.isCheckingDependencies = false
     if (dependencyCheckView) {
@@ -1651,7 +1665,14 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
-    report += "- **Engine Source**: " + (root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN") + "\n"
+    var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN"
+    if (root.enginePackage) {
+      engineSourceStr += " (" + root.enginePackage + ")"
+    } else if (root.engineSource === "builtin") {
+      engineSourceStr += " (local binary)"
+    }
+    report += "- **Engine Source**: " + engineSourceStr + "\n"
+    report += "- **Engine Binary Path**: " + (root.helperPath || "Unknown") + "\n"
     report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
@@ -2326,6 +2347,7 @@ Item {
             config: root.config
             cliHealth: root.cliHealth
             engineSource: root.engineSource
+            enginePackage: root.enginePackage
             logBuffer: root.logBuffer
             isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy

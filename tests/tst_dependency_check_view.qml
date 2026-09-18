@@ -67,6 +67,7 @@ Item {
     depView.parsePacmanStdout(mockAurStdout)
     check(depView.dependencyModel.get(0).status === "installed", "omawarden is satisfied by omawarden-bin")
     check(depView.dependencyModel.get(0).version === "0.7.0-1", "omawarden version set to 0.7.0-1")
+    check(depView.dependencyModel.get(0).installedPackage === "omawarden-bin", "omawarden installedPackage is omawarden-bin")
 
     var missingAfter = depView.finalizeCheck()
     check(missingAfter.length === 0, "all dependencies satisfied, missing length is 0")
@@ -74,10 +75,12 @@ Item {
 
     // 7b. Parse stdout with omawarden-git satisfying omawarden
     depView.resetToChecking()
+    check(depView.dependencyModel.get(0).installedPackage === "", "installedPackage is reset to empty string on resetToChecking")
     var mockGitStdout = "libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\nomawarden-git 0.8.0.r45.ga1b2c3d-1\n"
     depView.parsePacmanStdout(mockGitStdout)
     check(depView.dependencyModel.get(0).status === "installed", "omawarden is satisfied by omawarden-git")
     check(depView.dependencyModel.get(0).version === "0.8.0.r45.ga1b2c3d-1", "omawarden version set to git version")
+    check(depView.dependencyModel.get(0).installedPackage === "omawarden-git", "omawarden installedPackage is omawarden-git")
 
     var missingAfterGit = depView.finalizeCheck()
     check(missingAfterGit.length === 0, "all dependencies satisfied with omawarden-git, missing length is 0")

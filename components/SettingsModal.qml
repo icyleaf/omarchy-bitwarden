@@ -9,6 +9,7 @@ Item {
   property var config: ({})
   property var cliHealth: ({})
   property string engineSource: "builtin"
+  property string enginePackage: ""
   property var logBuffer: []
   property bool isDownloadingCli: false
   property bool isBusy: false
@@ -349,7 +350,12 @@ Item {
                   Text {
                     id: engineSourceText
                     anchors.centerIn: parent
-                    text: (settingsRoot.engineSource.toLowerCase() === "aur") ? "AUR" : "builtin"
+                    text: {
+                      if (settingsRoot.engineSource.toLowerCase() === "aur") {
+                        return settingsRoot.enginePackage ? ("AUR: " + settingsRoot.enginePackage) : "AUR"
+                      }
+                      return "builtin"
+                    }
                     color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
                     font.pixelSize: 9
                     font.weight: Font.DemiBold
