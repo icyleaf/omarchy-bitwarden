@@ -152,6 +152,31 @@ Item {
     authView.fido2Status = "no_device"
     check(authView.fido2Status === "no_device", "fido2Status set to no_device")
 
+    // 11. Verification of Submit Button states and auto-detect timer based on fido2Status
+    authView.show2FAField = true
+    authView.twoFactorProvider = 7
+
+    // Case A: no_device -> button is disabled, timer is running
+    authView.fido2Status = "no_device"
+    check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button is disabled when no_device")
+    check(authView.fido2AutoDetectTimerComponent.running === true, "fido2AutoDetectTimer is running when no_device")
+
+    // Case B: tool_not_found -> button is disabled, timer does not run
+    authView.fido2Status = "tool_not_found"
+    check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button is disabled when tool_not_found")
+    check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when tool_not_found")
+
+    // Case C: available -> button is enabled, timer stops
+    authView.fido2Status = "available"
+    check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled when available")
+    check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when available")
+
+    // Case D: Other 2FA providers are not blocked by fido2Status
+    authView.fido2Status = "no_device"
+    authView.twoFactorProvider = 1
+    check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled for Email 2FA even if fido2Status is no_device")
+    check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when on Email 2FA tab")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

@@ -33,11 +33,31 @@ Item {
   signal settingsRequested()
   signal twoFactorProviderSelected(int provider)
   signal sendTwoFactorEmailRequested(string email, string password)
+  signal checkFido2StatusRequested()
   signal copyRequested(string text, string label)
 
   property alias unlockInput: unlockPasswordField
   property alias twoFactorInput: login2FAInput
   property alias resendEmailButton: resendEmailBtn
+  property alias submitButtonComponent: submitButton
+  property alias fido2AutoDetectTimerComponent: fido2AutoDetectTimer
+
+  Timer {
+    id: fido2AutoDetectTimer
+    interval: 1500
+    repeat: true
+    running: authRoot.show2FAField
+             && authRoot.twoFactorProvider === 7
+             && authRoot.fido2Status === "no_device"
+             && !authRoot.isBusy
+    onTriggered: authRoot.checkFido2StatusRequested()
+  }
+
+  Timer {
+    id: checkAgainTimer
+    interval: 800
+    repeat: false
+  }
 
   function notifyEmailCodeSent() {
     authRoot.isSendingEmail = false
@@ -440,10 +460,12 @@ Item {
               Rectangle {
                 visible: authRoot.twoFactorProvider === 7
                 Layout.fillWidth: true
-                implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 56
+                implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 58
                 radius: 5
                 color: Qt.rgba(0, 0, 0, 0.25)
-                border.color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
+                border.color: authRoot.fido2Status === "available"
+                  ? "#10b981"
+                  : (authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : Qt.rgba(1, 1, 1, 0.15))
                 border.width: 1
 
                 RowLayout {
@@ -452,10 +474,14 @@ Item {
                   spacing: 10
 
                   Text {
-                    text: authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf084"
+                    text: authRoot.fido2Status === "available"
+                      ? "\uf084"
+                      : (authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf287")
                     font.family: authRoot.fontFamily
                     font.pixelSize: 20
-                    color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
+                    color: authRoot.fido2Status === "available"
+                      ? "#10b981"
+                      : (authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent)
                     Layout.alignment: Qt.AlignTop
                   }
 
@@ -463,13 +489,52 @@ Item {
                     Layout.fillWidth: true
                     spacing: 4
 
-                    Text {
-                      text: authRoot.fido2Status === "tool_not_found"
-                        ? "libfido2 not installed"
-                        : "WebAuthn Security Key"
-                      color: authRoot.foreground
-                      font.pixelSize: 11
-                      font.weight: Font.DemiBold
+                    RowLayout {
+                      Layout.fillWidth: true
+                      spacing: 6
+
+                      Text {
+                        text: authRoot.fido2Status === "tool_not_found"
+                          ? "libfido2 not installed"
+                          : (authRoot.fido2Status === "no_device"
+                              ? "No Security Key Detected"
+                              : "Security Key Detected")
+                        color: authRoot.foreground
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        Layout.fillWidth: true
+                      }
+
+                      // Check Again button
+                      Rectangle {
+                        visible: authRoot.fido2Status === "no_device" || authRoot.fido2Status === "tool_not_found"
+                        implicitWidth: checkAgainBtnText.implicitWidth + 12
+                        implicitHeight: 20
+                        radius: 3
+                        color: checkAgainMouseArea.containsMouse ? Qt.lighter(Qt.rgba(1, 1, 1, 0.1), 1.2) : Qt.rgba(1, 1, 1, 0.08)
+                        border.color: authRoot.borderColor
+                        border.width: 1
+
+                        Text {
+                          id: checkAgainBtnText
+                          anchors.centerIn: parent
+                          text: checkAgainTimer.running ? "Checking..." : "Check Again"
+                          color: authRoot.foreground
+                          font.pixelSize: 9
+                          font.weight: Font.Medium
+                        }
+
+                        MouseArea {
+                          id: checkAgainMouseArea
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          enabled: !checkAgainTimer.running && !authRoot.isBusy
+                          onClicked: {
+                            checkAgainTimer.restart()
+                            authRoot.checkFido2StatusRequested()
+                          }
+                        }
+                      }
                     }
 
                     Text {
@@ -478,7 +543,7 @@ Item {
                         : (authRoot.isBusy
                             ? "Waiting for security key touch..."
                             : (authRoot.fido2Status === "no_device"
-                                ? "No security key detected. Please insert your key and click Verify."
+                                ? "Insert your USB security key. It will be detected automatically."
                                 : "Click 'Verify with Security Key' and touch your key."))
                       color: Qt.darker(authRoot.foreground, 1.4)
                       font.pixelSize: 10
@@ -654,24 +719,42 @@ Item {
 
             // Submit Button
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: authRoot.accent
+              id: submitButton
+              Layout.fillWidth: true
+              height: 32
+              radius: 5
+              readonly property bool isFido2Blocked: authRoot.show2FAField
+                && authRoot.twoFactorProvider === 7
+                && authRoot.fido2Status !== "available"
+              readonly property bool isSubmitEnabled: !authRoot.isBusy && !isFido2Blocked
+
+              color: isSubmitEnabled
+                ? (submitMouseArea.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
+                : Qt.rgba(1, 1, 1, 0.08)
+
               Text {
                 anchors.centerIn: parent
                 text: authRoot.isBusy
                   ? (authRoot.twoFactorProvider === 7 ? "Waiting for key touch..." : "Logging in...")
                   : (authRoot.show2FAField && authRoot.twoFactorProvider === 7
-                      ? (authRoot.fido2Status === "tool_not_found" ? "Install libfido2 to Verify" : "Verify with Security Key")
+                      ? (authRoot.fido2Status === "tool_not_found"
+                          ? "Install libfido2 to Proceed"
+                          : (authRoot.fido2Status === "no_device"
+                              ? "Insert Security Key to Verify"
+                              : "Verify with Security Key"))
                       : "Log In")
-                color: "#ffffff"
+                color: submitButton.isSubmitEnabled ? "#ffffff" : authRoot.muted
                 font.pixelSize: 12
                 font.weight: Font.Medium
               }
+
               MouseArea {
-                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                id: submitMouseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: submitButton.isSubmitEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                enabled: submitButton.isSubmitEnabled
                 onClicked: {
-                  if (authRoot.show2FAField && authRoot.twoFactorProvider === 7 && authRoot.fido2Status === "tool_not_found") {
-                    authRoot.copyRequested("sudo pacman -S libfido2", "Install command")
-                  }
                   authRoot.loginPasswordRequested(
                     loginEmailInput.text.trim(),
                     loginPwdInput.text,

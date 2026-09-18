@@ -200,6 +200,8 @@ enum AuthAction {
         #[arg(long, required = true)]
         email: String,
     },
+    #[command(about = "Check current FIDO2 / WebAuthn environment and device status")]
+    Fido2Status,
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
     #[command(about = "Lock vault and clear session")]
@@ -811,6 +813,15 @@ fn main() -> ExitCode {
                             }
                         }
                     }
+                }
+                AuthAction::Fido2Status => {
+                    let status = omawarden::webauthn::check_fido2_status();
+                    let res = serde_json::json!({
+                        "ok": true,
+                        "status": status.as_str()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    ExitCode::SUCCESS
                 }
                 AuthAction::Unlock => {
                     let pwd = if io::stdin().is_terminal() {

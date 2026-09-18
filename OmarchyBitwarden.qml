@@ -1752,6 +1752,12 @@ Item {
     authSendEmailProc.running = true
   }
 
+  function doCheckFido2Status() {
+    if (authFido2CheckProc.running) return
+    authFido2CheckProc.command = [root.helperPath, "auth", "fido2-status"]
+    authFido2CheckProc.running = true
+  }
+
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
     root.clearSensitiveState()
@@ -2281,10 +2287,14 @@ Item {
               if (authViewComponent) {
                 authViewComponent.twoFactorProvider = prov
               }
+              if (prov === 7) {
+                root.doCheckFido2Status()
+              }
             }
             onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
+            onCheckFido2StatusRequested: { root.doCheckFido2Status() }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }
@@ -2989,6 +2999,25 @@ Item {
         if (authViewComponent) {
           authViewComponent.notifyEmailCodeFailed()
         }
+      }
+    }
+  }
+
+  Process {
+    id: authFido2CheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok && data.status) {
+            root.fido2Status = data.status
+            if (authViewComponent) {
+              authViewComponent.fido2Status = data.status
+            }
+          }
+        } catch (e) {}
       }
     }
   }
