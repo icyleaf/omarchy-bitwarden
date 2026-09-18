@@ -81,20 +81,43 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 
 Ensure the following tools are available on your system:
 
+- **omawarden Engine**: High-performance Rust backend for Bitwarden (distributed via AUR or GitHub Releases)
 - **Keyring / Secret Service**: `secret-tool` (`libsecret` package on Arch/Debian/Fedora)
 - **Wayland Clipboard**: `wl-clipboard` (`wl-copy` / `wl-paste`)
+
+> [!TIP]
+> **One-Click Setup**: When opening Omarchy Bitwarden for the first time without prerequisites, an interactive **Dependency Check** view automatically appears, allowing you to install `omawarden-bin`, `libsecret`, and `wl-clipboard` with a single click via an Omarchy floating terminal popup.
 
 ---
 
 ## Installation & Setup
 
-1. **Install Plugin via Omarchy CLI**:
+### 1. Install omawarden Engine (Arch Linux / AUR)
+
+The native engine is officially distributed on AUR in two flavors:
+
+- **`omawarden-bin`** (Recommended): Official pre-compiled release binary package.
+- **`omawarden-git`**: Development VCS package built from the bleeding-edge `develop` branch.
+
+```bash
+# Install stable pre-compiled release (recommended)
+paru -S omawarden-bin
+# or
+yay -S omawarden-bin
+
+# Or install bleeding-edge development VCS package
+paru -S omawarden-git
+```
+
+*(Non-Arch distributions can download pre-built binaries directly from [GitHub Releases](https://github.com/icyleaf/omarchy-bitwarden/releases) and place them in your `$PATH`).*
+
+### 2. Install Plugin via Omarchy CLI
 
 ```bash
 omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 ```
 
-2. **Bind Global Hotkey & Window Rule** (in `~/.config/hypr/bindings.lua`):
+### 3. Bind Global Hotkey & Window Rule (in `~/.config/hypr/bindings.lua`)
 
 ```lua
 -- ~/.config/hypr/bindings.lua
@@ -106,6 +129,14 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
   size = { 1152, 768 }
 })
 ```
+
+## Engine Source Badges & Updates
+
+Omarchy Bitwarden seamlessly distinguishes and manages the active engine source in the **Settings** modal:
+
+- **`[ AUR: omawarden-bin ]` / `[ AUR: omawarden-git ]`**: Active when installed via pacman/AUR. Offers channel-aware one-click update actions (`Update (AUR)`) launching your terminal AUR helper.
+- **`[ builtin ]`**: Active when running against a local in-tree binary (`bin/omawarden`). Supports direct binary update downloads from GitHub Releases.
+- **Development Suppression**: Development builds (e.g. `0.8.0-dev` from `omawarden-git`) automatically suppress standard release update notifications to prevent downgrade prompts.
 
 ## Update & Uninstall
 
@@ -128,10 +159,15 @@ omarchy plugin remove icyleaf.bitwarden
 
 `omarchy-bitwarden` supports two authentication methods for connecting to Bitwarden or self-hosted Vaultwarden instances:
 
-### 1. Master Password Login (+ 2FA Support)
+### 1. Master Password Login (+ Comprehensive 2FA Support)
 
 - **Default & Direct**: Enter your account email and Master Password directly in the overlay login form.
-- **Two-Factor Authentication (2FA)**: If your account has two-step login enabled, an inline **2FA Code** field will appear automatically upon challenge. Enter your 6-digit TOTP code (or email verification code) to complete authentication.
+- **Comprehensive Two-Factor Authentication (2FA)**:
+  - **Authenticator App (TOTP)** (*Provider 0*): Enter your 6-digit verification code from your authenticator app.
+  - **Email Verification Code** (*Provider 1*): Automatically dispatches an email challenge code with resend capabilities.
+  - **Hardware Security Key / WebAuthn / FIDO2** (*Provider 7*): Native hardware security key support (YubiKey, SoloKey, Nitrokey, passkeys). Visual prompt instructs you to touch the physical security key, with support for user presence, user verification, and optional PIN entry.
+  - **Multi-Provider Switcher**: When multiple 2FA methods are active on your account (e.g. Security Key + Authenticator + Email), an interactive provider selector allows switching between methods on the fly, with smart default selection favoring hardware security keys.
+- **New Device Verification**: Seamlessly detects and prompts for email OTP verification challenges when logging in from a newly recognized device.
 - **Remember Email**: Optionally toggle "Remember Email" to prefill your login email address across sessions.
 
 ### 2. API Key Login (Personal API Key)
@@ -226,7 +262,11 @@ flowchart TD
 - [x] Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) & password history viewer (<kbd>Ctrl</kbd>+<kbd>H</kbd>)
 - [x] FIDO2 / WebAuthn passkey indicator & item creation/update history
 - [x] Locked-state background sync (syncing encrypted ciphertext while vault is locked)
-- [x] Self-hosted Vaultwarden & personal API key / 2FA login support
+- [x] Self-hosted Vaultwarden & personal API key login support
+- [x] Comprehensive 2FA support (Authenticator TOTP, Email verification, and native FIDO2 / WebAuthn hardware security keys)
+- [x] Official Arch Linux AUR distribution (`omawarden-bin`, `omawarden-git`) with UI engine source badges
+- [x] Channel-aware update management & floating terminal dependency installer
+- [x] Persistent search state (remembers query, category, and selected item across window sessions)
 - [x] Dual-channel structured logging & privacy-redacted diagnostics
 
 ### Phase 2: In Progress / Upcoming (Full Vault Item Lifecycle & Editing)
