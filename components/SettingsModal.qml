@@ -12,6 +12,7 @@ Item {
   property string enginePackage: ""
   property var logBuffer: []
   property bool isDownloadingCli: false
+  property bool isInstallingDependencies: false
   property bool isBusy: false
   property bool updateAvailable: false
   property string latestVersion: ""
@@ -79,6 +80,7 @@ Item {
   signal refreshHealthRequested()
   signal checkUpdateRequested()
   signal downloadCliRequested()
+  signal installPackageRequested(string pkgName)
   signal copyDiagnosticsRequested()
   signal clearLogsRequested()
 
@@ -332,7 +334,7 @@ Item {
                 }
 
                 Text {
-                  text: "Engine: " + (settingsRoot.cliHealth.version || (engineBadgeBox.isInstalled ? "Ready" : "Missing"))
+                  text: "Engine: " + (!engineBadgeBox.isInstalled ? "Missing" : (settingsRoot.cliHealth.version || "Ready"))
                   color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
@@ -381,7 +383,8 @@ Item {
                       font.pixelSize: 8
                     }
                     Text {
-                      text: "Update to v" + settingsRoot.latestVersion
+                      id: updateTagLabel
+                      text: (settingsRoot.engineSource.toLowerCase() === "aur") ? "Update (AUR)" : "Update"
                       color: "#ffffff"
                       font.pixelSize: 9
                       font.weight: Font.DemiBold
@@ -389,7 +392,7 @@ Item {
                   }
                 }
 
-                // Download pill when missing
+                // Install pill when missing
                 Rectangle {
                   visible: !engineBadgeBox.isInstalled
                   implicitHeight: 16
@@ -400,7 +403,7 @@ Item {
                   Text {
                     id: dlTagText
                     anchors.centerIn: parent
-                    text: settingsRoot.isDownloadingCli ? "Downloading..." : "Download"
+                    text: (settingsRoot.isDownloadingCli || settingsRoot.isInstallingDependencies) ? "Installing..." : "Install"
                     color: "#ffffff"
                     font.pixelSize: 9
                     font.weight: Font.Medium
@@ -413,12 +416,16 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled
                 cursorShape: (engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                enabled: !settingsRoot.isDownloadingCli
+                enabled: !settingsRoot.isDownloadingCli && !settingsRoot.isInstallingDependencies
                 onClicked: {
                   if (engineBadgeBox.hasUpdate) {
-                    settingsRoot.showReleaseNotes = true
+                    if (settingsRoot.engineSource.toLowerCase() === "aur") {
+                      settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
+                    } else {
+                      settingsRoot.downloadCliRequested()
+                    }
                   } else if (!engineBadgeBox.isInstalled) {
-                    settingsRoot.downloadCliRequested()
+                    settingsRoot.installPackageRequested("omawarden-bin")
                   }
                 }
               }
@@ -1141,6 +1148,8 @@ Item {
     releaseTitle: settingsRoot.latestReleaseTitle
     releaseNotes: settingsRoot.latestReleaseNotes
     releaseUrl: settingsRoot.latestReleaseUrl
+    engineSource: settingsRoot.engineSource
+    enginePackage: settingsRoot.enginePackage
     isDownloadingCli: settingsRoot.isDownloadingCli
     foreground: settingsRoot.foreground
     accent: settingsRoot.accent
@@ -1149,7 +1158,11 @@ Item {
     onCloseRequested: settingsRoot.showReleaseNotes = false
     onUpdateRequested: {
       settingsRoot.showReleaseNotes = false
-      settingsRoot.downloadCliRequested()
+      if (settingsRoot.engineSource.toLowerCase() === "aur") {
+        settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
+      } else {
+        settingsRoot.downloadCliRequested()
+      }
     }
   }
 }
