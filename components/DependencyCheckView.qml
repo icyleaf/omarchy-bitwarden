@@ -69,7 +69,7 @@ Item {
         var ver = match[2]
         for (var j = 0; j < dependencyModel.count; j++) {
           var item = dependencyModel.get(j)
-          if (item.pkgName === name || item.aurPkgName === name || (item.pkgName === "omawarden" && name === "omawarden-bin")) {
+          if (item.pkgName === name || item.aurPkgName === name || (item.pkgName === "omawarden" && (name === "omawarden-bin" || name === "omawarden-git"))) {
             dependencyModel.setProperty(j, "status", "installed")
             dependencyModel.setProperty(j, "version", ver)
             dependencyModel.setProperty(j, "isLocalFallback", false)
