@@ -95,6 +95,7 @@ Item {
         var missingName = match[1]
         for (var j = 0; j < dependencyModel.count; j++) {
           var item = dependencyModel.get(j)
+          if (item.status === "installed") continue
           if (item.pkgName === missingName || item.aurPkgName === missingName) {
             dependencyModel.setProperty(j, "status", "missing")
             dependencyModel.setProperty(j, "version", "")

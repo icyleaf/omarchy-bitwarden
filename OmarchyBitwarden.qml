@@ -23,6 +23,8 @@ Item {
   property bool opened: false
   onOpenedChanged: {
     if (root.opened) {
+      root.checkDependencies()
+      root.resolveHelper()
       root.refreshAuthStatus()
     }
   }
@@ -81,7 +83,7 @@ Item {
     }
     root.isCheckingDependencies = true
     pacmanCheckProc.running = false
-    pacmanCheckProc.command = ["pacman", "-Q", "omawarden", "libsecret", "wl-clipboard"]
+    pacmanCheckProc.command = ["pacman", "-Q", "omawarden", "omawarden-bin", "omawarden-git", "libsecret", "wl-clipboard"]
     pacmanCheckProc.running = true
   }
 
@@ -211,10 +213,12 @@ Item {
 
   Process {
     id: checkFallbackProc
+    property string fallbackText: ""
     running: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        checkFallbackProc.fallbackText = text || ""
         var out = (text || "").trim()
         var match = out.match(/^omawarden\s+([^\s(]+)/)
         var ver = match ? match[1] : ""
@@ -224,6 +228,14 @@ Item {
       }
     }
     onExited: function(code) {
+      if (code === 0 && checkFallbackProc.fallbackText) {
+        var out = (checkFallbackProc.fallbackText || "").trim()
+        var match = out.match(/^omawarden\s+([^\s(]+)/)
+        var ver = match ? match[1] : ""
+        if (dependencyCheckView && ver.length > 0) {
+          dependencyCheckView.setFallbackInstalled("omawarden", ver)
+        }
+      }
       root.finalizeDependencyCheck()
     }
   }
@@ -529,7 +541,7 @@ Item {
     var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
     var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/download-engine.sh"))
 
-    var targetTag = pinnedTag || (root.latestVersion ? ("omawarden-v" + root.latestVersion) : "")
+    var targetTag = pinnedTag || (root.latestVersion ? ("omawarden-" + root.latestVersion.replace(/^v/i, "")) : "")
     downloadCliProc.running = false
     if (targetTag) {
       downloadCliProc.command = ["bash", scriptPath, baseDir, "icyleaf/omarchy-bitwarden", targetTag]
@@ -2360,6 +2372,7 @@ Item {
             enginePackage: root.enginePackage
             logBuffer: root.logBuffer
             isDownloadingCli: root.isDownloadingCli
+            isInstallingDependencies: root.isInstallingDependencies
             isBusy: root.isBusy
             updateAvailable: root.updateAvailable
             latestVersion: root.latestVersion
@@ -2381,6 +2394,7 @@ Item {
             }
             onCheckUpdateRequested: { root.checkUpdates(true) }
             onDownloadCliRequested: { root.downloadCli() }
+            onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onCopyDiagnosticsRequested: { root.copyDiagnostics() }
             onClearLogsRequested: { root.logBuffer = [] }
           }
@@ -2701,6 +2715,8 @@ Item {
               root.statusMessage = "omawarden engine updated successfully (SHA-256 verified)."
             }
             root.errorMessage = ""
+            root.checkDependencies()
+            root.resolveHelper()
             root.refreshHealth()
             root.refreshConfig()
             root.refreshAuthStatus()

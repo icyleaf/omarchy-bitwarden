@@ -10,6 +10,8 @@ Rectangle {
   property string releaseTitle: ""
   property string releaseNotes: ""
   property string releaseUrl: ""
+  property string engineSource: "builtin"
+  property string enginePackage: ""
   property bool isDownloadingCli: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
@@ -321,7 +323,13 @@ Rectangle {
           Text {
             id: upBtnText
             anchors.centerIn: parent
-            text: releaseModalRoot.isDownloadingCli ? "Updating..." : ("Update to v" + releaseModalRoot.version)
+            text: {
+              if (releaseModalRoot.isDownloadingCli) return "Updating..."
+              if (releaseModalRoot.engineSource.toLowerCase() === "aur") {
+                return "Update via AUR"
+              }
+              return "Update to v" + releaseModalRoot.version
+            }
             color: "#ffffff"
             font.pixelSize: 10
             font.weight: Font.Medium

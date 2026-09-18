@@ -158,6 +158,11 @@ Item {
     var missingWithFallback = depView.finalizeCheck()
     check(missingWithFallback.length === 0, "no missing packages when omawarden local fallback is present")
 
+    // 12. Robustness: parsePacmanStderr must not overwrite installed status
+    depView.parsePacmanStderr("error: package 'omawarden' was not found\n")
+    check(depView.dependencyModel.get(0).status === "installed", "parsePacmanStderr does not overwrite fallback installed status")
+    check(depView.dependencyModel.get(0).isLocalFallback === true, "isLocalFallback remains true after pacman stderr")
+
     console.log("ALL DEPENDENCY CHECK VIEW TESTS PASSED!")
     Qt.exit(failures === 0 ? 0 : 1)
   }
