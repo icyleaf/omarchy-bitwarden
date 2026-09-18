@@ -1,0 +1,40 @@
+name: Release Omawarden CLI (AUR Git)
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - 'dist/aur-git/PKGBUILD'
+      - '.github/workflows/release-aur-git.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-aur-git:
+    name: Publish omawarden-git to AUR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate PKGBUILD syntax
+        run: |
+          bash -n dist/aur-git/PKGBUILD
+          echo "PKGBUILD syntax is valid."
+
+      - name: Publish AUR package
+        env:
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        if: env.AUR_KEY != ''
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: omawarden-git
+          pkgbuild: ./dist/aur-git/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_KEY }}
+          commit_message: "upgpkg: omawarden-git (track develop branch)"
+          ssh_keyscan_types: rsa,ecdsa,ed25519

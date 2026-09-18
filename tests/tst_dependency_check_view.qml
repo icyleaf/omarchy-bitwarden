@@ -72,6 +72,17 @@ Item {
     check(missingAfter.length === 0, "all dependencies satisfied, missing length is 0")
     check(depView.missingPackages.length === 0, "depView.missingPackages is empty when all installed")
 
+    // 7b. Parse stdout with omawarden-git satisfying omawarden
+    depView.resetToChecking()
+    var mockGitStdout = "libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\nomawarden-git 0.8.0.r45.ga1b2c3d-1\n"
+    depView.parsePacmanStdout(mockGitStdout)
+    check(depView.dependencyModel.get(0).status === "installed", "omawarden is satisfied by omawarden-git")
+    check(depView.dependencyModel.get(0).version === "0.8.0.r45.ga1b2c3d-1", "omawarden version set to git version")
+
+    var missingAfterGit = depView.finalizeCheck()
+    check(missingAfterGit.length === 0, "all dependencies satisfied with omawarden-git, missing length is 0")
+    check(depView.missingPackages.length === 0, "depView.missingPackages is empty when omawarden-git is installed")
+
     // 8. Signals test
     var recheckEmitted = false
     var installEmitted = false

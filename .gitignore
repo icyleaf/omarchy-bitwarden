@@ -10,4 +10,5 @@ config.json
 data.json
 target/
 bin/
-dist/
+dist/*
+!dist/aur-git/
