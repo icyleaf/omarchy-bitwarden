@@ -22,11 +22,12 @@ Item {
   property string fontFamily: ""
 
   signal unlockRequested(string password)
-  signal loginPasswordRequested(string email, string password, string code)
+  signal loginPasswordRequested(string email, string password, string code, var provider)
   signal loginApiKeyRequested(string clientId, string clientSecret)
   signal logoutRequested()
   signal downloadCliRequested()
   signal settingsRequested()
+  signal twoFactorProviderSelected(int provider)
 
   property alias unlockInput: unlockPasswordField
   property alias twoFactorInput: login2FAInput
@@ -313,13 +314,18 @@ Item {
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
                   activeFocusOnTab: true
-                  KeyNavigation.tab: authRoot.show2FAField ? login2FAInput : loginEmailInput
+                  KeyNavigation.tab: (authRoot.show2FAField && authRoot.twoFactorProvider !== 7) ? login2FAInput : loginEmailInput
                   KeyNavigation.backtab: loginEmailInput
                   onAccepted: {
-                    if (authRoot.show2FAField && !login2FAInput.text.trim()) {
+                    if (authRoot.show2FAField && authRoot.twoFactorProvider !== 7 && !login2FAInput.text.trim()) {
                       login2FAInput.forceActiveFocus()
                     } else {
-                      authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
+                      authRoot.loginPasswordRequested(
+                        loginEmailInput.text.trim(),
+                        loginPwdInput.text,
+                        authRoot.twoFactorProvider === 7 ? "" : login2FAInput.text.trim(),
+                        authRoot.twoFactorProvider
+                      )
                     }
                   }
                 }
@@ -329,28 +335,141 @@ Item {
             ColumnLayout {
               visible: authRoot.show2FAField
               Layout.fillWidth: true
-              spacing: 3
-              Text {
-                text: authRoot.isNewDeviceVerification
-                  ? "New Device Verification Code (check email):"
-                  : (authRoot.twoFactorProvider === 1
-                      ? "Email 2FA Verification Code (check email):"
-                      : "Two-Factor Authentication (2FA) Code:")
-                color: authRoot.foreground
-                font.pixelSize: 11
-                font.weight: Font.Medium
+              spacing: 6
+
+              // Multi-2FA Provider Switcher (when more than 1 provider is available and not new device verification)
+              RowLayout {
+                visible: !authRoot.isNewDeviceVerification && authRoot.availableTwoFactorProviders && authRoot.availableTwoFactorProviders.length > 1
+                Layout.fillWidth: true
+                spacing: 4
+
+                Repeater {
+                  model: authRoot.availableTwoFactorProviders
+                  delegate: Rectangle {
+                    id: providerTab
+                    required property int modelData
+                    implicitHeight: 22
+                    Layout.fillWidth: true
+                    radius: 4
+                    color: (authRoot.twoFactorProvider === modelData)
+                      ? Qt.rgba(authRoot.accent.r, authRoot.accent.g, authRoot.accent.b, 0.2)
+                      : "transparent"
+                    border.color: (authRoot.twoFactorProvider === modelData)
+                      ? authRoot.accent
+                      : authRoot.borderColor
+                    border.width: 1
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: modelData === 7
+                        ? "Security Key"
+                        : (modelData === 1
+                            ? "Email"
+                            : (modelData === 3 ? "YubiKey OTP" : "Authenticator"))
+                      color: (authRoot.twoFactorProvider === modelData)
+                        ? authRoot.accent
+                        : authRoot.foreground
+                      font.pixelSize: 10
+                      font.weight: (authRoot.twoFactorProvider === modelData) ? Font.DemiBold : Font.Normal
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        authRoot.twoFactorProvider = providerTab.modelData
+                        authRoot.twoFactorProviderSelected(providerTab.modelData)
+                        if (providerTab.modelData !== 7) {
+                          Qt.callLater(function() {
+                            if (login2FAInput) login2FAInput.forceActiveFocus()
+                          })
+                        }
+                      }
+                    }
+                  }
+                }
               }
+
+              // WebAuthn / Security Key View (Provider 7)
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
-                TextInput {
-                  id: login2FAInput
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
-                  activeFocusOnTab: true
-                  KeyNavigation.tab: loginEmailInput
-                  KeyNavigation.backtab: loginPwdInput
-                  onAccepted: {
-                    authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
+                visible: authRoot.twoFactorProvider === 7
+                Layout.fillWidth: true
+                implicitHeight: 56
+                radius: 5
+                color: Qt.rgba(0, 0, 0, 0.25)
+                border.color: authRoot.accent
+                border.width: 1
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.margins: 10
+                  spacing: 10
+
+                  Text {
+                    text: "\uf084"
+                    font.family: authRoot.fontFamily
+                    font.pixelSize: 20
+                    color: authRoot.accent
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                      text: "WebAuthn Security Key"
+                      color: authRoot.foreground
+                      font.pixelSize: 11
+                      font.weight: Font.DemiBold
+                    }
+                    Text {
+                      text: authRoot.isBusy
+                        ? "Waiting for security key touch..."
+                        : "Click 'Verify with Security Key' and touch your key."
+                      color: Qt.darker(authRoot.foreground, 1.4)
+                      font.pixelSize: 10
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
+                  }
+                }
+              }
+
+              // Standard OTP Code View (Providers 0, 1, 3, etc.)
+              ColumnLayout {
+                visible: authRoot.twoFactorProvider !== 7
+                Layout.fillWidth: true
+                spacing: 3
+
+                Text {
+                  text: authRoot.isNewDeviceVerification
+                    ? "New Device Verification Code (check email):"
+                    : (authRoot.twoFactorProvider === 1
+                        ? "Email 2FA Verification Code (check email):"
+                        : (authRoot.twoFactorProvider === 3
+                            ? "Touch YubiKey or Enter OTP:"
+                            : "Two-Factor Authentication (2FA) Code:"))
+                  color: authRoot.foreground
+                  font.pixelSize: 11
+                  font.weight: Font.Medium
+                }
+
+                Rectangle {
+                  Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                  TextInput {
+                    id: login2FAInput
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                    color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                    activeFocusOnTab: true
+                    KeyNavigation.tab: loginEmailInput
+                    KeyNavigation.backtab: loginPwdInput
+                    onAccepted: {
+                      authRoot.loginPasswordRequested(
+                        loginEmailInput.text.trim(),
+                        loginPwdInput.text,
+                        login2FAInput.text.trim(),
+                        authRoot.twoFactorProvider
+                      )
+                    }
                   }
                 }
               }
@@ -377,11 +496,24 @@ Item {
             // Submit Button
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: authRoot.accent
-              Text { anchors.centerIn: parent; text: authRoot.isBusy ? "Logging in..." : "Log In"; color: "#ffffff"; font.pixelSize: 12; font.weight: Font.Medium }
+              Text {
+                anchors.centerIn: parent
+                text: authRoot.isBusy
+                  ? (authRoot.twoFactorProvider === 7 ? "Waiting for key touch..." : "Logging in...")
+                  : (authRoot.show2FAField && authRoot.twoFactorProvider === 7 ? "Verify with Security Key" : "Log In")
+                color: "#ffffff"
+                font.pixelSize: 12
+                font.weight: Font.Medium
+              }
               MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                  authRoot.loginPasswordRequested(loginEmailInput.text.trim(), loginPwdInput.text, login2FAInput.text.trim())
+                  authRoot.loginPasswordRequested(
+                    loginEmailInput.text.trim(),
+                    loginPwdInput.text,
+                    authRoot.twoFactorProvider === 7 ? "" : login2FAInput.text.trim(),
+                    authRoot.twoFactorProvider
+                  )
                 }
               }
             }
