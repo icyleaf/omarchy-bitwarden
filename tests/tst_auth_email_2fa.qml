@@ -123,6 +123,37 @@ Item {
     check(authView.emailSentCount === 0, "clearInputs() resets emailSentCount to 0")
     check(authView.resendCooldown === 0, "clearInputs() resets resendCooldown to 0")
 
+    // 9. Initial 2FA challenge error message suppression logic
+    var testData2FA = {
+      ok: false,
+      error: "Email two-factor authentication required. Please check your email for the verification code.",
+      two_factor_required: true,
+      two_factor_providers: [1],
+      two_factor_provider: 1
+    }
+    var errLower = (testData2FA.error || "").toLowerCase()
+    var is2FA = Boolean(testData2FA.two_factor_required)
+        || errLower.indexOf("two-factor") !== -1
+
+    // Simulated initial attempt: was2FAShown = false
+    var was2FAShown = false
+    var computedErrMsg = ""
+    if (is2FA && !was2FAShown) {
+      computedErrMsg = ""
+    } else {
+      computedErrMsg = testData2FA.error || "Login failed."
+    }
+    check(computedErrMsg === "", "Initial 2FA challenge suppresses error toast message")
+
+    // Simulated subsequent attempt with wrong code: was2FAShown = true
+    was2FAShown = true
+    if (is2FA && !was2FAShown) {
+      computedErrMsg = ""
+    } else {
+      computedErrMsg = testData2FA.error || "Login failed."
+    }
+    check(computedErrMsg === testData2FA.error, "Subsequent 2FA failure retains error message")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

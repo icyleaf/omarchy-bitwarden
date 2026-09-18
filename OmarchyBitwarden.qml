@@ -2862,8 +2862,6 @@ Item {
               root.syncVault(true, true)
             }
           } else {
-            root.errorMessage = data.error || "Login failed."
-            root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
             var isNewDevice = Boolean(data.new_device_verification_required)
                 || errLower.indexOf("new device verification") !== -1
@@ -2879,6 +2877,15 @@ Item {
                 || errLower.indexOf("security code") !== -1
                 || errLower.indexOf("security key") !== -1
                 || errLower.indexOf("webauthn") !== -1
+            var was2FAShown = root.show2FAField
+            if (is2FA && !was2FAShown) {
+              root.errorMessage = ""
+              root.statusMessage = ""
+              root.logInfo("omarchy:auth", "Two-factor authentication required for login.")
+            } else {
+              root.errorMessage = data.error || "Login failed."
+              root.logWarn("omarchy:auth", root.errorMessage)
+            }
             root.isNewDeviceVerification = isNewDevice
             var prov = (data.two_factor_provider !== undefined && data.two_factor_provider !== null)
                 ? Number(data.two_factor_provider)
@@ -2930,7 +2937,7 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0 && !root.errorMessage) root.errorMessage = "Login command failed."
+      if (code !== 0 && !root.errorMessage && !root.show2FAField) root.errorMessage = "Login command failed."
     }
   }
 
