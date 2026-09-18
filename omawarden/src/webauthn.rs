@@ -149,6 +149,8 @@ pub fn perform_fido2_assertion(
 
     let mut child = Command::new("fido2-assert")
         .arg("-G")
+        .arg("-t")
+        .arg("pin=false")
         .arg(device_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
