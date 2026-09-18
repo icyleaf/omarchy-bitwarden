@@ -48,7 +48,7 @@ Item {
     repeat: true
     running: authRoot.show2FAField
              && authRoot.twoFactorProvider === 7
-             && authRoot.fido2Status === "no_device"
+             && authRoot.fido2Status !== "tool_not_found"
              && !authRoot.isBusy
     onTriggered: authRoot.checkFido2StatusRequested()
   }
@@ -615,9 +615,9 @@ Item {
 
                 Text {
                   text: authRoot.isNewDeviceVerification
-                    ? "New Device Verification Code (check email):"
+                    ? "New Device Email Verification Code:"
                     : (authRoot.twoFactorProvider === 1
-                        ? "Email 2FA Verification Code (check email):"
+                        ? "Email 2FA Verification Code:"
                         : (authRoot.twoFactorProvider === 3
                             ? "Touch YubiKey or Enter OTP:"
                             : "Two-Factor Authentication (2FA) Code:"))

@@ -1,12 +1,15 @@
 # ADR 0016: Support New Device Verification OTP Challenge During Master Password Authentication
 
 ## Status
+
 Accepted
 
 ## Context
+
 Bitwarden identity servers enforce email verification for logins originating from unrecognized devices or client installations when standard two-factor authentication (2FA) is not explicitly enabled on the account.
 
 When a login request (`/identity/connect/token`) encounters an unrecognized device or client:
+
 1. The server returns an HTTP 400 Bad Request response containing:
    - `"error": "device_error"`
    - `"error_description": "New device verification required"`
@@ -17,6 +20,7 @@ When a login request (`/identity/connect/token`) encounters an unrecognized devi
 Previously, `omawarden` only supported the `twoFactorToken` and `twoFactorProvider` parameters. When users without account-level 2FA logged in on a new device or fresh install, `omawarden` failed with a generic error or failed authentication, leaving users unable to complete the login flow via the overlay UI or CLI (see issue #164).
 
 ## Decision
+
 1. **Challenge Detection (`ApiError::NewDeviceVerificationRequired`)**:
    - In `BitwardenApiClient::login_password`, parse HTTP 400 error payloads for `"device_error"` or `"new device verification required"`.
    - Distinguish this challenge from standard 2FA provider challenges (`ApiError::TwoFactorRequired`) by returning `ApiError::NewDeviceVerificationRequired`.
@@ -36,9 +40,10 @@ Previously, `omawarden` only supported the `twoFactorToken` and `twoFactorProvid
 
 5. **QML & Desktop Overlay Integration**:
    - In `OmarchyBitwarden.qml` and `components/AuthView.qml`, track `isNewDeviceVerification`.
-   - When the backend signals `new_device_verification_required`, dynamically update the code input label to `"New Device Verification Code (check email):"` and ensure the entered code is submitted as `new_device_otp` in the JSON auth payload.
+   - When the backend signals `new_device_verification_required`, dynamically update the code input label to `"New Device Email Verification Code:"` and ensure the entered code is submitted as `new_device_otp` in the JSON auth payload.
 
 ## Consequences
+
 - **Seamless New Device Login**: Users logging in from new installations or IP addresses can successfully verify their device using the code emailed by Bitwarden.
 - **Clear User Experience**: Both the desktop UI and CLI clearly communicate that an email verification code is expected, rather than confusing it with an authenticator TOTP app code.
 - **Backward Compatibility**: Accounts with standard 2FA (TOTP, YubiKey, Duo, email 2FA) continue using the existing `twoFactorToken` flow without regression.

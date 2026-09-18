@@ -1,12 +1,15 @@
 # ADR 0017: Support Email and Pluggable Two-Factor Authentication (2FA) Providers
 
 ## Status
+
 Accepted
 
 ## Context
+
 Bitwarden accounts can be configured with multiple two-factor authentication (2FA) providers, including Authenticator Apps (TOTP, provider 0), Email (provider 1), Duo (provider 2), YubiKey OTP (provider 3), and WebAuthn/FIDO2 (provider 7).
 
 When a Bitwarden identity server requires 2FA:
+
 1. The server returns HTTP 400 with `"error": "invalid_grant"`, `"TwoFactorProviders": [...]`, and optional `"TwoFactorProviders2": {...}`.
 2. For accounts with Email 2FA (provider 1):
    - The Bitwarden server automatically sends an email containing a 6-digit verification code to the registered email address upon the initial login attempt.
@@ -14,6 +17,7 @@ When a Bitwarden identity server requires 2FA:
 3. Previously, `omawarden` hardcoded `twoFactorProvider=0` (Authenticator) whenever 2FA was triggered. If a user only had Email 2FA enabled, or preferred Email 2FA, the login failed because provider 0 was rejected by the server (see issue #165).
 
 ## Decision
+
 1. **Pluggable Provider Architecture (`TwoFactorProviderType`)**:
    - Introduce `TwoFactorProviderType` in `omawarden::api`:
      - `Authenticator = 0`
@@ -39,10 +43,11 @@ When a Bitwarden identity server requires 2FA:
 
 5. **QML UI Support**:
    - In `components/AuthView.qml` and `OmarchyBitwarden.qml`, expose `twoFactorProvider` and `availableTwoFactorProviders`.
-   - When Email 2FA (provider 1) is active, dynamically update the input label to `"Email 2FA Verification Code (check email):"`.
+   - When Email 2FA (provider 1) is active, dynamically update the input label to `"Email 2FA Verification Code:"`.
    - Ensure the selected provider is forwarded in the authentication payload upon form submission and cleared on logout/reset.
 
 ## Consequences
+
 - **Email 2FA Fully Functional**: Users with Bitwarden Email 2FA can smoothly log in via both the GUI overlay and the CLI.
 - **Extensibility**: The codebase now has clean, structured support for Bitwarden's provider enum, laying the foundation for additional providers (e.g., YubiKey OTP, Duo).
 - **Zero Regression**: Accounts using standard Authenticator TOTP (provider 0) or New Device Verification (ADR 0016) remain unaffected.

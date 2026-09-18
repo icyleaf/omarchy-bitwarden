@@ -166,12 +166,18 @@ Item {
     check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button is disabled when tool_not_found")
     check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when tool_not_found")
 
-    // Case C: available -> button is enabled, timer stops
+    // Case C: available -> button is enabled, timer continues running to detect unplugging
     authView.fido2Status = "available"
     check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled when available")
-    check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when available")
+    check(authView.fido2AutoDetectTimerComponent.running === true, "fido2AutoDetectTimer continues running when available to monitor unplugging")
 
-    // Case D: Other 2FA providers are not blocked by fido2Status
+    // Case D: timer pauses during busy state (waiting for key touch)
+    authView.isBusy = true
+    check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer pauses when isBusy")
+    authView.isBusy = false
+    check(authView.fido2AutoDetectTimerComponent.running === true, "fido2AutoDetectTimer resumes after busy state ends")
+
+    // Case E: Other 2FA providers are not blocked by fido2Status
     authView.fido2Status = "no_device"
     authView.twoFactorProvider = 1
     check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled for Email 2FA even if fido2Status is no_device")
