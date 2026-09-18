@@ -15,7 +15,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -193,6 +193,15 @@ enum AuthAction {
         #[arg(long, required = true)]
         client_id: String,
     },
+    #[command(
+        about = "Send or resend two-factor verification code to email (password read from stdin)"
+    )]
+    SendTwoFactorEmail {
+        #[arg(long, required = true)]
+        email: String,
+    },
+    #[command(about = "Check current FIDO2 / WebAuthn environment and device status")]
+    Fido2Status,
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
     #[command(about = "Lock vault and clear session")]
@@ -655,52 +664,76 @@ fn main() -> ExitCode {
                         } else if res.two_factor_required == Some(true) {
                             let providers =
                                 res.two_factor_providers.clone().unwrap_or_else(|| vec![0]);
+                            let default_idx = if let Some(pref) = res.two_factor_provider {
+                                providers.iter().position(|p| *p == pref).unwrap_or(0)
+                            } else {
+                                0
+                            };
                             let chosen_provider = if providers.len() == 1 {
                                 providers[0]
-                            } else if providers.contains(&0) && !providers.contains(&1) {
-                                0
-                            } else if !providers.contains(&0) && providers.contains(&1) {
-                                1
                             } else {
                                 eprintln!("\nTwo-Factor Authentication Methods:");
                                 for (idx, p) in providers.iter().enumerate() {
                                     let label = match p {
-                                        0 => "Authenticator App (TOTP)",
-                                        1 => "Email Verification Code",
-                                        3 => "YubiKey OTP",
-                                        _ => "Other",
+                                        0 => "Authenticator App (TOTP)".to_string(),
+                                        1 => "Email Verification Code".to_string(),
+                                        3 => "YubiKey OTP".to_string(),
+                                        7 => match res.fido2_status.as_deref() {
+                                            Some("tool_not_found") => {
+                                                "WebAuthn / Passkey / Security Key (libfido2 not installed)".to_string()
+                                            }
+                                            Some("no_device") => {
+                                                "WebAuthn / Passkey / Security Key (no key detected)".to_string()
+                                            }
+                                            _ => "WebAuthn / Passkey / Security Key".to_string(),
+                                        },
+                                        _ => "Other".to_string(),
                                     };
                                     eprintln!("  [{}] {}", idx + 1, label);
                                 }
-                                let choice = rpassword::prompt_password("Select method [1]: ")
-                                    .unwrap_or_default();
+                                eprint!(
+                                    "Select method [1-{}, default: {}]: ",
+                                    providers.len(),
+                                    default_idx + 1
+                                );
+                                let _ = io::stderr().flush();
+                                let mut choice = String::new();
+                                let _ = io::stdin().read_line(&mut choice);
                                 let idx = choice
                                     .trim()
                                     .parse::<usize>()
-                                    .unwrap_or(1)
+                                    .unwrap_or(default_idx + 1)
                                     .saturating_sub(1);
-                                *providers.get(idx).unwrap_or(&providers[0])
+                                *providers.get(idx).unwrap_or(&providers[default_idx])
                             };
 
                             effective_provider = Some(chosen_provider);
-                            let prompt_label = match chosen_provider {
-                                1 => {
-                                    "Enter Email Two-Factor Verification Code (check your email): "
-                                }
-                                3 => "Touch your YubiKey or enter OTP: ",
-                                _ => "Enter Two-Factor (2FA) Code: ",
-                            };
-                            let prompt_code =
-                                rpassword::prompt_password(prompt_label).unwrap_or_default();
-                            if !prompt_code.trim().is_empty() {
-                                effective_code = Some(prompt_code.trim().to_string());
-                                res = auth_mgr.login_password(
-                                    &email,
-                                    &pwd,
-                                    effective_code.as_deref(),
-                                    effective_provider,
-                                    None,
+                            if chosen_provider == 7 {
+                                omawarden::log_info!(
+                                    "omawarden:auth",
+                                    "Requesting WebAuthn challenge from server..."
                                 );
+                                res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
+                            } else {
+                                let prompt_label = match chosen_provider {
+                                    1 => {
+                                        "Enter Email Two-Factor Verification Code (check your email): "
+                                    }
+                                    3 => "Touch your YubiKey or enter OTP: ",
+                                    _ => "Enter Two-Factor (2FA) Code: ",
+                                };
+                                let prompt_code =
+                                    rpassword::prompt_password(prompt_label).unwrap_or_default();
+                                if !prompt_code.trim().is_empty() {
+                                    effective_code = Some(prompt_code.trim().to_string());
+                                    res = auth_mgr.login_password(
+                                        &email,
+                                        &pwd,
+                                        effective_code.as_deref(),
+                                        effective_provider,
+                                        None,
+                                    );
+                                }
                             }
                         }
                     }
@@ -747,6 +780,51 @@ fn main() -> ExitCode {
                     } else {
                         ExitCode::FAILURE
                     }
+                }
+                AuthAction::SendTwoFactorEmail { email } => {
+                    let (pwd, _, _, _) = if io::stdin().is_terminal() {
+                        let p = rpassword::prompt_password("Enter Master Password: ")
+                            .unwrap_or_default();
+                        (p, None, None, None)
+                    } else {
+                        read_auth_payload()
+                    };
+                    if pwd.is_empty() {
+                        let res = serde_json::json!({
+                            "ok": false,
+                            "error": "Password is required to send verification code."
+                        });
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        ExitCode::FAILURE
+                    } else {
+                        match auth_mgr.send_two_factor_email(&email, &pwd) {
+                            Ok(()) => {
+                                let res = serde_json::json!({
+                                    "ok": true,
+                                    "message": "Two-factor verification code sent to your email."
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::SUCCESS
+                            }
+                            Err(e) => {
+                                let res = serde_json::json!({
+                                    "ok": false,
+                                    "error": e.to_string()
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::FAILURE
+                            }
+                        }
+                    }
+                }
+                AuthAction::Fido2Status => {
+                    let status = omawarden::webauthn::check_fido2_status();
+                    let res = serde_json::json!({
+                        "ok": true,
+                        "status": status.as_str()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    ExitCode::SUCCESS
                 }
                 AuthAction::Unlock => {
                     let pwd = if io::stdin().is_terminal() {

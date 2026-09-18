@@ -16,7 +16,10 @@ pub enum ApiError {
     Http(String),
     Json(String),
     AuthFailed(String),
-    TwoFactorRequired { providers: Vec<i32> },
+    TwoFactorRequired {
+        providers: Vec<i32>,
+        providers2: Option<serde_json::Value>,
+    },
     NewDeviceVerificationRequired,
     Crypto(String),
 }
@@ -627,20 +630,39 @@ impl BitwardenApiClient {
                         }
                     }
 
-                    return Err(ApiError::TwoFactorRequired { providers });
+                    let providers2 = err_json.get("TwoFactorProviders2").cloned();
+                    return Err(ApiError::TwoFactorRequired {
+                        providers,
+                        providers2,
+                    });
                 }
 
                 if !err_desc.is_empty() {
                     return Err(ApiError::AuthFailed(err_desc.to_string()));
                 }
-                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                if !err_msg.is_empty() {
                     return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+                if !err_code.is_empty() && !body_text.trim().is_empty() {
+                    return Err(ApiError::AuthFailed(format!(
+                        "{}: {}",
+                        err_code,
+                        body_text.trim()
+                    )));
                 }
             }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::BAD_REQUEST
             {
-                Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+                let detail = body_text.trim();
+                if detail.is_empty() {
+                    Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+                } else {
+                    Err(ApiError::AuthFailed(format!(
+                        "HTTP {} ({})",
+                        status, detail
+                    )))
+                }
             } else {
                 Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
             }
@@ -2432,7 +2454,7 @@ mod tests {
         let pwd = zeroize::Zeroizing::new("master_password".to_string());
         let res = client.login_password("user@example.com", &pwd, None, None, None);
         match res {
-            Err(ApiError::TwoFactorRequired { providers }) => {
+            Err(ApiError::TwoFactorRequired { providers, .. }) => {
                 assert_eq!(providers, vec![0, 1]);
             }
             other => panic!("Expected TwoFactorRequired, got {:?}", other),
@@ -2780,6 +2802,48 @@ mod tests {
             "Expected auto-retry with two_factor_provider=1 to succeed: {:?}",
             res2.err()
         );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_send_two_factor_email_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /api/two-factor/send-email-login") {
+                    assert!(req.contains("masterPasswordHash"));
+                    assert!(req.contains("user@example.com"));
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.send_two_factor_email("user@example.com", "password123");
+        assert!(res.is_ok(), "Expected send_two_factor_email to succeed");
 
         let _ = handle.join();
     }

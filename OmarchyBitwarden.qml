@@ -85,19 +85,25 @@ Item {
     pacmanCheckProc.running = true
   }
 
-  function installMissingDependencies() {
-    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
-    if (missing.length === 0) return
+  function installPackage(pkgName) {
+    if (!pkgName || typeof pkgName !== "string") return
+    var cleanPkg = pkgName.trim()
+    if (!/^[a-zA-Z0-9_\-\.\s]+$/.test(cleanPkg)) return
 
-    var pkgs = missing.join(" ")
-    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + pkgs +
-                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + pkgs +
-                     "; else sudo pacman -S --needed " + pkgs + "; fi"
+    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + cleanPkg +
+                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + cleanPkg +
+                     "; else sudo pacman -S --needed " + cleanPkg + "; fi"
 
     root.isInstallingDependencies = true
     installDependenciesProc.running = false
     installDependenciesProc.command = ["omarchy-launch-floating-terminal-with-presentation", installCmd]
     installDependenciesProc.running = true
+  }
+
+  function installMissingDependencies() {
+    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
+    if (missing.length === 0) return
+    root.installPackage(missing.join(" "))
   }
 
   // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
@@ -203,6 +209,7 @@ Item {
     onExited: function(code) {
       root.isInstallingDependencies = false
       root.checkDependencies()
+      root.doCheckFido2Status()
     }
   }
 
@@ -225,6 +232,7 @@ Item {
   property bool isNewDeviceVerification: false
   property int twoFactorProvider: 0
   property var availableTwoFactorProviders: []
+  property string fido2Status: ""
 
   property var cliHealth: ({
     installed: false,
@@ -651,6 +659,7 @@ Item {
     str = str.replace(/bearer\s+[a-z0-9_\-\.]+/gi, "Bearer <REDACTED>")
     str = str.replace(/("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     str = str.replace(/("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
+    str = str.replace(/("code"|"twoFactorToken"|"newDeviceOtp"|"new_device_otp")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     return str
   }
 
@@ -713,7 +722,15 @@ Item {
         else if (lvl === "WARN") console.warn(line)
         else console.log(line)
       } else {
-        root.logError(defaultSource || "omawarden:cli", line)
+        var isInfo = line.startsWith("•") || line.startsWith("✓") ||
+                     line.indexOf("Waiting for security key touch") !== -1 ||
+                     line.indexOf("Requesting WebAuthn challenge") !== -1 ||
+                     line.indexOf("Security key verified") !== -1
+        if (isInfo) {
+          root.logInfo(defaultSource || "omawarden:cli", line)
+        } else {
+          root.logError(defaultSource || "omawarden:cli", line)
+        }
       }
     }
   }
@@ -1681,25 +1698,39 @@ Item {
     authLockProc.running = true
   }
 
-  function doLoginPassword(email, password, code) {
+  function doLoginPassword(email, password, code, provider) {
     if (!email || !password) return
-    root.logInfo("omarchy:auth", "Submitting password login for " + email + "...")
+    var effectiveProvider = (provider !== undefined && provider !== null)
+        ? provider
+        : root.twoFactorProvider
+    root.twoFactorProvider = effectiveProvider
+    if (authViewComponent) {
+      authViewComponent.twoFactorProvider = effectiveProvider
+    }
+    root.logInfo("omarchy:auth", "Submitting password login for " + email + " (provider: " + effectiveProvider + ")...")
     root.isBusy = true
     root.errorMessage = ""
-    root.statusMessage = "Logging in to Bitwarden..."
+    if (root.show2FAField && effectiveProvider === 7) {
+      root.statusMessage = "Waiting for security key touch..."
+    } else {
+      root.statusMessage = "Logging in to Bitwarden..."
+    }
     var cmd = [root.helperPath, "auth", "login-password", "--email", email]
     if (root.rememberEmailChecked) {
       cmd.push("--remember-email", "true")
     } else {
       cmd.push("--remember-email", "false")
     }
-    if (code) {
-      var payload = { password: password, code: code }
+    if (code || (root.show2FAField && effectiveProvider === 7)) {
+      var payload = { password: password }
+      if (code) {
+        payload.code = code
+      }
       if (root.isNewDeviceVerification) {
         payload.new_device_otp = code
       }
-      if (root.twoFactorProvider !== undefined && root.twoFactorProvider !== null) {
-        payload.two_factor_provider = root.twoFactorProvider
+      if (effectiveProvider !== undefined && effectiveProvider !== null) {
+        payload.two_factor_provider = effectiveProvider
       }
       authLoginProc.secret = JSON.stringify(payload)
     } else {
@@ -1720,6 +1751,29 @@ Item {
     authLoginProc.running = true
   }
 
+  function doSendTwoFactorEmail(email, password) {
+    if (!email || !password) {
+      root.errorMessage = "Email and password are required to send verification code."
+      if (authViewComponent) {
+        authViewComponent.notifyEmailCodeFailed()
+      }
+      return
+    }
+    root.logInfo("omarchy:auth", "Submitting send two-factor email request for " + email + "...")
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Sending verification email..."
+    authSendEmailProc.secret = JSON.stringify({ password: password })
+    authSendEmailProc.command = [root.helperPath, "auth", "send-two-factor-email", "--email", email]
+    authSendEmailProc.running = true
+  }
+
+  function doCheckFido2Status() {
+    if (authFido2CheckProc.running) return
+    authFido2CheckProc.command = [root.helperPath, "auth", "fido2-status"]
+    authFido2CheckProc.running = true
+  }
+
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
     root.clearSensitiveState()
@@ -1727,6 +1781,14 @@ Item {
     root.isNewDeviceVerification = false
     root.twoFactorProvider = 0
     root.availableTwoFactorProviders = []
+    root.fido2Status = ""
+    if (authViewComponent) {
+      authViewComponent.show2FAField = false
+      authViewComponent.isNewDeviceVerification = false
+      authViewComponent.twoFactorProvider = 0
+      authViewComponent.availableTwoFactorProviders = []
+      authViewComponent.fido2Status = ""
+    }
     root.authState = ({
       status: "unauthenticated",
       server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2229,13 +2291,28 @@ Item {
             isNewDeviceVerification: root.isNewDeviceVerification
             twoFactorProvider: root.twoFactorProvider
             availableTwoFactorProviders: root.availableTwoFactorProviders
+            fido2Status: root.fido2Status
+            isInstalling: root.isInstallingDependencies
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
-            onLoginPasswordRequested: function(email, pwd, code) { root.doLoginPassword(email, pwd, code) }
+            onLoginPasswordRequested: function(email, pwd, code, prov) { root.doLoginPassword(email, pwd, code, prov) }
+            onTwoFactorProviderSelected: function(prov) {
+              root.twoFactorProvider = prov
+              if (authViewComponent) {
+                authViewComponent.twoFactorProvider = prov
+              }
+              if (prov === 7) {
+                root.doCheckFido2Status()
+              }
+            }
+            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
+            onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
+            onCheckFido2StatusRequested: { root.doCheckFido2Status() }
+            onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }
@@ -2787,12 +2864,19 @@ Item {
               root.statusMessage = "Logged in successfully."
             }
             root.searchQuery = ""
-            if (authViewComponent) authViewComponent.clearInputs()
-
             root.show2FAField = false
             root.isNewDeviceVerification = false
             root.twoFactorProvider = 0
             root.availableTwoFactorProviders = []
+            root.fido2Status = ""
+            if (authViewComponent) {
+              authViewComponent.clearInputs()
+              authViewComponent.show2FAField = false
+              authViewComponent.isNewDeviceVerification = false
+              authViewComponent.twoFactorProvider = 0
+              authViewComponent.availableTwoFactorProviders = []
+              authViewComponent.fido2Status = ""
+            }
             root.authState = ({
               status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2806,8 +2890,6 @@ Item {
               root.syncVault(true, true)
             }
           } else {
-            root.errorMessage = data.error || "Login failed."
-            root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
             var isNewDevice = Boolean(data.new_device_verification_required)
                 || errLower.indexOf("new device verification") !== -1
@@ -2821,6 +2903,17 @@ Item {
                 || errLower.indexOf("verification code") !== -1
                 || errLower.indexOf("authenticator code") !== -1
                 || errLower.indexOf("security code") !== -1
+                || errLower.indexOf("security key") !== -1
+                || errLower.indexOf("webauthn") !== -1
+            var was2FAShown = root.show2FAField
+            if (is2FA && !was2FAShown) {
+              root.errorMessage = ""
+              root.statusMessage = ""
+              root.logInfo("omarchy:auth", "Two-factor authentication required for login.")
+            } else {
+              root.errorMessage = data.error || "Login failed."
+              root.logWarn("omarchy:auth", root.errorMessage)
+            }
             root.isNewDeviceVerification = isNewDevice
             var prov = (data.two_factor_provider !== undefined && data.two_factor_provider !== null)
                 ? Number(data.two_factor_provider)
@@ -2828,7 +2921,11 @@ Item {
             if (data.two_factor_providers && data.two_factor_providers.length > 0) {
               root.availableTwoFactorProviders = data.two_factor_providers
               if (data.two_factor_provider === undefined || data.two_factor_provider === null) {
-                if (data.two_factor_providers.indexOf(1) !== -1 && data.two_factor_providers.indexOf(0) === -1) {
+                if (data.two_factor_providers.indexOf(7) !== -1) {
+                  prov = 7
+                } else if (data.two_factor_providers.indexOf(0) !== -1) {
+                  prov = 0
+                } else if (data.two_factor_providers.indexOf(1) !== -1) {
                   prov = 1
                 }
               }
@@ -2836,15 +2933,23 @@ Item {
               root.availableTwoFactorProviders = []
             }
             root.twoFactorProvider = prov
+            root.fido2Status = data.fido2_status || ""
             if (is2FA) {
               root.show2FAField = true
-              if (authViewComponent && authViewComponent.twoFactorInput) {
+              if (prov !== 7 && authViewComponent && authViewComponent.twoFactorInput) {
                 Qt.callLater(function() {
                   authViewComponent.twoFactorInput.forceActiveFocus()
                 })
               }
             } else {
               root.show2FAField = false
+            }
+            if (authViewComponent) {
+              authViewComponent.show2FAField = root.show2FAField
+              authViewComponent.isNewDeviceVerification = root.isNewDeviceVerification
+              authViewComponent.twoFactorProvider = root.twoFactorProvider
+              authViewComponent.availableTwoFactorProviders = root.availableTwoFactorProviders
+              authViewComponent.fido2Status = root.fido2Status
             }
           }
         } catch (e) {
@@ -2860,7 +2965,78 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0 && !root.errorMessage) root.errorMessage = "Login command failed."
+      if (code !== 0 && !root.errorMessage && !root.show2FAField) root.errorMessage = "Login command failed."
+    }
+  }
+
+  Process {
+    id: authSendEmailProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            root.statusMessage = data.message || "Verification code sent to your email."
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeSent()
+            }
+          } else {
+            root.errorMessage = data.error || "Failed to send verification email."
+            root.logWarn("omarchy:auth", root.errorMessage)
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeFailed()
+            }
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to parse send email response."
+          root.logError("omarchy:auth", root.errorMessage + ": " + e)
+          if (authViewComponent) {
+            authViewComponent.notifyEmailCodeFailed()
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) {
+        root.errorMessage = "Failed to send verification email."
+        if (authViewComponent) {
+          authViewComponent.notifyEmailCodeFailed()
+        }
+      }
+    }
+  }
+
+  Process {
+    id: authFido2CheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok && data.status) {
+            root.fido2Status = data.status
+            if (authViewComponent) {
+              authViewComponent.fido2Status = data.status
+            }
+          }
+        } catch (e) {}
+      }
     }
   }
 

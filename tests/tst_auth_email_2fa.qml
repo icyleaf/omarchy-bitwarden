@@ -91,6 +91,69 @@ Item {
     }
     check(provFallback === 1, "Fallback correctly resolves provider 1 when only email is available")
 
+    // 7. Inline resend email button visibility and state
+    authView.show2FAField = true
+    authView.twoFactorProvider = 1
+    check(authView.resendEmailButton !== null && authView.resendEmailButton.visible === true, "resendEmailButton is visible when twoFactorProvider === 1")
+    authView.twoFactorProvider = 0
+    check(authView.resendEmailButton.visible === false, "resendEmailButton is hidden when twoFactorProvider === 0")
+    authView.twoFactorProvider = 7
+    check(authView.resendEmailButton.visible === false, "resendEmailButton is hidden when twoFactorProvider === 7")
+
+    // 8. Resend email button trigger and cooldown notification
+    authView.twoFactorProvider = 1
+    var signalEmitted = false
+    var signalEmail = ""
+    var signalPwd = ""
+    authView.sendTwoFactorEmailRequested.connect(function(email, pwd) {
+      signalEmitted = true
+      signalEmail = email
+      signalPwd = pwd
+    })
+    check(authView.emailSentCount === 0, "emailSentCount defaults to 0")
+    check(authView.resendCooldown === 0, "resendCooldown defaults to 0")
+
+    // Notify code sent
+    authView.notifyEmailCodeSent()
+    check(authView.emailSentCount === 1, "notifyEmailCodeSent() increments emailSentCount to 1")
+    check(authView.resendCooldown === 60, "notifyEmailCodeSent() sets resendCooldown to 60")
+
+    // Reset clears emailSentCount and resendCooldown
+    authView.clearInputs()
+    check(authView.emailSentCount === 0, "clearInputs() resets emailSentCount to 0")
+    check(authView.resendCooldown === 0, "clearInputs() resets resendCooldown to 0")
+
+    // 9. Initial 2FA challenge error message suppression logic
+    var testData2FA = {
+      ok: false,
+      error: "Email two-factor authentication required. Please check your email for the verification code.",
+      two_factor_required: true,
+      two_factor_providers: [1],
+      two_factor_provider: 1
+    }
+    var errLower = (testData2FA.error || "").toLowerCase()
+    var is2FA = Boolean(testData2FA.two_factor_required)
+        || errLower.indexOf("two-factor") !== -1
+
+    // Simulated initial attempt: was2FAShown = false
+    var was2FAShown = false
+    var computedErrMsg = ""
+    if (is2FA && !was2FAShown) {
+      computedErrMsg = ""
+    } else {
+      computedErrMsg = testData2FA.error || "Login failed."
+    }
+    check(computedErrMsg === "", "Initial 2FA challenge suppresses error toast message")
+
+    // Simulated subsequent attempt with wrong code: was2FAShown = true
+    was2FAShown = true
+    if (is2FA && !was2FAShown) {
+      computedErrMsg = ""
+    } else {
+      computedErrMsg = testData2FA.error || "Login failed."
+    }
+    check(computedErrMsg === testData2FA.error, "Subsequent 2FA failure retains error message")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

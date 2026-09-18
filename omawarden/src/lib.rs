@@ -15,3 +15,4 @@ pub mod ssh;
 pub mod storage;
 pub mod totp;
 pub mod vault;
+pub mod webauthn;
