@@ -1735,6 +1735,23 @@ Item {
     authLoginProc.running = true
   }
 
+  function doSendTwoFactorEmail(email, password) {
+    if (!email || !password) {
+      root.errorMessage = "Email and password are required to send verification code."
+      if (authViewComponent) {
+        authViewComponent.notifyEmailCodeFailed()
+      }
+      return
+    }
+    root.logInfo("omarchy:auth", "Submitting send two-factor email request for " + email + "...")
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Sending verification email..."
+    authSendEmailProc.secret = JSON.stringify({ password: password })
+    authSendEmailProc.command = [root.helperPath, "auth", "send-two-factor-email", "--email", email]
+    authSendEmailProc.running = true
+  }
+
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
     root.clearSensitiveState()
@@ -2267,6 +2284,7 @@ Item {
             }
             onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
+            onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }
@@ -2913,6 +2931,58 @@ Item {
     onExited: function(code) {
       root.isBusy = false
       if (code !== 0 && !root.errorMessage) root.errorMessage = "Login command failed."
+    }
+  }
+
+  Process {
+    id: authSendEmailProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            root.statusMessage = data.message || "Verification code sent to your email."
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeSent()
+            }
+          } else {
+            root.errorMessage = data.error || "Failed to send verification email."
+            root.logWarn("omarchy:auth", root.errorMessage)
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeFailed()
+            }
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to parse send email response."
+          root.logError("omarchy:auth", root.errorMessage + ": " + e)
+          if (authViewComponent) {
+            authViewComponent.notifyEmailCodeFailed()
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) {
+        root.errorMessage = "Failed to send verification email."
+        if (authViewComponent) {
+          authViewComponent.notifyEmailCodeFailed()
+        }
+      }
     }
   }
 

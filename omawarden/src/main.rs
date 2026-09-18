@@ -193,6 +193,13 @@ enum AuthAction {
         #[arg(long, required = true)]
         client_id: String,
     },
+    #[command(
+        about = "Send or resend two-factor verification code to email (password read from stdin)"
+    )]
+    SendTwoFactorEmail {
+        #[arg(long, required = true)]
+        email: String,
+    },
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
     #[command(about = "Lock vault and clear session")]
@@ -767,6 +774,42 @@ fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::FAILURE
+                    }
+                }
+                AuthAction::SendTwoFactorEmail { email } => {
+                    let (pwd, _, _, _) = if io::stdin().is_terminal() {
+                        let p = rpassword::prompt_password("Enter Master Password: ")
+                            .unwrap_or_default();
+                        (p, None, None, None)
+                    } else {
+                        read_auth_payload()
+                    };
+                    if pwd.is_empty() {
+                        let res = serde_json::json!({
+                            "ok": false,
+                            "error": "Password is required to send verification code."
+                        });
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        ExitCode::FAILURE
+                    } else {
+                        match auth_mgr.send_two_factor_email(&email, &pwd) {
+                            Ok(()) => {
+                                let res = serde_json::json!({
+                                    "ok": true,
+                                    "message": "Two-factor verification code sent to your email."
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::SUCCESS
+                            }
+                            Err(e) => {
+                                let res = serde_json::json!({
+                                    "ok": false,
+                                    "error": e.to_string()
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::FAILURE
+                            }
+                        }
                     }
                 }
                 AuthAction::Unlock => {

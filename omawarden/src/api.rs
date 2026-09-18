@@ -2805,4 +2805,46 @@ mod tests {
 
         let _ = handle.join();
     }
+
+    #[test]
+    fn test_send_two_factor_email_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /api/two-factor/send-email-login") {
+                    assert!(req.contains("masterPasswordHash"));
+                    assert!(req.contains("user@example.com"));
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.send_two_factor_email("user@example.com", "password123");
+        assert!(res.is_ok(), "Expected send_two_factor_email to succeed");
+
+        let _ = handle.join();
+    }
 }

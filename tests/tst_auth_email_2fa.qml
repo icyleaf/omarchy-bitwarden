@@ -91,6 +91,38 @@ Item {
     }
     check(provFallback === 1, "Fallback correctly resolves provider 1 when only email is available")
 
+    // 7. Inline resend email button visibility and state
+    authView.show2FAField = true
+    authView.twoFactorProvider = 1
+    check(authView.resendEmailButton !== null && authView.resendEmailButton.visible === true, "resendEmailButton is visible when twoFactorProvider === 1")
+    authView.twoFactorProvider = 0
+    check(authView.resendEmailButton.visible === false, "resendEmailButton is hidden when twoFactorProvider === 0")
+    authView.twoFactorProvider = 7
+    check(authView.resendEmailButton.visible === false, "resendEmailButton is hidden when twoFactorProvider === 7")
+
+    // 8. Resend email button trigger and cooldown notification
+    authView.twoFactorProvider = 1
+    var signalEmitted = false
+    var signalEmail = ""
+    var signalPwd = ""
+    authView.sendTwoFactorEmailRequested.connect(function(email, pwd) {
+      signalEmitted = true
+      signalEmail = email
+      signalPwd = pwd
+    })
+    check(authView.emailSentCount === 0, "emailSentCount defaults to 0")
+    check(authView.resendCooldown === 0, "resendCooldown defaults to 0")
+
+    // Notify code sent
+    authView.notifyEmailCodeSent()
+    check(authView.emailSentCount === 1, "notifyEmailCodeSent() increments emailSentCount to 1")
+    check(authView.resendCooldown === 60, "notifyEmailCodeSent() sets resendCooldown to 60")
+
+    // Reset clears emailSentCount and resendCooldown
+    authView.clearInputs()
+    check(authView.emailSentCount === 0, "clearInputs() resets emailSentCount to 0")
+    check(authView.resendCooldown === 0, "clearInputs() resets resendCooldown to 0")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

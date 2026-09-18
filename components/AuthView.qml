@@ -17,6 +17,9 @@ Item {
   property int twoFactorProvider: 0
   property var availableTwoFactorProviders: []
   property string fido2Status: ""
+  property int resendCooldown: 0
+  property int emailSentCount: 0
+  property bool isSendingEmail: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -29,10 +32,38 @@ Item {
   signal downloadCliRequested()
   signal settingsRequested()
   signal twoFactorProviderSelected(int provider)
+  signal sendTwoFactorEmailRequested(string email, string password)
   signal copyRequested(string text, string label)
 
   property alias unlockInput: unlockPasswordField
   property alias twoFactorInput: login2FAInput
+  property alias resendEmailButton: resendEmailBtn
+
+  function notifyEmailCodeSent() {
+    authRoot.isSendingEmail = false
+    authRoot.emailSentCount++
+    authRoot.resendCooldown = 60
+    resendCooldownTimer.restart()
+  }
+
+  function notifyEmailCodeFailed() {
+    authRoot.isSendingEmail = false
+  }
+
+  Timer {
+    id: resendCooldownTimer
+    interval: 1000
+    repeat: true
+    running: false
+    onTriggered: {
+      if (authRoot.resendCooldown > 1) {
+        authRoot.resendCooldown--
+      } else {
+        authRoot.resendCooldown = 0
+        stop()
+      }
+    }
+  }
 
   function clearInputs() {
     if (unlockPasswordField) unlockPasswordField.text = ""
@@ -42,6 +73,10 @@ Item {
     authRoot.isNewDeviceVerification = false
     authRoot.twoFactorProvider = 0
     authRoot.availableTwoFactorProviders = []
+    authRoot.emailSentCount = 0
+    authRoot.resendCooldown = 0
+    authRoot.isSendingEmail = false
+    resendCooldownTimer.stop()
   }
 
   onVisibleChanged: {
@@ -56,6 +91,15 @@ Item {
     authRoot.isNewDeviceVerification = false
     authRoot.twoFactorProvider = 0
     authRoot.availableTwoFactorProviders = []
+  }
+
+  onShow2FAFieldChanged: {
+    if (!show2FAField) {
+      authRoot.emailSentCount = 0
+      authRoot.resendCooldown = 0
+      authRoot.isSendingEmail = false
+      resendCooldownTimer.stop()
+    }
   }
 
   onAuthStateChanged: {
@@ -523,9 +567,14 @@ Item {
 
                 Rectangle {
                   Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+
                   TextInput {
                     id: login2FAInput
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.right: resendEmailBtn.visible ? resendEmailBtn.left : parent.right
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: resendEmailBtn.visible ? 6 : 10
+                    anchors.verticalCenter: parent.verticalCenter
                     color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                     activeFocusOnTab: true
                     KeyNavigation.tab: loginEmailInput
@@ -537,6 +586,48 @@ Item {
                         login2FAInput.text.trim(),
                         authRoot.twoFactorProvider
                       )
+                    }
+                  }
+
+                  Rectangle {
+                    id: resendEmailBtn
+                    visible: authRoot.twoFactorProvider === 1
+                    anchors.right: parent.right
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    implicitWidth: resendBtnText.implicitWidth + 14
+                    height: 24
+                    radius: 3
+                    color: (resendCooldownTimer.running || authRoot.isSendingEmail)
+                      ? Qt.rgba(1, 1, 1, 0.08)
+                      : (resendMouseArea.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
+                    opacity: (resendCooldownTimer.running || authRoot.isBusy || authRoot.isSendingEmail) ? 0.7 : 1.0
+
+                    Text {
+                      id: resendBtnText
+                      anchors.centerIn: parent
+                      text: authRoot.isSendingEmail
+                        ? "Sending..."
+                        : (resendCooldownTimer.running
+                            ? ("Resend (" + authRoot.resendCooldown + "s)")
+                            : (authRoot.emailSentCount > 0 ? "Resend Email" : "Send Email"))
+                      color: (resendCooldownTimer.running || authRoot.isSendingEmail) ? authRoot.foreground : "#ffffff"
+                      font.pixelSize: 10
+                      font.weight: Font.Medium
+                    }
+
+                    MouseArea {
+                      id: resendMouseArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: (resendCooldownTimer.running || authRoot.isBusy || authRoot.isSendingEmail)
+                        ? Qt.ArrowCursor
+                        : Qt.PointingHandCursor
+                      enabled: !resendCooldownTimer.running && !authRoot.isBusy && !authRoot.isSendingEmail && loginEmailInput.text.trim() !== "" && loginPwdInput.text !== ""
+                      onClicked: {
+                        authRoot.isSendingEmail = true
+                        authRoot.sendTwoFactorEmailRequested(loginEmailInput.text.trim(), loginPwdInput.text)
+                      }
                     }
                   }
                 }
