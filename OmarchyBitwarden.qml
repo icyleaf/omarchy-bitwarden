@@ -85,19 +85,22 @@ Item {
     pacmanCheckProc.running = true
   }
 
-  function installMissingDependencies() {
-    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
-    if (missing.length === 0) return
-
-    var pkgs = missing.join(" ")
-    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + pkgs +
-                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + pkgs +
-                     "; else sudo pacman -S --needed " + pkgs + "; fi"
+  function installPackage(pkgName) {
+    if (!pkgName) return
+    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + pkgName +
+                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + pkgName +
+                     "; else sudo pacman -S --needed " + pkgName + "; fi"
 
     root.isInstallingDependencies = true
     installDependenciesProc.running = false
     installDependenciesProc.command = ["omarchy-launch-floating-terminal-with-presentation", installCmd]
     installDependenciesProc.running = true
+  }
+
+  function installMissingDependencies() {
+    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
+    if (missing.length === 0) return
+    root.installPackage(missing.join(" "))
   }
 
   // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
@@ -203,6 +206,7 @@ Item {
     onExited: function(code) {
       root.isInstallingDependencies = false
       root.checkDependencies()
+      root.doCheckFido2Status()
     }
   }
 
@@ -2284,6 +2288,7 @@ Item {
             twoFactorProvider: root.twoFactorProvider
             availableTwoFactorProviders: root.availableTwoFactorProviders
             fido2Status: root.fido2Status
+            isInstalling: root.isInstallingDependencies
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
@@ -2303,6 +2308,7 @@ Item {
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
             onCheckFido2StatusRequested: { root.doCheckFido2Status() }
+            onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }

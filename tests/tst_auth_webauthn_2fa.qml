@@ -16,6 +16,7 @@ Item {
   property int lastSelectedProvider: -1
   property var lastLoginRequest: null
   property string lastCopiedText: ""
+  property string lastInstalledPackage: ""
 
   AuthView {
     id: authView
@@ -28,6 +29,9 @@ Item {
     }
     onCopyRequested: function(txt, lbl) {
       testRunner.lastCopiedText = txt
+    }
+    onInstallPackageRequested: function(pkg) {
+      testRunner.lastInstalledPackage = pkg
     }
   }
 
@@ -161,10 +165,21 @@ Item {
     check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button is disabled when no_device")
     check(authView.fido2AutoDetectTimerComponent.running === true, "fido2AutoDetectTimer is running when no_device")
 
-    // Case B: tool_not_found -> button is disabled, timer does not run
+    // Case B: tool_not_found -> button is enabled for installation, timer does not run
     authView.fido2Status = "tool_not_found"
-    check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button is disabled when tool_not_found")
+    check(authView.submitButtonComponent.isToolNotFound === true, "Submit button identifies tool_not_found state")
+    check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button is enabled to install libfido2 when tool_not_found")
     check(authView.fido2AutoDetectTimerComponent.running === false, "fido2AutoDetectTimer is stopped when tool_not_found")
+
+    // Install requested signal from submit button click or direct invocation
+    authView.installPackageRequested("libfido2")
+    check(testRunner.lastInstalledPackage === "libfido2", "installPackageRequested emitted libfido2")
+
+    // Installing state disables the button
+    authView.isInstalling = true
+    check(authView.submitButtonComponent.isSubmitEnabled === false, "Submit button disabled while isInstalling")
+    authView.isInstalling = false
+    check(authView.submitButtonComponent.isSubmitEnabled === true, "Submit button re-enabled when isInstalling finishes")
 
     // Case C: available -> button is enabled, timer continues running to detect unplugging
     authView.fido2Status = "available"

@@ -20,6 +20,7 @@ Item {
   property int resendCooldown: 0
   property int emailSentCount: 0
   property bool isSendingEmail: false
+  property bool isInstalling: false
   property color foreground: "#ffffff"
   property color accent: "#3b82f6"
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
@@ -35,6 +36,7 @@ Item {
   signal sendTwoFactorEmailRequested(string email, string password)
   signal checkFido2StatusRequested()
   signal copyRequested(string text, string label)
+  signal installPackageRequested(string pkgName)
 
   property alias unlockInput: unlockPasswordField
   property alias twoFactorInput: login2FAInput
@@ -572,11 +574,37 @@ Item {
                           elide: Text.ElideRight
                         }
 
+                        // One-Click Install Button
+                        Rectangle {
+                          implicitWidth: authRoot.isInstalling ? 68 : 46
+                          implicitHeight: 18
+                          radius: 2
+                          color: authRoot.isInstalling ? Qt.rgba(1, 1, 1, 0.15) : (installMouse.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
+
+                          Text {
+                            anchors.centerIn: parent
+                            text: authRoot.isInstalling ? "Installing..." : "Install"
+                            color: authRoot.isInstalling ? authRoot.muted : "#ffffff"
+                            font.pixelSize: 9
+                            font.weight: Font.Medium
+                          }
+
+                          MouseArea {
+                            id: installMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: authRoot.isInstalling ? Qt.ArrowCursor : Qt.PointingHandCursor
+                            enabled: !authRoot.isInstalling
+                            onClicked: authRoot.installPackageRequested("libfido2")
+                          }
+                        }
+
+                        // Copy Command Button
                         Rectangle {
                           implicitWidth: copyTimer.running ? 46 : 38
                           implicitHeight: 18
                           radius: 2
-                          color: copyTimer.running ? "#10b981" : authRoot.accent
+                          color: copyTimer.running ? "#10b981" : Qt.rgba(1, 1, 1, 0.15)
 
                           Text {
                             anchors.centerIn: parent
@@ -719,10 +747,15 @@ Item {
               Layout.fillWidth: true
               height: 32
               radius: 5
-              readonly property bool isFido2Blocked: authRoot.show2FAField
+              readonly property bool isToolNotFound: authRoot.show2FAField
                 && authRoot.twoFactorProvider === 7
-                && authRoot.fido2Status !== "available"
-              readonly property bool isSubmitEnabled: !authRoot.isBusy && !isFido2Blocked
+                && authRoot.fido2Status === "tool_not_found"
+              readonly property bool isFido2NoDevice: authRoot.show2FAField
+                && authRoot.twoFactorProvider === 7
+                && authRoot.fido2Status === "no_device"
+              readonly property bool isSubmitEnabled: !authRoot.isBusy
+                && !authRoot.isInstalling
+                && !isFido2NoDevice
 
               color: isSubmitEnabled
                 ? (submitMouseArea.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
@@ -730,15 +763,21 @@ Item {
 
               Text {
                 anchors.centerIn: parent
-                text: authRoot.isBusy
-                  ? (authRoot.twoFactorProvider === 7 ? "Waiting for key touch..." : "Logging in...")
-                  : (authRoot.show2FAField && authRoot.twoFactorProvider === 7
-                      ? (authRoot.fido2Status === "tool_not_found"
-                          ? "Install libfido2 to Proceed"
-                          : (authRoot.fido2Status === "no_device"
-                              ? "Insert Security Key to Verify"
-                              : "Verify with Security Key"))
-                      : "Log In")
+                text: {
+                  if (authRoot.isBusy) {
+                    return (authRoot.twoFactorProvider === 7 ? "Waiting for key touch..." : "Logging in...")
+                  }
+                  if (authRoot.show2FAField && authRoot.twoFactorProvider === 7) {
+                    if (authRoot.fido2Status === "tool_not_found") {
+                      return authRoot.isInstalling ? "Installing libfido2 in Terminal..." : "⚡ Install libfido2"
+                    }
+                    if (authRoot.fido2Status === "no_device") {
+                      return "Insert Security Key to Verify"
+                    }
+                    return "Verify with Security Key"
+                  }
+                  return "Log In"
+                }
                 color: submitButton.isSubmitEnabled ? "#ffffff" : authRoot.muted
                 font.pixelSize: 12
                 font.weight: Font.Medium
@@ -751,6 +790,10 @@ Item {
                 cursorShape: submitButton.isSubmitEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                 enabled: submitButton.isSubmitEnabled
                 onClicked: {
+                  if (submitButton.isToolNotFound) {
+                    authRoot.installPackageRequested("libfido2")
+                    return
+                  }
                   authRoot.loginPasswordRequested(
                     loginEmailInput.text.trim(),
                     loginPwdInput.text,
