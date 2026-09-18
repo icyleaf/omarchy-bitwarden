@@ -15,7 +15,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -138,6 +138,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum ConfigAction {
     #[command(about = "Get current configuration or a specific key")]
     Get {
@@ -166,6 +167,8 @@ enum ConfigAction {
         log_level: Option<String>,
         #[arg(long)]
         show_website_icons: Option<String>,
+        #[arg(long)]
+        remember_last_search: Option<String>,
     },
 }
 
@@ -190,6 +193,15 @@ enum AuthAction {
         #[arg(long, required = true)]
         client_id: String,
     },
+    #[command(
+        about = "Send or resend two-factor verification code to email (password read from stdin)"
+    )]
+    SendTwoFactorEmail {
+        #[arg(long, required = true)]
+        email: String,
+    },
+    #[command(about = "Check current FIDO2 / WebAuthn environment and device status")]
+    Fido2Status,
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
     #[command(about = "Lock vault and clear session")]
@@ -332,10 +344,10 @@ fn read_clipboard_stdin() -> String {
     String::new()
 }
 
-fn parse_auth_payload(raw: &str) -> (String, Option<String>) {
+fn parse_auth_payload(raw: &str) -> (String, Option<String>, Option<i32>, Option<String>) {
     let trimmed = raw.trim_end_matches(&['\r', '\n'][..]).trim();
     if trimmed.is_empty() {
-        return (String::new(), None);
+        return (String::new(), None, None, None);
     }
 
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
@@ -349,7 +361,25 @@ fn parse_auth_payload(raw: &str) -> (String, Option<String>) {
                 .get("code")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            return (pwd, code_val);
+            let two_factor_provider = map
+                .get("two_factor_provider")
+                .or_else(|| map.get("twoFactorProvider"))
+                .or_else(|| map.get("provider"))
+                .and_then(|v| {
+                    if let Some(n) = v.as_i64() {
+                        Some(n as i32)
+                    } else if let Some(s) = v.as_str() {
+                        s.parse::<i32>().ok()
+                    } else {
+                        None
+                    }
+                });
+            let new_device_otp = map
+                .get("new_device_otp")
+                .or_else(|| map.get("newDeviceOtp"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return (pwd, code_val, two_factor_provider, new_device_otp);
         }
     }
 
@@ -360,17 +390,17 @@ fn parse_auth_payload(raw: &str) -> (String, Option<String>) {
         }
     }
 
-    (pwd, None)
+    (pwd, None, None, None)
 }
 
-fn read_auth_payload() -> (String, Option<String>) {
+fn read_auth_payload() -> (String, Option<String>, Option<i32>, Option<String>) {
     let stdin = io::stdin();
     if stdin.is_terminal() {
-        return (String::new(), None);
+        return (String::new(), None, None, None);
     }
     let mut buffer = String::new();
     if stdin.lock().read_line(&mut buffer).is_err() {
-        return (String::new(), None);
+        return (String::new(), None, None, None);
     }
     parse_auth_payload(&buffer)
 }
@@ -391,7 +421,18 @@ fn main() -> ExitCode {
                 15
             };
             let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
-            let storage_mgr = StorageManager::default();
+            let storage_mgr = match cli.config.as_deref() {
+                Some(cp) => {
+                    if let Some(parent) = cp.parent() {
+                        StorageManager::new(
+                            parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                        )
+                    } else {
+                        StorageManager::default()
+                    }
+                }
+                None => StorageManager::default(),
+            };
             let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
             println!(
                 "Starting omawarden daemon (auto_lock: {}m)...",
@@ -421,6 +462,7 @@ fn main() -> ExitCode {
                         "check_updates" => println!("{}", cfg.check_updates),
                         "log_level" => println!("{}", cfg.log_level),
                         "show_website_icons" => println!("{}", cfg.show_website_icons),
+                        "remember_last_search" => println!("{}", cfg.remember_last_search),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -442,6 +484,7 @@ fn main() -> ExitCode {
                 check_updates,
                 log_level,
                 show_website_icons,
+                remember_last_search,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -471,6 +514,11 @@ fn main() -> ExitCode {
                     matches!(lower.as_str(), "true" | "1" | "yes")
                 });
 
+                let parsed_remember_last_search = remember_last_search.map(|v| {
+                    let lower = v.trim().to_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "yes")
+                });
+
                 let options = ConfigUpdateOptions {
                     server_url,
                     identity_url,
@@ -482,6 +530,7 @@ fn main() -> ExitCode {
                     check_updates: parsed_check_updates,
                     log_level,
                     show_website_icons: parsed_show_website_icons,
+                    remember_last_search: parsed_remember_last_search,
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -574,26 +623,118 @@ fn main() -> ExitCode {
                     email,
                     remember_email,
                 } => {
-                    let (pwd, stdin_code) = if io::stdin().is_terminal() {
-                        let p = rpassword::prompt_password("Enter Master Password: ")
-                            .unwrap_or_default();
-                        (p, None)
-                    } else {
-                        read_auth_payload()
-                    };
+                    let (pwd, stdin_code, stdin_provider, stdin_new_device_otp) =
+                        if io::stdin().is_terminal() {
+                            let p = rpassword::prompt_password("Enter Master Password: ")
+                                .unwrap_or_default();
+                            (p, None, None, None)
+                        } else {
+                            read_auth_payload()
+                        };
                     let mut effective_code = stdin_code;
-                    let mut res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                    let mut effective_provider = stdin_provider;
+                    let mut effective_new_device_otp = stdin_new_device_otp;
+                    let mut res = auth_mgr.login_password(
+                        &email,
+                        &pwd,
+                        effective_code.as_deref(),
+                        effective_provider,
+                        effective_new_device_otp.as_deref(),
+                    );
                     if !res.ok
-                        && res.two_factor_required == Some(true)
                         && effective_code.is_none()
+                        && effective_new_device_otp.is_none()
                         && io::stdin().is_terminal()
                     {
-                        let prompt_code =
-                            rpassword::prompt_password("Enter Two-Factor (2FA) Code: ")
-                                .unwrap_or_default();
-                        if !prompt_code.trim().is_empty() {
-                            effective_code = Some(prompt_code.trim().to_string());
-                            res = auth_mgr.login_password(&email, &pwd, effective_code.as_deref());
+                        if res.new_device_verification_required == Some(true) {
+                            let prompt_code = rpassword::prompt_password(
+                                "Enter New Device Verification Code (check your email): ",
+                            )
+                            .unwrap_or_default();
+                            if !prompt_code.trim().is_empty() {
+                                effective_new_device_otp = Some(prompt_code.trim().to_string());
+                                res = auth_mgr.login_password(
+                                    &email,
+                                    &pwd,
+                                    None,
+                                    None,
+                                    effective_new_device_otp.as_deref(),
+                                );
+                            }
+                        } else if res.two_factor_required == Some(true) {
+                            let providers =
+                                res.two_factor_providers.clone().unwrap_or_else(|| vec![0]);
+                            let default_idx = if let Some(pref) = res.two_factor_provider {
+                                providers.iter().position(|p| *p == pref).unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let chosen_provider = if providers.len() == 1 {
+                                providers[0]
+                            } else {
+                                eprintln!("\nTwo-Factor Authentication Methods:");
+                                for (idx, p) in providers.iter().enumerate() {
+                                    let label = match p {
+                                        0 => "Authenticator App (TOTP)".to_string(),
+                                        1 => "Email Verification Code".to_string(),
+                                        3 => "YubiKey OTP".to_string(),
+                                        7 => match res.fido2_status.as_deref() {
+                                            Some("tool_not_found") => {
+                                                "WebAuthn / Passkey / Security Key (libfido2 not installed)".to_string()
+                                            }
+                                            Some("no_device") => {
+                                                "WebAuthn / Passkey / Security Key (no key detected)".to_string()
+                                            }
+                                            _ => "WebAuthn / Passkey / Security Key".to_string(),
+                                        },
+                                        _ => "Other".to_string(),
+                                    };
+                                    eprintln!("  [{}] {}", idx + 1, label);
+                                }
+                                eprint!(
+                                    "Select method [1-{}, default: {}]: ",
+                                    providers.len(),
+                                    default_idx + 1
+                                );
+                                let _ = io::stderr().flush();
+                                let mut choice = String::new();
+                                let _ = io::stdin().read_line(&mut choice);
+                                let idx = choice
+                                    .trim()
+                                    .parse::<usize>()
+                                    .unwrap_or(default_idx + 1)
+                                    .saturating_sub(1);
+                                *providers.get(idx).unwrap_or(&providers[default_idx])
+                            };
+
+                            effective_provider = Some(chosen_provider);
+                            if chosen_provider == 7 {
+                                omawarden::log_info!(
+                                    "omawarden:auth",
+                                    "Requesting WebAuthn challenge from server..."
+                                );
+                                res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
+                            } else {
+                                let prompt_label = match chosen_provider {
+                                    1 => {
+                                        "Enter Email Two-Factor Verification Code (check your email): "
+                                    }
+                                    3 => "Touch your YubiKey or enter OTP: ",
+                                    _ => "Enter Two-Factor (2FA) Code: ",
+                                };
+                                let prompt_code =
+                                    rpassword::prompt_password(prompt_label).unwrap_or_default();
+                                if !prompt_code.trim().is_empty() {
+                                    effective_code = Some(prompt_code.trim().to_string());
+                                    res = auth_mgr.login_password(
+                                        &email,
+                                        &pwd,
+                                        effective_code.as_deref(),
+                                        effective_provider,
+                                        None,
+                                    );
+                                }
+                            }
                         }
                     }
                     if res.ok {
@@ -639,6 +780,51 @@ fn main() -> ExitCode {
                     } else {
                         ExitCode::FAILURE
                     }
+                }
+                AuthAction::SendTwoFactorEmail { email } => {
+                    let (pwd, _, _, _) = if io::stdin().is_terminal() {
+                        let p = rpassword::prompt_password("Enter Master Password: ")
+                            .unwrap_or_default();
+                        (p, None, None, None)
+                    } else {
+                        read_auth_payload()
+                    };
+                    if pwd.is_empty() {
+                        let res = serde_json::json!({
+                            "ok": false,
+                            "error": "Password is required to send verification code."
+                        });
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        ExitCode::FAILURE
+                    } else {
+                        match auth_mgr.send_two_factor_email(&email, &pwd) {
+                            Ok(()) => {
+                                let res = serde_json::json!({
+                                    "ok": true,
+                                    "message": "Two-factor verification code sent to your email."
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::SUCCESS
+                            }
+                            Err(e) => {
+                                let res = serde_json::json!({
+                                    "ok": false,
+                                    "error": e.to_string()
+                                });
+                                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                                ExitCode::FAILURE
+                            }
+                        }
+                    }
+                }
+                AuthAction::Fido2Status => {
+                    let status = omawarden::webauthn::check_fido2_status();
+                    let res = serde_json::json!({
+                        "ok": true,
+                        "status": status.as_str()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    ExitCode::SUCCESS
                 }
                 AuthAction::Unlock => {
                     let pwd = if io::stdin().is_terminal() {
@@ -1812,7 +1998,7 @@ fn ensure_unlocked_user_key(
         return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
     }
 
-    let (pwd, _) = read_auth_payload();
+    let (pwd, ..) = read_auth_payload();
     if pwd.is_empty() {
         return Err("Vault is locked. Please unlock the vault first using 'omawarden auth unlock' or provide Master Password.".to_string());
     }
@@ -1833,31 +2019,76 @@ mod tests {
 
     #[test]
     fn test_parse_auth_payload_plain() {
-        let (pwd, code) = parse_auth_payload("mypassword\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("mypassword\n");
         assert_eq!(pwd, "mypassword");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
+        assert_eq!(ndv, None);
     }
 
     #[test]
     fn test_parse_auth_payload_json_with_code() {
-        let (pwd, code) =
+        let (pwd, code, provider, ndv) =
             parse_auth_payload("{\"password\": \"secret123\", \"code\": \"654321\"}\n");
         assert_eq!(pwd, "secret123");
         assert_eq!(code.as_deref(), Some("654321"));
+        assert_eq!(provider, None);
+        assert_eq!(ndv, None);
+    }
+
+    #[test]
+    fn test_parse_auth_payload_json_with_new_device_otp() {
+        let (pwd, code, provider, ndv) = parse_auth_payload(
+            "{\"password\": \"secret123\", \"code\": \"111222\", \"new_device_otp\": \"111222\"}\n",
+        );
+        assert_eq!(pwd, "secret123");
+        assert_eq!(code.as_deref(), Some("111222"));
+        assert_eq!(provider, None);
+        assert_eq!(ndv.as_deref(), Some("111222"));
+
+        let (pwd2, code2, provider2, ndv2) =
+            parse_auth_payload("{\"password\": \"secret123\", \"newDeviceOtp\": \"333444\"}\n");
+        assert_eq!(pwd2, "secret123");
+        assert_eq!(code2, None);
+        assert_eq!(provider2, None);
+        assert_eq!(ndv2.as_deref(), Some("333444"));
+    }
+
+    #[test]
+    fn test_parse_auth_payload_json_with_provider() {
+        let (pwd, code, provider, ndv) = parse_auth_payload(
+            "{\"password\": \"secret123\", \"code\": \"123456\", \"two_factor_provider\": 1}\n",
+        );
+        assert_eq!(pwd, "secret123");
+        assert_eq!(code.as_deref(), Some("123456"));
+        assert_eq!(provider, Some(1));
+        assert_eq!(ndv, None);
+
+        let (pwd2, code2, provider2, ndv2) = parse_auth_payload(
+            "{\"password\": \"secret123\", \"code\": \"999888\", \"provider\": \"3\"}\n",
+        );
+        assert_eq!(pwd2, "secret123");
+        assert_eq!(code2.as_deref(), Some("999888"));
+        assert_eq!(provider2, Some(3));
+        assert_eq!(ndv2, None);
     }
 
     #[test]
     fn test_parse_auth_payload_json_without_code() {
-        let (pwd, code) = parse_auth_payload("{\"password\": \"secret123\"}\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("{\"password\": \"secret123\"}\n");
         assert_eq!(pwd, "secret123");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
+        assert_eq!(ndv, None);
     }
 
     #[test]
     fn test_parse_auth_payload_empty() {
-        let (pwd, code) = parse_auth_payload("  \r\n");
+        let (pwd, code, provider, ndv) = parse_auth_payload("  \r\n");
         assert_eq!(pwd, "");
         assert_eq!(code, None);
+        assert_eq!(provider, None);
+        assert_eq!(ndv, None);
     }
 
     #[test]

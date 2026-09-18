@@ -1,9 +1,12 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "./IconPolicy.js" as IconPolicy
 
 ScrollView {
   id: inspectorRoot
+
+  property string serverUrl: ""
 
   property var item: null
   property var currentTotp: ({ code: "", ttl: 30, period: 30 })
@@ -115,7 +118,7 @@ ScrollView {
       if (!uriStr || isAppScheme(uriStr)) continue
       var domain = getHostname(uriStr)
       if (domain && domain.indexOf(".") !== -1) {
-        return "https://icons.bitwarden.net/" + domain + "/icon.png"
+        return IconPolicy.resolveIconUrl(inspectorRoot.serverUrl, domain)
       }
     }
     return ""
@@ -774,7 +777,7 @@ ScrollView {
 
           // Divider (if totp)
           Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.totp || inspectorRoot.item.login.has_totp))
             Layout.fillWidth: true
             height: 1
             color: Qt.rgba(255, 255, 255, 0.05)
@@ -782,7 +785,7 @@ ScrollView {
 
           // TOTP Countdown & Verification Code
           ColumnLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.totp)
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.totp || inspectorRoot.item.login.has_totp))
             Layout.fillWidth: true
             spacing: 4
 

@@ -25,6 +25,34 @@
 | **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
 | **锁屏联动**         | **守护进程原生自动检测（Omarchy 锁屏、Hyprlock、D-Bus/logind 睡眠与挂起）** | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
 | **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
+
+### 为什么自研 omawarden 而非直接采用 rbw？
+
+`rbw` 是 Linux 生态中极其优秀的非官方 Rust 命令行客户端，开创了零知识常驻守护进程架构，为 `omawarden` 提供了重要启发。两者在内存安全上有着共同的高标准，均实现了物理内存锁定（`mlock`）与退出即时清零（`zeroize`）。
+
+两者的差异并非“命令行 vs 桌面”，而是**面对同样的 Bitwarden 服务，在功能完整度、系统依赖与工作流上做出了不同的设计取舍**：
+
+#### 核心特性对比
+
+| 评估维度 | `omawarden`（内置引擎 & 独立 CLI） | `rbw`（非官方 Rust 命令行） |
+| :--- | :--- | :--- |
+| **条目类型支持深度** | **五大类型一等公民支持**：为登录、银行卡（CVV/卡号）、身份、便签及 SSH 密钥提供专用提取命令与结构化展示 | 主要面向登录密码与 TOTP；查看银行卡/身份等条目需使用 `--raw` 输出原始 JSON 自行提取 |
+| **加密附件处理** | **原生支持**：支持下载加密 Blob 并解密预览/导出 | **不支持**（参见长期未决 Issue [doy/rbw#130](https://github.com/doy/rbw/issues/130)） |
+| **密码历史记录** | **原生支持**：可解密并查看条目历史修改过的旧密码 | **不支持**查看历史密码 |
+| **多组织与集合** | **完整支持**：`RSA-OAEP-SHA1` 组织密钥解包，支持多组织与集合过滤 | **基础支持**：以个人密码库为主，多组织与集合管理较弱（参见 [doy/rbw#351](https://github.com/doy/rbw/issues/351)） |
+| **SSH 密钥能力** | **密钥对生成与管理**：支持本地生成 Ed25519/RSA 密钥对、计算指纹并导出文件 | **OpenSSH Agent 代理**：实现 `SSH_AUTH_SOCK` 协议，私钥无需落盘直接充当系统 ssh 签名代理（但不支持生成密钥对） |
+| **锁屏安全联动** | **主动监听系统锁屏与睡眠**：电脑合盖或锁屏（Hyprlock/Omarchy/D-Bus）瞬时抹除内存凭据并锁定 | **被动闲置超时倒计时**：合盖休眠期间若未超时，凭据依然驻留内存 |
+| **身份交互与凭据存储** | **系统密钥环（Keyring）深度集成**：后台无感静默刷新 Token，日常使用免频繁弹窗 | **GnuPG / pinentry 交互**：依靠系统的 pinentry（支持纯终端 `pinentry-curses`），不依赖桌面密钥环 |
+| **图形界面 IPC 对接** | **专用结构化 JSON IPC 套接字**：专为桌面 Overlay 瞬时全量吞吐设计 | 纯文本标准输入输出，专为终端管道设计 |
+
+#### omawarden 目前相比 rbw 的不足之处
+
+在以下场景中，`rbw` 具有明显优势，读者可根据自身需求合理选型：
+1. **发行版生态与打包成熟度**：`rbw` 已经进入 Arch、Debian、Fedora、Alpine、NixOS 等各大主流发行版的官方源，一行命令即可全局安装；`omawarden` 目前主要通过 AUR 和 GitHub 发布，尚未被各主流发行版官方源收录。
+2. **纯无头环境（Headless / Server）兼容性**：`rbw` 配合 `pinentry-curses` 在纯字符终端、服务器或没有 Secret Service 密钥环服务的极简容器中开箱即用；`omawarden` 强依赖桌面 Secret Service 密钥环服务实现安全存储。
+3. **OpenSSH Agent 实时代理**：`rbw` 能直接充当 `SSH_AUTH_SOCK`，日常执行 `ssh` 或 `git` 时私钥零落盘直接签名；`omawarden` 尚未实现 OpenSSH Agent 协议服务，目前侧重于密钥生成与本地导出管理。
+4. **终端内交互式条目编辑**：`rbw` 提供 `rbw edit` 等命令可随时唤起终端编辑器修改密码库；`omawarden` 目前主要聚焦于检索、提取、复制与生成流程，在终端内直接编辑写回远端的功能暂未支持（已列入后续规划）。
+
 ---
 
 ## 常用快捷键
@@ -213,6 +241,40 @@ flowchart TD
 
 - [ ] Wayland 自动填充 / 模拟按键输入（例如基于 `ydotool` / `wtype` 集成）
 - [ ] 快速生物识别 / PAM / 指纹系统级解锁
+
+---
+
+## 贡献指南
+
+我们非常欢迎社区的各类贡献！为了确保顺畅的协作体验并支持基于 `git-cliff` 的自动化变更日志生成，请遵循以下开发流程：
+
+1. **基于 `develop` 分支开发**：`main` 分支仅保留给已打标签的稳定发行版。所有特性开发、问题修复与代码重构均应从 `develop` 分支切出：
+   ```bash
+   git checkout develop && git pull
+   git checkout -b <type>/<short-description>
+   # 类型前缀：feat/, fix/, chore/, refactor/, sec/
+   ```
+2. **本地验证**：在提交前确保代码格式化、Lint 检查和测试全部通过：
+   ```bash
+   cd omawarden
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   XDG_RUNTIME_DIR=/tmp cargo test
+   ```
+   *(可选)* 如果已安装 [`mise`](https://mise.jdx.dev/)，可直接使用 `mise run build` 或 `mise run dev-deploy` 进行本地联调与部署。
+3. **提交信息规范**：编写符合 Conventional Commits 规范的 Commit（如 `feat(daemon): ...`、`fix(ui): ...`）。
+4. **向 `develop` 提交 PR**：创建 Pull Request 并指定基准分支（base branch）为 `develop`。
+
+完整开发与贡献细节请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+---
+
+## 致谢 / Credits
+
+`omarchy-bitwarden` 得益于开源社区的优秀成果与深厚积淀，特别致谢：
+
+- **[Bitwarden CLI (`bw`)](https://github.com/bitwarden/clients)**：感谢 Bitwarden 官方团队提供的完整协议设计、数据模型与标准参考客户端。
+- **[rbw](https://github.com/doy/rbw)**：衷心感谢 `rbw` 开创性地实现了基于 Rust 的高性能零知识常驻 daemon 架构，为 `omawarden` 的核心设计带来了重要启发与实现灵感。
 
 ---
 

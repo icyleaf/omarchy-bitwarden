@@ -7,15 +7,14 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "./components"
-import "./components/iconpolicy.js" as IconPolicy
+import "./components/IconPolicy.js" as IconPolicy
 
 Item {
   id: root
 
   Component.onCompleted: {
-    root.refreshConfig()
-    root.refreshHealth()
-    root.refreshAuthStatus()
+    root.checkDependencies()
+    root.resolveHelper()
     root.checkUpdates(false)
   }
 
@@ -33,14 +32,199 @@ Item {
     return str.replace(/^file:\/+/i, "/")
   }
 
-  property string helperPath: {
-    var custom = Quickshell.env("OMARCHY_BITWARDEN_HELPER")
-    if (custom) return custom
-    var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-    if (localPath) return localPath
-    var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-    var baseDir = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin"
-    return baseDir + "/omawarden"
+  property string helperPath: "omawarden"
+
+  function resolveHelper() {
+    resolveHelperProc.running = false
+    resolveHelperProc.command = ["which", "omawarden"]
+    resolveHelperProc.running = true
+  }
+
+  Process {
+    id: resolveHelperProc
+    command: ["which", "omawarden"]
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var p = (text || "").trim()
+        if (p.length > 0) {
+          root.helperPath = p
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) {
+        var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+        if (localPath) {
+          root.helperPath = localPath
+        } else {
+          var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+          root.helperPath = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
+        }
+      }
+      root.refreshConfig()
+      root.refreshHealth()
+      root.refreshAuthStatus()
+    }
+  }
+
+  // Dependency Checking & One-Click Installer State
+  property bool dependenciesMissing: false
+  property bool isCheckingDependencies: false
+  property bool isInstallingDependencies: false
+  property var missingDependencyPackages: []
+
+  function checkDependencies() {
+    if (dependencyCheckView) {
+      dependencyCheckView.resetToChecking()
+    }
+    root.isCheckingDependencies = true
+    pacmanCheckProc.running = false
+    pacmanCheckProc.command = ["pacman", "-Q", "omawarden", "libsecret", "wl-clipboard"]
+    pacmanCheckProc.running = true
+  }
+
+  function installPackage(pkgName) {
+    if (!pkgName || typeof pkgName !== "string") return
+    var cleanPkg = pkgName.trim()
+    if (!/^[a-zA-Z0-9_\-\.\s]+$/.test(cleanPkg)) return
+
+    var installCmd = "if command -v paru >/dev/null 2>&1; then paru -S --needed " + cleanPkg +
+                     "; elif command -v yay >/dev/null 2>&1; then yay -S --needed " + cleanPkg +
+                     "; else sudo pacman -S --needed " + cleanPkg + "; fi"
+
+    root.isInstallingDependencies = true
+    installDependenciesProc.running = false
+    installDependenciesProc.command = ["omarchy-launch-floating-terminal-with-presentation", installCmd]
+    installDependenciesProc.running = true
+  }
+
+  function installMissingDependencies() {
+    var missing = dependencyCheckView ? dependencyCheckView.getInstallPackageNames() : []
+    if (missing.length === 0) return
+    root.installPackage(missing.join(" "))
+  }
+
+  // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
+  property bool allowLocalBinaryFallback: true
+
+  readonly property string engineSource: {
+    if (dependencyCheckView) {
+      for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+        var item = dependencyCheckView.dependencyModel.get(i)
+        if (item.pkgName === "omawarden") {
+          if (item.isLocalFallback) return "builtin"
+          if (item.status === "installed") return "aur"
+        }
+      }
+    }
+    if (root.helperPath && root.helperPath !== "omawarden") {
+      if (root.helperPath.indexOf("/usr/") === 0 || root.helperPath === "/usr/bin/omawarden") {
+        return "aur"
+      }
+    }
+    return "builtin"
+  }
+
+  readonly property string enginePackage: {
+    if (dependencyCheckView) {
+      for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+        var item = dependencyCheckView.dependencyModel.get(i)
+        if (item.pkgName === "omawarden") {
+          if (item.status === "installed" && item.installedPackage) {
+            return item.installedPackage
+          }
+        }
+      }
+    }
+    return ""
+  }
+
+  function finalizeDependencyCheck() {
+    root.isCheckingDependencies = false
+    if (dependencyCheckView) {
+      var missing = dependencyCheckView.finalizeCheck()
+      root.missingDependencyPackages = missing
+      root.dependenciesMissing = (missing.length > 0)
+      if (!root.dependenciesMissing) {
+        root.resolveHelper()
+      }
+    }
+  }
+
+  Process {
+    id: pacmanCheckProc
+    running: false
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (dependencyCheckView) {
+          dependencyCheckView.parsePacmanStdout(text)
+        }
+      }
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (dependencyCheckView) {
+          dependencyCheckView.parsePacmanStderr(text)
+        }
+      }
+    }
+
+    onExited: function(code) {
+      if (dependencyCheckView && root.allowLocalBinaryFallback) {
+        var omawardenInstalled = false
+        for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
+          var item = dependencyCheckView.dependencyModel.get(i)
+          if (item.pkgName === "omawarden" && item.status === "installed") {
+            omawardenInstalled = true
+            break
+          }
+        }
+        if (!omawardenInstalled) {
+          var localBin = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+          var targetBin = (root.helperPath && root.helperPath !== "omawarden") ? root.helperPath : localBin
+          checkFallbackProc.running = false
+          checkFallbackProc.command = [targetBin, "-V"]
+          checkFallbackProc.running = true
+          return
+        }
+      }
+      root.finalizeDependencyCheck()
+    }
+  }
+
+  Process {
+    id: checkFallbackProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var out = (text || "").trim()
+        var match = out.match(/^omawarden\s+([^\s(]+)/)
+        var ver = match ? match[1] : ""
+        if (dependencyCheckView && ver.length > 0) {
+          dependencyCheckView.setFallbackInstalled("omawarden", ver)
+        }
+      }
+    }
+    onExited: function(code) {
+      root.finalizeDependencyCheck()
+    }
+  }
+
+  Process {
+    id: installDependenciesProc
+    running: false
+    onExited: function(code) {
+      root.isInstallingDependencies = false
+      root.checkDependencies()
+      root.doCheckFido2Status()
+    }
   }
 
   // Configuration & Engine Health State
@@ -59,6 +243,10 @@ Item {
   property bool showWebsiteIcons: false
   property int configSeq: 0
   property bool show2FAField: false
+  property bool isNewDeviceVerification: false
+  property int twoFactorProvider: 0
+  property var availableTwoFactorProviders: []
+  property string fido2Status: ""
 
   property var cliHealth: ({
     installed: false,
@@ -81,7 +269,15 @@ Item {
     if (!latestVersion) return false
     var currentVer = (cliHealth && cliHealth.version) ? cliHealth.version : ""
     if (!currentVer) return false
+    // Suppress regular release update notifications when running development builds
+    if (currentVer.indexOf("-dev") !== -1 || currentVer.indexOf(".dev") !== -1) return false
     return compareSemVer(latestVersion, currentVer) > 0
+  }
+
+  readonly property string effectiveServerUrl: {
+    if (root.authState && root.authState.server_url) return root.authState.server_url
+    if (root.config && root.config.server_url) return root.config.server_url
+    return "https://vault.bitwarden.com"
   }
 
   property var authState: ({
@@ -146,6 +342,7 @@ Item {
   }
 
   readonly property string effectiveView: {
+    if (dependenciesMissing && currentView !== "settings") return "dependency_check"
     if (currentView !== "auto") return currentView
     if (authState.status === "unlocked" && Boolean(authState.has_session)) return "search"
     if (authState.status === "locked" && Boolean(authState.has_session)) return "unlock"
@@ -163,7 +360,7 @@ Item {
     Qt.callLater(function() {
       if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
         searchHeader.searchField.forceActiveFocus()
-      } else if (root.opened && authViewComponent && authViewComponent.unlockInput) {
+      } else if (root.opened && root.effectiveView !== "dependency_check" && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
     })
@@ -200,6 +397,9 @@ Item {
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
 
+    root.twoFactorProvider = 0
+    root.availableTwoFactorProviders = []
+
     if (authViewComponent && typeof authViewComponent.clearInputs === "function") {
       authViewComponent.clearInputs()
     }
@@ -210,8 +410,21 @@ Item {
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
-    root.searchQuery = ""
-    root.selectedIndex = 0
+    var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+    if (!canRemember) {
+      root.searchQuery = ""
+      root.selectedIndex = 0
+    } else {
+      if (root.filteredItems && root.filteredItems.length > 0) {
+        if (root.selectedIndex < 0) {
+          root.selectedIndex = 0
+        } else if (root.selectedIndex >= root.filteredItems.length) {
+          root.selectedIndex = root.filteredItems.length - 1
+        }
+      } else {
+        root.selectedIndex = 0
+      }
+    }
     if (!root.authState || root.authState.status !== "unlocked") {
       root.clearSensitiveState()
     } else {
@@ -229,14 +442,21 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
-    root.refreshHealth()
-    root.refreshConfig()
-    root.refreshAuthStatus()
-    root.checkUpdates(false)
+    if (root.dependenciesMissing) {
+      root.checkDependencies()
+    } else {
+      root.refreshHealth()
+      root.refreshConfig()
+      root.refreshAuthStatus()
+      root.checkUpdates(false)
+    }
+    if (root.effectiveView === "search" && root.selectedItem) {
+      root.handleSelectedItemChanged()
+    }
     Qt.callLater(function() {
-      if (root.effectiveView === "search" && searchHeader && searchHeader.searchField) {
-        searchHeader.searchField.forceActiveFocus()
-      } else if (authViewComponent && authViewComponent.unlockInput) {
+      if (root.effectiveView === "search" && searchHeader) {
+        searchHeader.focusSearch(canRemember)
+      } else if (root.effectiveView !== "dependency_check" && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
     })
@@ -244,6 +464,7 @@ Item {
 
   function close() {
     root.opened = false
+    totpGenProc.running = false
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
@@ -257,7 +478,11 @@ Item {
     root.sshKeyModalItem = null
     root.currentAvailableActions = []
     root.currentTotp = ({ code: "", ttl: 30, period: 30 })
-    root.searchQuery = ""
+    var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+    if (!canRemember) {
+      root.searchQuery = ""
+      root.selectedIndex = 0
+    }
   }
 
   function dismiss() {
@@ -370,6 +595,35 @@ Item {
     vaultSyncProc.running = true
   }
 
+  function formatSyncError(err) {
+    if (!err) return "Vault sync failed."
+    var str = String(err).trim()
+
+    var isTokenRefresh = str.toLowerCase().indexOf("token refresh") !== -1 || str.toLowerCase().indexOf("refresh token") !== -1
+    var isApiAuth = str.toLowerCase().indexOf("api auth") !== -1 || str.toLowerCase().indexOf("api key") !== -1
+
+    var httpMatch = str.match(/HTTP\s+(\d{3}(?:\s+[A-Za-z]+){0,4})/i)
+    if (httpMatch && httpMatch[1]) {
+      var httpCode = "HTTP " + httpMatch[1].trim()
+      if (isTokenRefresh) {
+        return "Token refresh failed: " + httpCode
+      } else if (isApiAuth) {
+        return "API auth failed: " + httpCode
+      } else {
+        return "Vault sync failed: " + httpCode
+      }
+    }
+
+    if (str.toLowerCase().indexOf("connection refused") !== -1) {
+      return (isTokenRefresh ? "Token refresh failed: " : "Vault sync failed: ") + "Connection refused"
+    }
+    if (str.toLowerCase().indexOf("timed out") !== -1 || str.toLowerCase().indexOf("timeout") !== -1) {
+      return (isTokenRefresh ? "Token refresh failed: " : "Vault sync failed: ") + "Request timed out"
+    }
+
+    return str
+  }
+
   function loadVaultItems() {
     root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
@@ -419,6 +673,7 @@ Item {
     str = str.replace(/bearer\s+[a-z0-9_\-\.]+/gi, "Bearer <REDACTED>")
     str = str.replace(/("password"|"masterPasswordHash"|"master_password_hash")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     str = str.replace(/("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
+    str = str.replace(/("code"|"twoFactorToken"|"newDeviceOtp"|"new_device_otp")\s*:\s*"[^"]*"/gi, '$1:"<REDACTED>"')
     return str
   }
 
@@ -481,7 +736,15 @@ Item {
         else if (lvl === "WARN") console.warn(line)
         else console.log(line)
       } else {
-        root.logError(defaultSource || "omawarden:cli", line)
+        var isInfo = line.startsWith("•") || line.startsWith("✓") ||
+                     line.indexOf("Waiting for security key touch") !== -1 ||
+                     line.indexOf("Requesting WebAuthn challenge") !== -1 ||
+                     line.indexOf("Security key verified") !== -1
+        if (isInfo) {
+          root.logInfo(defaultSource || "omawarden:cli", line)
+        } else {
+          root.logError(defaultSource || "omawarden:cli", line)
+        }
       }
     }
   }
@@ -1037,7 +1300,7 @@ Item {
       if (item.login.username) {
         actions.push({ label: "Copy Username (" + item.login.username + ")", icon: "\uf007", shortcut: "Ctrl+U", action: function() { root.copyToClipboard(item.login.username, false, "username") } })
       }
-      if ((item.login.totp) || (root.currentTotp && root.currentTotp.code)) {
+      if ((item.login.totp || item.login.has_totp) || (root.currentTotp && root.currentTotp.code)) {
         var totpLabel = "Copy TOTP Code" + ((root.currentTotp && root.currentTotp.code) ? (" (" + root.currentTotp.code + ")") : "")
         actions.push({
           label: totpLabel,
@@ -1378,6 +1641,7 @@ Item {
     if (settings.log_level !== undefined) cmd.push("--log-level", settings.log_level)
     if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
     if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
+    if (settings.remember_last_search !== undefined) cmd.push("--remember-last-search", String(settings.remember_last_search))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1401,6 +1665,14 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
+    var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN"
+    if (root.enginePackage) {
+      engineSourceStr += " (" + root.enginePackage + ")"
+    } else if (root.engineSource === "builtin") {
+      engineSourceStr += " (local binary)"
+    }
+    report += "- **Engine Source**: " + engineSourceStr + "\n"
+    report += "- **Engine Binary Path**: " + (root.helperPath || "Unknown") + "\n"
     report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
@@ -1447,20 +1719,41 @@ Item {
     authLockProc.running = true
   }
 
-  function doLoginPassword(email, password, code) {
+  function doLoginPassword(email, password, code, provider) {
     if (!email || !password) return
-    root.logInfo("omarchy:auth", "Submitting password login for " + email + "...")
+    var effectiveProvider = (provider !== undefined && provider !== null)
+        ? provider
+        : root.twoFactorProvider
+    root.twoFactorProvider = effectiveProvider
+    if (authViewComponent) {
+      authViewComponent.twoFactorProvider = effectiveProvider
+    }
+    root.logInfo("omarchy:auth", "Submitting password login for " + email + " (provider: " + effectiveProvider + ")...")
     root.isBusy = true
     root.errorMessage = ""
-    root.statusMessage = "Logging in to Bitwarden..."
+    if (root.show2FAField && effectiveProvider === 7) {
+      root.statusMessage = "Waiting for security key touch..."
+    } else {
+      root.statusMessage = "Logging in to Bitwarden..."
+    }
     var cmd = [root.helperPath, "auth", "login-password", "--email", email]
     if (root.rememberEmailChecked) {
       cmd.push("--remember-email", "true")
     } else {
       cmd.push("--remember-email", "false")
     }
-    if (code) {
-      authLoginProc.secret = JSON.stringify({ password: password, code: code })
+    if (code || (root.show2FAField && effectiveProvider === 7)) {
+      var payload = { password: password }
+      if (code) {
+        payload.code = code
+      }
+      if (root.isNewDeviceVerification) {
+        payload.new_device_otp = code
+      }
+      if (effectiveProvider !== undefined && effectiveProvider !== null) {
+        payload.two_factor_provider = effectiveProvider
+      }
+      authLoginProc.secret = JSON.stringify(payload)
     } else {
       authLoginProc.secret = JSON.stringify({ password: password })
     }
@@ -1479,10 +1772,44 @@ Item {
     authLoginProc.running = true
   }
 
+  function doSendTwoFactorEmail(email, password) {
+    if (!email || !password) {
+      root.errorMessage = "Email and password are required to send verification code."
+      if (authViewComponent) {
+        authViewComponent.notifyEmailCodeFailed()
+      }
+      return
+    }
+    root.logInfo("omarchy:auth", "Submitting send two-factor email request for " + email + "...")
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Sending verification email..."
+    authSendEmailProc.secret = JSON.stringify({ password: password })
+    authSendEmailProc.command = [root.helperPath, "auth", "send-two-factor-email", "--email", email]
+    authSendEmailProc.running = true
+  }
+
+  function doCheckFido2Status() {
+    if (authFido2CheckProc.running) return
+    authFido2CheckProc.command = [root.helperPath, "auth", "fido2-status"]
+    authFido2CheckProc.running = true
+  }
+
   function doLogout() {
     root.logInfo("omarchy:auth", "Logging out session...")
     root.clearSensitiveState()
     root.show2FAField = false
+    root.isNewDeviceVerification = false
+    root.twoFactorProvider = 0
+    root.availableTwoFactorProviders = []
+    root.fido2Status = ""
+    if (authViewComponent) {
+      authViewComponent.show2FAField = false
+      authViewComponent.isNewDeviceVerification = false
+      authViewComponent.twoFactorProvider = 0
+      authViewComponent.availableTwoFactorProviders = []
+      authViewComponent.fido2Status = ""
+    }
     root.authState = ({
       status: "unauthenticated",
       server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -1510,12 +1837,12 @@ Item {
 
   Timer {
     interval: 1000
-    running: Boolean(root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && root.selectedItem.login.totp)
+    running: Boolean(root.opened && root.effectiveView === "search" && root.selectedItem && root.selectedItem.login && (root.selectedItem.login.totp || root.selectedItem.login.has_totp))
     repeat: true
     onTriggered: {
-      if (root.currentTotp.ttl > 1) {
+      if (root.currentTotp && root.currentTotp.code && root.currentTotp.ttl > 1) {
         root.currentTotp = ({ code: root.currentTotp.code, ttl: root.currentTotp.ttl - 1, period: root.currentTotp.period })
-      } else {
+      } else if (!totpGenProc.running) {
         root.updateTotpForSelected()
       }
     }
@@ -1529,11 +1856,12 @@ Item {
     onTriggered: root.refreshAuthStatus()
   }
 
-  function restoreSearchFocus() {
+  function restoreSearchFocus(cursorAtEnd) {
+    var atEnd = (cursorAtEnd === true)
     Qt.callLater(function() {
       if (root.opened && root.effectiveView === "search") {
         if (focusRoot) focusRoot.forceActiveFocus()
-        if (searchHeader) searchHeader.focusSearch()
+        if (searchHeader) searchHeader.focusSearch(atEnd)
       } else if (root.opened && (root.effectiveView === "unlock" || root.effectiveView === "login") && authViewComponent && authViewComponent.unlockInput) {
         authViewComponent.unlockInput.forceActiveFocus()
       }
@@ -1554,7 +1882,11 @@ Item {
 
     onVisibleChanged: {
       if (visible) {
-        root.restoreSearchFocus()
+        var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+        root.restoreSearchFocus(canRemember)
+        if (root.effectiveView === "search" && root.selectedItem) {
+          root.handleSelectedItemChanged()
+        }
       }
     }
 
@@ -1873,6 +2205,7 @@ Item {
             // Left Column: Items List
             VaultItemList {
               id: vaultItemList
+              serverUrl: root.effectiveServerUrl
               showWebsiteIcons: root.showWebsiteIcons
               Layout.fillHeight: true
               Layout.preferredWidth: 320
@@ -1910,6 +2243,7 @@ Item {
               // Item Inspector View
               ItemInspector {
                 anchors.fill: parent
+                serverUrl: root.effectiveServerUrl
                 showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
@@ -1975,13 +2309,31 @@ Item {
             loginMethod: root.loginMethod
             rememberEmailChecked: root.rememberEmailChecked
             show2FAField: root.show2FAField
+            isNewDeviceVerification: root.isNewDeviceVerification
+            twoFactorProvider: root.twoFactorProvider
+            availableTwoFactorProviders: root.availableTwoFactorProviders
+            fido2Status: root.fido2Status
+            isInstalling: root.isInstallingDependencies
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
-            onLoginPasswordRequested: function(email, pwd, code) { root.doLoginPassword(email, pwd, code) }
+            onLoginPasswordRequested: function(email, pwd, code, prov) { root.doLoginPassword(email, pwd, code, prov) }
+            onTwoFactorProviderSelected: function(prov) {
+              root.twoFactorProvider = prov
+              if (authViewComponent) {
+                authViewComponent.twoFactorProvider = prov
+              }
+              if (prov === 7) {
+                root.doCheckFido2Status()
+              }
+            }
+            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
+            onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
+            onCheckFido2StatusRequested: { root.doCheckFido2Status() }
+            onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onLogoutRequested: { root.doLogout() }
             onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }
@@ -1994,6 +2346,8 @@ Item {
             visible: root.effectiveView === "settings"
             config: root.config
             cliHealth: root.cliHealth
+            engineSource: root.engineSource
+            enginePackage: root.enginePackage
             logBuffer: root.logBuffer
             isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
@@ -2019,6 +2373,21 @@ Item {
             onCopyDiagnosticsRequested: { root.copyDiagnostics() }
             onClearLogsRequested: { root.logBuffer = [] }
           }
+
+          // Mode D: Dependency Check View (Prerequisite Setup)
+          DependencyCheckView {
+            id: dependencyCheckView
+            anchors.fill: parent
+            visible: root.effectiveView === "dependency_check"
+            isChecking: root.isCheckingDependencies
+            isInstalling: root.isInstallingDependencies
+            fontFamily: root.fontFamily
+            foreground: root.foreground
+            accent: root.accent
+            borderColor: root.borderColor
+            onRecheckRequested: root.checkDependencies()
+            onInstallRequested: root.installMissingDependencies()
+          }
         }
 
         // 3. Footer Bar (Bottom Left: Actions, Sync, Lock, Settings; Bottom Right: Versions & Actions)
@@ -2027,7 +2396,7 @@ Item {
           isBusy: root.isBusy
           overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
           backendVersion: (root.cliHealth && root.cliHealth.version) || ""
-          isEngineInstalled: Boolean(root.cliHealth && root.cliHealth.installed)
+          isEngineInstalled: !root.dependenciesMissing && Boolean(root.cliHealth && root.cliHealth.installed)
           isDownloadingCli: root.isDownloadingCli
           updateAvailable: root.updateAvailable
           latestVersion: root.latestVersion
@@ -2407,7 +2776,10 @@ Item {
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.showActionPalette) {
-                searchHeader.searchField.forceActiveFocus()
+                if (!searchHeader.searchField.activeFocus) {
+                  var canRemember = Boolean(root.config && root.config.remember_last_search === true && root.authState && root.authState.status === "unlocked")
+                  searchHeader.focusSearch(canRemember)
+                }
               }
             })
           }
@@ -2514,9 +2886,19 @@ Item {
               root.statusMessage = "Logged in successfully."
             }
             root.searchQuery = ""
-            if (authViewComponent) authViewComponent.clearInputs()
-
             root.show2FAField = false
+            root.isNewDeviceVerification = false
+            root.twoFactorProvider = 0
+            root.availableTwoFactorProviders = []
+            root.fido2Status = ""
+            if (authViewComponent) {
+              authViewComponent.clearInputs()
+              authViewComponent.show2FAField = false
+              authViewComponent.isNewDeviceVerification = false
+              authViewComponent.twoFactorProvider = 0
+              authViewComponent.availableTwoFactorProviders = []
+              authViewComponent.fido2Status = ""
+            }
             root.authState = ({
               status: statusVal,
               server_url: (root.authState && root.authState.server_url) || (root.config && root.config.server_url) || "",
@@ -2530,10 +2912,11 @@ Item {
               root.syncVault(true, true)
             }
           } else {
-            root.errorMessage = data.error || "Login failed."
-            root.logWarn("omarchy:auth", root.errorMessage)
             var errLower = (data.error || "").toLowerCase()
-            var is2FA = Boolean(data.two_factor_required)
+            var isNewDevice = Boolean(data.new_device_verification_required)
+                || errLower.indexOf("new device verification") !== -1
+            var is2FA = isNewDevice
+                || Boolean(data.two_factor_required)
                 || errLower.indexOf("two-step") !== -1
                 || errLower.indexOf("two-factor") !== -1
                 || errLower.indexOf("two factor") !== -1
@@ -2542,15 +2925,53 @@ Item {
                 || errLower.indexOf("verification code") !== -1
                 || errLower.indexOf("authenticator code") !== -1
                 || errLower.indexOf("security code") !== -1
+                || errLower.indexOf("security key") !== -1
+                || errLower.indexOf("webauthn") !== -1
+            var was2FAShown = root.show2FAField
+            if (is2FA && !was2FAShown) {
+              root.errorMessage = ""
+              root.statusMessage = ""
+              root.logInfo("omarchy:auth", "Two-factor authentication required for login.")
+            } else {
+              root.errorMessage = data.error || "Login failed."
+              root.logWarn("omarchy:auth", root.errorMessage)
+            }
+            root.isNewDeviceVerification = isNewDevice
+            var prov = (data.two_factor_provider !== undefined && data.two_factor_provider !== null)
+                ? Number(data.two_factor_provider)
+                : 0
+            if (data.two_factor_providers && data.two_factor_providers.length > 0) {
+              root.availableTwoFactorProviders = data.two_factor_providers
+              if (data.two_factor_provider === undefined || data.two_factor_provider === null) {
+                if (data.two_factor_providers.indexOf(7) !== -1) {
+                  prov = 7
+                } else if (data.two_factor_providers.indexOf(0) !== -1) {
+                  prov = 0
+                } else if (data.two_factor_providers.indexOf(1) !== -1) {
+                  prov = 1
+                }
+              }
+            } else {
+              root.availableTwoFactorProviders = []
+            }
+            root.twoFactorProvider = prov
+            root.fido2Status = data.fido2_status || ""
             if (is2FA) {
               root.show2FAField = true
-              if (authViewComponent && authViewComponent.twoFactorInput) {
+              if (prov !== 7 && authViewComponent && authViewComponent.twoFactorInput) {
                 Qt.callLater(function() {
                   authViewComponent.twoFactorInput.forceActiveFocus()
                 })
               }
             } else {
               root.show2FAField = false
+            }
+            if (authViewComponent) {
+              authViewComponent.show2FAField = root.show2FAField
+              authViewComponent.isNewDeviceVerification = root.isNewDeviceVerification
+              authViewComponent.twoFactorProvider = root.twoFactorProvider
+              authViewComponent.availableTwoFactorProviders = root.availableTwoFactorProviders
+              authViewComponent.fido2Status = root.fido2Status
             }
           }
         } catch (e) {
@@ -2566,7 +2987,78 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0 && !root.errorMessage) root.errorMessage = "Login command failed."
+      if (code !== 0 && !root.errorMessage && !root.show2FAField) root.errorMessage = "Login command failed."
+    }
+  }
+
+  Process {
+    id: authSendEmailProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      if (secret) {
+        write(secret + "\n")
+        secret = ""
+      }
+    }
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok) {
+            root.statusMessage = data.message || "Verification code sent to your email."
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeSent()
+            }
+          } else {
+            root.errorMessage = data.error || "Failed to send verification email."
+            root.logWarn("omarchy:auth", root.errorMessage)
+            if (authViewComponent) {
+              authViewComponent.notifyEmailCodeFailed()
+            }
+          }
+        } catch (e) {
+          root.errorMessage = "Failed to parse send email response."
+          root.logError("omarchy:auth", root.errorMessage + ": " + e)
+          if (authViewComponent) {
+            authViewComponent.notifyEmailCodeFailed()
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+    }
+    onExited: function(code) {
+      root.isBusy = false
+      if (code !== 0 && !root.errorMessage) {
+        root.errorMessage = "Failed to send verification email."
+        if (authViewComponent) {
+          authViewComponent.notifyEmailCodeFailed()
+        }
+      }
+    }
+  }
+
+  Process {
+    id: authFido2CheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok && data.status) {
+            root.fido2Status = data.status
+            if (authViewComponent) {
+              authViewComponent.fido2Status = data.status
+            }
+          }
+        } catch (e) {}
+      }
     }
   }
 
@@ -2632,9 +3124,10 @@ Item {
         try {
           var res = JSON.parse(text)
           if (res && res.ok === false) {
-            root.errorMessage = res.error || "Vault sync failed."
-            root.logError("omarchy:vault", "Vault sync failed: " + root.errorMessage)
-            var errStr = String(res.error || "")
+            var rawError = String(res.error || "Vault sync failed.")
+            root.logError("omarchy:vault", "Vault sync failed: " + rawError)
+            root.errorMessage = root.formatSyncError(rawError)
+            var errStr = rawError
             if (errStr.indexOf("Session expired") !== -1 || errStr.indexOf("Please log in") !== -1 || errStr.indexOf("token missing") !== -1) {
               root.clearSensitiveState()
               root.authState = ({

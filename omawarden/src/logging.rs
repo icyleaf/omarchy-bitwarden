@@ -39,6 +39,7 @@ pub fn sanitize_log_message(msg: &str) -> String {
     static TOKEN_RE: OnceLock<Regex> = OnceLock::new();
     static PWD_RE: OnceLock<Regex> = OnceLock::new();
     static SECRET_RE: OnceLock<Regex> = OnceLock::new();
+    static CODE_RE: OnceLock<Regex> = OnceLock::new();
 
     let token_re = TOKEN_RE.get_or_init(|| Regex::new(r"(?i)bearer\s+[a-z0-9_\-\.]+").unwrap());
     let pwd_re = PWD_RE.get_or_init(|| {
@@ -49,11 +50,16 @@ pub fn sanitize_log_message(msg: &str) -> String {
         Regex::new(r#"(?i)("client_secret"|"clientSecret"|"userKey"|"privateKey")\s*:\s*"[^"]*""#)
             .unwrap()
     });
+    let code_re = CODE_RE.get_or_init(|| {
+        Regex::new(r#"(?i)("code"|"twoFactorToken"|"newDeviceOtp"|"new_device_otp")\s*:\s*"[^"]*""#)
+            .unwrap()
+    });
 
     let s1 = token_re.replace_all(msg, "Bearer <REDACTED>");
     let s2 = pwd_re.replace_all(&s1, r#"$1:"<REDACTED>""#);
     let s3 = secret_re.replace_all(&s2, r#"$1:"<REDACTED>""#);
-    s3.into_owned()
+    let s4 = code_re.replace_all(&s3, r#"$1:"<REDACTED>""#);
+    s4.into_owned()
 }
 
 pub fn get_active_log_level() -> LogLevel {
@@ -117,11 +123,15 @@ mod tests {
 
     #[test]
     fn test_sanitize_log_message() {
-        let raw = "Login failed with Bearer eyJhbGciOiJIUzI1NiJ9.test and {\"password\":\"supersecret123\"}";
+        let raw = "Login failed with Bearer eyJhbGciOiJIUzI1NiJ9.test and {\"password\":\"supersecret123\",\"code\":\"123456\",\"newDeviceOtp\":\"654321\"}";
         let sanitized = sanitize_log_message(raw);
         assert!(!sanitized.contains("supersecret123"));
+        assert!(!sanitized.contains("123456"));
+        assert!(!sanitized.contains("654321"));
         assert!(!sanitized.contains("eyJhbGciOiJIUzI1NiJ9.test"));
         assert!(sanitized.contains("Bearer <REDACTED>"));
         assert!(sanitized.contains("\"password\":\"<REDACTED>\""));
+        assert!(sanitized.contains("\"code\":\"<REDACTED>\""));
+        assert!(sanitized.contains("\"newDeviceOtp\":\"<REDACTED>\""));
     }
 }
