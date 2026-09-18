@@ -463,9 +463,7 @@ Item {
                 implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 58
                 radius: 5
                 color: Qt.rgba(0, 0, 0, 0.25)
-                border.color: authRoot.fido2Status === "available"
-                  ? "#10b981"
-                  : (authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : Qt.rgba(1, 1, 1, 0.15))
+                border.color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
                 border.width: 1
 
                 RowLayout {
@@ -479,9 +477,7 @@ Item {
                       : (authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf287")
                     font.family: authRoot.fontFamily
                     font.pixelSize: 20
-                    color: authRoot.fido2Status === "available"
-                      ? "#10b981"
-                      : (authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent)
+                    color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
                     Layout.alignment: Qt.AlignTop
                   }
 
