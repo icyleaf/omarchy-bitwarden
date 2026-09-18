@@ -31,6 +31,50 @@ pub fn base64_to_base64url(s: &str) -> String {
         .to_string()
 }
 
+/// If data is wrapped in a CBOR byte string (major type 2), unwraps and returns the raw bytes.
+/// `fido2-assert -G` outputs CBOR-encoded authenticatorData, whereas W3C WebAuthn requires
+/// the raw authenticatorData bytes.
+pub fn unwrap_cbor_bytestring(data: &[u8]) -> &[u8] {
+    if data.is_empty() {
+        return data;
+    }
+    let b0 = data[0];
+    if (b0 & 0b111_00000) != 0x40 {
+        // Not a CBOR byte string
+        return data;
+    }
+    let info = b0 & 0x1F;
+    let (header_len, payload_len) = match info {
+        0..=23 => (1, info as usize),
+        24 => {
+            if data.len() < 2 {
+                return data;
+            }
+            (2, data[1] as usize)
+        }
+        25 => {
+            if data.len() < 3 {
+                return data;
+            }
+            (3, ((data[1] as usize) << 8) | (data[2] as usize))
+        }
+        26 => {
+            if data.len() < 5 {
+                return data;
+            }
+            let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+            (5, len)
+        }
+        _ => return data,
+    };
+
+    if data.len() >= header_len + payload_len {
+        &data[header_len..header_len + payload_len]
+    } else {
+        data
+    }
+}
+
 /// Parses WebAuthn challenge parameters from Bitwarden/Vaultwarden `TwoFactorProviders2["7"]`.
 pub fn parse_webauthn_challenge(
     val: &serde_json::Value,
@@ -185,8 +229,11 @@ pub fn perform_fido2_assertion(
     // Line 0: cd_hash
     // Line 1: rp_id
     // Line 2: authenticator_data (base64)
-    // Line 3: signature (base64)
-    let auth_data_b64url = base64_to_base64url(lines[2]);
+    let auth_data_raw = BASE64
+        .decode(lines[2])
+        .unwrap_or_else(|_| lines[2].as_bytes().to_vec());
+    let unwrapped_auth_data = unwrap_cbor_bytestring(&auth_data_raw);
+    let auth_data_b64url = base64_to_base64url(&BASE64.encode(unwrapped_auth_data));
     let signature_b64url = base64_to_base64url(lines[3]);
     let client_data_b64url = base64_to_base64url(&BASE64.encode(&client_data_bytes));
     let cred_id_b64url = base64_to_base64url(&cred_id_b64);
@@ -325,5 +372,20 @@ mod tests {
         let cred = deserialized.unwrap();
         assert_eq!(cred.id, "cred_id");
         assert_eq!(cred.response.client_data_json, "client_data");
+    }
+
+    #[test]
+    fn test_unwrap_cbor_bytestring() {
+        // CBOR major type 2 with length 37 (0x58, 0x25)
+        let mut cbor_wrapped = vec![0x58, 37];
+        let raw_expected = vec![0xAA; 37];
+        cbor_wrapped.extend_from_slice(&raw_expected);
+
+        let unwrapped = unwrap_cbor_bytestring(&cbor_wrapped);
+        assert_eq!(unwrapped, &raw_expected[..]);
+
+        // Non-CBOR raw bytes (e.g. SHA256 rpIdHash starting with non-0x40)
+        let raw_unwrapped = vec![0x12, 0x34, 0x56];
+        assert_eq!(unwrap_cbor_bytestring(&raw_unwrapped), &raw_unwrapped[..]);
     }
 }
