@@ -39,7 +39,8 @@ Item {
     check(sm.enginePackage === "omawarden-git", "enginePackage updates to omawarden-git")
 
     // 4. Test engineSource derivation logic matching OmarchyBitwarden.qml
-    function deriveEngineSource(depModel, helperPath) {
+    function deriveEngineSource(depModel, helperPath, cliHealth) {
+      if (cliHealth && !cliHealth.installed) return ""
       if (depModel) {
         for (var i = 0; i < depModel.length; i++) {
           var item = depModel[i]
@@ -53,8 +54,9 @@ Item {
         if (helperPath.indexOf("/usr/") === 0 || helperPath === "/usr/bin/omawarden") {
           return "aur"
         }
+        return "builtin"
       }
-      return "builtin"
+      return ""
     }
 
     function deriveEnginePackage(depModel) {
@@ -73,24 +75,30 @@ Item {
 
     // A: omawarden installed via AUR/pacman (omawarden-git)
     var aurModelGit = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-git", isLocalFallback: false }]
-    check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden") === "aur", "Derives 'aur' when pacman installed")
+    check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' when pacman installed")
     check(deriveEnginePackage(aurModelGit) === "omawarden-git", "Derives 'omawarden-git' package name")
 
     // A2: omawarden installed via AUR/pacman (omawarden-bin)
     var aurModelBin = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-bin", isLocalFallback: false }]
-    check(deriveEngineSource(aurModelBin, "/usr/bin/omawarden") === "aur", "Derives 'aur' when omawarden-bin installed")
+    check(deriveEngineSource(aurModelBin, "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' when omawarden-bin installed")
     check(deriveEnginePackage(aurModelBin) === "omawarden-bin", "Derives 'omawarden-bin' package name")
 
     // B: omawarden satisfied via local fallback binary
     var fallbackModel = [{ pkgName: "omawarden", status: "installed", installedPackage: "", isLocalFallback: true }]
-    check(deriveEngineSource(fallbackModel, "/home/user/plugin/bin/omawarden") === "builtin", "Derives 'builtin' when local fallback")
+    check(deriveEngineSource(fallbackModel, "/home/user/plugin/bin/omawarden", { installed: true }) === "builtin", "Derives 'builtin' when local fallback")
     check(deriveEnginePackage(fallbackModel) === "", "Derives empty enginePackage when local fallback")
 
     // C: fallback on system helperPath
-    check(deriveEngineSource([], "/usr/bin/omawarden") === "aur", "Derives 'aur' from system /usr/bin/omawarden helperPath")
+    check(deriveEngineSource([], "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' from system /usr/bin/omawarden helperPath")
 
     // D: fallback on in-tree helperPath
-    check(deriveEngineSource([], "/home/user/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden") === "builtin", "Derives 'builtin' from in-tree helperPath")
+    check(deriveEngineSource([], "/home/user/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden", { installed: true }) === "builtin", "Derives 'builtin' from in-tree helperPath")
+
+    // E: missing engine state (no package, no binary, or uninstalled cliHealth)
+    var missingModel = [{ pkgName: "omawarden", status: "missing", installedPackage: "", isLocalFallback: false }]
+    check(deriveEngineSource(missingModel, "", { installed: false }) === "", "Derives empty string when engine missing from dependencies")
+    check(deriveEngineSource([], "", { installed: false }) === "", "Derives empty string when engine not installed")
+    check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden", { installed: false }) === "", "Derives empty string when cliHealth.installed is false")
 
     // 5. Test isInstallingDependencies property
     check(sm.isInstallingDependencies === false, "Default isInstallingDependencies is false")

@@ -38,13 +38,20 @@ Item {
 
   function resolveHelper() {
     resolveHelperProc.running = false
-    resolveHelperProc.command = ["which", "omawarden"]
+    var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+    var fallbackPath = localPath || ((Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/omarchy/plugins/icyleaf.bitwarden/bin/omawarden")
+    resolveHelperProc.command = [
+      "sh", "-c",
+      "if command -v omawarden >/dev/null 2>&1; then command -v omawarden; exit 0; elif [ -x \"$1\" ]; then echo \"$1\"; exit 0; else exit 1; fi",
+      "--",
+      fallbackPath
+    ]
     resolveHelperProc.running = true
   }
 
   Process {
     id: resolveHelperProc
-    command: ["which", "omawarden"]
+    command: []
     running: false
     stdout: StdioCollector {
       waitForEnd: true
@@ -57,17 +64,21 @@ Item {
     }
     onExited: function(code) {
       if (code !== 0) {
-        var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-        if (localPath) {
-          root.helperPath = localPath
-        } else {
-          var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-          root.helperPath = pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
-        }
+        root.helperPath = ""
+        root.cliHealth = ({
+          installed: false,
+          ok: false,
+          version: "",
+          server_reachable: false,
+          keyring_available: false,
+          clipboard_available: false,
+          error: "omawarden engine is missing or not installed."
+        })
+      } else {
+        root.refreshConfig()
+        root.refreshHealth()
+        root.refreshAuthStatus()
       }
-      root.refreshConfig()
-      root.refreshHealth()
-      root.refreshAuthStatus()
     }
   }
 
@@ -112,6 +123,7 @@ Item {
   property bool allowLocalBinaryFallback: true
 
   readonly property string engineSource: {
+    if (!cliHealth || !cliHealth.installed) return ""
     if (dependencyCheckView) {
       for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
         var item = dependencyCheckView.dependencyModel.get(i)
@@ -125,8 +137,9 @@ Item {
       if (root.helperPath.indexOf("/usr/") === 0 || root.helperPath === "/usr/bin/omawarden") {
         return "aur"
       }
+      return "builtin"
     }
-    return "builtin"
+    return ""
   }
 
   readonly property string enginePackage: {
@@ -151,6 +164,7 @@ Item {
       root.dependenciesMissing = (missing.length > 0)
       if (root.dependenciesMissing) {
         if (missing.indexOf("omawarden") !== -1) {
+          root.helperPath = ""
           root.cliHealth = ({
             installed: false,
             ok: false,
@@ -201,8 +215,9 @@ Item {
         }
         if (!omawardenInstalled) {
           var localBin = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
+          checkFallbackProc.fallbackText = ""
           checkFallbackProc.running = false
-          checkFallbackProc.command = [localBin, "-V"]
+          checkFallbackProc.command = ["sh", "-c", "if [ -x \"$1\" ]; then exec \"$1\" -V; else exit 1; fi", "--", localBin]
           checkFallbackProc.running = true
           return
         }
@@ -587,12 +602,23 @@ Item {
 
   function refreshHealth() {
     healthProc.running = false
-    healthProc.command = [root.helperPath, "health"]
+    healthProc.command = [
+      "sh", "-c",
+      "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" health; else exit 127; fi",
+      "--",
+      root.helperPath
+    ]
     healthProc.running = true
   }
 
   function refreshAuthStatus() {
-    authStatusProc.command = [root.helperPath, "auth", "status"]
+    authStatusProc.running = false
+    authStatusProc.command = [
+      "sh", "-c",
+      "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" auth status; else exit 127; fi",
+      "--",
+      root.helperPath
+    ]
     authStatusProc.running = true
   }
 
@@ -2389,8 +2415,6 @@ Item {
             onCloseRequested: { root.currentView = "auto" }
             onRefreshHealthRequested: {
               root.checkDependencies()
-              root.resolveHelper()
-              root.refreshConfig()
             }
             onCheckUpdateRequested: { root.checkUpdates(true) }
             onDownloadCliRequested: { root.downloadCli() }
@@ -2582,7 +2606,9 @@ Item {
       onStreamFinished: {
         if (configGetProc.seq !== root.configSeq) return
         try {
-          var data = JSON.parse(text)
+          var cleanText = (text || "").trim()
+          if (cleanText.length === 0) return
+          var data = JSON.parse(cleanText)
           root.config = data
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
@@ -2614,7 +2640,9 @@ Item {
       onStreamFinished: {
         root.isBusy = false
         try {
-          var data = JSON.parse(text)
+          var cleanSetText = (text || "").trim()
+          if (cleanSetText.length === 0) return
+          var data = JSON.parse(cleanSetText)
           root.config = data
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.checkUpdatesEnabled = (data.check_updates !== false)
@@ -2691,7 +2719,6 @@ Item {
           clipboard_available: false,
           error: "CLI executable not found or failed to execute."
         })
-        root.checkDependencies()
       }
     }
   }
@@ -2790,7 +2817,9 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var data = JSON.parse(text)
+          var cleanText = (text || "").trim()
+          if (cleanText.length === 0) return
+          var data = JSON.parse(cleanText)
           if (data && data.status) {
             var wasNotUnlocked = (root.authState.status !== "unlocked")
             root.authState = data

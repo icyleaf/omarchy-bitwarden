@@ -334,7 +334,7 @@ Item {
                 }
 
                 Text {
-                  text: "Engine: " + (settingsRoot.cliHealth.version || (engineBadgeBox.isInstalled ? "Ready" : "Missing"))
+                  text: "Engine: " + (!engineBadgeBox.isInstalled ? "Missing" : (settingsRoot.cliHealth.version || "Ready"))
                   color: settingsRoot.foreground
                   font.pixelSize: 10
                 }
