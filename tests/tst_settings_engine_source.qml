@@ -33,6 +33,11 @@ Item {
     sm.engineSource = "builtin"
     check(sm.engineSource === "builtin", "engineSource updates to 'builtin'")
 
+    // 3b. Test enginePackage property
+    check(sm.enginePackage === "", "Default enginePackage is empty")
+    sm.enginePackage = "omawarden-git"
+    check(sm.enginePackage === "omawarden-git", "enginePackage updates to omawarden-git")
+
     // 4. Test engineSource derivation logic matching OmarchyBitwarden.qml
     function deriveEngineSource(depModel, helperPath) {
       if (depModel) {
@@ -52,13 +57,34 @@ Item {
       return "builtin"
     }
 
-    // A: omawarden installed via AUR/pacman
-    var aurModel = [{ pkgName: "omawarden", status: "installed", isLocalFallback: false }]
-    check(deriveEngineSource(aurModel, "/usr/bin/omawarden") === "aur", "Derives 'aur' when pacman installed")
+    function deriveEnginePackage(depModel) {
+      if (depModel) {
+        for (var i = 0; i < depModel.length; i++) {
+          var item = depModel[i]
+          if (item.pkgName === "omawarden") {
+            if (item.status === "installed" && item.installedPackage) {
+              return item.installedPackage
+            }
+          }
+        }
+      }
+      return ""
+    }
+
+    // A: omawarden installed via AUR/pacman (omawarden-git)
+    var aurModelGit = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-git", isLocalFallback: false }]
+    check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden") === "aur", "Derives 'aur' when pacman installed")
+    check(deriveEnginePackage(aurModelGit) === "omawarden-git", "Derives 'omawarden-git' package name")
+
+    // A2: omawarden installed via AUR/pacman (omawarden-bin)
+    var aurModelBin = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-bin", isLocalFallback: false }]
+    check(deriveEngineSource(aurModelBin, "/usr/bin/omawarden") === "aur", "Derives 'aur' when omawarden-bin installed")
+    check(deriveEnginePackage(aurModelBin) === "omawarden-bin", "Derives 'omawarden-bin' package name")
 
     // B: omawarden satisfied via local fallback binary
-    var fallbackModel = [{ pkgName: "omawarden", status: "installed", isLocalFallback: true }]
+    var fallbackModel = [{ pkgName: "omawarden", status: "installed", installedPackage: "", isLocalFallback: true }]
     check(deriveEngineSource(fallbackModel, "/home/user/plugin/bin/omawarden") === "builtin", "Derives 'builtin' when local fallback")
+    check(deriveEnginePackage(fallbackModel) === "", "Derives empty enginePackage when local fallback")
 
     // C: fallback on system helperPath
     check(deriveEngineSource([], "/usr/bin/omawarden") === "aur", "Derives 'aur' from system /usr/bin/omawarden helperPath")

@@ -28,9 +28,10 @@ Item {
       aurPkgName: "omawarden-bin"
       required: true
       title: "Bitwarden Engine & Daemon"
-      description: "High-performance Rust backend providing end-to-end encryption, TOTP generation, and Unix domain socket IPC (distributed via AUR omawarden-bin)."
+      description: "High-performance Rust backend providing end-to-end encryption, TOTP generation, and Unix domain socket IPC (distributed via AUR omawarden-bin / omawarden-git)."
       status: "idle"     // "idle" | "checking" | "installed" | "missing"
       version: ""
+      installedPackage: ""
       isLocalFallback: false
     }
 
@@ -42,6 +43,7 @@ Item {
       description: "Provides secret-tool CLI for securely persisting vault session tokens and API credentials in the system keyring."
       status: "idle"
       version: ""
+      installedPackage: ""
       isLocalFallback: false
     }
 
@@ -53,6 +55,7 @@ Item {
       description: "Provides wl-copy and wl-paste for secure password and TOTP copying with auto-clearing timeout."
       status: "idle"
       version: ""
+      installedPackage: ""
       isLocalFallback: false
     }
   }
@@ -72,6 +75,7 @@ Item {
           if (item.pkgName === name || item.aurPkgName === name || (item.pkgName === "omawarden" && (name === "omawarden-bin" || name === "omawarden-git"))) {
             dependencyModel.setProperty(j, "status", "installed")
             dependencyModel.setProperty(j, "version", ver)
+            dependencyModel.setProperty(j, "installedPackage", name)
             dependencyModel.setProperty(j, "isLocalFallback", false)
             break
           }
@@ -94,6 +98,7 @@ Item {
           if (item.pkgName === missingName || item.aurPkgName === missingName) {
             dependencyModel.setProperty(j, "status", "missing")
             dependencyModel.setProperty(j, "version", "")
+            dependencyModel.setProperty(j, "installedPackage", "")
             dependencyModel.setProperty(j, "isLocalFallback", false)
             break
           }
@@ -108,6 +113,7 @@ Item {
       if (item.pkgName === pkgName) {
         dependencyModel.setProperty(j, "status", "installed")
         dependencyModel.setProperty(j, "version", ver ? (ver + " (local)") : "local")
+        dependencyModel.setProperty(j, "installedPackage", "")
         dependencyModel.setProperty(j, "isLocalFallback", true)
         break
       }
@@ -134,6 +140,7 @@ Item {
     for (var i = 0; i < dependencyModel.count; i++) {
       dependencyModel.setProperty(i, "status", "checking")
       dependencyModel.setProperty(i, "version", "")
+      dependencyModel.setProperty(i, "installedPackage", "")
       dependencyModel.setProperty(i, "isLocalFallback", false)
     }
   }
@@ -283,7 +290,12 @@ Item {
                       anchors.centerIn: parent
                       text: {
                         if (Boolean(model.isLocalFallback)) return "Local Binary Fallback"
-                        if (model.pkgName === "omawarden") return "AUR: omawarden-bin"
+                        if (model.pkgName === "omawarden") {
+                          if (model.status === "installed" && model.installedPackage) {
+                            return "AUR: " + model.installedPackage
+                          }
+                          return "AUR: omawarden-bin / omawarden-git"
+                        }
                         return "Core System Package"
                       }
                       color: {
