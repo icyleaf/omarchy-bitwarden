@@ -81,20 +81,43 @@
 
 请确保系统中已安装以下基础工具：
 
+- **omawarden 核心引擎**：高性能 Rust 编写的 Bitwarden 原生 CLI 引擎（可通过 AUR 或 GitHub Releases 获取）
 - **密钥环 / 秘密服务 (Secret Service)**：`secret-tool`（Arch/Debian/Fedora 上的 `libsecret` 软件包）
 - **Wayland 剪贴板管理**：`wl-clipboard`（提供 `wl-copy` / `wl-paste`）
+
+> [!TIP]
+> **一键向导**：首次打开 Omarchy Bitwarden 时若检测到缺少依赖，将自动弹出交互式**依赖检查向导**，点击即可通过 Omarchy 浮动终端弹窗自动安装 `omawarden-bin`、`libsecret` 与 `wl-clipboard`。
 
 ---
 
 ## 安装与配置
 
-1. **通过 Omarchy CLI 一键安装并启用**：
+### 1. 安装 omawarden 原生引擎 (Arch Linux / AUR)
+
+原生引擎已正式发布至 Arch Linux AUR，提供两种版本供选择：
+
+- **`omawarden-bin`**（推荐）：官方预编译二进制包，开箱即用。
+- **`omawarden-git`**：基于开发分支（`develop`）实时编译的开发版包。
+
+```bash
+# 安装稳定预编译包（推荐）
+paru -S omawarden-bin
+# 或
+yay -S omawarden-bin
+
+# 或安装 Git 实时开发版本
+paru -S omawarden-git
+```
+
+*(其他 Linux 发行版用户可前往 [GitHub Releases](https://github.com/icyleaf/omarchy-bitwarden/releases) 直接下载预编译二进制，置入 `$PATH` 即可使用)。*
+
+### 2. 通过 Omarchy CLI 安装并启用插件
 
 ```bash
 omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 ```
 
-2. **配置全局快捷键与窗口规则**（在 `~/.config/hypr/bindings.lua` 中配置）：
+### 3. 配置全局快捷键与窗口规则（在 `~/.config/hypr/bindings.lua` 中配置）
 
 ```lua
 -- ~/.config/hypr/bindings.lua
@@ -106,6 +129,14 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
   size = { 1152, 768 }
 })
 ```
+
+## 引擎来源徽标与更新管理
+
+在**设置 (Settings)** 弹窗中，插件会智能识别当前运行的引擎来源并提供差异化更新体验：
+
+- **`[ AUR: omawarden-bin ]` / `[ AUR: omawarden-git ]`**：由 pacman/AUR 包管理器托管。当有新版本时，点击 `Update (AUR)` 会调用浮动终端启动 paru/yay 执行系统包更新。
+- **`[ builtin ]`**：使用本地内置二进制（`bin/omawarden`）运行。支持直接从 GitHub Releases 下载最新发行版更新。
+- **开发分支更新抑制**：当运行 `omawarden-git` 或带有 `-dev` 后缀的开发版本时，会自动静默常规稳定版更新弹窗，防止误降级。
 
 ## 更新与卸载
 
@@ -128,10 +159,15 @@ omarchy plugin remove icyleaf.bitwarden
 
 `omarchy-bitwarden` 支持两种连接 Bitwarden 或自建 Vaultwarden 的登录认证方式：
 
-### 1. 主密码登录 (+ 2FA 双因素认证)
+### 1. 主密码登录 (+ 2FA 双因素全能认证)
 
 - **默认直连**：直接在覆盖层登录界面输入账户邮箱与主密码。
-- **双因素认证 (2FA)**：如果账户开启了两步验证，界面会自动展开 **2FA Code** 输入框。输入 6 位 TOTP 动态码（或邮箱验证码）即可完成认证。
+- **全功能双因素认证 (2FA)**：
+  - **身份验证器 (TOTP)** (*Provider 0*)：输入来自身份验证器 App 的 6 位动态验证码。
+  - **邮箱验证码** (*Provider 1*)：系统自动触发邮箱验证码发送，支持输入验证码及重新发送。
+  - **硬件安全密钥 / WebAuthn / FIDO2** (*Provider 7*)：原生支持 YubiKey、SoloKey、Nitrokey 等物理硬件密钥与 Passkey。界面提供直观的物理触控提示（`Touch your security key...`），并支持用户存在性验证（UP）、用户确认（UV）及密钥 PIN 码输入。
+  - **多 2FA 方式自由切换**：当账户启用了多种两步验证方式（如安全密钥 + 验证器 + 邮箱）时，提供交互式提供商下拉菜单，可在登录时自由切换认证方式，并默认优先推荐硬件密钥。
+- **新设备授权验证**：首次在新环境或新设备登录时，智能捕获服务端设备质询，支持通过邮箱 OTP 完成一次性新设备激活。
 - **记住邮箱**：勾选“记住邮箱”可在后续会话中自动预填登录邮箱地址。
 
 ### 2. 个人 API Key 登录
@@ -211,7 +247,7 @@ flowchart TD
 
 ## 路线图
 
-### 阶段一：已完成（快速检索与核心安全）
+### 阶段一：已完成（快速检索、核心安全与分发体系）
 
 - [x] 内存缓存与亚毫秒级模糊搜索
 - [x] 完整的 Argon2id / PBKDF2 / AES-256-CBC / RSA-OAEP 原生密码学解密
@@ -226,7 +262,11 @@ flowchart TD
 - [x] 动作面板（<kbd>Ctrl</kbd>+<kbd>K</kbd>）与密码历史记录查看器（<kbd>Ctrl</kbd>+<kbd>H</kbd>）
 - [x] FIDO2 / WebAuthn Passkey 凭据标识与条目创建/修改时间历史
 - [x] 锁定状态后台同步（支持在登录且锁定时安全同步最新端到端密文）
-- [x] 自建 Vaultwarden 实例、个人 API Key 及 2FA 登录支持
+- [x] 自建 Vaultwarden 实例与个人 API Key 登录支持
+- [x] 完整的 2FA 双因素全能认证（身份验证器 TOTP、邮箱验证码、原生 FIDO2 / WebAuthn 硬件安全密钥）
+- [x] 官方 Arch Linux AUR 软件包分发（`omawarden-bin`、`omawarden-git`）及 UI 引擎来源徽标
+- [x] 渠道差异化更新管理与终端一键依赖安装向导
+- [x] 搜索状态会话持久化（在窗口开关间记忆上一次搜索词、分类及选中条目）
 - [x] 双通道结构化日志与脱敏诊断信息导出
 
 ### 阶段二：进行中 / 近期规划（完整密码库条目生命周期与编辑）
