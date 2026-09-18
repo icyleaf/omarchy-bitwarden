@@ -683,7 +683,9 @@ fn main() -> ExitCode {
 
                             effective_provider = Some(chosen_provider);
                             if chosen_provider == 7 {
-                                eprintln!("Please touch your WebAuthn security key (waiting for touch)...");
+                                eprintln!(
+                                    "Connecting to server and requesting WebAuthn challenge..."
+                                );
                                 res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
                             } else {
                                 let prompt_label = match chosen_provider {
