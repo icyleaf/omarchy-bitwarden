@@ -15,7 +15,7 @@ use omawarden::storage::StorageManager;
 use omawarden::totp::generate_totp;
 use omawarden::vault::VaultManager;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -669,8 +669,10 @@ fn main() -> ExitCode {
                                     };
                                     eprintln!("  [{}] {}", idx + 1, label);
                                 }
-                                let choice = rpassword::prompt_password("Select method [1]: ")
-                                    .unwrap_or_default();
+                                eprint!("Select method [1-{} (default 1)]: ", providers.len());
+                                let _ = io::stderr().flush();
+                                let mut choice = String::new();
+                                let _ = io::stdin().read_line(&mut choice);
                                 let idx = choice
                                     .trim()
                                     .parse::<usize>()
