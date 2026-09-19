@@ -68,6 +68,7 @@ Item {
       download_dir: dlDirInput.text.trim() || "~/Downloads",
       auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
       clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
+      max_attachment_size_mb: parseInt(maxAttSizeInput.text.trim()) || 500,
       log_level: settingsRoot.selectedLogLevel,
       show_website_icons: settingsRoot.showWebsiteIconsChecked,
       check_updates: settingsRoot.checkUpdatesChecked,
@@ -508,7 +509,7 @@ Item {
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                 activeFocusOnTab: true
                 KeyNavigation.tab: idUrlInput
-                KeyNavigation.backtab: clipSecInput
+                KeyNavigation.backtab: maxAttSizeInput
                 text: (settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "https://vault.bitwarden.com"
               }
             }
@@ -595,9 +596,28 @@ Item {
                   id: clipSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
                   activeFocusOnTab: true
-                  KeyNavigation.tab: sUrlInput
+                  KeyNavigation.tab: maxAttSizeInput
                   KeyNavigation.backtab: lockMinInput
                   text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
+                }
+              }
+            }
+
+            // Max Attachment Size (MB)
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 3
+              Text { text: "Max Attachment (MB):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Rectangle {
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: maxAttSizeInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+                TextInput {
+                  id: maxAttSizeInput
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  activeFocusOnTab: true
+                  KeyNavigation.tab: sUrlInput
+                  KeyNavigation.backtab: clipSecInput
+                  validator: IntValidator { bottom: 1; top: 100000 }
+                  text: (settingsRoot.config && settingsRoot.config.max_attachment_size_mb) ? String(settingsRoot.config.max_attachment_size_mb) : "500"
                 }
               }
             }
