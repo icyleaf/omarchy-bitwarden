@@ -15,12 +15,22 @@ Item {
 
   Component.onCompleted: {
     // 1. Config load -> max_attachment_size_mb binding & buildPayload
-    sm.config = ({ server_url: "https://vault.bitwarden.com", log_level: "error", max_attachment_size_mb: 250 })
+    sm.config = ({
+      server_url: "https://vault.bitwarden.com",
+      log_level: "error",
+      max_attachment_size_mb: 250,
+      auto_lock_minutes: 0,
+      clipboard_clear_seconds: 0
+    })
     check(sm.buildPayload().max_attachment_size_mb === 250, "config max_attachment_size_mb:250 is emitted in buildPayload")
+    check(sm.buildPayload().auto_lock_minutes === 0, "auto_lock_minutes:0 is preserved as 0 instead of falling back to 15")
+    check(sm.buildPayload().clipboard_clear_seconds === 0, "clipboard_clear_seconds:0 is preserved as 0 instead of falling back to 30")
 
     // 2. Upgrade path: key absent defaults to 500
     sm.config = ({ server_url: "https://vault.bitwarden.com", log_level: "error" })
     check(sm.buildPayload().max_attachment_size_mb === 500, "missing max_attachment_size_mb defaults buildPayload to 500")
+    check(sm.buildPayload().auto_lock_minutes === 15, "missing auto_lock_minutes defaults buildPayload to 15")
+    check(sm.buildPayload().clipboard_clear_seconds === 30, "missing clipboard_clear_seconds defaults buildPayload to 30")
 
     // 3. Regression guard: required keys in buildPayload
     var payload = sm.buildPayload()

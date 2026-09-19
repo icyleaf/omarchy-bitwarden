@@ -66,9 +66,9 @@ Item {
       server_url: sUrlInput.text.trim() || "https://vault.bitwarden.com",
       identity_url: idUrlInput.text.trim(),
       download_dir: dlDirInput.text.trim() || "~/Downloads",
-      auto_lock_minutes: parseInt(lockMinInput.text.trim()) || 15,
-      clipboard_clear_seconds: parseInt(clipSecInput.text.trim()) || 30,
-      max_attachment_size_mb: parseInt(maxAttSizeInput.text.trim()) || 500,
+      auto_lock_minutes: isNaN(parseInt(lockMinInput.text.trim())) ? 15 : Math.max(0, parseInt(lockMinInput.text.trim())),
+      clipboard_clear_seconds: isNaN(parseInt(clipSecInput.text.trim())) ? 30 : Math.max(0, parseInt(clipSecInput.text.trim())),
+      max_attachment_size_mb: isNaN(parseInt(maxAttSizeInput.text.trim())) || parseInt(maxAttSizeInput.text.trim()) <= 0 ? 500 : parseInt(maxAttSizeInput.text.trim()),
       log_level: settingsRoot.selectedLogLevel,
       show_website_icons: settingsRoot.showWebsiteIconsChecked,
       check_updates: settingsRoot.checkUpdatesChecked,
@@ -580,7 +580,9 @@ Item {
                   activeFocusOnTab: true
                   KeyNavigation.tab: clipSecInput
                   KeyNavigation.backtab: dlDirInput
-                  text: (settingsRoot.config && settingsRoot.config.auto_lock_minutes) ? String(settingsRoot.config.auto_lock_minutes) : "15"
+                  inputMethodHints: Qt.ImhDigitsOnly
+                  validator: IntValidator { bottom: 0; top: 100000 }
+                  text: (settingsRoot.config && settingsRoot.config.auto_lock_minutes !== undefined) ? String(settingsRoot.config.auto_lock_minutes) : "15"
                 }
               }
             }
@@ -598,7 +600,9 @@ Item {
                   activeFocusOnTab: true
                   KeyNavigation.tab: maxAttSizeInput
                   KeyNavigation.backtab: lockMinInput
-                  text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
+                  inputMethodHints: Qt.ImhDigitsOnly
+                  validator: IntValidator { bottom: 0; top: 100000 }
+                  text: (settingsRoot.config && settingsRoot.config.clipboard_clear_seconds !== undefined) ? String(settingsRoot.config.clipboard_clear_seconds) : "30"
                 }
               }
             }
@@ -616,8 +620,9 @@ Item {
                   activeFocusOnTab: true
                   KeyNavigation.tab: sUrlInput
                   KeyNavigation.backtab: clipSecInput
+                  inputMethodHints: Qt.ImhDigitsOnly
                   validator: IntValidator { bottom: 1; top: 100000 }
-                  text: (settingsRoot.config && settingsRoot.config.max_attachment_size_mb) ? String(settingsRoot.config.max_attachment_size_mb) : "500"
+                  text: (settingsRoot.config && settingsRoot.config.max_attachment_size_mb !== undefined) ? String(settingsRoot.config.max_attachment_size_mb) : "500"
                 }
               }
             }
