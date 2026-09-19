@@ -169,6 +169,8 @@ enum ConfigAction {
         show_website_icons: Option<String>,
         #[arg(long)]
         remember_last_search: Option<String>,
+        #[arg(long, help = "Maximum allowed attachment size in MB (default: 500)")]
+        max_attachment_size: Option<u64>,
     },
 }
 
@@ -463,6 +465,9 @@ fn main() -> ExitCode {
                         "log_level" => println!("{}", cfg.log_level),
                         "show_website_icons" => println!("{}", cfg.show_website_icons),
                         "remember_last_search" => println!("{}", cfg.remember_last_search),
+                        "max_attachment_size_mb" | "max_attachment_size" => {
+                            println!("{}", cfg.max_attachment_size_mb)
+                        }
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
                             return ExitCode::FAILURE;
@@ -485,6 +490,7 @@ fn main() -> ExitCode {
                 log_level,
                 show_website_icons,
                 remember_last_search,
+                max_attachment_size,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -531,6 +537,7 @@ fn main() -> ExitCode {
                     log_level,
                     show_website_icons: parsed_show_website_icons,
                     remember_last_search: parsed_remember_last_search,
+                    max_attachment_size_mb: max_attachment_size,
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -2181,6 +2188,35 @@ mod tests {
                         show_website_icons, ..
                     },
             } => assert_eq!(show_website_icons, Some("true".to_string())),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+    }
+
+    #[test]
+    fn test_cli_max_attachment_size_arg_parsing() {
+        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        match cli_default.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        max_attachment_size,
+                        ..
+                    },
+            } => assert_eq!(max_attachment_size, None),
+            _ => panic!("Expected Commands::Config with ConfigAction::Set"),
+        }
+
+        let cli_custom =
+            Cli::try_parse_from(["omawarden", "config", "set", "--max-attachment-size", "250"])
+                .unwrap();
+        match cli_custom.command {
+            Commands::Config {
+                action:
+                    ConfigAction::Set {
+                        max_attachment_size,
+                        ..
+                    },
+            } => assert_eq!(max_attachment_size, Some(250)),
             _ => panic!("Expected Commands::Config with ConfigAction::Set"),
         }
     }

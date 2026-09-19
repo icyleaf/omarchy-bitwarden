@@ -185,6 +185,11 @@ pub fn get_attachment(
     }
 
     let cfg = ConfigManager::new(None).load();
+    let max_attachment_bytes = if cfg.max_attachment_size_mb > 0 {
+        cfg.max_attachment_size_mb.saturating_mul(1024 * 1024)
+    } else {
+        crate::config::DEFAULT_MAX_ATTACHMENT_SIZE_MB * 1024 * 1024
+    };
     let storage_mgr = StorageManager::default();
     let storage = storage_mgr.load();
 
@@ -406,10 +411,14 @@ pub fn get_attachment(
     }
 
     let bytes = match download_res {
-        Ok(r) if r.status().is_success() => {
+        Ok(mut r) if r.status().is_success() => {
             let r_content_len = r.content_length();
-            let body_bytes = match r.bytes() {
-                Ok(b) => b.to_vec(),
+            let body_bytes = match crate::api::read_response_limited(
+                &mut r,
+                r_content_len,
+                max_attachment_bytes,
+            ) {
+                Ok(b) => b,
                 Err(e) => {
                     let err_msg = format!("Failed to read attachment response bytes: {}", e);
                     crate::log_error!("omawarden:attachment", "{}", err_msg);
@@ -456,7 +465,7 @@ pub fn get_attachment(
                         req = req.header("Authorization", format!("Bearer {}", active_token));
                     }
 
-                    let blob_resp = match req.send() {
+                    let mut blob_resp = match req.send() {
                         Ok(resp) => resp,
                         Err(e) => {
                             let err_msg =
@@ -496,8 +505,12 @@ pub fn get_attachment(
                     }
 
                     let blob_content_len = blob_resp.content_length();
-                    let raw_bytes = match blob_resp.bytes() {
-                        Ok(b) => b.to_vec(),
+                    let raw_bytes = match crate::api::read_response_limited(
+                        &mut blob_resp,
+                        blob_content_len,
+                        max_attachment_bytes,
+                    ) {
+                        Ok(b) => b,
                         Err(e) => {
                             let err_msg =
                                 format!("Failed to read attachment bytes from storage: {}", e);
@@ -1329,5 +1342,157 @@ mod tests {
 
         // Different port
         assert!(!is_same_origin("https://vault.example.com:8443", base));
+    }
+
+    static ATTACHMENT_ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_attachment_download_rejects_oversized_advertised_content_length() {
+        let _lock = ATTACHMENT_ENV_TEST_MUTEX.lock().unwrap();
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("GET /api/ciphers/item_large/attachment/att_large") {
+                    // Advertises 600MB Content-Length, exceeding default 500MB limit
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 629145600\r\nConnection: close\r\n\r\n{}";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        // Set up temporary data directory with data.json pointing to our mock server
+        let data_dir = tempfile::tempdir().unwrap();
+        let data_json = data_dir.path().join("data.json");
+        std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
+
+        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
+        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+
+        let res = get_attachment(
+            "item_large",
+            "att_large",
+            "large.bin",
+            None,
+            false,
+            false,
+            Some("fake_token"),
+            None,
+            false,
+        );
+
+        if let Some(old) = old_data_dir {
+            std::env::set_var("OMAWARDEN_DATA_DIR", old);
+        } else {
+            std::env::remove_var("OMAWARDEN_DATA_DIR");
+        }
+
+        assert!(!res.ok);
+        let err = res.error.expect("Expected error for oversized attachment");
+        assert!(
+            err.contains("Response body exceeds maximum allowed size")
+                || err.contains("Failed to read attachment response bytes"),
+            "Unexpected error: {}",
+            err
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_attachment_download_rejects_stream_overflow() {
+        let _lock = ATTACHMENT_ENV_TEST_MUTEX.lock().unwrap();
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("GET /api/ciphers/item_stream/attachment/att_stream") {
+                    // Send 200 OK without Content-Length header, streaming 2MB of chunks
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    // Send chunks of data
+                    let chunk = [b'X'; 4096];
+                    for _ in 0..512 {
+                        // 512 * 4KB = 2MB
+                        if stream.write_all(&chunk).is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        });
+
+        // Set up temporary config directory with 1MB max_attachment_size_mb
+        let config_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = config_dir
+            .path()
+            .join("omarchy")
+            .join("plugins")
+            .join("icyleaf.bitwarden");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let config_json = plugin_dir.join("config.json");
+        std::fs::write(&config_json, r#"{"max_attachment_size_mb": 1}"#).unwrap();
+
+        // Set up temporary data directory with data.json pointing to our mock server
+        let data_dir = tempfile::tempdir().unwrap();
+        let data_json = data_dir.path().join("data.json");
+        std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
+
+        let old_config_dir = std::env::var("XDG_CONFIG_HOME").ok();
+        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
+        std::env::set_var("XDG_CONFIG_HOME", config_dir.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+
+        let res = get_attachment(
+            "item_stream",
+            "att_stream",
+            "stream.bin",
+            None,
+            false,
+            false,
+            Some("fake_token"),
+            None,
+            false,
+        );
+
+        if let Some(old) = old_config_dir {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        if let Some(old) = old_data_dir {
+            std::env::set_var("OMAWARDEN_DATA_DIR", old);
+        } else {
+            std::env::remove_var("OMAWARDEN_DATA_DIR");
+        }
+
+        assert!(!res.ok);
+        let err = res.error.expect("Expected error for oversized stream");
+        assert!(
+            err.contains("Response body exceeds maximum allowed size")
+                || err.contains("Failed to read attachment response bytes"),
+            "Unexpected error: {}",
+            err
+        );
+
+        let _ = handle.join();
     }
 }

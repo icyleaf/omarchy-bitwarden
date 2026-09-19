@@ -2,12 +2,22 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::time::Duration;
 
 use crate::crypto::{
     derive_master_key, derive_master_password_hash, EncString, KdfType, SymmetricCryptoKey,
 };
 use crate::vault::{parse_ssh_key_fields, SshMetadata, VaultItem};
+
+/// Maximum response size for error bodies (64 KiB)
+pub const MAX_ERROR_BODY_SIZE: u64 = 64 * 1024;
+
+/// Maximum response size for standard API JSON responses (e.g. prelogin, token, 2FA, ciphers) (2 MiB)
+pub const MAX_API_BODY_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Maximum response size for vault synchronization responses (/sync) (64 MiB)
+pub const MAX_SYNC_BODY_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum ApiError {
@@ -22,6 +32,10 @@ pub enum ApiError {
     },
     NewDeviceVerificationRequired,
     Crypto(String),
+    ResponseTooLarge {
+        size: u64,
+        max_allowed: u64,
+    },
 }
 
 impl std::fmt::Display for ApiError {
@@ -37,10 +51,68 @@ impl std::fmt::Display for ApiError {
                 write!(f, "New device verification required")
             }
             ApiError::Crypto(s) => write!(f, "Cryptographic error: {}", s),
+            ApiError::ResponseTooLarge { size, max_allowed } => write!(
+                f,
+                "Response size {} bytes exceeds maximum allowed limit of {} bytes",
+                size, max_allowed
+            ),
         }
     }
 }
 impl std::error::Error for ApiError {}
+
+/// Reads bytes from a reader with both pre-read Content-Length rejection and streaming byte cap.
+pub fn read_response_limited<R: std::io::Read>(
+    reader: &mut R,
+    advertised_len: Option<u64>,
+    max_allowed: u64,
+) -> Result<Vec<u8>, ApiError> {
+    if let Some(advertised) = advertised_len {
+        if advertised > max_allowed {
+            return Err(ApiError::ResponseTooLarge {
+                size: advertised,
+                max_allowed,
+            });
+        }
+    }
+
+    let mut buf = Vec::new();
+    let take_limit = max_allowed.saturating_add(1);
+    reader
+        .take(take_limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| ApiError::Http(format!("Failed to read response body: {}", e)))?;
+
+    if (buf.len() as u64) > max_allowed {
+        return Err(ApiError::ResponseTooLarge {
+            size: buf.len() as u64,
+            max_allowed,
+        });
+    }
+
+    Ok(buf)
+}
+
+/// Reads a UTF-8 string from a response with a size cap.
+pub fn read_response_text(
+    resp: &mut reqwest::blocking::Response,
+    max_allowed: u64,
+) -> Result<String, ApiError> {
+    let content_len = resp.content_length();
+    let bytes = read_response_limited(resp, content_len, max_allowed)?;
+    String::from_utf8(bytes)
+        .map_err(|e| ApiError::Http(format!("Invalid UTF-8 in response: {}", e)))
+}
+
+/// Reads a JSON object from a response with a size cap.
+pub fn read_response_json<T: serde::de::DeserializeOwned>(
+    resp: &mut reqwest::blocking::Response,
+    max_allowed: u64,
+) -> Result<T, ApiError> {
+    let content_len = resp.content_length();
+    let bytes = read_response_limited(resp, content_len, max_allowed)?;
+    serde_json::from_slice::<T>(&bytes).map_err(|e| ApiError::Json(e.to_string()))
+}
 
 impl From<reqwest::Error> for ApiError {
     fn from(e: reqwest::Error) -> Self {
@@ -393,18 +465,18 @@ impl BitwardenApiClient {
             }
         }
 
-        let resp = resp.map_err(ApiError::from)?;
+        let mut resp = resp.map_err(ApiError::from)?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
             return Err(ApiError::HttpStatus(
                 status,
                 format!("Prelogin returned HTTP {} ({})", status, body),
             ));
         }
 
-        resp.json::<PreloginResponse>()
-            .map_err(|e| ApiError::Json(e.to_string()))
+        read_response_json::<PreloginResponse>(&mut resp, MAX_API_BODY_SIZE)
     }
 
     fn post_identity_connect_token(
@@ -506,9 +578,9 @@ impl BitwardenApiClient {
                 Ok((token_resp, user_key))
             };
 
-        let resp = self.post_identity_connect_token(&form_params)?;
+        let mut resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
-        let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
 
         if status.is_success() {
             parse_and_decrypt_token(&body_text)
@@ -552,10 +624,13 @@ impl BitwardenApiClient {
                             retry_params.remove("twoFactorProvider");
                             retry_params.remove("twoFactorRemember");
                             retry_params.insert("newDeviceOtp", code.trim().to_string());
-                            if let Ok(retry_resp) = self.post_identity_connect_token(&retry_params)
+                            if let Ok(mut retry_resp) =
+                                self.post_identity_connect_token(&retry_params)
                             {
                                 let retry_status = retry_resp.status();
-                                if let Ok(retry_body) = retry_resp.text() {
+                                if let Ok(retry_body) =
+                                    read_response_text(&mut retry_resp, MAX_API_BODY_SIZE)
+                                {
                                     if retry_status.is_success() {
                                         return parse_and_decrypt_token(&retry_body);
                                     }
@@ -618,10 +693,13 @@ impl BitwardenApiClient {
                         {
                             let mut retry_params = form_params.clone();
                             retry_params.insert("twoFactorProvider", "1".to_string());
-                            if let Ok(retry_resp) = self.post_identity_connect_token(&retry_params)
+                            if let Ok(mut retry_resp) =
+                                self.post_identity_connect_token(&retry_params)
                             {
                                 let retry_status = retry_resp.status();
-                                if let Ok(retry_body) = retry_resp.text() {
+                                if let Ok(retry_body) =
+                                    read_response_text(&mut retry_resp, MAX_API_BODY_SIZE)
+                                {
                                     if retry_status.is_success() {
                                         return parse_and_decrypt_token(&retry_body);
                                     }
@@ -703,12 +781,13 @@ impl BitwardenApiClient {
             }
         }
 
-        let resp = resp.map_err(ApiError::from)?;
+        let mut resp = resp.map_err(ApiError::from)?;
         if resp.status().is_success() {
             Ok(())
         } else {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
             Err(ApiError::HttpStatus(
                 status,
                 format!("Failed to send 2FA email: HTTP {} - {}", status, body),
@@ -730,9 +809,9 @@ impl BitwardenApiClient {
         form_params.insert("deviceIdentifier", get_device_identifier());
         form_params.insert("deviceName", "linux".to_string());
 
-        let resp = self.post_identity_connect_token(&form_params)?;
+        let mut resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
-        let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
 
         if status.is_success() {
             serde_json::from_str::<TokenResponse>(&body_text)
@@ -767,9 +846,9 @@ impl BitwardenApiClient {
         form_params.insert("client_id", "web".to_string());
         form_params.insert("refresh_token", refresh_token.to_string());
 
-        let resp = self.post_identity_connect_token(&form_params)?;
+        let mut resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
-        let body_text = resp.text().map_err(|e| ApiError::Http(e.to_string()))?;
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
 
         if status.is_success() {
             serde_json::from_str::<TokenResponse>(&body_text)
@@ -806,7 +885,7 @@ impl BitwardenApiClient {
 
     pub fn sync_vault(&self, access_token: &str) -> Result<SyncResponse, ApiError> {
         let url = format!("{}/sync", self.urls.api_url);
-        let resp = self
+        let mut resp = self
             .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -815,20 +894,20 @@ impl BitwardenApiClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
             return Err(ApiError::HttpStatus(
                 status,
                 format!("Sync vault failed with HTTP status {} ({})", status, body),
             ));
         }
 
-        resp.json::<SyncResponse>()
-            .map_err(|e| ApiError::Json(e.to_string()))
+        read_response_json::<SyncResponse>(&mut resp, MAX_SYNC_BODY_SIZE)
     }
 
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
         let url = format!("{}/ciphers", self.urls.api_url);
-        let resp = self
+        let mut resp = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -838,15 +917,15 @@ impl BitwardenApiClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
             return Err(ApiError::HttpStatus(
                 status,
                 format!("Create cipher failed (HTTP {}): {}", status, body),
             ));
         }
 
-        resp.json::<Value>()
-            .map_err(|e| ApiError::Json(e.to_string()))
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 }
 
@@ -2844,6 +2923,82 @@ mod tests {
         let client = BitwardenApiClient::new(&server_url);
         let res = client.send_two_factor_email("user@example.com", "password123");
         assert!(res.is_ok(), "Expected send_two_factor_email to succeed");
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_read_response_limited_oversized_content_length_rejected() {
+        let mut mock_data = std::io::Cursor::new(vec![b'A'; 100]);
+        // Advertised length 10MB exceeds 2MB limit
+        let res = read_response_limited(&mut mock_data, Some(10 * 1024 * 1024), 2 * 1024 * 1024);
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 10 * 1024 * 1024);
+                assert_eq!(max_allowed, 2 * 1024 * 1024);
+            }
+            other => panic!("Expected ResponseTooLarge, got {:?}", other),
+        }
+        // Reader position remains untouched at 0 (rejected before reading)
+        assert_eq!(mock_data.position(), 0);
+    }
+
+    #[test]
+    fn test_read_response_limited_stream_overflow_rejected() {
+        // Stream sends 100 bytes without Content-Length, but max allowed is 50 bytes
+        let mut mock_data = std::io::Cursor::new(vec![b'B'; 100]);
+        let res = read_response_limited(&mut mock_data, None, 50);
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 51); // Aborted as soon as limit + 1 byte is encountered
+                assert_eq!(max_allowed, 50);
+            }
+            other => panic!("Expected ResponseTooLarge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_read_response_limited_within_limit_succeeds() {
+        let mut mock_data = std::io::Cursor::new(b"{\"ok\":true}".to_vec());
+        let res = read_response_limited(&mut mock_data, Some(11), 1024).unwrap();
+        assert_eq!(res, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn test_prelogin_rejects_oversized_advertised_response() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    // Malicious server advertises 100MB Content-Length for prelogin (exceeds 2MB MAX_API_BODY_SIZE)
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 104857600\r\nConnection: close\r\n\r\n{}";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("victim@example.com");
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 104857600);
+                assert_eq!(max_allowed, MAX_API_BODY_SIZE);
+            }
+            other => panic!("Expected ApiError::ResponseTooLarge, got {:?}", other),
+        }
 
         let _ = handle.join();
     }

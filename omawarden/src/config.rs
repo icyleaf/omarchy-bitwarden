@@ -13,6 +13,7 @@ pub const DEFAULT_CHECK_UPDATES: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 pub const DEFAULT_REMEMBER_LAST_SEARCH: bool = false;
+pub const DEFAULT_MAX_ATTACHMENT_SIZE_MB: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -38,6 +39,8 @@ pub struct Config {
     pub show_website_icons: bool,
     #[serde(default = "default_remember_last_search")]
     pub remember_last_search: bool,
+    #[serde(default = "default_max_attachment_size_mb")]
+    pub max_attachment_size_mb: u64,
 }
 
 fn default_server_url() -> String {
@@ -70,6 +73,9 @@ fn default_show_website_icons() -> bool {
 fn default_remember_last_search() -> bool {
     DEFAULT_REMEMBER_LAST_SEARCH
 }
+fn default_max_attachment_size_mb() -> u64 {
+    DEFAULT_MAX_ATTACHMENT_SIZE_MB
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -85,6 +91,7 @@ impl Default for Config {
             log_level: default_log_level(),
             show_website_icons: default_show_website_icons(),
             remember_last_search: default_remember_last_search(),
+            max_attachment_size_mb: default_max_attachment_size_mb(),
         }
     }
 }
@@ -255,6 +262,9 @@ impl ConfigManager {
         if let Some(v) = options.remember_last_search {
             cfg.remember_last_search = v;
         }
+        if let Some(v) = options.max_attachment_size_mb {
+            cfg.max_attachment_size_mb = v;
+        }
 
         self.save(&cfg)?;
         Ok((cfg, server_changed))
@@ -274,6 +284,7 @@ pub struct ConfigUpdateOptions {
     pub log_level: Option<String>,
     pub show_website_icons: Option<bool>,
     pub remember_last_search: Option<bool>,
+    pub max_attachment_size_mb: Option<u64>,
 }
 
 #[cfg(test)]
@@ -293,6 +304,7 @@ mod tests {
         assert!(cfg.remember_email);
         assert_eq!(cfg.log_level, "error");
         assert!(!cfg.remember_last_search);
+        assert_eq!(cfg.max_attachment_size_mb, 500);
     }
 
     #[test]
@@ -333,6 +345,7 @@ mod tests {
         assert_eq!(loaded.server_url, DEFAULT_SERVER_URL);
         assert_eq!(loaded.identity_url, None);
         assert!(loaded.remember_email);
+        assert_eq!(loaded.max_attachment_size_mb, 500);
     }
 
     #[test]
@@ -693,6 +706,42 @@ esac
         fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
         let legacy = ConfigManager::new(Some(&legacy_path)).load();
         assert!(!legacy.remember_last_search);
+    }
+
+    #[test]
+    fn test_max_attachment_size_mb_default_and_update() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        assert_eq!(Config::default().max_attachment_size_mb, 500);
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    max_attachment_size_mb: Some(100),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert_eq!(updated_cfg.max_attachment_size_mb, 100);
+
+        // Persisted to disk
+        let reloaded = ConfigManager::new(Some(&config_path)).load();
+        assert_eq!(reloaded.max_attachment_size_mb, 100);
+
+        // Upgrade path: config written before the key existed must default to 500
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        let legacy = ConfigManager::new(Some(&legacy_path)).load();
+        assert_eq!(legacy.max_attachment_size_mb, 500);
     }
 
     #[test]
