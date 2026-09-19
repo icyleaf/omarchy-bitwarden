@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Generate PKGBUILD
         run: |
@@ -71,7 +71,7 @@ jobs:
         env:
           AUR_KEY: ${{ secrets.AUR_KEY }}
         if: env.AUR_KEY != ''
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        uses: KSXGitHub/github-actions-deploy-aur@2ac5a4c1d7035885d46b10e3193393be8460b6f1 # v4.1.1
         with:
           pkgname: omawarden-git
           pkgbuild: ./dist/aur-git/PKGBUILD

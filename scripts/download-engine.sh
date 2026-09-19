@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${1:-$HOME/.config/omarchy/plugins/icyleaf.bitwarden/bin}"
 REPO="${2:-icyleaf/omarchy-bitwarden}"
 TAG="${3:-${OMAWARDEN_TAG:-}}"
+ARG_EXPECTED_SHA="${4:-}"
 
 # Validate repository format to prevent path or URL injection
 if [[ ! "$REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
@@ -37,45 +39,25 @@ download_file() {
 
 GH_HOST="${GITHUB_SERVER_URL:-https://github.com}"
 
-# 1. Resolve release tag: use pinned tag if provided, otherwise fetch latest release
-if [ -n "$TAG" ]; then
-  # Normalize tag name: accept 0.8.0, v0.8.0, omawarden-0.8.0, omawarden-v0.8.0
-  if [[ "$TAG" =~ ^omawarden-v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
-    CLEAN_VER="${BASH_REMATCH[1]}"
-    TAG="omawarden-${CLEAN_VER}"
-  elif [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
-    CLEAN_VER="${BASH_REMATCH[1]}"
-    TAG="omawarden-${CLEAN_VER}"
-  fi
-else
-  # Fetch latest omawarden release tag via Atom feed (immune to API rate limits)
-  if command -v curl >/dev/null 2>&1; then
-    TAG=$(curl -fsSL --max-time 6 "${GH_HOST}/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
-  elif command -v wget >/dev/null 2>&1; then
-    TAG=$(wget -qO- --timeout=6 "${GH_HOST}/${REPO}/releases.atom" 2>/dev/null | grep -o 'releases/tag/omawarden-[^"/]*' | head -n 1 | cut -d'/' -f3 || true)
-  fi
+# Pinned omawarden release and expected SHA-256 digests in validated plugin source
+DEFAULT_PINNED_VERSION="0.8.0"
+DEFAULT_PINNED_TAG="omawarden-${DEFAULT_PINNED_VERSION}"
 
-  # Fallback to GitHub Releases API if Atom feed was not resolved
-  if [ -z "$TAG" ]; then
-    if [ "$GH_HOST" = "https://github.com" ]; then
-      API_URL="https://api.github.com/repos/${REPO}/releases?per_page=10"
-    else
-      API_URL="${GH_HOST}/api/v3/repos/${REPO}/releases?per_page=10"
-    fi
-    if command -v curl >/dev/null 2>&1; then
-      RELEASE_JSON=$(curl -fsSL -H "User-Agent: OmarchyBitwarden" --max-time 10 "$API_URL" 2>/dev/null || true)
-    elif command -v wget >/dev/null 2>&1; then
-      RELEASE_JSON=$(wget -qO- --user-agent="OmarchyBitwarden" --timeout=10 "$API_URL" 2>/dev/null || true)
-    else
-      RELEASE_JSON=""
-    fi
-    TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"omawarden-[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
-  fi
+PINNED_SHA_X86_64="cf122e2ff08c30857a5c298929b16a50c58ca513b3cf200946d5859149f35eb5"
+PINNED_SHA_AARCH64="821e2e008e9cf19ce7b759c5693aa9205b072032023549a8bcc3d19558064edd"
+
+# 1. Resolve release tag: default to immutable pinned release from validated plugin source
+if [ -z "$TAG" ]; then
+  TAG="$DEFAULT_PINNED_TAG"
 fi
 
-if [ -z "$TAG" ]; then
-  echo "{\"ok\":false,\"error\":\"Failed to resolve release tag\"}"
-  exit 1
+# Normalize tag name: accept 0.8.0, v0.8.0, omawarden-0.8.0, omawarden-v0.8.0
+if [[ "$TAG" =~ ^omawarden-v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+  CLEAN_VER="${BASH_REMATCH[1]}"
+  TAG="omawarden-${CLEAN_VER}"
+elif [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+  CLEAN_VER="${BASH_REMATCH[1]}"
+  TAG="omawarden-${CLEAN_VER}"
 fi
 
 # Sanitize release tag to prevent directory traversal or malformed injection
@@ -87,7 +69,34 @@ fi
 VERSION="${TAG#omawarden-}"
 VERSION="${VERSION#v}"
 
-# 2. Try candidate URLs in order of preference (both standard omawarden-<ver> and legacy omawarden-v<ver>)
+# Resolve expected SHA-256 from validated plugin source
+EXPECTED_SHA=""
+IS_PINNED=false
+
+if [ -n "$ARG_EXPECTED_SHA" ]; then
+  EXPECTED_SHA="$ARG_EXPECTED_SHA"
+  IS_PINNED=true
+else
+  # Check companion checksums.txt in validated plugin source
+  ARCHIVE_FILE_NAME="omawarden-${VERSION}-${TRIPLE}.tar.gz"
+  if [ -f "$SCRIPT_DIR/checksums.txt" ]; then
+    LOOKUP_SHA=$(grep -E "[[:space:]]${ARCHIVE_FILE_NAME}\$" "$SCRIPT_DIR/checksums.txt" | head -n 1 | awk '{print $1}' | tr -d ' \r\n' | tr '[:upper:]' '[:lower:]')
+    if [ -n "$LOOKUP_SHA" ]; then
+      EXPECTED_SHA="$LOOKUP_SHA"
+      IS_PINNED=true
+    fi
+  fi
+
+  # Fallback to in-script pinned digests
+  if [ -z "$EXPECTED_SHA" ] && [ "$VERSION" = "$DEFAULT_PINNED_VERSION" ]; then
+    case "$TRIPLE" in
+      x86_64-unknown-linux-gnu) EXPECTED_SHA="$PINNED_SHA_X86_64"; IS_PINNED=true ;;
+      aarch64-unknown-linux-gnu) EXPECTED_SHA="$PINNED_SHA_AARCH64"; IS_PINNED=true ;;
+    esac
+  fi
+fi
+
+# 2. Try candidate URLs in order of preference
 CANDIDATE_URLS=(
   "${GH_HOST}/${REPO}/releases/download/${TAG}/omawarden-${VERSION}-${TRIPLE}.tar.gz"
   "${GH_HOST}/${REPO}/releases/download/${TAG}/omawarden-${TRIPLE}.tar.gz"
@@ -110,21 +119,6 @@ if [ "$DOWNLOADED" != "true" ]; then
   exit 1
 fi
 
-# 3. Download checksum and verify (fail-closed)
-CHECKSUM_FILE="$TMP_DIR/omawarden.tar.gz.sha256"
-if ! download_file "${DOWNLOADED_URL}.sha256" "$CHECKSUM_FILE"; then
-  echo "{\"ok\":false,\"error\":\"Failed to download SHA-256 checksum file from release $TAG\"}"
-  exit 1
-fi
-
-EXPECTED_SHA=$(awk '{print $1}' "$CHECKSUM_FILE" | tr -d ' \r\n' | tr '[:upper:]' '[:lower:]')
-
-# Validate that expected checksum is a valid 64-character hexadecimal SHA-256 string
-if ! [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{64}$ ]]; then
-  echo "{\"ok\":false,\"error\":\"Malformed or invalid SHA-256 checksum in release metadata\"}"
-  exit 1
-fi
-
 # Ensure SHA-256 utility is available
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA=$(sha256sum "$TMP_DIR/omawarden.tar.gz" | awk '{print $1}' | tr -d ' \r\n' | tr '[:upper:]' '[:lower:]')
@@ -140,30 +134,73 @@ if ! [[ "$ACTUAL_SHA" =~ ^[a-f0-9]{64}$ ]]; then
   exit 1
 fi
 
-if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-  echo "{\"ok\":false,\"error\":\"SHA-256 checksum mismatch: expected $EXPECTED_SHA, got $ACTUAL_SHA\"}"
-  exit 1
-fi
-
-VERIFIED=true
-
-# 4. GitHub Artifact Attestation verification (Tier 2 provenance verification)
+# 3. Integrity and Provenance Verification (Dual-tier & Fail-closed)
+VERIFIED=false
 ATTESTATION_VERIFIED=false
-if command -v gh >/dev/null 2>&1; then
-  if gh attestation verify "$TMP_DIR/omawarden.tar.gz" --repo "$REPO" >/dev/null 2>&1; then
-    ATTESTATION_VERIFIED=true
-  else
-    if [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
-      echo "{\"ok\":false,\"error\":\"Security Alert: GitHub Artifact Attestation verification failed for $REPO\"}"
-      exit 1
-    fi
+
+if [ "$IS_PINNED" = "true" ]; then
+  # Expected SHA-256 is pinned in the validated plugin source: verify immutably
+  if ! [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Malformed pinned SHA-256 checksum in plugin source: $EXPECTED_SHA\"}"
+    exit 1
   fi
-elif [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
-  echo "{\"ok\":false,\"error\":\"Security Alert: GitHub CLI (gh) required for strict attestation verification but not found\"}"
-  exit 1
+
+  if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+    echo "{\"ok\":false,\"error\":\"SHA-256 checksum mismatch: expected $EXPECTED_SHA, got $ACTUAL_SHA\"}"
+    exit 1
+  fi
+  VERIFIED=true
+
+  # Tier 2 Provenance Verification: If gh is available, verify attestation
+  if command -v gh >/dev/null 2>&1; then
+    if gh attestation verify "$TMP_DIR/omawarden.tar.gz" --repo "$REPO" >/dev/null 2>&1; then
+      ATTESTATION_VERIFIED=true
+    else
+      if [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
+        echo "{\"ok\":false,\"error\":\"Security Alert: GitHub Artifact Attestation verification failed for $REPO\"}"
+        exit 1
+      fi
+    fi
+  elif [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
+    echo "{\"ok\":false,\"error\":\"Security Alert: GitHub CLI (gh) required for strict attestation verification but not found\"}"
+    exit 1
+  fi
+else
+  # UNPINNED release: require fail-closed immutable provenance check
+  # Step 3a: Verify download against release .sha256 for transport integrity
+  CHECKSUM_FILE="$TMP_DIR/omawarden.tar.gz.sha256"
+  if ! download_file "${DOWNLOADED_URL}.sha256" "$CHECKSUM_FILE"; then
+    echo "{\"ok\":false,\"error\":\"Failed to download SHA-256 checksum file from release $TAG\"}"
+    exit 1
+  fi
+
+  DOWNLOADED_SHA=$(awk '{print $1}' "$CHECKSUM_FILE" | tr -d ' \r\n' | tr '[:upper:]' '[:lower:]')
+  if ! [[ "$DOWNLOADED_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Malformed or invalid SHA-256 checksum in release metadata\"}"
+    exit 1
+  fi
+
+  if [ "$DOWNLOADED_SHA" != "$ACTUAL_SHA" ]; then
+    echo "{\"ok\":false,\"error\":\"SHA-256 checksum mismatch: expected $DOWNLOADED_SHA, got $ACTUAL_SHA\"}"
+    exit 1
+  fi
+
+  # Step 3b: Fail-closed immutable provenance check is mandatory for unpinned releases
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "{\"ok\":false,\"error\":\"Security Alert: GitHub CLI (gh) required for fail-closed provenance verification of unpinned release $TAG, but not found\"}"
+    exit 1
+  fi
+
+  if ! gh attestation verify "$TMP_DIR/omawarden.tar.gz" --repo "$REPO" >/dev/null 2>&1; then
+    echo "{\"ok\":false,\"error\":\"Security Alert: GitHub Artifact Attestation verification failed for unpinned release $TAG\"}"
+    exit 1
+  fi
+
+  ATTESTATION_VERIFIED=true
+  VERIFIED=true
 fi
 
-# 5. Extract and install (fail-closed: only if VERIFIED is true)
+# 4. Extract and install (fail-closed: only if VERIFIED is true)
 if [ "$VERIFIED" != "true" ]; then
   echo "{\"ok\":false,\"error\":\"Installation blocked: archive failed integrity verification\"}"
   exit 1

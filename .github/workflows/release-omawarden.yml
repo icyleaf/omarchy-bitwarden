@@ -34,19 +34,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tool (if needed)
         if: matrix.use_cross
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross
+          cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27
 
       - name: Validate Cargo.toml version matches release tag
         run: |
@@ -91,12 +91,12 @@ jobs:
           echo "sha256_path=dist/${ARCHIVE_NAME}.tar.gz.sha256" >> $GITHUB_OUTPUT
 
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: 'dist/*.tar.gz'
 
       - name: Upload artifact to job
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: omawarden-${{ matrix.target }}
           path: |
@@ -109,19 +109,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Generate Changelog with git-cliff
-        uses: orhun/git-cliff-action@v4
+        uses: orhun/git-cliff-action@4a4a951bc43fafe41cd2348d181853f52356bee7 # v4.4.2
         with:
           config: cliff.toml
           args: --tag ${{ inputs.tag || github.ref_name }} --tag-pattern "^omawarden-v?[0-9].*" --include-path "omawarden/**" --strip header --latest
@@ -131,7 +131,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: "${{ inputs.tag || github.ref_name }}"
@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
@@ -213,7 +213,7 @@ jobs:
         env:
           AUR_KEY: ${{ secrets.AUR_KEY }}
         if: env.AUR_KEY != ''
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        uses: KSXGitHub/github-actions-deploy-aur@2ac5a4c1d7035885d46b10e3193393be8460b6f1 # v4.1.1
         with:
           pkgname: omawarden-bin
           pkgbuild: ./dist/aur/PKGBUILD
