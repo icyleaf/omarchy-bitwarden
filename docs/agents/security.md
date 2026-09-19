@@ -53,18 +53,20 @@ These rules were distilled from real-world vulnerabilities and architectural pit
   - Reporting synthetic success (`verified: true`) when no actual verification was performed.
   - Relying exclusively on an unauthenticated `.sha256` file without provenance verification against release tampering or compromised release assets.
 - ✅ **Required Pattern**:
-  - **Tier 1 (Universal Integrity Checksum)**: Checksum downloads are **mandatory and fail-closed**: if the checksum cannot be fetched, contains non-hex text, or does not match the archive's SHA-256 hash, the script MUST immediately delete the download and exit with a non-zero code.
-  - **Tier 2 (Cryptographic Build Provenance Attestation)**: Release pipelines automatically sign and attest build provenance using GitHub Artifact Attestations (`actions/attest-build-provenance` via Sigstore OIDC). When `gh` CLI is available, the downloader runs `gh attestation verify` to prove the binary originated from an official `icyleaf/omarchy-bitwarden` workflow run.
+  - **In-Source Release Pinning**: Bootstrap downloaders (`scripts/download-engine.sh`) MUST default to an immutable pinned release version and verify against expected SHA-256 digests pinned directly in the validated plugin source (`scripts/checksums.txt`). Never resolve mutable "latest" releases over the network by default.
+  - **Tier 1 (Universal Integrity Checksum)**: For pinned releases, archive checksums are validated directly against in-source hashes. For unpinned releases, checksum downloads are mandatory and fail-closed: if the checksum cannot be fetched, contains non-hex text, or does not match the archive's SHA-256 hash, the script MUST immediately delete the download and exit with a non-zero code.
+  - **Tier 2 (Cryptographic Build Provenance Attestation)**: Release pipelines automatically sign and attest build provenance using GitHub Artifact Attestations (`actions/attest-build-provenance` via Sigstore OIDC). When downloading an unpinned release, immutable provenance verification via `gh attestation verify` is **mandatory and fail-closed** (missing `gh` or failed attestation aborts installation immediately). For pinned releases, attestation verification is performed when `gh` is present, and fails closed when `REQUIRE_ATTESTATION=1`.
+  - **Workflow Action Pinning**: All GitHub Actions workflows (`.github/workflows/`) MUST pin all third-party actions and Git dependencies (`cargo install --git ... --rev ...`) to a full 40-character commit SHA rather than mutable branch or tag names.
   - **Structured Verification Reporting**: The downloader reports `verified: true`, `sha256`, and `attestation_verified: bool` in its structured JSON output for UI transparency.
-  - **Strict Policy Mode**: When `REQUIRE_ATTESTATION=1` is set, attestation verification is mandatory; missing `gh` or failed provenance verification aborts installation immediately.
 - 🧪 **Mandatory Verification**:
   Maintain automated integration tests covering:
-  1. Checksum mismatch aborts without extraction.
-  2. 404 / missing checksum aborts without extraction.
-  3. Malformed/HTML checksum aborts without extraction.
-  4. Attestation success reports `attestation_verified: true`.
-  5. Attestation failure gracefully falls back in default mode and fails closed when `REQUIRE_ATTESTATION=1`.
-  6. Missing `gh` fails closed when `REQUIRE_ATTESTATION=1`.
+  1. Default downloader invocation resolves to pinned release and in-source SHA-256.
+  2. Checksum mismatch aborts without extraction.
+  3. 404 / missing checksum on unpinned release aborts without extraction.
+  4. Malformed/HTML checksum aborts without extraction.
+  5. Attestation success reports `attestation_verified: true`.
+  6. Unpinned releases fail closed when `gh` is missing or attestation verification fails.
+  7. Workflows pin every third-party action and Git dependency to 40-character commit SHAs.
 
 ---
 
