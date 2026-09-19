@@ -1690,6 +1690,7 @@ Item {
     if (settings.show_website_icons !== undefined) cmd.push("--show-website-icons", String(settings.show_website_icons))
     if (settings.check_updates !== undefined) cmd.push("--check-updates", String(settings.check_updates))
     if (settings.remember_last_search !== undefined) cmd.push("--remember-last-search", String(settings.remember_last_search))
+    if (settings.max_attachment_size_mb !== undefined) cmd.push("--max-attachment-size", String(settings.max_attachment_size_mb))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1703,6 +1704,7 @@ Item {
     var rawIdUrl = (root.config && root.config.identity_url) ? root.config.identity_url : ""
     var idUrl = rawIdUrl ? root.sanitizeServerUrl(rawIdUrl) : "Auto"
     var lLevel = (root.config && root.config.log_level) ? root.config.log_level : "error"
+    var maxAttMb = (root.config && root.config.max_attachment_size_mb) ? root.config.max_attachment_size_mb : 500
     var vStatus = (root.authState ? root.authState.status : "unknown")
 
     var report = "### Omarchy Bitwarden Diagnostics Report\n\n"
@@ -1711,6 +1713,7 @@ Item {
     report += "- **Server URL**: " + sUrl + "\n"
     report += "- **Identity URL**: " + idUrl + "\n"
     report += "- **Configured Log Level**: " + lLevel + "\n"
+    report += "- **Max Attachment Size**: " + maxAttMb + " MB\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
     var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN"

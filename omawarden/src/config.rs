@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_CONFIG_FILENAME: &str = "config.json";
 pub const DEFAULT_SERVER_URL: &str = "https://vault.bitwarden.com";
 pub const DEFAULT_DOWNLOAD_DIR: &str = "~/Downloads";
 pub const DEFAULT_AUTO_LOCK_MINUTES: i64 = 15;
@@ -13,6 +15,7 @@ pub const DEFAULT_CHECK_UPDATES: bool = true;
 pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 pub const DEFAULT_REMEMBER_LAST_SEARCH: bool = false;
+pub const DEFAULT_MAX_ATTACHMENT_SIZE_MB: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -38,6 +41,8 @@ pub struct Config {
     pub show_website_icons: bool,
     #[serde(default = "default_remember_last_search")]
     pub remember_last_search: bool,
+    #[serde(default = "default_max_attachment_size_mb")]
+    pub max_attachment_size_mb: u64,
 }
 
 fn default_server_url() -> String {
@@ -70,6 +75,9 @@ fn default_show_website_icons() -> bool {
 fn default_remember_last_search() -> bool {
     DEFAULT_REMEMBER_LAST_SEARCH
 }
+fn default_max_attachment_size_mb() -> u64 {
+    DEFAULT_MAX_ATTACHMENT_SIZE_MB
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -85,6 +93,7 @@ impl Default for Config {
             log_level: default_log_level(),
             show_website_icons: default_show_website_icons(),
             remember_last_search: default_remember_last_search(),
+            max_attachment_size_mb: default_max_attachment_size_mb(),
         }
     }
 }
@@ -92,6 +101,59 @@ impl Default for Config {
 #[derive(Clone, Debug)]
 pub struct ConfigManager {
     pub config_path: PathBuf,
+}
+
+pub fn resolve_legacy_config_path() -> PathBuf {
+    let xdg_config = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        });
+    xdg_config
+        .join("omarchy")
+        .join("plugins")
+        .join("icyleaf.bitwarden")
+        .join(DEFAULT_CONFIG_FILENAME)
+}
+
+pub fn migrate_legacy_config_file(legacy_path: &Path, target_path: &Path) {
+    if legacy_path != target_path && legacy_path.exists() {
+        if !target_path.exists() {
+            if let Some(parent) = target_path.parent() {
+                let _ = crate::fs_util::create_secure_dir_all(parent, 0o700);
+            }
+            if fs::rename(legacy_path, target_path).is_err()
+                && fs::copy(legacy_path, target_path).is_ok()
+            {
+                let _ = fs::remove_file(legacy_path);
+            }
+            let _ = fs::set_permissions(target_path, fs::Permissions::from_mode(0o600));
+        } else {
+            let _ = fs::remove_file(legacy_path);
+        }
+    }
+}
+
+pub fn resolve_default_config_path() -> PathBuf {
+    if let Ok(custom_dir) = env::var("OMAWARDEN_CONFIG_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_CONFIG_FILENAME);
+        }
+    }
+
+    let xdg_config = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        });
+    let target_path = xdg_config.join("omawarden").join(DEFAULT_CONFIG_FILENAME);
+    let legacy_path = resolve_legacy_config_path();
+
+    migrate_legacy_config_file(&legacy_path, &target_path);
+
+    target_path
 }
 
 impl Default for ConfigManager {
@@ -104,19 +166,7 @@ impl ConfigManager {
     pub fn new(custom_path: Option<&Path>) -> Self {
         let config_path = match custom_path {
             Some(p) => p.to_path_buf(),
-            None => {
-                let xdg_config = env::var("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        PathBuf::from(home).join(".config")
-                    });
-                xdg_config
-                    .join("omarchy")
-                    .join("plugins")
-                    .join("icyleaf.bitwarden")
-                    .join("config.json")
-            }
+            None => resolve_default_config_path(),
         };
         Self { config_path }
     }
@@ -255,6 +305,9 @@ impl ConfigManager {
         if let Some(v) = options.remember_last_search {
             cfg.remember_last_search = v;
         }
+        if let Some(v) = options.max_attachment_size_mb {
+            cfg.max_attachment_size_mb = v;
+        }
 
         self.save(&cfg)?;
         Ok((cfg, server_changed))
@@ -274,6 +327,7 @@ pub struct ConfigUpdateOptions {
     pub log_level: Option<String>,
     pub show_website_icons: Option<bool>,
     pub remember_last_search: Option<bool>,
+    pub max_attachment_size_mb: Option<u64>,
 }
 
 #[cfg(test)]
@@ -293,6 +347,7 @@ mod tests {
         assert!(cfg.remember_email);
         assert_eq!(cfg.log_level, "error");
         assert!(!cfg.remember_last_search);
+        assert_eq!(cfg.max_attachment_size_mb, 500);
     }
 
     #[test]
@@ -333,6 +388,7 @@ mod tests {
         assert_eq!(loaded.server_url, DEFAULT_SERVER_URL);
         assert_eq!(loaded.identity_url, None);
         assert!(loaded.remember_email);
+        assert_eq!(loaded.max_attachment_size_mb, 500);
     }
 
     #[test]
@@ -696,6 +752,42 @@ esac
     }
 
     #[test]
+    fn test_max_attachment_size_mb_default_and_update() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        assert_eq!(Config::default().max_attachment_size_mb, 500);
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path);
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let (updated_cfg, _) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    max_attachment_size_mb: Some(100),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert_eq!(updated_cfg.max_attachment_size_mb, 100);
+
+        // Persisted to disk
+        let reloaded = ConfigManager::new(Some(&config_path)).load();
+        assert_eq!(reloaded.max_attachment_size_mb, 100);
+
+        // Upgrade path: config written before the key existed must default to 500
+        let legacy_path = dir.path().join("legacy.json");
+        fs::write(&legacy_path, r#"{"email": "legacy@test.com"}"#).unwrap();
+        let legacy = ConfigManager::new(Some(&legacy_path)).load();
+        assert_eq!(legacy.max_attachment_size_mb, 500);
+    }
+
+    #[test]
     fn test_validate_url_scheme_security() {
         // Valid secure or loopback URLs
         assert!(ConfigManager::validate_url_scheme_security(
@@ -771,5 +863,81 @@ esac
         let err = res.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("Remote servers must use HTTPS"));
+    }
+
+    #[test]
+    fn test_default_config_path_not_in_watched_plugin_directory() {
+        let config_mgr = ConfigManager::default();
+        let path_str = config_mgr.config_path.to_string_lossy();
+        assert!(
+            !path_str.contains("omarchy/plugins"),
+            "Config file path must not reside inside watched omarchy/plugins directory, was: {}",
+            path_str
+        );
+        assert!(
+            path_str.ends_with("omawarden/config.json"),
+            "Config file path must end with omawarden/config.json, was: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_file_moves_existing_data() {
+        let dir = tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_file = legacy_dir.join("config.json");
+        fs::write(
+            &legacy_file,
+            "{\"server_url\":\"https://vault.example.com\"}",
+        )
+        .unwrap();
+
+        let target_dir = dir.path().join("target");
+        let target_file = target_dir.join("config.json");
+
+        assert!(legacy_file.exists());
+        assert!(!target_file.exists());
+
+        migrate_legacy_config_file(&legacy_file, &target_file);
+
+        assert!(
+            !legacy_file.exists(),
+            "Legacy config file must be removed after migration"
+        );
+        assert!(
+            target_file.exists(),
+            "Target config file must exist after migration"
+        );
+
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"server_url\":\"https://vault.example.com\"}");
+
+        let metadata = fs::metadata(&target_file).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "Migrated config file must have 0600 permissions"
+        );
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_cleans_up_when_target_already_exists() {
+        let dir = tempdir().unwrap();
+        let legacy_file = dir.path().join("legacy.json");
+        fs::write(&legacy_file, "{\"old\":true}").unwrap();
+
+        let target_file = dir.path().join("target.json");
+        fs::write(&target_file, "{\"new\":true}").unwrap();
+
+        migrate_legacy_config_file(&legacy_file, &target_file);
+
+        assert!(
+            !legacy_file.exists(),
+            "Stale legacy config file must be deleted when target already exists"
+        );
+        assert!(target_file.exists());
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"new\":true}");
     }
 }
