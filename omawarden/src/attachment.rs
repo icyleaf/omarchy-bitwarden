@@ -1442,13 +1442,9 @@ mod tests {
 
         // Set up temporary config directory with 1MB max_attachment_size_mb
         let config_dir = tempfile::tempdir().unwrap();
-        let plugin_dir = config_dir
-            .path()
-            .join("omarchy")
-            .join("plugins")
-            .join("icyleaf.bitwarden");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        let config_json = plugin_dir.join("config.json");
+        let cfg_dir = config_dir.path().join("omawarden");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_json = cfg_dir.join("config.json");
         std::fs::write(&config_json, r#"{"max_attachment_size_mb": 1}"#).unwrap();
 
         // Set up temporary data directory with data.json pointing to our mock server

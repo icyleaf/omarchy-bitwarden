@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_CONFIG_FILENAME: &str = "config.json";
 pub const DEFAULT_SERVER_URL: &str = "https://vault.bitwarden.com";
 pub const DEFAULT_DOWNLOAD_DIR: &str = "~/Downloads";
 pub const DEFAULT_AUTO_LOCK_MINUTES: i64 = 15;
@@ -101,6 +103,59 @@ pub struct ConfigManager {
     pub config_path: PathBuf,
 }
 
+pub fn resolve_legacy_config_path() -> PathBuf {
+    let xdg_config = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        });
+    xdg_config
+        .join("omarchy")
+        .join("plugins")
+        .join("icyleaf.bitwarden")
+        .join(DEFAULT_CONFIG_FILENAME)
+}
+
+pub fn migrate_legacy_config_file(legacy_path: &Path, target_path: &Path) {
+    if legacy_path != target_path && legacy_path.exists() {
+        if !target_path.exists() {
+            if let Some(parent) = target_path.parent() {
+                let _ = crate::fs_util::create_secure_dir_all(parent, 0o700);
+            }
+            if fs::rename(legacy_path, target_path).is_err()
+                && fs::copy(legacy_path, target_path).is_ok()
+            {
+                let _ = fs::remove_file(legacy_path);
+            }
+            let _ = fs::set_permissions(target_path, fs::Permissions::from_mode(0o600));
+        } else {
+            let _ = fs::remove_file(legacy_path);
+        }
+    }
+}
+
+pub fn resolve_default_config_path() -> PathBuf {
+    if let Ok(custom_dir) = env::var("OMAWARDEN_CONFIG_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_CONFIG_FILENAME);
+        }
+    }
+
+    let xdg_config = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        });
+    let target_path = xdg_config.join("omawarden").join(DEFAULT_CONFIG_FILENAME);
+    let legacy_path = resolve_legacy_config_path();
+
+    migrate_legacy_config_file(&legacy_path, &target_path);
+
+    target_path
+}
+
 impl Default for ConfigManager {
     fn default() -> Self {
         Self::new(None)
@@ -111,19 +166,7 @@ impl ConfigManager {
     pub fn new(custom_path: Option<&Path>) -> Self {
         let config_path = match custom_path {
             Some(p) => p.to_path_buf(),
-            None => {
-                let xdg_config = env::var("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        PathBuf::from(home).join(".config")
-                    });
-                xdg_config
-                    .join("omarchy")
-                    .join("plugins")
-                    .join("icyleaf.bitwarden")
-                    .join("config.json")
-            }
+            None => resolve_default_config_path(),
         };
         Self { config_path }
     }
@@ -820,5 +863,81 @@ esac
         let err = res.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("Remote servers must use HTTPS"));
+    }
+
+    #[test]
+    fn test_default_config_path_not_in_watched_plugin_directory() {
+        let config_mgr = ConfigManager::default();
+        let path_str = config_mgr.config_path.to_string_lossy();
+        assert!(
+            !path_str.contains("omarchy/plugins"),
+            "Config file path must not reside inside watched omarchy/plugins directory, was: {}",
+            path_str
+        );
+        assert!(
+            path_str.ends_with("omawarden/config.json"),
+            "Config file path must end with omawarden/config.json, was: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_file_moves_existing_data() {
+        let dir = tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_file = legacy_dir.join("config.json");
+        fs::write(
+            &legacy_file,
+            "{\"server_url\":\"https://vault.example.com\"}",
+        )
+        .unwrap();
+
+        let target_dir = dir.path().join("target");
+        let target_file = target_dir.join("config.json");
+
+        assert!(legacy_file.exists());
+        assert!(!target_file.exists());
+
+        migrate_legacy_config_file(&legacy_file, &target_file);
+
+        assert!(
+            !legacy_file.exists(),
+            "Legacy config file must be removed after migration"
+        );
+        assert!(
+            target_file.exists(),
+            "Target config file must exist after migration"
+        );
+
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"server_url\":\"https://vault.example.com\"}");
+
+        let metadata = fs::metadata(&target_file).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "Migrated config file must have 0600 permissions"
+        );
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_cleans_up_when_target_already_exists() {
+        let dir = tempdir().unwrap();
+        let legacy_file = dir.path().join("legacy.json");
+        fs::write(&legacy_file, "{\"old\":true}").unwrap();
+
+        let target_file = dir.path().join("target.json");
+        fs::write(&target_file, "{\"new\":true}").unwrap();
+
+        migrate_legacy_config_file(&legacy_file, &target_file);
+
+        assert!(
+            !legacy_file.exists(),
+            "Stale legacy config file must be deleted when target already exists"
+        );
+        assert!(target_file.exists());
+        let content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "{\"new\":true}");
     }
 }
