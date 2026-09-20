@@ -60,6 +60,3 @@ jobs:
 
       - name: Run test suite
         run: cargo test --all-targets
-
-      - name: Run downloader integration tests
-        run: python3 ../tests/test_downloader.py

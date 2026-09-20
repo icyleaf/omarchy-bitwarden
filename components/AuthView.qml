@@ -8,7 +8,6 @@ Item {
   property var authState: ({})
   property var config: ({})
   property var cliHealth: ({})
-  property bool isDownloadingCli: false
   property bool isBusy: false
   property string loginMethod: "password"
   property bool rememberEmailChecked: true
@@ -30,7 +29,6 @@ Item {
   signal loginPasswordRequested(string email, string password, string code, var provider)
   signal loginApiKeyRequested(string clientId, string clientSecret)
   signal logoutRequested()
-  signal downloadCliRequested()
   signal settingsRequested()
   signal twoFactorProviderSelected(int provider)
   signal sendTwoFactorEmailRequested(string email, string password)
