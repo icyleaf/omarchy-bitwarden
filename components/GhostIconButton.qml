@@ -1,11 +1,12 @@
 import QtQuick
 import QtQuick.Controls
+import qs.Commons
 
 Rectangle {
   id: ghostBtnRoot
 
   property string iconText: ""
-  property int iconPixelSize: 12
+  property int iconPixelSize: Style.font.body
   property color foreground: "#ffffff"
   property color iconColor: mouseArea.containsMouse ? foreground : Qt.darker(foreground, 1.4)
   property color hoverBackground: Qt.rgba(1, 1, 1, 0.1)

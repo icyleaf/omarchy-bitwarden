@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 ScrollView {
   id: emptyInspectorRoot
@@ -32,7 +33,7 @@ ScrollView {
     Text {
       text: "KEYBOARD SHORTCUTS"
       color: Qt.darker(emptyInspectorRoot.foreground, 1.8)
-      font.pixelSize: 9
+      font.pixelSize: Style.fontPx(0.75)
       font.weight: Font.DemiBold
     }
 
@@ -55,14 +56,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Tab"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Switch Category Filter (Logins, Cards, Secure Note, SSH)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -80,14 +81,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Alt + V"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Switch Vault Scope (All Vaults, Personal, Organizations)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -105,14 +106,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Alt + F"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Switch Folder Scope (All Folders, Specific Folder)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -130,14 +131,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "↵ "
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Copy Primary Credential (Password / Card / Key)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -155,14 +156,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + ↵"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Copy Live TOTP Code"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -180,14 +181,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + U"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Copy Username"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -205,14 +206,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + T"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Toggle Field / Secret Visibility"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -230,14 +231,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + H"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Open Password History Modal"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -255,14 +256,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + O"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Open Primary Website in Default Browser"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -280,14 +281,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + K"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Open Action Palette (Copy Attributes, PIN, Attachments)"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -305,14 +306,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + R"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Sync Vault with Server"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -330,14 +331,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + L"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Lock Vault Immediately"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }
@@ -355,14 +356,14 @@ ScrollView {
           anchors.centerIn: parent
           text: "Ctrl + ,"
           color: emptyInspectorRoot.foreground
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           font.weight: Font.Medium
         }
       }
       Text {
         text: "Open Settings & Configuration"
         color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
       }

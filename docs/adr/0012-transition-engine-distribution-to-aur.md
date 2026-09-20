@@ -46,7 +46,7 @@ We transition the distribution of the `omawarden` engine to the Arch User Reposi
 - On initialization, `OmarchyBitwarden.qml` dynamically queries the host `$PATH` via `command -v omawarden`.
 - If found in system `$PATH`, `/usr/bin/omawarden` is used directly.
 - If not present in `$PATH`, the engine is marked missing and routes to `DependencyCheckView.qml`.
-- **Minimum Engine Version Gate (>= 0.8.1)**: To prevent execution of older engines vulnerable to memory exhaustion via unbounded responses (0.8.0), the frontend enforces `isEngineVersionSatisfied(ver)` with `minimumEngineVersion: "0.8.1"`. Any engine `< 0.8.1` is rejected and marked as missing, requiring an update via AUR. Development and VCS builds (`-dev`, `.dev`, `omawarden-git`) remain permitted.
+- **Minimum Engine Version Gate (>= 0.8.1)**: To prevent execution of older engines vulnerable to memory exhaustion via unbounded responses (0.8.0), the frontend enforces `isEngineVersionSatisfied(ver)` with `minimumEngineVersion: "0.8.1"`. Any engine `< 0.8.1` is rejected and marked as missing, requiring an update via AUR. Development and VCS builds (`-dev`, `.dev`, `omawarden-git`) must also have their numeric SemVer satisfy `>= 0.8.1` to be permitted.
 
 ### 4. Gated Dependency Onboarding View (`DependencyCheckView.qml`)
 - On overlay startup and activation, the frontend queries package installation states via `pacman -Q omawarden omawarden-bin omawarden-git libsecret wl-clipboard`.

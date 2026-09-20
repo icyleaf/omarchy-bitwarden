@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Item {
   id: depViewRoot
@@ -20,18 +21,22 @@ Item {
   readonly property string minimumEngineVersion: "0.8.1"
 
   function parseSemVer(v) {
-    if (!v) return [0, 0, 0]
-    var clean = String(v).replace(/^omawarden-|^v/i, "").trim()
-    var parts = clean.split("-")[0].split(".")
-    var major = parseInt(parts[0]) || 0
-    var minor = parseInt(parts[1]) || 0
-    var patch = parseInt(parts[2]) || 0
+    if (!v || typeof v !== "string") return null
+    var clean = String(v).replace(/^omawarden[\s-]+|^v/i, "").trim()
+    var match = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?/)
+    if (!match) return null
+    var major = parseInt(match[1], 10)
+    var minor = parseInt(match[2], 10)
+    var patch = (match[3] !== undefined && match[3] !== "") ? parseInt(match[3], 10) : 0
     return [major, minor, patch]
   }
 
   function compareSemVer(v1, v2) {
     var a = parseSemVer(v1)
     var b = parseSemVer(v2)
+    if (!a && !b) return 0
+    if (!a) return -1
+    if (!b) return 1
     for (var i = 0; i < 3; i++) {
       if (a[i] > b[i]) return 1
       if (a[i] < b[i]) return -1
@@ -41,11 +46,15 @@ Item {
 
   function isEngineVersionSatisfied(ver) {
     if (!ver) return false
-    var clean = String(ver).trim()
-    if (clean.indexOf("-dev") !== -1 || clean.indexOf(".dev") !== -1 || /\.r\d+\.g[a-f0-9]+/i.test(clean)) {
-      return true
+    var parsed = parseSemVer(ver)
+    if (!parsed) return false
+    var min = parseSemVer(minimumEngineVersion)
+    if (!min) return false
+    for (var i = 0; i < 3; i++) {
+      if (parsed[i] > min[i]) return true
+      if (parsed[i] < min[i]) return false
     }
-    return compareSemVer(clean, minimumEngineVersion) >= 0
+    return true
   }
 
   signal recheckRequested()
@@ -200,14 +209,14 @@ Item {
           Text {
             text: "\uf0ad"
             font.family: depViewRoot.fontFamily
-            font.pixelSize: 22
+            font.pixelSize: Style.fontPx(1.833)
             color: depViewRoot.accent
           }
 
           Text {
             text: "System Dependencies Required"
             color: depViewRoot.foreground
-            font.pixelSize: 16
+            font.pixelSize: Style.font.heading
             font.bold: true
           }
 
@@ -224,7 +233,7 @@ Item {
               anchors.centerIn: parent
               text: "Prerequisite Setup"
               color: depViewRoot.accent
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               font.bold: true
             }
           }
@@ -233,7 +242,7 @@ Item {
         Text {
           text: "Omarchy Bitwarden requires native Arch / AUR packages to provide background encryption, system keyring session caching, and Wayland clipboard management."
           color: Qt.darker(depViewRoot.foreground, 1.6)
-          font.pixelSize: 11
+          font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
           Layout.fillWidth: true
         }
@@ -293,7 +302,7 @@ Item {
                   Text {
                     text: model.pkgName
                     color: depViewRoot.foreground
-                    font.pixelSize: 13
+                    font.pixelSize: Style.font.subtitle
                     font.bold: true
                   }
 
@@ -318,7 +327,7 @@ Item {
                         if (model.pkgName === "omawarden") return depViewRoot.accent
                         return Qt.darker(depViewRoot.foreground, 1.4)
                       }
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       font.bold: true
                     }
                   }
@@ -326,7 +335,7 @@ Item {
                   Text {
                     text: model.version ? ("v" + model.version) : ""
                     color: "#a6e3a1"
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     font.bold: true
                     visible: model.status === "installed" && Boolean(model.version)
                   }
@@ -335,14 +344,14 @@ Item {
                 Text {
                   text: model.title
                   color: Qt.darker(depViewRoot.foreground, 1.3)
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   font.weight: Font.DemiBold
                 }
 
                 Text {
                   text: model.description
                   color: Qt.darker(depViewRoot.foreground, 1.6)
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
                   Layout.fillWidth: true
                 }
@@ -392,7 +401,7 @@ Item {
                     if (model.status === "checking") return "#f9e2af"
                     return depViewRoot.foreground
                   }
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
               }
@@ -420,7 +429,7 @@ Item {
             anchors.centerIn: parent
             text: depViewRoot.isChecking ? "Checking..." : "↻ Recheck"
             color: depViewRoot.isChecking ? Qt.darker(depViewRoot.foreground, 2) : depViewRoot.foreground
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             font.bold: true
           }
 
@@ -462,7 +471,7 @@ Item {
               if (depViewRoot.isChecking || depViewRoot.isInstalling) return Qt.darker(depViewRoot.foreground, 2)
               return "#ffffff"
             }
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
             font.bold: true
           }
 
@@ -480,7 +489,7 @@ Item {
       Text {
         text: "Automatically launches an Omarchy floating presentation terminal running paru / yay / pacman to install prerequisites."
         color: Qt.darker(depViewRoot.foreground, 2.2)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
         Layout.fillWidth: true
       }

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Item {
   id: dropdownRoot
@@ -94,14 +95,14 @@ Item {
       Text {
         text: dropdownRoot.currentItem ? (dropdownRoot.currentItem.icon || "\uf009") : "\uf009"
         font.family: dropdownRoot.fontFamily
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
         color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : Qt.darker(dropdownRoot.foreground, 1.4))
       }
 
       Text {
         text: dropdownRoot.currentItem ? dropdownRoot.currentItem.name : dropdownRoot.title
         font.family: "sans-serif"
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
         font.weight: dropdownRoot.isFiltered ? Font.DemiBold : Font.Normal
         color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : Qt.darker(dropdownRoot.foreground, 1.2))
         elide: Text.ElideRight
@@ -112,7 +113,7 @@ Item {
       Text {
         text: "\uf0d7"
         font.family: dropdownRoot.fontFamily
-        font.pixelSize: 9
+        font.pixelSize: Style.fontPx(0.75)
         color: dropdownRoot.isFiltered ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 1.6)
       }
 
@@ -128,7 +129,7 @@ Item {
           anchors.centerIn: parent
           text: "\uf00d"
           font.family: dropdownRoot.fontFamily
-          font.pixelSize: 9
+          font.pixelSize: Style.fontPx(0.75)
           color: dropdownRoot.accent
         }
 
@@ -248,14 +249,14 @@ Item {
           Text {
             text: modelData.icon || "\uf009"
             font.family: dropdownRoot.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             color: isSelected ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 1.4)
           }
 
           Text {
             text: modelData.name || ""
             color: isSelected ? dropdownRoot.accent : dropdownRoot.foreground
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             font.weight: isSelected ? Font.DemiBold : Font.Normal
             elide: Text.ElideRight
             Layout.fillWidth: true
@@ -266,14 +267,14 @@ Item {
             visible: modelData.count !== undefined && modelData.count !== null
             text: String(modelData.count)
             color: isSelected ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 2.0)
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
           }
 
           Text {
             visible: isSelected
             text: "\uf00c"
             font.family: dropdownRoot.fontFamily
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             color: dropdownRoot.accent
           }
         }

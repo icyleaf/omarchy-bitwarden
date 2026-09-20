@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Rectangle {
   id: modalRoot
@@ -175,14 +176,14 @@ Rectangle {
         Text {
           text: modalRoot.mode === "create" ? "\uf067" : (modalRoot.mode === "import" ? "\uf019" : "\uf093")
           font.family: modalRoot.fontFamily
-          font.pixelSize: 14
+          font.pixelSize: Style.font.title
           color: modalRoot.accent
         }
 
         Text {
           text: modalRoot.mode === "create" ? "Generate SSH Key" : (modalRoot.mode === "import" ? "Import SSH Key" : "Export SSH Key")
           color: modalRoot.foreground
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
           font.weight: Font.DemiBold
         }
 
@@ -198,7 +199,7 @@ Rectangle {
             anchors.centerIn: parent
             text: "\uf00d"
             font.family: modalRoot.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             color: closeMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.5)
           }
 
@@ -238,7 +239,7 @@ Rectangle {
           Text {
             text: "\uf06a"
             font.family: modalRoot.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             color: "#f87171"
           }
 
@@ -246,7 +247,7 @@ Rectangle {
             id: errText
             text: modalRoot.errorMessage
             color: "#fca5a5"
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             Layout.fillWidth: true
             wrapMode: Text.Wrap
           }
@@ -280,7 +281,7 @@ Rectangle {
               Text {
                 text: "Item Name *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -299,7 +300,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: commentInput
@@ -319,7 +320,7 @@ Rectangle {
               Text {
                 text: "Algorithm"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -349,7 +350,7 @@ Rectangle {
                       anchors.centerIn: parent
                       text: modelData.label
                       color: parent.isSelected ? modalRoot.accent : (algoMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.3))
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       font.weight: parent.isSelected ? Font.DemiBold : Font.Normal
                     }
 
@@ -373,7 +374,7 @@ Rectangle {
               Text {
                 text: "Key Comment (optional)"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -392,7 +393,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: notesInput
@@ -408,7 +409,7 @@ Rectangle {
                   anchors.verticalCenter: parent.verticalCenter
                   text: "e.g. your_email@example.com"
                   color: Qt.darker(modalRoot.foreground, 2.0)
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   visible: !commentInput.text
                 }
               }
@@ -422,7 +423,7 @@ Rectangle {
               Text {
                 text: "Notes (optional)"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -444,7 +445,7 @@ Rectangle {
                     color: modalRoot.foreground
                     background: null
                     padding: 0
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.Wrap
                     selectByMouse: true
                     activeFocusOnTab: true
@@ -480,7 +481,7 @@ Rectangle {
                   anchors.centerIn: parent
                   text: "\uf00c"
                   font.family: modalRoot.fontFamily
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                   color: "#ffffff"
                   visible: modalRoot.exportToLocal
                 }
@@ -495,7 +496,7 @@ Rectangle {
               Text {
                 text: "Also export keypair to local directory:"
                 color: modalRoot.foreground
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
               }
 
               Rectangle {
@@ -514,7 +515,7 @@ Rectangle {
                   anchors.rightMargin: 6
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.exportToLocal ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 2.0)
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: createNameInput
@@ -542,7 +543,7 @@ Rectangle {
               Text {
                 text: "Item Name *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -561,7 +562,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: importPrivInput
@@ -581,7 +582,7 @@ Rectangle {
               Text {
                 text: "Private Key File Path *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -600,7 +601,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: importPubInput
@@ -614,7 +615,7 @@ Rectangle {
               Text {
                 text: "Defaults to ~/.ssh/ (e.g. ~/.ssh/id_ed25519 or ~/.ssh/id_rsa)"
                 color: Qt.darker(modalRoot.foreground, 2.0)
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
               }
             }
 
@@ -626,7 +627,7 @@ Rectangle {
               Text {
                 text: "Public Key File Path (optional - auto-derived if omitted)"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -645,7 +646,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: importNotesInput
@@ -664,7 +665,7 @@ Rectangle {
               Text {
                 text: "Notes (optional)"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -686,7 +687,7 @@ Rectangle {
                     color: modalRoot.foreground
                     background: null
                     padding: 0
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.Wrap
                     selectByMouse: true
                     activeFocusOnTab: true
@@ -734,13 +735,13 @@ Rectangle {
                   Text {
                     text: "\uf084"
                     font.family: modalRoot.fontFamily
-                    font.pixelSize: 12
+                    font.pixelSize: Style.font.body
                     color: modalRoot.accent
                   }
                   Text {
                     text: modalRoot.item ? (modalRoot.item.name || "SSH Key") : ""
                     color: modalRoot.foreground
-                    font.pixelSize: 12
+                    font.pixelSize: Style.font.body
                     font.weight: Font.DemiBold
                   }
                 }
@@ -749,7 +750,7 @@ Rectangle {
                   visible: Boolean(modalRoot.item && modalRoot.item.ssh_key && modalRoot.item.ssh_key.fingerprint)
                   text: "Fingerprint: " + (modalRoot.item && modalRoot.item.ssh_key ? (modalRoot.item.ssh_key.fingerprint || "") : "")
                   color: Qt.darker(modalRoot.foreground, 1.5)
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                   font.family: "monospace"
                   elide: Text.ElideRight
                   Layout.fillWidth: true
@@ -765,7 +766,7 @@ Rectangle {
               Text {
                 text: "Destination Directory *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -784,7 +785,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: exportPrivInput
@@ -804,7 +805,7 @@ Rectangle {
               Text {
                 text: "Private Key Filename *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -823,7 +824,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: exportPubInput
@@ -848,7 +849,7 @@ Rectangle {
               Text {
                 text: "Public Key Filename *"
                 color: Qt.darker(modalRoot.foreground, 1.4)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
 
@@ -867,7 +868,7 @@ Rectangle {
                   anchors.rightMargin: 8
                   verticalAlignment: Text.AlignVCenter
                   color: modalRoot.foreground
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: exportDirInput
@@ -902,7 +903,7 @@ Rectangle {
             anchors.centerIn: parent
             text: "Cancel"
             color: cancelMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.3)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
           }
 
           MouseArea {
@@ -932,14 +933,14 @@ Rectangle {
               visible: modalRoot.isBusy
               text: "\uf110"
               font.family: modalRoot.fontFamily
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               color: "#ffffff"
             }
 
             Text {
               text: modalRoot.isBusy ? "Processing..." : (modalRoot.mode === "create" ? "Generate" : (modalRoot.mode === "import" ? "Import" : "Export"))
               color: "#ffffff"
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold
             }
           }

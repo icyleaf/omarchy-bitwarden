@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Rectangle {
   id: historyModalRoot
@@ -131,14 +132,14 @@ Rectangle {
         Text {
           text: "\uf1da"
           font.family: historyModalRoot.fontFamily
-          font.pixelSize: 14
+          font.pixelSize: Style.font.title
           color: historyModalRoot.accent
         }
 
         Text {
           text: "Password History: " + (historyModalRoot.item ? (historyModalRoot.item.name || "Item") : "")
           color: historyModalRoot.foreground
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
           font.weight: Font.DemiBold
           elide: Text.ElideRight
           Layout.fillWidth: true
@@ -191,7 +192,7 @@ Rectangle {
                   Text {
                     text: (modelData.last_used_date ? historyModalRoot.formatDateTime(modelData.last_used_date) : "Unknown date")
                     color: Qt.darker(historyModalRoot.foreground, 1.5)
-                    font.pixelSize: 10
+                    font.pixelSize: Style.font.caption
                     font.weight: Font.Medium
                     Layout.fillWidth: true
                   }
@@ -199,7 +200,7 @@ Rectangle {
                   Text {
                     text: "#" + (historyModalRoot.getHistoryList().length - index)
                     color: Qt.darker(historyModalRoot.foreground, 2.0)
-                    font.pixelSize: 9
+                    font.pixelSize: Style.fontPx(0.75)
                   }
                 }
 
@@ -211,7 +212,7 @@ Rectangle {
                   Text {
                     text: entryCard.isEntryRevealed ? ((modelData && modelData.password) ? modelData.password : "") : "••••••••••••••••"
                     color: historyModalRoot.foreground
-                    font.pixelSize: 12
+                    font.pixelSize: Style.font.body
                     font.family: entryCard.isEntryRevealed ? "monospace" : "sans-serif"
                     font.weight: Font.Medium
                     elide: Text.ElideRight
@@ -244,7 +245,7 @@ Rectangle {
             visible: historyModalRoot.getHistoryList().length === 0
             text: "No password history available for this item."
             color: Qt.darker(historyModalRoot.foreground, 1.8)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             Layout.alignment: Qt.AlignCenter
           }
         }
@@ -264,7 +265,7 @@ Rectangle {
         Text {
           text: historyModalRoot.getHistoryList().length + " past password(s) recorded"
           color: Qt.darker(historyModalRoot.foreground, 1.8)
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           Layout.fillWidth: true
         }
 
@@ -291,7 +292,7 @@ Rectangle {
             anchors.centerIn: parent
             text: "Close"
             color: historyModalRoot.foreground
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }
 

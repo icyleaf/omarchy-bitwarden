@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 ColumnLayout {
   id: searchHeaderRoot
@@ -201,7 +202,7 @@ ColumnLayout {
           anchors.verticalCenter: parent.verticalCenter
           color: searchHeaderRoot.foreground
           font.family: "sans-serif"
-          font.pixelSize: 12
+          font.pixelSize: Style.font.body
           selectByMouse: true
           clip: true
 
@@ -274,7 +275,7 @@ ColumnLayout {
           text: "Search Bitwarden vault (names, usernames, notes, tags)..."
           color: Qt.darker(searchHeaderRoot.foreground, 2.0)
           font.family: "sans-serif"
-          font.pixelSize: 12
+          font.pixelSize: Style.font.body
           visible: !searchInputField.text
         }
       }
@@ -285,7 +286,7 @@ ColumnLayout {
         text: "\uf00d"
         font.family: searchHeaderRoot.fontFamily
         color: clearMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.5)
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
         Layout.alignment: Qt.AlignVCenter
 
         MouseArea {
@@ -366,7 +367,7 @@ ColumnLayout {
           anchors.centerIn: parent
           text: "\uf067"
           font.family: searchHeaderRoot.fontFamily
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           color: createMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
         }
 
@@ -393,7 +394,7 @@ ColumnLayout {
           anchors.centerIn: parent
           text: "\uf019"
           font.family: searchHeaderRoot.fontFamily
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
           color: importMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
         }
 
