@@ -34,7 +34,7 @@ The difference between them is not "CLI vs Desktop", but rather **the distinct d
 
 #### Core Feature Comparison
 
-| Dimension | `omawarden` (Builtin Engine & Standalone CLI) | `rbw` (Unofficial Rust CLI) |
+| Dimension | `omawarden` (Native Engine & Standalone CLI) | `rbw` (Unofficial Rust CLI) |
 | :--- | :--- | :--- |
 | **Item Type Support Depth** | **First-Class 5 Types**: Dedicated extraction flags and structured UI inspection for Logins, Cards (CVV/number), Identities, Notes, and SSH Keys | Primarily targets password and TOTP; viewing cards/identities requires dumping unformatted raw JSON (`--raw`) |
 | **Attachment Decryption** | **Native**: Downloads encrypted blobs and decrypts binary payloads via `AES-256-CBC` for preview/export | **Not supported** (see open feature request [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
@@ -132,11 +132,11 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
 
 ## Engine Source Badges & Updates
 
-Omarchy Bitwarden seamlessly distinguishes and manages the active engine source in the **Settings** modal:
+Omarchy Bitwarden seamlessly identifies and manages the active engine source in the **Settings** modal:
 
-- **`[ AUR: omawarden-bin ]` / `[ AUR: omawarden-git ]`**: Active when installed via pacman/AUR. Offers channel-aware one-click update actions (`Update (AUR)`) launching your terminal AUR helper.
-- **`[ builtin ]`**: Active when running against a local in-tree binary (`bin/omawarden`). Supports direct binary update downloads from GitHub Releases.
-- **Development Suppression**: Development builds (e.g. `0.8.0-dev` from `omawarden-git`) automatically suppress standard release update notifications to prevent downgrade prompts.
+- **`[ AUR: omawarden-bin ]` / `[ AUR: omawarden-git ]`**: Active when installed via pacman/AUR. Offers channel-aware one-click update actions (`Update (AUR)`) that launch your terminal AUR helper (`paru` or `yay`).
+- **`[ System ]`**: Active on non-Arch distributions when running a standalone pre-compiled binary located in your system `$PATH` (e.g. `/usr/local/bin/omawarden`).
+- **Development Suppression**: Development builds (e.g. `0.8.0-dev` or VCS revisions from `omawarden-git`) automatically suppress standard release update notifications to prevent downgrade prompts.
 
 ## Update & Uninstall
 

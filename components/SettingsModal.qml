@@ -338,7 +338,7 @@ Item {
                   font.pixelSize: 10
                 }
 
-                // Source badge (AUR vs builtin)
+                // Source badge (AUR vs System)
                 Rectangle {
                   visible: engineBadgeBox.isInstalled && Boolean(settingsRoot.engineSource)
                   implicitHeight: 16
@@ -355,7 +355,7 @@ Item {
                       if (settingsRoot.engineSource.toLowerCase() === "aur") {
                         return settingsRoot.enginePackage ? ("AUR: " + settingsRoot.enginePackage) : "AUR"
                       }
-                      return "builtin"
+                      return settingsRoot.engineSource ? (settingsRoot.engineSource.charAt(0).toUpperCase() + settingsRoot.engineSource.slice(1)) : "System"
                     }
                     color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
                     font.pixelSize: 9

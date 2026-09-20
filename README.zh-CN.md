@@ -34,7 +34,7 @@
 
 #### 核心特性对比
 
-| 评估维度 | `omawarden`（内置引擎 & 独立 CLI） | `rbw`（非官方 Rust 命令行） |
+| 评估维度 | `omawarden`（原生引擎 & 独立 CLI） | `rbw`（非官方 Rust 命令行） |
 | :--- | :--- | :--- |
 | **条目类型支持深度** | **五大类型一等公民支持**：为登录、银行卡（CVV/卡号）、身份、便签及 SSH 密钥提供专用提取命令与结构化展示 | 主要面向登录密码与 TOTP；查看银行卡/身份等条目需使用 `--raw` 输出原始 JSON 自行提取 |
 | **加密附件处理** | **原生支持**：支持下载加密 Blob 并解密预览/导出 | **不支持**（参见长期未决 Issue [doy/rbw#130](https://github.com/doy/rbw/issues/130)） |
@@ -135,7 +135,7 @@ o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
 在**设置 (Settings)** 弹窗中，插件会智能识别当前运行的引擎来源并提供差异化更新体验：
 
 - **`[ AUR: omawarden-bin ]` / `[ AUR: omawarden-git ]`**：由 pacman/AUR 包管理器托管。当有新版本时，点击 `Update (AUR)` 会调用浮动终端启动 paru/yay 执行系统包更新。
-- **`[ builtin ]`**：使用本地内置二进制（`bin/omawarden`）运行。支持直接从 GitHub Releases 下载最新发行版更新。
+- **`[ System ]`**：非 Arch Linux 系统上通过系统环境变量 `$PATH` 运行手动放置的独立预编译二进制文件。
 - **开发分支更新抑制**：当运行 `omawarden-git` 或带有 `-dev` 后缀的开发版本时，会自动静默常规稳定版更新弹窗，防止误降级。
 
 ## 更新与卸载
