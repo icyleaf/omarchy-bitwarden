@@ -43,30 +43,27 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ---
 
-### Rule 2: Fail-Closed Integrity & Dual-Tier Provenance Verification (SHA-256 + Artifact Attestations)
+### Rule 2: Fail-Closed Integrity, AUR Native Distribution & Minimum Safe Version Gate
 
-**Principle**: All installers, downloaders, and update bootstrap scripts (`scripts/download-engine.sh`, `check-update.sh`) MUST cryptographically verify release artifacts before extracting or executing them, combining universal SHA-256 integrity with cryptographic build provenance attestations.
+**Principle**: All engine installations, updates, and runtime executions MUST be cryptographically verified and meet minimum security baseline versions. Engine distribution is strictly routed via native Arch Linux / AUR packages (`omawarden-bin`, `omawarden-git`), and the frontend enforces a fail-closed minimum engine version gate (`>= 0.8.1`).
 
 - ❌ **Anti-Pattern**:
-  - Skipping verification if a checksum file fails to download (404/network error) or is empty.
-  - Parsing HTML error pages as checksum strings.
-  - Reporting synthetic success (`verified: true`) when no actual verification was performed.
-  - Relying exclusively on an unauthenticated `.sha256` file without provenance verification against release tampering or compromised release assets.
+  - Running arbitrary unverified or outdated local engine binaries (< 0.8.1) vulnerable to memory exhaustion via unbounded HTTP/attachment responses.
+  - Relying on mutable in-tree downloaders that bypass OS package managers and depend on static checksum files that drift across releases.
+  - Allowing vault operations or password unlocking when the underlying engine version is below the security baseline.
 - ✅ **Required Pattern**:
-  - **In-Source Release Pinning**: Bootstrap downloaders (`scripts/download-engine.sh`) MUST default to an immutable pinned release version and verify against expected SHA-256 digests pinned directly in the validated plugin source (`scripts/checksums.txt`). Never resolve mutable "latest" releases over the network by default.
-  - **Tier 1 (Universal Integrity Checksum)**: For pinned releases, archive checksums are validated directly against in-source hashes. For unpinned releases, checksum downloads are mandatory and fail-closed: if the checksum cannot be fetched, contains non-hex text, or does not match the archive's SHA-256 hash, the script MUST immediately delete the download and exit with a non-zero code.
-  - **Tier 2 (Cryptographic Build Provenance Attestation)**: Release pipelines automatically sign and attest build provenance using GitHub Artifact Attestations (`actions/attest-build-provenance` via Sigstore OIDC). When downloading an unpinned release, immutable provenance verification via `gh attestation verify` is **mandatory and fail-closed** (missing `gh` or failed attestation aborts installation immediately). For pinned releases, attestation verification is performed when `gh` is present, and fails closed when `REQUIRE_ATTESTATION=1`.
+  - **Native AUR Package Distribution**: The engine is distributed exclusively via official Arch Linux AUR packages (`omawarden-bin` / `omawarden-git`), leveraging `makepkg` / `pacman` SHA-256 integrity verification.
+  - **Enforce Minimum Safe Engine Version Gate (>= 0.8.1)**: Both `DependencyCheckView.qml` and `OmarchyBitwarden.qml` strictly enforce `minimumEngineVersion: "0.8.1"`. Any engine reporting a version `< 0.8.1` is rejected, marked as missing/outdated, and immediately blocks all vault operations (login, unlock, search, sync). Development and VCS builds (`-dev`, `.dev`, `omawarden-git`) remain permitted for developers.
+  - **Fail-Closed Resolution**: If `command -v omawarden` fails or the installed package is missing/outdated, the frontend fails closed to the dependency check view (`effectiveView === "dependency_check"`).
   - **Workflow Action Pinning**: All GitHub Actions workflows (`.github/workflows/`) MUST pin all third-party actions and Git dependencies (`cargo install --git ... --rev ...`) to a full 40-character commit SHA rather than mutable branch or tag names.
-  - **Structured Verification Reporting**: The downloader reports `verified: true`, `sha256`, and `attestation_verified: bool` in its structured JSON output for UI transparency.
+  - **Cryptographic Build Provenance Attestation**: Release pipelines automatically sign and attest build provenance using GitHub Artifact Attestations (`actions/attest-build-provenance` via Sigstore OIDC) when generating release artifacts.
 - 🧪 **Mandatory Verification**:
   Maintain automated integration tests covering:
-  1. Default downloader invocation resolves to pinned release and in-source SHA-256.
-  2. Checksum mismatch aborts without extraction.
-  3. 404 / missing checksum on unpinned release aborts without extraction.
-  4. Malformed/HTML checksum aborts without extraction.
-  5. Attestation success reports `attestation_verified: true`.
-  6. Unpinned releases fail closed when `gh` is missing or attestation verification fails.
-  7. Workflows pin every third-party action and Git dependency to 40-character commit SHAs.
+  1. Engine versions `< 0.8.1` (such as `0.8.0`, `0.7.0`) are strictly rejected and marked as missing/outdated.
+  2. Engine versions `>= 0.8.1` and development builds (`-dev`, `omawarden-git`) are accepted.
+  3. System PATH resolution correctly clears `helperPath` when `omawarden` is not found.
+  4. Missing engine packages gate vault operations fail-closed.
+  5. Workflows pin every third-party action and Git dependency to 40-character commit SHAs.
 
 ---
 

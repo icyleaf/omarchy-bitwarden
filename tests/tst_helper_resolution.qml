@@ -28,12 +28,7 @@ Item {
     if (whichExitCode === 0 && p.length > 0) {
       testRunner.helperPath = p
     } else {
-      var localPath = testRunner.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-      if (localPath) {
-        testRunner.helperPath = localPath
-      } else {
-        testRunner.helperPath = "/mock/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
-      }
+      testRunner.helperPath = ""
     }
     return testRunner.helperPath
   }
@@ -44,17 +39,16 @@ Item {
     // 1. Initial default is "omawarden"
     check(testRunner.helperPath === "omawarden", "Default helperPath is system command 'omawarden'")
 
-    // 2. System binary present: which exits 0 with /usr/bin/omawarden
+    // 2. System binary present: command -v exits 0 with /usr/bin/omawarden
     var systemResult = testRunner.resolveWithResult("/usr/bin/omawarden\n", 0)
     check(systemResult === "/usr/bin/omawarden", "Resolves to /usr/bin/omawarden when found in system PATH")
 
-    // 3. System binary missing: which exits 1 (command not found)
+    // 3. System binary missing: command -v exits 1 (command not found)
     var fallbackResult = testRunner.resolveWithResult("", 1)
-    var expectedLocal = testRunner.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-    check(fallbackResult === expectedLocal, "Falls back to local in-tree bin/omawarden when not in system PATH")
+    check(fallbackResult === "", "Clears helperPath to empty string when not in system PATH")
 
     // 4. Verification that OMARCHY_BITWARDEN_HELPER is not used
-    // (Ensure resolution is strictly system -> fallback, impervious to custom env injection)
+    // (Ensure resolution is strictly system, impervious to custom env injection)
     check(testRunner.helperPath.indexOf("OMARCHY_BITWARDEN_HELPER") === -1, "OMARCHY_BITWARDEN_HELPER has zero effect on path resolution")
 
     console.log("ALL HELPER RESOLUTION TESTS PASSED!")

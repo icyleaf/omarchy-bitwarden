@@ -1,3 +1,0 @@
-# Pinned omawarden release checksums validated in plugin source
-cf122e2ff08c30857a5c298929b16a50c58ca513b3cf200946d5859149f35eb5  omawarden-0.8.0-x86_64-unknown-linux-gnu.tar.gz
-821e2e008e9cf19ce7b759c5693aa9205b072032023549a8bcc3d19558064edd  omawarden-0.8.0-aarch64-unknown-linux-gnu.tar.gz
