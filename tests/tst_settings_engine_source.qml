@@ -20,18 +20,18 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("Running Settings Engine Source Badge Tests...")
+    console.log("Running Settings Engine Source Tests...")
 
-    // 1. Default property value
-    check(sm.engineSource === "builtin", "Default engineSource is 'builtin'")
+    // 1. Default property value is "aur"
+    check(sm.engineSource === "aur", "Default engineSource is 'aur'")
 
-    // 2. Set engineSource to 'aur'
+    // 2. Set engineSource to custom value
+    sm.engineSource = "system"
+    check(sm.engineSource === "system", "engineSource updates to 'system'")
+
+    // 3. Set engineSource back to 'aur'
     sm.engineSource = "aur"
     check(sm.engineSource === "aur", "engineSource updates to 'aur'")
-
-    // 3. Set engineSource to 'builtin'
-    sm.engineSource = "builtin"
-    check(sm.engineSource === "builtin", "engineSource updates to 'builtin'")
 
     // 3b. Test enginePackage property
     check(sm.enginePackage === "", "Default enginePackage is empty")
@@ -45,16 +45,12 @@ Item {
         for (var i = 0; i < depModel.length; i++) {
           var item = depModel[i]
           if (item.pkgName === "omawarden") {
-            if (item.isLocalFallback) return "builtin"
             if (item.status === "installed") return "aur"
           }
         }
       }
       if (helperPath && helperPath !== "omawarden") {
-        if (helperPath.indexOf("/usr/") === 0 || helperPath === "/usr/bin/omawarden") {
-          return "aur"
-        }
-        return "builtin"
+        return "aur"
       }
       return ""
     }
@@ -74,28 +70,20 @@ Item {
     }
 
     // A: omawarden installed via AUR/pacman (omawarden-git)
-    var aurModelGit = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-git", isLocalFallback: false }]
+    var aurModelGit = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-git" }]
     check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' when pacman installed")
     check(deriveEnginePackage(aurModelGit) === "omawarden-git", "Derives 'omawarden-git' package name")
 
     // A2: omawarden installed via AUR/pacman (omawarden-bin)
-    var aurModelBin = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-bin", isLocalFallback: false }]
+    var aurModelBin = [{ pkgName: "omawarden", status: "installed", installedPackage: "omawarden-bin" }]
     check(deriveEngineSource(aurModelBin, "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' when omawarden-bin installed")
     check(deriveEnginePackage(aurModelBin) === "omawarden-bin", "Derives 'omawarden-bin' package name")
 
-    // B: omawarden satisfied via local fallback binary
-    var fallbackModel = [{ pkgName: "omawarden", status: "installed", installedPackage: "", isLocalFallback: true }]
-    check(deriveEngineSource(fallbackModel, "/home/user/plugin/bin/omawarden", { installed: true }) === "builtin", "Derives 'builtin' when local fallback")
-    check(deriveEnginePackage(fallbackModel) === "", "Derives empty enginePackage when local fallback")
-
-    // C: fallback on system helperPath
+    // B: system helperPath fallback
     check(deriveEngineSource([], "/usr/bin/omawarden", { installed: true }) === "aur", "Derives 'aur' from system /usr/bin/omawarden helperPath")
 
-    // D: fallback on in-tree helperPath
-    check(deriveEngineSource([], "/home/user/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden", { installed: true }) === "builtin", "Derives 'builtin' from in-tree helperPath")
-
-    // E: missing engine state (no package, no binary, or uninstalled cliHealth)
-    var missingModel = [{ pkgName: "omawarden", status: "missing", installedPackage: "", isLocalFallback: false }]
+    // C: missing engine state (no package, no binary, or uninstalled cliHealth)
+    var missingModel = [{ pkgName: "omawarden", status: "missing", installedPackage: "" }]
     check(deriveEngineSource(missingModel, "", { installed: false }) === "", "Derives empty string when engine missing from dependencies")
     check(deriveEngineSource([], "", { installed: false }) === "", "Derives empty string when engine not installed")
     check(deriveEngineSource(aurModelGit, "/usr/bin/omawarden", { installed: false }) === "", "Derives empty string when cliHealth.installed is false")
@@ -106,50 +94,35 @@ Item {
     check(sm.isInstallingDependencies === true, "isInstallingDependencies updates to true")
     sm.isInstallingDependencies = false
 
-    // 6. Test installPackageRequested signal on missing engine
+    // 6. Test installPackageRequested signal on missing engine and updates
     var lastInstalledPackage = ""
     sm.installPackageRequested.connect(function(pkg) { lastInstalledPackage = pkg })
 
-    // Simulate missing engine state
+    // Simulate missing engine install action
     sm.cliHealth = { installed: false }
     sm.updateAvailable = false
     check(!sm.cliHealth.installed, "Engine is marked as missing")
+    sm.installPackageRequested("omawarden-bin")
+    check(lastInstalledPackage === "omawarden-bin", "installPackageRequested dispatched with omawarden-bin for missing engine")
 
-    // 7. Test action dispatching based on engineSource
-    var downloadRequested = false
-    sm.downloadCliRequested.connect(function() { downloadRequested = true })
-
-    // When update is available with AUR source
-    sm.cliHealth = { installed: true, version: "0.7.0" }
-    sm.updateAvailable = true
-    sm.latestVersion = "0.8.0"
-    sm.engineSource = "aur"
-    sm.enginePackage = "omawarden-bin"
-
-    // Simulate update action dispatch
-    if (sm.engineSource.toLowerCase() === "aur") {
-      sm.installPackageRequested(sm.enginePackage || "omawarden-bin")
-    } else {
-      sm.downloadCliRequested()
-    }
-    check(lastInstalledPackage === "omawarden-bin", "AUR update triggers installPackageRequested with omawarden-bin")
-    check(!downloadRequested, "downloadCliRequested not triggered for AUR update")
-
-    // When update is available with builtin source
+    // 7. Simulate update action dispatch via AUR package
     lastInstalledPackage = ""
-    downloadRequested = false
-    sm.engineSource = "builtin"
+    sm.cliHealth = { installed: true, version: "0.8.1" }
+    sm.updateAvailable = true
+    sm.latestVersion = "0.8.2"
+    sm.engineSource = "aur"
+    sm.enginePackage = "omawarden-git"
+
+    sm.installPackageRequested(sm.enginePackage || "omawarden-bin")
+    check(lastInstalledPackage === "omawarden-git", "Update triggers installPackageRequested with omawarden-git")
+
+    // 7b. Update when enginePackage is empty defaults to omawarden-bin
+    lastInstalledPackage = ""
     sm.enginePackage = ""
+    sm.installPackageRequested(sm.enginePackage || "omawarden-bin")
+    check(lastInstalledPackage === "omawarden-bin", "Update defaults to omawarden-bin when enginePackage is unset")
 
-    if (sm.engineSource.toLowerCase() === "aur") {
-      sm.installPackageRequested(sm.enginePackage || "omawarden-bin")
-    } else {
-      sm.downloadCliRequested()
-    }
-    check(lastInstalledPackage === "", "installPackageRequested not triggered for builtin update")
-    check(downloadRequested, "downloadCliRequested triggered for builtin update")
-
-    console.log("ALL SETTINGS ENGINE SOURCE BADGE TESTS PASSED!")
+    console.log("ALL SETTINGS ENGINE SOURCE TESTS PASSED!")
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

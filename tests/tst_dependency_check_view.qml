@@ -62,18 +62,25 @@ Item {
     check(installNames.length === 1, "installNames length is 1")
     check(installNames[0] === "omawarden-bin", "installNames mapped omawarden to omawarden-bin")
 
-    // 7. Parse stdout with omawarden-bin satisfying omawarden
-    var mockAurStdout = "omawarden-bin 0.7.0-1\n"
+    // 7. Parse stdout with omawarden-bin satisfying omawarden (version >= 0.8.1)
+    var mockAurStdout = "omawarden-bin 0.8.1-1\n"
     depView.parsePacmanStdout(mockAurStdout)
-    check(depView.dependencyModel.get(0).status === "installed", "omawarden is satisfied by omawarden-bin")
-    check(depView.dependencyModel.get(0).version === "0.7.0-1", "omawarden version set to 0.7.0-1")
+    check(depView.dependencyModel.get(0).status === "installed", "omawarden is satisfied by omawarden-bin >= 0.8.1")
+    check(depView.dependencyModel.get(0).version === "0.8.1-1", "omawarden version set to 0.8.1-1")
     check(depView.dependencyModel.get(0).installedPackage === "omawarden-bin", "omawarden installedPackage is omawarden-bin")
 
     var missingAfter = depView.finalizeCheck()
     check(missingAfter.length === 0, "all dependencies satisfied, missing length is 0")
     check(depView.missingPackages.length === 0, "depView.missingPackages is empty when all installed")
 
-    // 7b. Parse stdout with omawarden-git satisfying omawarden
+    // 7b. Outdated version test: omawarden-bin 0.8.0 must be rejected (< 0.8.1)
+    depView.resetToChecking()
+    depView.parsePacmanStdout("libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\nomawarden-bin 0.8.0-1\n")
+    check(depView.dependencyModel.get(0).status === "missing", "omawarden 0.8.0 marked missing due to minimum version requirement")
+    var missingOutdated = depView.finalizeCheck()
+    check(missingOutdated.indexOf("omawarden") !== -1, "missingOutdated contains omawarden")
+
+    // 7c. Parse stdout with omawarden-git (dev build) satisfying omawarden
     depView.resetToChecking()
     check(depView.dependencyModel.get(0).installedPackage === "", "installedPackage is reset to empty string on resetToChecking")
     var mockGitStdout = "libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\nomawarden-git 0.8.0.r45.ga1b2c3d-1\n"
@@ -143,25 +150,21 @@ Item {
     check(cmd.indexOf("yay -S --needed") !== -1, "Install command checks yay")
     check(cmd.indexOf("sudo pacman -S --needed") !== -1, "Install command falls back to pacman")
 
-    // 11. Local binary fallback support during transition phase
+    // 11. Missing package via stderr
     depView.resetToChecking()
     depView.parsePacmanStdout("libsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\n")
     depView.parsePacmanStderr("error: package 'omawarden' was not found\n")
-    check(depView.dependencyModel.get(0).status === "missing", "omawarden initially missing from pacman")
+    check(depView.dependencyModel.get(0).status === "missing", "omawarden missing when not found in pacman")
 
-    // In transition phase: local binary is detected
-    depView.setFallbackInstalled("omawarden", "0.7.0")
-    check(depView.dependencyModel.get(0).status === "installed", "omawarden satisfied via local fallback binary")
-    check(depView.dependencyModel.get(0).isLocalFallback === true, "omawarden has isLocalFallback true")
-    check(depView.dependencyModel.get(0).version.indexOf("local") !== -1, "omawarden version indicates local")
-
-    var missingWithFallback = depView.finalizeCheck()
-    check(missingWithFallback.length === 0, "no missing packages when omawarden local fallback is present")
+    var missingAur = depView.finalizeCheck()
+    check(missingAur.indexOf("omawarden") !== -1, "missing packages includes omawarden")
 
     // 12. Robustness: parsePacmanStderr must not overwrite installed status
+    depView.resetToChecking()
+    depView.parsePacmanStdout("omawarden-bin 0.8.1-1\nlibsecret 0.21.7-1\nwl-clipboard 1:2.3.0-1\n")
     depView.parsePacmanStderr("error: package 'omawarden' was not found\n")
-    check(depView.dependencyModel.get(0).status === "installed", "parsePacmanStderr does not overwrite fallback installed status")
-    check(depView.dependencyModel.get(0).isLocalFallback === true, "isLocalFallback remains true after pacman stderr")
+    check(depView.dependencyModel.get(0).status === "installed", "parsePacmanStderr does not overwrite installed omawarden-bin")
+    check(depView.dependencyModel.get(0).installedPackage === "omawarden-bin", "installedPackage remains omawarden-bin")
 
     console.log("ALL DEPENDENCY CHECK VIEW TESTS PASSED!")
     Qt.exit(failures === 0 ? 0 : 1)

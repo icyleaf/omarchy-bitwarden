@@ -35,17 +35,20 @@ Item {
   }
 
   property string helperPath: "omawarden"
+  readonly property string minimumEngineVersion: "0.8.1"
+
+  function isEngineVersionSatisfied(ver) {
+    if (!ver) return false
+    var clean = String(ver).trim()
+    if (clean.indexOf("-dev") !== -1 || clean.indexOf(".dev") !== -1 || /\.r\d+\.g[a-f0-9]+/i.test(clean)) {
+      return true
+    }
+    return root.compareSemVer(clean, root.minimumEngineVersion) >= 0
+  }
 
   function resolveHelper() {
     resolveHelperProc.running = false
-    var localPath = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-    var fallbackPath = localPath || ((Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/omarchy/plugins/icyleaf.bitwarden/bin/omawarden")
-    resolveHelperProc.command = [
-      "sh", "-c",
-      "if command -v omawarden >/dev/null 2>&1; then command -v omawarden; exit 0; elif [ -x \"$1\" ]; then echo \"$1\"; exit 0; else exit 1; fi",
-      "--",
-      fallbackPath
-    ]
+    resolveHelperProc.command = ["sh", "-c", "command -v omawarden"]
     resolveHelperProc.running = true
   }
 
@@ -119,25 +122,18 @@ Item {
     root.installPackage(missing.join(" "))
   }
 
-  // Transition Phase: Allow local in-tree binary fallback (bin/omawarden) until built-in downloader is retired
-  property bool allowLocalBinaryFallback: true
-
   readonly property string engineSource: {
     if (!cliHealth || !cliHealth.installed) return ""
     if (dependencyCheckView) {
       for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
         var item = dependencyCheckView.dependencyModel.get(i)
-        if (item.pkgName === "omawarden") {
-          if (item.isLocalFallback) return "builtin"
-          if (item.status === "installed") return "aur"
+        if (item.pkgName === "omawarden" && item.status === "installed") {
+          return "aur"
         }
       }
     }
     if (root.helperPath && root.helperPath !== "omawarden") {
-      if (root.helperPath.indexOf("/usr/") === 0 || root.helperPath === "/usr/bin/omawarden") {
-        return "aur"
-      }
-      return "builtin"
+      return "aur"
     }
     return ""
   }
@@ -204,53 +200,6 @@ Item {
     }
 
     onExited: function(code) {
-      if (dependencyCheckView && root.allowLocalBinaryFallback) {
-        var omawardenInstalled = false
-        for (var i = 0; i < dependencyCheckView.dependencyModel.count; i++) {
-          var item = dependencyCheckView.dependencyModel.get(i)
-          if (item.pkgName === "omawarden" && item.status === "installed") {
-            omawardenInstalled = true
-            break
-          }
-        }
-        if (!omawardenInstalled) {
-          var localBin = root.toLocalPath(Qt.resolvedUrl("bin/omawarden"))
-          checkFallbackProc.fallbackText = ""
-          checkFallbackProc.running = false
-          checkFallbackProc.command = ["sh", "-c", "if [ -x \"$1\" ]; then exec \"$1\" -V; else exit 1; fi", "--", localBin]
-          checkFallbackProc.running = true
-          return
-        }
-      }
-      root.finalizeDependencyCheck()
-    }
-  }
-
-  Process {
-    id: checkFallbackProc
-    property string fallbackText: ""
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        checkFallbackProc.fallbackText = text || ""
-        var out = (text || "").trim()
-        var match = out.match(/^omawarden\s+([^\s(]+)/)
-        var ver = match ? match[1] : ""
-        if (dependencyCheckView && ver.length > 0) {
-          dependencyCheckView.setFallbackInstalled("omawarden", ver)
-        }
-      }
-    }
-    onExited: function(code) {
-      if (code === 0 && checkFallbackProc.fallbackText) {
-        var out = (checkFallbackProc.fallbackText || "").trim()
-        var match = out.match(/^omawarden\s+([^\s(]+)/)
-        var ver = match ? match[1] : ""
-        if (dependencyCheckView && ver.length > 0) {
-          dependencyCheckView.setFallbackInstalled("omawarden", ver)
-        }
-      }
       root.finalizeDependencyCheck()
     }
   }
@@ -295,7 +244,6 @@ Item {
     clipboard_available: false,
     error: "Checking CLI status..."
   })
-  property bool isDownloadingCli: false
   property bool engineAttestationVerified: false
   property string latestVersion: ""
   property bool isCheckingUpdate: false
@@ -544,27 +492,6 @@ Item {
     configGetProc.running = true
   }
 
-  function downloadCli(pinnedTag) {
-    if (root.isDownloadingCli) return
-    root.isDownloadingCli = true
-    root.isBusy = true
-    root.errorMessage = ""
-    root.statusMessage = "Downloading omawarden backend engine..."
-
-    var localDir = root.toLocalPath(Qt.resolvedUrl("bin"))
-    var pluginDir = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
-    var baseDir = localDir || (pluginDir + "/omarchy/plugins/icyleaf.bitwarden/bin")
-    var scriptPath = root.toLocalPath(Qt.resolvedUrl("scripts/download-engine.sh"))
-
-    var targetTag = pinnedTag || (root.latestVersion ? ("omawarden-" + root.latestVersion.replace(/^v/i, "")) : "")
-    downloadCliProc.running = false
-    if (targetTag) {
-      downloadCliProc.command = ["bash", scriptPath, baseDir, "icyleaf/omarchy-bitwarden", targetTag]
-    } else {
-      downloadCliProc.command = ["bash", scriptPath, baseDir]
-    }
-    downloadCliProc.running = true
-  }
 
   function parseSemVer(v) {
     if (!v) return [0, 0, 0]
@@ -1716,7 +1643,7 @@ Item {
     report += "- **Max Attachment Size**: " + maxAttMb + " MB\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (root.cliHealth && root.cliHealth.installed ? "Yes" : "No") + "\n"
-    var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "BUILTIN"
+    var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "AUR"
     if (root.enginePackage) {
       engineSourceStr += " (" + root.enginePackage + ")"
     } else if (root.engineSource === "builtin") {
@@ -2355,7 +2282,6 @@ Item {
             authState: root.authState
             config: root.config
             cliHealth: root.cliHealth
-            isDownloadingCli: root.isDownloadingCli
             isBusy: root.isBusy
             loginMethod: root.loginMethod
             rememberEmailChecked: root.rememberEmailChecked
@@ -2386,7 +2312,6 @@ Item {
             onCheckFido2StatusRequested: { root.doCheckFido2Status() }
             onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onLogoutRequested: { root.doLogout() }
-            onDownloadCliRequested: { root.downloadCli() }
             onSettingsRequested: { root.currentView = "settings" }
           }
 
@@ -2400,7 +2325,6 @@ Item {
             engineSource: root.engineSource
             enginePackage: root.enginePackage
             logBuffer: root.logBuffer
-            isDownloadingCli: root.isDownloadingCli
             isInstallingDependencies: root.isInstallingDependencies
             isBusy: root.isBusy
             updateAvailable: root.updateAvailable
@@ -2420,7 +2344,6 @@ Item {
               root.checkDependencies()
             }
             onCheckUpdateRequested: { root.checkUpdates(true) }
-            onDownloadCliRequested: { root.downloadCli() }
             onInstallPackageRequested: function(pkg) { root.installPackage(pkg) }
             onCopyDiagnosticsRequested: { root.copyDiagnostics() }
             onClearLogsRequested: { root.logBuffer = [] }
@@ -2437,8 +2360,8 @@ Item {
             foreground: root.foreground
             accent: root.accent
             borderColor: root.borderColor
-            onRecheckRequested: root.checkDependencies()
-            onInstallRequested: root.installMissingDependencies()
+            onRecheckRequested: { root.checkDependencies() }
+            onInstallRequested: { root.installMissingDependencies() }
           }
         }
 
@@ -2449,7 +2372,7 @@ Item {
           overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
           backendVersion: (root.cliHealth && root.cliHealth.version) || ""
           isEngineInstalled: !root.dependenciesMissing && Boolean(root.cliHealth && root.cliHealth.installed)
-          isDownloadingCli: root.isDownloadingCli
+          isInstallingDependencies: root.isInstallingDependencies
           updateAvailable: root.updateAvailable
           latestVersion: root.latestVersion
           background: root.background
@@ -2469,7 +2392,7 @@ Item {
             }
             root.currentView = (root.effectiveView === "settings") ? "auto" : "settings"
           }
-          onDownloadCliTriggered: { root.downloadCli() }
+          onInstallCliTriggered: { root.installMissingDependencies() }
         }
       }
 
@@ -2691,6 +2614,10 @@ Item {
           }
           var data = JSON.parse(cleanText)
           if (data && typeof data === "object") {
+            if (data.installed && data.version && !root.isEngineVersionSatisfied(data.version)) {
+              data.ok = false
+              data.error = "omawarden engine is outdated (v" + data.version + "). Minimum version required: >= " + root.minimumEngineVersion + "."
+            }
             root.cliHealth = data
           }
         } catch (e) {
@@ -2726,52 +2653,6 @@ Item {
     }
   }
 
-  Process {
-    id: downloadCliProc
-    command: []
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.isDownloadingCli = false
-        root.isBusy = false
-        try {
-          var cleanText = (text || "").trim()
-          var data = JSON.parse(cleanText)
-          if (data && data.ok) {
-            root.engineAttestationVerified = Boolean(data.attestation_verified)
-            if (data.attestation_verified) {
-              root.statusMessage = "omawarden engine updated successfully (✓ GitHub Attestation verified)."
-            } else {
-              root.statusMessage = "omawarden engine updated successfully (SHA-256 verified)."
-            }
-            root.errorMessage = ""
-            root.checkDependencies()
-            root.resolveHelper()
-            root.refreshHealth()
-            root.refreshConfig()
-            root.refreshAuthStatus()
-          } else {
-            root.errorMessage = (data && data.error) ? data.error : "Failed to download omawarden."
-            root.logError("omarchy:cli-download", root.errorMessage)
-          }
-        } catch (e) {
-          root.errorMessage = "Failed to process download response."
-          root.logError("omarchy:cli-download", root.errorMessage + ": " + e)
-        }
-      }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omarchy:cli-download")
-    }
-    onExited: function(code) {
-      root.isDownloadingCli = false
-      root.isBusy = false
-      if (code !== 0 && !root.errorMessage) {
-        root.errorMessage = "Download script failed."
-      }
-    }
-  }
 
   Process {
     id: updateCheckProc

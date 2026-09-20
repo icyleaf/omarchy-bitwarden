@@ -17,6 +17,37 @@ Item {
   property color cardBackground: Qt.rgba(0, 0, 0, 0.25)
   property string fontFamily: ""
 
+  readonly property string minimumEngineVersion: "0.8.1"
+
+  function parseSemVer(v) {
+    if (!v) return [0, 0, 0]
+    var clean = String(v).replace(/^omawarden-|^v/i, "").trim()
+    var parts = clean.split("-")[0].split(".")
+    var major = parseInt(parts[0]) || 0
+    var minor = parseInt(parts[1]) || 0
+    var patch = parseInt(parts[2]) || 0
+    return [major, minor, patch]
+  }
+
+  function compareSemVer(v1, v2) {
+    var a = parseSemVer(v1)
+    var b = parseSemVer(v2)
+    for (var i = 0; i < 3; i++) {
+      if (a[i] > b[i]) return 1
+      if (a[i] < b[i]) return -1
+    }
+    return 0
+  }
+
+  function isEngineVersionSatisfied(ver) {
+    if (!ver) return false
+    var clean = String(ver).trim()
+    if (clean.indexOf("-dev") !== -1 || clean.indexOf(".dev") !== -1 || /\.r\d+\.g[a-f0-9]+/i.test(clean)) {
+      return true
+    }
+    return compareSemVer(clean, minimumEngineVersion) >= 0
+  }
+
   signal recheckRequested()
   signal installRequested()
 
@@ -73,10 +104,17 @@ Item {
         for (var j = 0; j < dependencyModel.count; j++) {
           var item = dependencyModel.get(j)
           if (item.pkgName === name || item.aurPkgName === name || (item.pkgName === "omawarden" && (name === "omawarden-bin" || name === "omawarden-git"))) {
-            dependencyModel.setProperty(j, "status", "installed")
-            dependencyModel.setProperty(j, "version", ver)
-            dependencyModel.setProperty(j, "installedPackage", name)
-            dependencyModel.setProperty(j, "isLocalFallback", false)
+            if (item.pkgName === "omawarden" && !isEngineVersionSatisfied(ver)) {
+              dependencyModel.setProperty(j, "status", "missing")
+              dependencyModel.setProperty(j, "version", ver)
+              dependencyModel.setProperty(j, "installedPackage", name)
+              dependencyModel.setProperty(j, "isLocalFallback", false)
+            } else {
+              dependencyModel.setProperty(j, "status", "installed")
+              dependencyModel.setProperty(j, "version", ver)
+              dependencyModel.setProperty(j, "installedPackage", name)
+              dependencyModel.setProperty(j, "isLocalFallback", false)
+            }
             break
           }
         }
@@ -104,19 +142,6 @@ Item {
             break
           }
         }
-      }
-    }
-  }
-
-  function setFallbackInstalled(pkgName, ver) {
-    for (var j = 0; j < dependencyModel.count; j++) {
-      var item = dependencyModel.get(j)
-      if (item.pkgName === pkgName) {
-        dependencyModel.setProperty(j, "status", "installed")
-        dependencyModel.setProperty(j, "version", ver ? (ver + " (local)") : "local")
-        dependencyModel.setProperty(j, "installedPackage", "")
-        dependencyModel.setProperty(j, "isLocalFallback", true)
-        break
       }
     }
   }
@@ -290,7 +315,6 @@ Item {
                       id: reqTagText
                       anchors.centerIn: parent
                       text: {
-                        if (Boolean(model.isLocalFallback)) return "Local Binary Fallback"
                         if (model.pkgName === "omawarden") {
                           if (model.status === "installed" && model.installedPackage) {
                             return "AUR: " + model.installedPackage
@@ -300,7 +324,6 @@ Item {
                         return "Core System Package"
                       }
                       color: {
-                        if (Boolean(model.isLocalFallback)) return "#a6e3a1"
                         if (model.pkgName === "omawarden") return depViewRoot.accent
                         return Qt.darker(depViewRoot.foreground, 1.4)
                       }
@@ -358,13 +381,23 @@ Item {
                   anchors.centerIn: parent
                   text: {
                     if (model.status === "installed") return "✓ Ready"
-                    if (model.status === "missing") return "✗ Missing"
+                    if (model.status === "missing") {
+                      if (model.pkgName === "omawarden" && Boolean(model.version) && !depViewRoot.isEngineVersionSatisfied(model.version)) {
+                        return "▲ Requires >= " + depViewRoot.minimumEngineVersion
+                      }
+                      return "✗ Missing"
+                    }
                     if (model.status === "checking") return "⏳ Checking"
                     return "Pending"
                   }
                   color: {
                     if (model.status === "installed") return "#a6e3a1"
-                    if (model.status === "missing") return "#f38ba8"
+                    if (model.status === "missing") {
+                      if (model.pkgName === "omawarden" && Boolean(model.version) && !depViewRoot.isEngineVersionSatisfied(model.version)) {
+                        return "#f9e2af"
+                      }
+                      return "#f38ba8"
+                    }
                     if (model.status === "checking") return "#f9e2af"
                     return depViewRoot.foreground
                   }

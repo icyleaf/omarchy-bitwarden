@@ -8,10 +8,9 @@ Item {
 
   property var config: ({})
   property var cliHealth: ({})
-  property string engineSource: "builtin"
+  property string engineSource: "aur"
   property string enginePackage: ""
   property var logBuffer: []
-  property bool isDownloadingCli: false
   property bool isInstallingDependencies: false
   property bool isBusy: false
   property bool updateAvailable: false
@@ -80,7 +79,6 @@ Item {
   signal closeRequested()
   signal refreshHealthRequested()
   signal checkUpdateRequested()
-  signal downloadCliRequested()
   signal installPackageRequested(string pkgName)
   signal copyDiagnosticsRequested()
   signal clearLogsRequested()
@@ -385,7 +383,7 @@ Item {
                     }
                     Text {
                       id: updateTagLabel
-                      text: (settingsRoot.engineSource.toLowerCase() === "aur") ? "Update (AUR)" : "Update"
+                      text: "Update (AUR)"
                       color: "#ffffff"
                       font.pixelSize: 9
                       font.weight: Font.DemiBold
@@ -404,7 +402,7 @@ Item {
                   Text {
                     id: dlTagText
                     anchors.centerIn: parent
-                    text: (settingsRoot.isDownloadingCli || settingsRoot.isInstallingDependencies) ? "Installing..." : "Install"
+                    text: settingsRoot.isInstallingDependencies ? "Installing..." : "Install"
                     color: "#ffffff"
                     font.pixelSize: 9
                     font.weight: Font.Medium
@@ -417,14 +415,10 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled
                 cursorShape: (engineBadgeBox.hasUpdate || !engineBadgeBox.isInstalled) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                enabled: !settingsRoot.isDownloadingCli && !settingsRoot.isInstallingDependencies
+                enabled: !settingsRoot.isInstallingDependencies
                 onClicked: {
                   if (engineBadgeBox.hasUpdate) {
-                    if (settingsRoot.engineSource.toLowerCase() === "aur") {
-                      settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
-                    } else {
-                      settingsRoot.downloadCliRequested()
-                    }
+                    settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
                   } else if (!engineBadgeBox.isInstalled) {
                     settingsRoot.installPackageRequested("omawarden-bin")
                   }
@@ -1175,7 +1169,7 @@ Item {
     releaseUrl: settingsRoot.latestReleaseUrl
     engineSource: settingsRoot.engineSource
     enginePackage: settingsRoot.enginePackage
-    isDownloadingCli: settingsRoot.isDownloadingCli
+    isDownloadingCli: settingsRoot.isInstallingDependencies
     foreground: settingsRoot.foreground
     accent: settingsRoot.accent
     borderColor: settingsRoot.borderColor
@@ -1183,11 +1177,7 @@ Item {
     onCloseRequested: settingsRoot.showReleaseNotes = false
     onUpdateRequested: {
       settingsRoot.showReleaseNotes = false
-      if (settingsRoot.engineSource.toLowerCase() === "aur") {
-        settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
-      } else {
-        settingsRoot.downloadCliRequested()
-      }
+      settingsRoot.installPackageRequested(settingsRoot.enginePackage || "omawarden-bin")
     }
   }
 }

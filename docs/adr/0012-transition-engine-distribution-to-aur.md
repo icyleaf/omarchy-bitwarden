@@ -41,21 +41,26 @@ We transition the distribution of the `omawarden` engine to the Arch User Reposi
 - The workflow generates the `PKGBUILD` dynamically in the runner using `pkgver`, `x86_64` and `aarch64` SHA-256 archive digests, avoiding checked-in static PKGBUILD drifts.
 - Deploys via `KSXGitHub/github-actions-deploy-aur@v4.1.1` reusing established repository secrets (`AUR_KEY`, `AUR_USERNAME`, `AUR_EMAIL`).
 
-### 3. Dynamic Path Resolution & Environment Clean-up
+### 3. Pure System PATH Resolution & Minimum Safe Version Gate
 - Completely removed `OMARCHY_BITWARDEN_HELPER` from frontend path resolution.
-- On initialization, `OmarchyBitwarden.qml` dynamically queries the host `$PATH` via `which omawarden`.
+- On initialization, `OmarchyBitwarden.qml` dynamically queries the host `$PATH` via `command -v omawarden`.
 - If found in system `$PATH`, `/usr/bin/omawarden` is used directly.
-- If not present in `$PATH`, the frontend falls back gracefully to in-tree `bin/omawarden` to ensure existing installations do not break during the migration phase.
+- If not present in `$PATH`, the engine is marked missing and routes to `DependencyCheckView.qml`.
+- **Minimum Engine Version Gate (>= 0.8.1)**: To prevent execution of older engines vulnerable to memory exhaustion via unbounded responses (0.8.0), the frontend enforces `isEngineVersionSatisfied(ver)` with `minimumEngineVersion: "0.8.1"`. Any engine `< 0.8.1` is rejected and marked as missing, requiring an update via AUR. Development and VCS builds (`-dev`, `.dev`, `omawarden-git`) remain permitted.
 
 ### 4. Gated Dependency Onboarding View (`DependencyCheckView.qml`)
-- On overlay startup and activation, the frontend queries package installation states via `pacman -Q omawarden libsecret wl-clipboard`.
-- If any required package is missing from pacman:
+- On overlay startup and activation, the frontend queries package installation states via `pacman -Q omawarden omawarden-bin omawarden-git libsecret wl-clipboard`.
+- If any required package is missing from pacman or the installed engine does not satisfy `>= 0.8.1`:
   - Normal vault search, unlock, and login views are gated.
   - The UI routes `effectiveView` to `dependency_check`, rendering `components/DependencyCheckView.qml`.
   - Manual access to Settings (`currentView === "settings"`) remains accessible for configuration and diagnostics.
 - The view displays each dependency's status (installed version vs missing) and provides a **One-Click Install Missing Dependencies** button.
 - Clicking the button launches `omarchy-launch-floating-terminal-with-presentation` running `paru -S --needed` (with automatic fallback to `yay` or `sudo pacman`), mapping `omawarden` to `omawarden-bin`.
 - When the installation terminal window is dismissed, an automatic recheck executes, transitioning seamlessly into normal vault operations as soon as prerequisites are satisfied.
+
+### 5. Retirement of In-Tree Downloader and Checksum Files
+- `scripts/download-engine.sh`, `scripts/checksums.txt`, and related downloader tests have been completely removed.
+- All engine installations and updates route natively through AUR package managers (`paru`, `yay`, `omawarden-bin`, `omawarden-git`).
 
 ---
 
@@ -65,9 +70,9 @@ We transition the distribution of the `omawarden` engine to the Arch User Reposi
 - **Native OS Integration**: `omawarden` is managed like any other Arch / Omarchy package with standard system upgrades (`paru -Syu`).
 - **Guaranteed Runtime Dependencies**: `libsecret` and `wl-clipboard` are declared as pacman dependencies and installed automatically.
 - **Single System-Wide Binary**: Eliminates duplicate binary copies across repositories and worktrees.
+- **Fail-Closed Security**: Eliminates legacy binary downloader attack surfaces and enforces `>= 0.8.1` safe engine version requirement.
 - **Frictionless Onboarding**: New users without prerequisites are guided by a unified, styled GUI view with one-click terminal installation.
-- **Zero Static PKGBUILD Maintenance**: Release CI automatically derives package versions and hashes directly from GitHub Release tarballs.
+- **Zero In-Tree Checksum Maintenance**: Eliminates the maintenance paradox of committing backend checksums into the frontend repository.
 
 ### Negative / Trade-offs
 - **AUR Helper Dependency for One-Click Install**: One-click installation in the terminal relies on an installed AUR helper (`paru` or `yay`) to build/install `omawarden-bin` from AUR. If neither is found, it falls back to `sudo pacman`, which will prompt if packages are only in AUR.
-- **Temporary Retention of Downloader Script**: `scripts/download-engine.sh` is preserved temporarily during the transition phase to support legacy development workflows before complete deprecation.
