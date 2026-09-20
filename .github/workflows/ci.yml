@@ -48,7 +48,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@400e7407cfd7a091e5fbb6afec01ec146c432b7c # v2.7.7
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: omawarden -> target
 
