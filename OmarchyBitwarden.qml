@@ -39,11 +39,15 @@ Item {
 
   function isEngineVersionSatisfied(ver) {
     if (!ver) return false
-    var clean = String(ver).trim()
-    if (clean.indexOf("-dev") !== -1 || clean.indexOf(".dev") !== -1 || /\.r\d+\.g[a-f0-9]+/i.test(clean)) {
-      return true
+    var parsed = root.parseSemVer(ver)
+    if (!parsed) return false
+    var min = root.parseSemVer(root.minimumEngineVersion)
+    if (!min) return false
+    for (var i = 0; i < 3; i++) {
+      if (parsed[i] > min[i]) return true
+      if (parsed[i] < min[i]) return false
     }
-    return root.compareSemVer(clean, root.minimumEngineVersion) >= 0
+    return true
   }
 
   function resolveHelper() {
@@ -494,18 +498,22 @@ Item {
 
 
   function parseSemVer(v) {
-    if (!v) return [0, 0, 0]
-    var clean = String(v).replace(/^omawarden-|^v/i, "").trim()
-    var parts = clean.split("-")[0].split(".")
-    var major = parseInt(parts[0]) || 0
-    var minor = parseInt(parts[1]) || 0
-    var patch = parseInt(parts[2]) || 0
+    if (!v || typeof v !== "string") return null
+    var clean = String(v).replace(/^omawarden[\s-]+|^v/i, "").trim()
+    var match = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?/)
+    if (!match) return null
+    var major = parseInt(match[1], 10)
+    var minor = parseInt(match[2], 10)
+    var patch = (match[3] !== undefined && match[3] !== "") ? parseInt(match[3], 10) : 0
     return [major, minor, patch]
   }
 
   function compareSemVer(v1, v2) {
     var a = parseSemVer(v1)
     var b = parseSemVer(v2)
+    if (!a && !b) return 0
+    if (!a) return -1
+    if (!b) return 1
     for (var i = 0; i < 3; i++) {
       if (a[i] > b[i]) return 1
       if (a[i] < b[i]) return -1
