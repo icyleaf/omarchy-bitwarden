@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Rectangle {
   id: releaseModalRoot
@@ -163,14 +164,14 @@ Rectangle {
         Text {
           text: "\uf15c"
           font.family: releaseModalRoot.fontFamily
-          font.pixelSize: 14
+          font.pixelSize: Style.font.title
           color: releaseModalRoot.accent
         }
 
         Text {
           text: releaseModalRoot.releaseTitle ? ("Release: " + releaseModalRoot.releaseTitle) : ("Release Notes (v" + releaseModalRoot.version + ")")
           color: releaseModalRoot.foreground
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
           font.weight: Font.DemiBold
           elide: Text.ElideRight
           Layout.fillWidth: true
@@ -186,7 +187,7 @@ Rectangle {
             anchors.centerIn: parent
             text: "\uf00d"
             font.family: releaseModalRoot.fontFamily
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
             color: releaseModalRoot.foreground
           }
 
@@ -219,7 +220,7 @@ Rectangle {
           text: releaseModalRoot.renderMarkdown(releaseModalRoot.releaseNotes)
           textFormat: Text.RichText
           color: releaseModalRoot.foreground
-          font.pixelSize: 11
+          font.pixelSize: Style.font.bodySmall
           font.family: "sans-serif"
           wrapMode: Text.Wrap
           readOnly: true
@@ -262,13 +263,13 @@ Rectangle {
               text: "\uf08e"
               font.family: releaseModalRoot.fontFamily
               color: Qt.darker(releaseModalRoot.foreground, 1.4)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
 
             Text {
               text: "Open on GitHub"
               color: releaseModalRoot.foreground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               font.weight: Font.Medium
             }
           }
@@ -302,7 +303,7 @@ Rectangle {
             anchors.centerIn: parent
             text: "Close"
             color: releaseModalRoot.foreground
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }
 
@@ -325,7 +326,7 @@ Rectangle {
             anchors.centerIn: parent
             text: releaseModalRoot.isDownloadingCli ? "Updating..." : "Update via AUR"
             color: "#ffffff"
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }
 

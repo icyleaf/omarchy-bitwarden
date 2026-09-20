@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
+import qs.Commons
 
 Item {
   id: itemListRoot
@@ -101,7 +102,7 @@ Item {
         Layout.alignment: Qt.AlignHCenter
         text: "\uf002"
         font.family: itemListRoot.fontFamily
-        font.pixelSize: 28
+        font.pixelSize: Style.font.displayLarge
         color: Qt.darker(itemListRoot.foreground, 1.8)
       }
 
@@ -109,7 +110,7 @@ Item {
         Layout.alignment: Qt.AlignHCenter
         text: (itemListRoot.searchQuery || itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "No matching items found" : "Vault is empty"
         color: Qt.darker(itemListRoot.foreground, 1.4)
-        font.pixelSize: 12
+        font.pixelSize: Style.font.body
         font.weight: Font.Medium
       }
 
@@ -118,7 +119,7 @@ Item {
         Layout.alignment: Qt.AlignHCenter
         text: (itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "Try resetting scope filters or press Esc" : "Try a different keyword or press Tab to switch category"
         color: Qt.darker(itemListRoot.foreground, 2.0)
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
       }
     }
   }
@@ -188,7 +189,7 @@ Item {
             visible: !faviconImg.visible
             text: itemListRoot.getItemIcon(modelData)
             font.family: itemListRoot.fontFamily
-            font.pixelSize: 14
+            font.pixelSize: Style.font.title
             color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
           }
         }
@@ -207,7 +208,7 @@ Item {
             Text {
               text: modelData.name || "Untitled"
               color: itemDelegate.isSelected ? "#ffffff" : itemListRoot.foreground
-              font.pixelSize: 12
+              font.pixelSize: Style.font.body
               font.weight: Font.Medium
               elide: Text.ElideRight
               Layout.fillWidth: true
@@ -231,7 +232,7 @@ Item {
                 text: "\uf1ad " + (modelData.organization_name || "")
                 font.family: itemListRoot.fontFamily
                 color: "#fbbf24"
-                font.pixelSize: 9
+                font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Medium
                 elide: Text.ElideRight
               }
@@ -254,7 +255,7 @@ Item {
                 text: "\uf07b " + (modelData.folder_name || "")
                 font.family: itemListRoot.fontFamily
                 color: "#60a5fa"
-                font.pixelSize: 9
+                font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Medium
                 elide: Text.ElideRight
               }
@@ -265,7 +266,7 @@ Item {
               visible: Boolean(modelData.attachments && modelData.attachments.length > 0)
               text: "\uf0c6"
               font.family: itemListRoot.fontFamily
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.5)
             }
 
@@ -274,7 +275,7 @@ Item {
               visible: Boolean(modelData.favorite)
               text: "\uf005"
               font.family: itemListRoot.fontFamily
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
             }
           }
@@ -285,7 +286,7 @@ Item {
             visible: Boolean(sub)
             text: sub
             color: itemDelegate.isSelected ? Qt.rgba(1, 1, 1, 0.8) : Qt.darker(itemListRoot.foreground, 1.6)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             elide: Text.ElideRight
             Layout.fillWidth: true
             Layout.preferredWidth: 0

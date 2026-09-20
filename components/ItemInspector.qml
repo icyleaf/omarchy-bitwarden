@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
+import qs.Commons
 
 ScrollView {
   id: inspectorRoot
@@ -22,8 +23,8 @@ ScrollView {
   property color borderColor: Qt.rgba(1, 1, 1, 0.1)
   property string fontFamily: ""
   property bool showWebsiteIcons: false
-  readonly property int keyPixelSize: 10
-  readonly property int valuePixelSize: 12
+  readonly property int keyPixelSize: Style.font.caption
+  readonly property int valuePixelSize: Style.font.body
 
   onItemChanged: {
     showCardNumberRevealed = false
@@ -294,9 +295,9 @@ ScrollView {
               text: "\uf060"
               font.family: inspectorRoot.fontFamily
               color: inspectorRoot.foreground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
-            Text { text: "Back to Item"; color: inspectorRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+            Text { text: "Back to Item"; color: inspectorRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
           }
           MouseArea {
             id: backMouse
@@ -310,14 +311,14 @@ ScrollView {
         Text {
           text: inspectorRoot.getAttachmentIcon(inspectorRoot.activeAttachmentPreview ? inspectorRoot.activeAttachmentPreview.filename : "")
           font.family: inspectorRoot.fontFamily
-          font.pixelSize: 14
+          font.pixelSize: Style.font.title
           color: inspectorRoot.accent
         }
 
         Text {
           text: inspectorRoot.activeAttachmentPreview ? (inspectorRoot.activeAttachmentPreview.filename || "Attachment") : ""
           color: inspectorRoot.foreground
-          font.pixelSize: 12
+          font.pixelSize: Style.font.body
           font.weight: Font.Medium
           elide: Text.ElideRight
           Layout.fillWidth: true
@@ -365,7 +366,7 @@ ScrollView {
           Text {
             text: "Text Content Preview"
             color: Qt.darker(inspectorRoot.foreground, 1.4)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
           }
           Item { Layout.fillWidth: true }
           GhostIconButton {
@@ -397,7 +398,7 @@ ScrollView {
               readOnly: true
               wrapMode: Text.WrapAnywhere
               color: inspectorRoot.foreground
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.family: "monospace"
               text: (inspectorRoot.activeAttachmentPreview && inspectorRoot.activeAttachmentPreview.text_content) ? inspectorRoot.activeAttachmentPreview.text_content : ""
               background: null
@@ -418,7 +419,7 @@ ScrollView {
           Layout.alignment: Qt.AlignHCenter
           text: "\uf15b"
           font.family: inspectorRoot.fontFamily
-          font.pixelSize: 36
+          font.pixelSize: Style.fontPx(3.0)
           color: Qt.darker(inspectorRoot.foreground, 1.8)
         }
 
@@ -426,7 +427,7 @@ ScrollView {
           Layout.alignment: Qt.AlignHCenter
           text: "Preview not available for this file format"
           color: Qt.darker(inspectorRoot.foreground, 1.4)
-          font.pixelSize: 12
+          font.pixelSize: Style.font.body
           font.weight: Font.Medium
         }
 
@@ -447,12 +448,12 @@ ScrollView {
               text: "\uf019"
               font.family: inspectorRoot.fontFamily
               color: inspectorRoot.accent
-              font.pixelSize: 12
+              font.pixelSize: Style.font.body
             }
             Text {
               text: "Open or Save File"
               color: inspectorRoot.foreground
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
           }
@@ -507,7 +508,7 @@ ScrollView {
             visible: !inspFaviconImg.visible
             text: inspectorRoot.getItemIcon(inspectorRoot.item)
             font.family: inspectorRoot.fontFamily
-            font.pixelSize: 14
+            font.pixelSize: Style.font.title
             color: Qt.darker(inspectorRoot.foreground, 1.3)
           }
         }
@@ -525,7 +526,7 @@ ScrollView {
             Text {
               text: inspectorRoot.item ? (inspectorRoot.item.name || "Untitled") : ""
               color: inspectorRoot.foreground
-              font.pixelSize: 12
+              font.pixelSize: Style.font.body
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
@@ -549,13 +550,13 @@ ScrollView {
                 Text {
                   text: "\uf005"
                   font.family: inspectorRoot.fontFamily
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                   color: Qt.darker(inspectorRoot.foreground, 1.2)
                 }
                 Text {
                   text: "Favorite"
                   color: Qt.darker(inspectorRoot.foreground, 1.2)
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                   font.weight: Font.Medium
                 }
               }
@@ -577,7 +578,7 @@ ScrollView {
                 text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
                 font.family: inspectorRoot.fontFamily
                 color: "#fbbf24"
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
               }
             }
@@ -598,7 +599,7 @@ ScrollView {
                 text: "\uf07b " + (inspectorRoot.item ? (inspectorRoot.item.folder_name || "") : "")
                 font.family: inspectorRoot.fontFamily
                 color: "#60a5fa"
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
               }
             }
@@ -607,7 +608,7 @@ ScrollView {
           Text {
             text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
             color: Qt.darker(inspectorRoot.foreground, 1.6)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             elide: Text.ElideRight
             Layout.fillWidth: true
             Layout.preferredWidth: 0
@@ -811,7 +812,7 @@ ScrollView {
                 Text {
                   text: inspectorRoot.currentTotp.code || "Generating..."
                   color: inspectorRoot.accent
-                  font.pixelSize: 14
+                  font.pixelSize: Style.font.title
                   font.family: "monospace"
                   font.weight: Font.Bold
                   elide: Text.ElideRight
@@ -1431,12 +1432,12 @@ ScrollView {
             text: "\uf0f6"
             font.family: inspectorRoot.fontFamily
             color: Qt.darker(inspectorRoot.foreground, 1.8)
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
           }
           Text {
             text: "This secure note has no text or custom fields."
             color: Qt.darker(inspectorRoot.foreground, 1.8)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
           }
         }
       }
@@ -1583,7 +1584,7 @@ ScrollView {
                 Text {
                   text: inspectorRoot.getAttachmentIcon(modelData.fileName)
                   font.family: inspectorRoot.fontFamily
-                  font.pixelSize: 14
+                  font.pixelSize: Style.font.title
                   color: Qt.darker(inspectorRoot.foreground, 1.4)
                 }
 
@@ -1595,7 +1596,7 @@ ScrollView {
                   Text {
                     text: modelData.fileName || "attachment"
                     color: inspectorRoot.foreground
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
@@ -1604,7 +1605,7 @@ ScrollView {
                   Text {
                     text: modelData.sizeName || inspectorRoot.formatFileSize(modelData.size)
                     color: Qt.darker(inspectorRoot.foreground, 1.8)
-                    font.pixelSize: 10
+                    font.pixelSize: Style.font.caption
                   }
                 }
 

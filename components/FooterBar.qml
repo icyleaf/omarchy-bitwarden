@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Rectangle {
   id: footerRoot
@@ -74,19 +75,19 @@ Rectangle {
                 text: "\uf0e7"
                 font.family: footerRoot.fontFamily
                 color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Actions"
                 color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+K"
               color: Qt.darker(footerRoot.foreground, 1.8)
-              font.pixelSize: 9
+              font.pixelSize: Style.fontPx(0.75)
             }
           }
 
@@ -117,19 +118,19 @@ Rectangle {
                 text: "\uf021"
                 font.family: footerRoot.fontFamily
                 color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Sync"
                 color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+R"
               color: Qt.darker(footerRoot.foreground, 1.8)
-              font.pixelSize: 9
+              font.pixelSize: Style.fontPx(0.75)
             }
           }
 
@@ -160,19 +161,19 @@ Rectangle {
                 text: "\uf023"
                 font.family: footerRoot.fontFamily
                 color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Lock"
                 color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-                font.pixelSize: 11
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+L"
               color: Qt.darker(footerRoot.foreground, 1.8)
-              font.pixelSize: 9
+              font.pixelSize: Style.fontPx(0.75)
             }
           }
 
@@ -204,19 +205,19 @@ Rectangle {
               text: "\uf013"
               font.family: footerRoot.fontFamily
               color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
             }
             Text {
               text: "Settings"
               color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
           }
           Text {
             text: "Ctrl+,"
             color: Qt.darker(footerRoot.foreground, 1.8)
-            font.pixelSize: 9
+            font.pixelSize: Style.fontPx(0.75)
           }
         }
 
@@ -239,20 +240,20 @@ Rectangle {
       Text {
         text: "Omarchy Bitwarden " + footerRoot.overlayVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
       }
 
       Text {
         text: "•"
         color: Qt.darker(footerRoot.foreground, 2.2)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
       }
 
       Text {
         visible: footerRoot.isEngineInstalled && !footerRoot.updateAvailable
         text: "Omawarden " + footerRoot.backendVersion
         color: Qt.darker(footerRoot.foreground, 1.8)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
       }
 
       // Installing Engine Indicator
@@ -273,12 +274,12 @@ Rectangle {
             text: "\uf021"
             font.family: footerRoot.fontFamily
             color: footerRoot.accent
-            font.pixelSize: 9
+            font.pixelSize: Style.fontPx(0.75)
           }
           Text {
             text: "Installing Engine..."
             color: footerRoot.accent
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }
         }
@@ -302,12 +303,12 @@ Rectangle {
             text: "\uf019"
             font.family: footerRoot.fontFamily
             color: "#f87171"
-            font.pixelSize: 9
+            font.pixelSize: Style.fontPx(0.75)
           }
           Text {
             text: "Install Engine"
             color: "#f87171"
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.DemiBold
           }
         }
@@ -337,12 +338,12 @@ Rectangle {
             text: "Omawarden"
             font.family: footerRoot.fontFamily
             color: "#4ade80"
-            font.pixelSize: 9
+            font.pixelSize: Style.fontPx(0.75)
           }
           Text {
             text: "\uf005 " + footerRoot.latestVersion + " Available"
             color: "#4ade80"
-            font.pixelSize: 10
+            font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }
         }
