@@ -22,9 +22,10 @@ FloatingWindow {
       pkgName: "omawarden"
       required: true
       title: "Omarchy Bitwarden 后台守护进程与 Rust 引擎"
-      description: "专为 Omarchy 设计的高性能纯 Rust 引擎，通过常驻 Unix Socket IPC 提供端到端解密、TOTP 生成与高速凭据检索（分发自 Pacman / AUR）"
+      description: "专为 Omarchy 设计的高性能纯 Rust 引擎，通过常驻 Unix Socket IPC 提供端到端解密、TOTP 生成与高速凭据检索（分发自 Pacman / AUR omawarden-bin / omawarden-git）"
       status: "idle"     // "idle" | "checking" | "installed" | "missing"
       version: ""
+      installedPackage: ""
     }
 
     ListElement {
@@ -34,6 +35,7 @@ FloatingWindow {
       description: "提供 secret-tool 命令行工具，用于系统密钥环（Keyring）的会话令牌与 API 凭据安全存储与静默续期"
       status: "idle"
       version: ""
+      installedPackage: ""
     }
 
     ListElement {
@@ -43,6 +45,7 @@ FloatingWindow {
       description: "提供 wl-copy / wl-paste 工具，用于安全复制密码、用户名、动态 TOTP 验证码及阅后即焚自动清除"
       status: "idle"
       version: ""
+      installedPackage: ""
     }
   }
 
@@ -51,6 +54,36 @@ FloatingWindow {
   // -------------------------------------------------------------
   property bool isChecking: false
   property var missingPackages: []
+  readonly property string minimumEngineVersion: "0.8.1"
+
+  function parseSemVer(v) {
+    if (!v) return [0, 0, 0]
+    var clean = String(v).replace(/^omawarden-|^v/i, "").trim()
+    var parts = clean.split("-")[0].split(".")
+    var major = parseInt(parts[0]) || 0
+    var minor = parseInt(parts[1]) || 0
+    var patch = parseInt(parts[2]) || 0
+    return [major, minor, patch]
+  }
+
+  function compareSemVer(v1, v2) {
+    var a = parseSemVer(v1)
+    var b = parseSemVer(v2)
+    for (var i = 0; i < 3; i++) {
+      if (a[i] > b[i]) return 1
+      if (a[i] < b[i]) return -1
+    }
+    return 0
+  }
+
+  function isEngineVersionSatisfied(ver) {
+    if (!ver) return false
+    var clean = String(ver).trim()
+    if (clean.indexOf("-dev") !== -1 || clean.indexOf(".dev") !== -1 || /\.r\d+\.g[a-f0-9]+/i.test(clean)) {
+      return true
+    }
+    return compareSemVer(clean, minimumEngineVersion) >= 0
+  }
 
   function checkAllDependencies() {
     missingPackages = []
@@ -58,7 +91,13 @@ FloatingWindow {
     for (var i = 0; i < dependencyModel.count; i++) {
       dependencyModel.setProperty(i, "status", "checking")
       dependencyModel.setProperty(i, "version", "")
-      names.push(dependencyModel.get(i).pkgName)
+      dependencyModel.setProperty(i, "installedPackage", "")
+      var pkg = dependencyModel.get(i).pkgName
+      if (pkg === "omawarden") {
+        names.push("omawarden", "omawarden-bin", "omawarden-git")
+      } else {
+        names.push(pkg)
+      }
     }
 
     root.isChecking = true
@@ -100,9 +139,17 @@ FloatingWindow {
             var name = match[1]
             var ver = match[2]
             for (var j = 0; j < dependencyModel.count; j++) {
-              if (dependencyModel.get(j).pkgName === name) {
-                dependencyModel.setProperty(j, "status", "installed")
-                dependencyModel.setProperty(j, "version", ver)
+              var item = dependencyModel.get(j)
+              if (item.pkgName === name || (item.pkgName === "omawarden" && (name === "omawarden-bin" || name === "omawarden-git"))) {
+                if (item.pkgName === "omawarden" && !isEngineVersionSatisfied(ver)) {
+                  dependencyModel.setProperty(j, "status", "missing")
+                  dependencyModel.setProperty(j, "version", ver)
+                  dependencyModel.setProperty(j, "installedPackage", name)
+                } else {
+                  dependencyModel.setProperty(j, "status", "installed")
+                  dependencyModel.setProperty(j, "version", ver)
+                  dependencyModel.setProperty(j, "installedPackage", name)
+                }
                 break
               }
             }
@@ -123,9 +170,12 @@ FloatingWindow {
           if (match) {
             var missingName = match[1]
             for (var j = 0; j < dependencyModel.count; j++) {
-              if (dependencyModel.get(j).pkgName === missingName) {
+              var item = dependencyModel.get(j)
+              if (item.status === "installed") continue
+              if (item.pkgName === missingName && missingName !== "omawarden" && missingName !== "omawarden-bin" && missingName !== "omawarden-git") {
                 dependencyModel.setProperty(j, "status", "missing")
                 dependencyModel.setProperty(j, "version", "")
+                dependencyModel.setProperty(j, "installedPackage", "")
                 break
               }
             }
@@ -299,7 +349,7 @@ FloatingWindow {
                   spacing: 8
 
                   Text {
-                    text: model.pkgName
+                    text: (model.installedPackage && model.status === "installed") ? model.installedPackage : model.pkgName
                     color: "#cdd6f4"
                     font.pixelSize: 14
                     font.bold: true
