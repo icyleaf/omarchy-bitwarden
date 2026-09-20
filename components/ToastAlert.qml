@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Item {
   id: toastRoot
@@ -38,7 +39,7 @@ Item {
       Text {
         text: isBusy ? "\uf021" : (errorMessage ? "\uf071" : "\uf129")
         font.family: toastRoot.fontFamily
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
         color: "#ffffff"
       }
 
@@ -46,7 +47,7 @@ Item {
         id: messageText
         text: errorMessage || statusMessage || (isBusy ? "Processing..." : "")
         color: "#ffffff"
-        font.pixelSize: 11
+        font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium
         elide: Text.ElideRight
         Layout.preferredWidth: implicitWidth
@@ -68,7 +69,7 @@ Item {
         text: "\uf00d"
         font.family: toastRoot.fontFamily
         color: Qt.rgba(1, 1, 1, 0.6)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         MouseArea {
           anchors.fill: parent
           cursorShape: Qt.PointingHandCursor

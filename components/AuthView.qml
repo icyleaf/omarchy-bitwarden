@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Item {
   id: authRoot
@@ -177,15 +178,15 @@ Item {
               Layout.alignment: Qt.AlignHCenter
               text: "\uf023"
               font.family: authRoot.fontFamily
-              font.pixelSize: 28
+              font.pixelSize: Style.font.displayLarge
               color: authRoot.accent
             }
-            Text { Layout.alignment: Qt.AlignHCenter; text: "Vault is Locked"; color: authRoot.foreground; font.pixelSize: 14; font.weight: Font.DemiBold }
+            Text { Layout.alignment: Qt.AlignHCenter; text: "Vault is Locked"; color: authRoot.foreground; font.pixelSize: Style.font.title; font.weight: Font.DemiBold }
             Text {
               Layout.alignment: Qt.AlignHCenter
               text: "Logged in as " + (authRoot.authState.user_email || "user")
               color: Qt.darker(authRoot.foreground, 1.6)
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
             }
           }
 
@@ -194,7 +195,7 @@ Item {
             Layout.fillWidth: true
             spacing: 4
 
-            Text { text: "Master Password:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+            Text { text: "Master Password:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
 
             Rectangle {
               Layout.fillWidth: true
@@ -216,7 +217,7 @@ Item {
                   anchors.verticalCenter: parent.verticalCenter
                   color: authRoot.foreground
                   font.family: "sans-serif"
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   echoMode: TextInput.Password
                   selectByMouse: true
                   activeFocusOnTab: true
@@ -234,7 +235,7 @@ Item {
                   text: "Enter master password..."
                   color: Qt.darker(authRoot.foreground, 2.0)
                   font.family: "sans-serif"
-                  font.pixelSize: 12
+                  font.pixelSize: Style.font.body
                   visible: !unlockPasswordField.text
                 }
               }
@@ -252,7 +253,7 @@ Item {
               anchors.centerIn: parent
               text: authRoot.isBusy ? "Unlocking..." : "Unlock Vault"
               color: "#ffffff"
-              font.pixelSize: 12
+              font.pixelSize: Style.font.body
               font.weight: Font.Medium
             }
 
@@ -277,7 +278,7 @@ Item {
             Text {
               text: "Log out from account"
               color: Qt.darker(authRoot.foreground, 1.6)
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
@@ -302,15 +303,15 @@ Item {
               Layout.alignment: Qt.AlignHCenter
               text: "\uf132"
               font.family: authRoot.fontFamily
-              font.pixelSize: 28
+              font.pixelSize: Style.font.displayLarge
               color: authRoot.accent
             }
-            Text { Layout.alignment: Qt.AlignHCenter; text: "Log In to Bitwarden"; color: authRoot.foreground; font.pixelSize: 14; font.weight: Font.DemiBold }
+            Text { Layout.alignment: Qt.AlignHCenter; text: "Log In to Bitwarden"; color: authRoot.foreground; font.pixelSize: Style.font.title; font.weight: Font.DemiBold }
             Text {
               Layout.alignment: Qt.AlignHCenter
               text: (authRoot.config && authRoot.config.server_url) ? authRoot.config.server_url : "https://vault.bitwarden.com"
               color: Qt.darker(authRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
 
@@ -327,7 +328,7 @@ Item {
               border.color: (authRoot.loginMethod === "password") ? authRoot.accent : authRoot.borderColor
               border.width: 1
 
-              Text { id: pwdTabTxt; anchors.centerIn: parent; text: "Master Password"; color: (authRoot.loginMethod === "password") ? authRoot.accent : authRoot.foreground; font.pixelSize: 11 }
+              Text { id: pwdTabTxt; anchors.centerIn: parent; text: "Master Password"; color: (authRoot.loginMethod === "password") ? authRoot.accent : authRoot.foreground; font.pixelSize: Style.font.bodySmall }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: authRoot.loginMethod = "password" }
             }
 
@@ -339,7 +340,7 @@ Item {
               border.color: (authRoot.loginMethod === "apikey") ? authRoot.accent : authRoot.borderColor
               border.width: 1
 
-              Text { id: apiTabTxt; anchors.centerIn: parent; text: "API Key"; color: (authRoot.loginMethod === "apikey") ? authRoot.accent : authRoot.foreground; font.pixelSize: 11 }
+              Text { id: apiTabTxt; anchors.centerIn: parent; text: "API Key"; color: (authRoot.loginMethod === "apikey") ? authRoot.accent : authRoot.foreground; font.pixelSize: Style.font.bodySmall }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: authRoot.loginMethod = "apikey" }
             }
           }
@@ -353,13 +354,13 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Email:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "Email:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginEmailInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginEmailInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: loginPwdInput
                   KeyNavigation.backtab: authRoot.show2FAField ? login2FAInput : loginPwdInput
@@ -372,13 +373,13 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Master Password:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "Master Password:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginPwdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginPwdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; echoMode: TextInput.Password; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: (authRoot.show2FAField && authRoot.twoFactorProvider !== 7) ? login2FAInput : loginEmailInput
                   KeyNavigation.backtab: loginEmailInput
@@ -435,7 +436,7 @@ Item {
                       color: (authRoot.twoFactorProvider === modelData)
                         ? authRoot.accent
                         : authRoot.foreground
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       font.weight: (authRoot.twoFactorProvider === modelData) ? Font.DemiBold : Font.Normal
                     }
 
@@ -476,7 +477,7 @@ Item {
                       ? "\uf084"
                       : (authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf287")
                     font.family: authRoot.fontFamily
-                    font.pixelSize: 20
+                    font.pixelSize: Style.fontPx(1.667)
                     color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
                     Layout.alignment: Qt.AlignTop
                   }
@@ -496,7 +497,7 @@ Item {
                               ? "No Security Key Detected"
                               : "Security Key Detected")
                         color: authRoot.foreground
-                        font.pixelSize: 11
+                        font.pixelSize: Style.font.bodySmall
                         font.weight: Font.DemiBold
                         Layout.fillWidth: true
                       }
@@ -516,7 +517,7 @@ Item {
                           anchors.centerIn: parent
                           text: checkAgainTimer.running ? "Checking..." : "Check Again"
                           color: authRoot.foreground
-                          font.pixelSize: 9
+                          font.pixelSize: Style.fontPx(0.75)
                           font.weight: Font.Medium
                         }
 
@@ -542,7 +543,7 @@ Item {
                                 ? "Insert your USB security key. It will be detected automatically."
                                 : "Click 'Verify with Security Key' and touch your key."))
                       color: Qt.darker(authRoot.foreground, 1.4)
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       wrapMode: Text.WordWrap
                       Layout.fillWidth: true
                     }
@@ -567,7 +568,7 @@ Item {
                           text: "sudo pacman -S libfido2"
                           color: authRoot.foreground
                           font.family: "monospace"
-                          font.pixelSize: 10
+                          font.pixelSize: Style.font.caption
                           Layout.fillWidth: true
                           elide: Text.ElideRight
                         }
@@ -583,7 +584,7 @@ Item {
                             anchors.centerIn: parent
                             text: authRoot.isInstalling ? "Installing..." : "Install"
                             color: authRoot.isInstalling ? authRoot.muted : "#ffffff"
-                            font.pixelSize: 9
+                            font.pixelSize: Style.fontPx(0.75)
                             font.weight: Font.Medium
                           }
 
@@ -608,7 +609,7 @@ Item {
                             anchors.centerIn: parent
                             text: copyTimer.running ? "Copied" : "Copy"
                             color: "#ffffff"
-                            font.pixelSize: 9
+                            font.pixelSize: Style.fontPx(0.75)
                             font.weight: Font.Medium
                           }
 
@@ -648,7 +649,7 @@ Item {
                             ? "Touch YubiKey or Enter OTP:"
                             : "Two-Factor Authentication (2FA) Code:"))
                   color: authRoot.foreground
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   font.weight: Font.Medium
                 }
 
@@ -662,7 +663,7 @@ Item {
                     anchors.leftMargin: 10
                     anchors.rightMargin: resendEmailBtn.visible ? 6 : 10
                     anchors.verticalCenter: parent.verticalCenter
-                    color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                    color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                     activeFocusOnTab: true
                     KeyNavigation.tab: loginEmailInput
                     KeyNavigation.backtab: loginPwdInput
@@ -699,7 +700,7 @@ Item {
                             ? ("Resend (" + authRoot.resendCooldown + "s)")
                             : (authRoot.emailSentCount > 0 ? "Resend Email" : "Send Email"))
                       color: (resendCooldownTimer.running || authRoot.isSendingEmail) ? authRoot.foreground : "#ffffff"
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       font.weight: Font.Medium
                     }
 
@@ -732,11 +733,11 @@ Item {
                   text: "\uf00c"
                   font.family: authRoot.fontFamily
                   color: "#ffffff"
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: authRoot.rememberEmailChecked = !authRoot.rememberEmailChecked }
               }
-              Text { text: "Remember Email"; color: authRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Remember Email"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall }
             }
 
             // Submit Button
@@ -777,7 +778,7 @@ Item {
                   return "Log In"
                 }
                 color: submitButton.isSubmitEnabled ? "#ffffff" : authRoot.muted
-                font.pixelSize: 12
+                font.pixelSize: Style.font.body
                 font.weight: Font.Medium
               }
 
@@ -812,13 +813,13 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "API Client ID (`user.xxxxxxxx`):"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "API Client ID (`user.xxxxxxxx`):"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientIdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: apiClientIdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: apiClientSecInput
                   KeyNavigation.backtab: apiClientSecInput
@@ -830,13 +831,13 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "API Client Secret:"; color: authRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "API Client Secret:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientSecInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: apiClientSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; echoMode: TextInput.Password; selectByMouse: true
+                  color: authRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; echoMode: TextInput.Password; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: apiClientIdInput
                   KeyNavigation.backtab: apiClientIdInput
@@ -850,7 +851,7 @@ Item {
             // Submit Button
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: authRoot.accent
-              Text { anchors.centerIn: parent; text: authRoot.isBusy ? "Logging in..." : "Log In with API Key"; color: "#ffffff"; font.pixelSize: 12; font.weight: Font.Medium }
+              Text { anchors.centerIn: parent; text: authRoot.isBusy ? "Logging in..." : "Log In with API Key"; color: "#ffffff"; font.pixelSize: Style.font.body; font.weight: Font.Medium }
               MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                 onClicked: {

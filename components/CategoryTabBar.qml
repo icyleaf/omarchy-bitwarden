@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 RowLayout {
   id: tabRoot
@@ -81,7 +82,7 @@ RowLayout {
         Text {
           text: tabRoot.getCategoryLabel(cat)
           color: isSelected ? tabRoot.accent : (tabMouse.containsMouse ? tabRoot.foreground : Qt.darker(tabRoot.foreground, 1.3))
-          font.pixelSize: 11
+          font.pixelSize: Style.font.bodySmall
           font.weight: isSelected ? Font.DemiBold : Font.Normal
         }
 
@@ -90,7 +91,7 @@ RowLayout {
           visible: count > 0
           text: count
           color: isSelected ? tabRoot.accent : Qt.darker(tabRoot.foreground, 1.8)
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
         }
       }
 

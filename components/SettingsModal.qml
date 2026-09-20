@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
+import qs.Commons
 
 Item {
   id: settingsRoot
@@ -146,12 +147,12 @@ Item {
           text: "\uf013"
           font.family: settingsRoot.fontFamily
           color: settingsRoot.accent
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
         }
         Text {
           text: "Settings & Diagnostics"
           color: settingsRoot.foreground
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
           font.weight: Font.DemiBold
         }
       }
@@ -178,7 +179,7 @@ Item {
             anchors.centerIn: parent
             text: "General"
             color: genTabItem.isSelected ? settingsRoot.accent : (genMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             font.weight: genTabItem.isSelected ? Font.DemiBold : Font.Normal
           }
           MouseArea {
@@ -208,7 +209,7 @@ Item {
             Text {
               text: "Logs & Diagnostics"
               color: logsTabItem.isSelected ? settingsRoot.accent : (logsMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: logsTabItem.isSelected ? Font.DemiBold : Font.Normal
             }
             // Error Badge if any errors exist
@@ -223,7 +224,7 @@ Item {
                 anchors.centerIn: parent
                 text: String(settingsRoot.errorCount)
                 color: "#ffffff"
-                font.pixelSize: 9
+                font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Bold
               }
             }
@@ -262,7 +263,7 @@ Item {
 
           RowLayout {
             Layout.fillWidth: true
-            Text { text: "ENGINE STATUS & HEALTH"; color: Qt.darker(settingsRoot.foreground, 1.8); font.pixelSize: 10; font.weight: Font.DemiBold }
+            Text { text: "ENGINE STATUS & HEALTH"; color: Qt.darker(settingsRoot.foreground, 1.8); font.pixelSize: Style.font.caption; font.weight: Font.DemiBold }
             Item { Layout.fillWidth: true }
 
             // Check Update Button
@@ -279,7 +280,7 @@ Item {
                 anchors.centerIn: parent
                 text: settingsRoot.isCheckingUpdate ? "Checking..." : (settingsRoot.justCheckedLatest ? "Latest" : "Check Update")
                 color: settingsRoot.justCheckedLatest ? "#4ade80" : settingsRoot.accent
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
               }
               MouseArea {
                 anchors.fill: parent
@@ -298,7 +299,7 @@ Item {
               border.color: settingsRoot.borderColor
               border.width: 1
 
-              Text { id: refHText; anchors.centerIn: parent; text: "Refresh"; color: settingsRoot.accent; font.pixelSize: 10 }
+              Text { id: refHText; anchors.centerIn: parent; text: "Refresh"; color: settingsRoot.accent; font.pixelSize: Style.font.caption }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.refreshHealthRequested() }
             }
           }
@@ -335,7 +336,7 @@ Item {
                 Text {
                   text: "Engine: " + (!engineBadgeBox.isInstalled ? "Missing" : (settingsRoot.cliHealth.version || "Ready"))
                   color: settingsRoot.foreground
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                 }
 
                 // Source badge (AUR vs System)
@@ -358,7 +359,7 @@ Item {
                       return settingsRoot.engineSource ? (settingsRoot.engineSource.charAt(0).toUpperCase() + settingsRoot.engineSource.slice(1)) : "System"
                     }
                     color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
-                    font.pixelSize: 9
+                    font.pixelSize: Style.fontPx(0.75)
                     font.weight: Font.DemiBold
                   }
                 }
@@ -379,13 +380,13 @@ Item {
                       text: "\uf062"
                       font.family: settingsRoot.fontFamily
                       color: "#ffffff"
-                      font.pixelSize: 8
+                      font.pixelSize: Style.fontPx(0.667)
                     }
                     Text {
                       id: updateTagLabel
                       text: "Update (AUR)"
                       color: "#ffffff"
-                      font.pixelSize: 9
+                      font.pixelSize: Style.fontPx(0.75)
                       font.weight: Font.DemiBold
                     }
                   }
@@ -404,7 +405,7 @@ Item {
                     anchors.centerIn: parent
                     text: settingsRoot.isInstallingDependencies ? "Installing..." : "Install"
                     color: "#ffffff"
-                    font.pixelSize: 9
+                    font.pixelSize: Style.fontPx(0.75)
                     font.weight: Font.Medium
                   }
                 }
@@ -450,7 +451,7 @@ Item {
                 Text {
                   text: "Keyring: " + (settingsRoot.cliHealth.keyring_available ? "Ready" : "Unavailable")
                   color: settingsRoot.foreground
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                 }
               }
             }
@@ -479,7 +480,7 @@ Item {
                 Text {
                   text: "Clipboard: " + (settingsRoot.cliHealth.clipboard_available ? "Ready" : "Missing")
                   color: settingsRoot.foreground
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                 }
               }
             }
@@ -495,12 +496,12 @@ Item {
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 3
-            Text { text: "Bitwarden / Vaultwarden Server URL:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+            Text { text: "Bitwarden / Vaultwarden Server URL:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: sUrlInput
-                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                 activeFocusOnTab: true
                 KeyNavigation.tab: idUrlInput
                 KeyNavigation.backtab: maxAttSizeInput
@@ -515,14 +516,14 @@ Item {
             spacing: 3
             RowLayout {
               spacing: 4
-              Text { text: "Identity URL:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
-              Text { text: "(Optional override, e.g. https://identity.bitwarden.com)"; color: settingsRoot.mutedForeground; font.pixelSize: 10 }
+              Text { text: "Identity URL:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+              Text { text: "(Optional override, e.g. https://identity.bitwarden.com)"; color: settingsRoot.mutedForeground; font.pixelSize: Style.font.caption }
             }
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: idUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: idUrlInput
-                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                 activeFocusOnTab: true
                 KeyNavigation.tab: dlDirInput
                 KeyNavigation.backtab: sUrlInput
@@ -532,7 +533,7 @@ Item {
                 anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
                 text: "Auto (default: identity.bitwarden.com or /identity)"
                 color: settingsRoot.mutedForeground
-                font.family: "sans-serif"; font.pixelSize: 11
+                font.family: "sans-serif"; font.pixelSize: Style.font.bodySmall
                 visible: idUrlInput.text.length === 0
               }
             }
@@ -542,12 +543,12 @@ Item {
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 3
-            Text { text: "Attachment Download Directory:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+            Text { text: "Attachment Download Directory:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: dlDirInput
-                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                 activeFocusOnTab: true
                 KeyNavigation.tab: lockMinInput
                 KeyNavigation.backtab: idUrlInput
@@ -565,12 +566,12 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Auto-lock Timeout (Minutes):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "Auto-lock Timeout (Minutes):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: lockMinInput
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: clipSecInput
                   KeyNavigation.backtab: dlDirInput
@@ -585,12 +586,12 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Clipboard Auto-Clear (Seconds):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "Clipboard Auto-Clear (Seconds):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: clipSecInput
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: maxAttSizeInput
                   KeyNavigation.backtab: lockMinInput
@@ -605,12 +606,12 @@ Item {
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 3
-              Text { text: "Max Attachment (MB):"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+              Text { text: "Max Attachment (MB):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
                 Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: maxAttSizeInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: maxAttSizeInput
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: 12; selectByMouse: true
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
                   activeFocusOnTab: true
                   KeyNavigation.tab: sUrlInput
                   KeyNavigation.backtab: clipSecInput
@@ -636,11 +637,11 @@ Item {
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
                   color: "#ffffff"
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.showWebsiteIconsChecked = !settingsRoot.showWebsiteIconsChecked }
               }
-              Text { text: "Show Website Icons"; color: settingsRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Show Website Icons"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall }
             }
             Text {
               readonly property string curServerUrl: (sUrlInput && sUrlInput.text.trim()) ? sUrlInput.text.trim() : ((settingsRoot.config && settingsRoot.config.server_url) ? settingsRoot.config.server_url : "")
@@ -650,7 +651,7 @@ Item {
                     ? "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
                     : ("Fetches icons directly from your vault server (" + (serverHost || "self-hosted") + ").")
               color: settingsRoot.mutedForeground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               Layout.fillWidth: true
               wrapMode: Text.WordWrap
             }
@@ -670,17 +671,17 @@ Item {
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
                   color: "#ffffff"
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
               }
-              Text { text: "Check For Updates"; color: settingsRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Check For Updates"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall }
             }
             Text {
               Layout.fillWidth: true
               text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
               color: settingsRoot.mutedForeground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
           }
@@ -699,17 +700,17 @@ Item {
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
                   color: "#ffffff"
-                  font.pixelSize: 9
+                  font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.rememberLastSearchChecked = !settingsRoot.rememberLastSearchChecked }
               }
-              Text { text: "Remember Last Search State"; color: settingsRoot.foreground; font.pixelSize: 11 }
+              Text { text: "Remember Last Search State"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall }
             }
             Text {
               Layout.fillWidth: true
               text: "Retains previous search query, category, and selection when reopening while vault is unlocked."
               color: settingsRoot.mutedForeground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
           }
@@ -718,7 +719,7 @@ Item {
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 4
-            Text { text: "Logging Severity Level:"; color: settingsRoot.foreground; font.pixelSize: 11; font.weight: Font.Medium }
+            Text { text: "Logging Severity Level:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
             RowLayout {
               spacing: 4
               Repeater {
@@ -738,7 +739,7 @@ Item {
                     anchors.centerIn: parent
                     text: modelData.toUpperCase()
                     color: lvlItem.isSelected ? settingsRoot.accent : (lvlMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     font.weight: lvlItem.isSelected ? Font.DemiBold : Font.Normal
                   }
                   MouseArea {
@@ -774,7 +775,7 @@ Item {
               anchors.centerIn: parent
               text: "Cancel"
               color: settingsRoot.foreground
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
             MouseArea {
@@ -796,7 +797,7 @@ Item {
               anchors.centerIn: parent
               text: settingsRoot.isBusy ? "Saving..." : "Save Settings"
               color: "#ffffff"
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
 
@@ -841,13 +842,13 @@ Item {
             Text {
               text: "All"
               color: fAllItem.isSelected ? settingsRoot.accent : (fAllMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: fAllItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: (settingsRoot.logBuffer ? settingsRoot.logBuffer.length : 0)
               color: fAllItem.isSelected ? settingsRoot.accent : Qt.darker(settingsRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -876,13 +877,13 @@ Item {
             Text {
               text: "Errors"
               color: fErrItem.isSelected ? "#ef4444" : (fErrMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: fErrItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.errorCount
               color: fErrItem.isSelected ? "#ef4444" : Qt.darker(settingsRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -911,13 +912,13 @@ Item {
             Text {
               text: "Warnings"
               color: fWarnItem.isSelected ? "#f59e0b" : (fWarnMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: fWarnItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.warnCount
               color: fWarnItem.isSelected ? "#f59e0b" : Qt.darker(settingsRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -946,13 +947,13 @@ Item {
             Text {
               text: "Info"
               color: fInfoItem.isSelected ? "#3b82f6" : (fInfoMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: fInfoItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.infoCount
               color: fInfoItem.isSelected ? "#3b82f6" : Qt.darker(settingsRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -981,13 +982,13 @@ Item {
             Text {
               text: "Debug"
               color: fDebugItem.isSelected ? "#a855f7" : (fDebugMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
-              font.pixelSize: 11
+              font.pixelSize: Style.font.bodySmall
               font.weight: fDebugItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.debugCount
               color: fDebugItem.isSelected ? "#a855f7" : Qt.darker(settingsRoot.foreground, 1.8)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -1017,12 +1018,12 @@ Item {
               text: "\uf1f8"
               font.family: settingsRoot.fontFamily
               color: Qt.darker(settingsRoot.foreground, 1.5)
-              font.pixelSize: 9
+              font.pixelSize: Style.fontPx(0.75)
             }
             Text {
               text: "Clear"
               color: Qt.darker(settingsRoot.foreground, 1.5)
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
           }
           MouseArea {
@@ -1049,12 +1050,12 @@ Item {
               text: "\uf0c5"
               font.family: settingsRoot.fontFamily
               color: settingsRoot.accent
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
             }
             Text {
               text: "Copy Diagnostics"
               color: settingsRoot.foreground
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               font.weight: Font.Medium
             }
           }
@@ -1105,7 +1106,7 @@ Item {
                 text: (modelData.timestamp ? (modelData.timestamp.indexOf("T") !== -1 ? modelData.timestamp.split("T")[1].replace("Z", "") : modelData.timestamp) : "")
                 color: Qt.darker(settingsRoot.foreground, 2.0)
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: Style.fontPx(0.75)
               }
 
               // 2. Badge
@@ -1119,7 +1120,7 @@ Item {
                   text: modelData.level
                   color: "#ffffff"
                   font.family: "monospace"
-                  font.pixelSize: 8
+                  font.pixelSize: Style.fontPx(0.667)
                   font.weight: Font.Bold
                 }
               }
@@ -1130,7 +1131,7 @@ Item {
                 text: "[" + modelData.source + "]"
                 color: settingsRoot.accent
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Bold
               }
 
@@ -1141,7 +1142,7 @@ Item {
                 text: modelData.message
                 color: settingsRoot.foreground
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
                 wrapMode: Text.WrapAnywhere
               }
             }
@@ -1153,7 +1154,7 @@ Item {
             anchors.centerIn: parent
             text: "No log entries recorded for this filter."
             color: Qt.darker(settingsRoot.foreground, 2.0)
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
           }
         }
       }

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Item {
   id: depViewRoot
@@ -208,14 +209,14 @@ Item {
           Text {
             text: "\uf0ad"
             font.family: depViewRoot.fontFamily
-            font.pixelSize: 22
+            font.pixelSize: Style.fontPx(1.833)
             color: depViewRoot.accent
           }
 
           Text {
             text: "System Dependencies Required"
             color: depViewRoot.foreground
-            font.pixelSize: 16
+            font.pixelSize: Style.font.heading
             font.bold: true
           }
 
@@ -232,7 +233,7 @@ Item {
               anchors.centerIn: parent
               text: "Prerequisite Setup"
               color: depViewRoot.accent
-              font.pixelSize: 10
+              font.pixelSize: Style.font.caption
               font.bold: true
             }
           }
@@ -241,7 +242,7 @@ Item {
         Text {
           text: "Omarchy Bitwarden requires native Arch / AUR packages to provide background encryption, system keyring session caching, and Wayland clipboard management."
           color: Qt.darker(depViewRoot.foreground, 1.6)
-          font.pixelSize: 11
+          font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
           Layout.fillWidth: true
         }
@@ -301,7 +302,7 @@ Item {
                   Text {
                     text: model.pkgName
                     color: depViewRoot.foreground
-                    font.pixelSize: 13
+                    font.pixelSize: Style.font.subtitle
                     font.bold: true
                   }
 
@@ -326,7 +327,7 @@ Item {
                         if (model.pkgName === "omawarden") return depViewRoot.accent
                         return Qt.darker(depViewRoot.foreground, 1.4)
                       }
-                      font.pixelSize: 10
+                      font.pixelSize: Style.font.caption
                       font.bold: true
                     }
                   }
@@ -334,7 +335,7 @@ Item {
                   Text {
                     text: model.version ? ("v" + model.version) : ""
                     color: "#a6e3a1"
-                    font.pixelSize: 11
+                    font.pixelSize: Style.font.bodySmall
                     font.bold: true
                     visible: model.status === "installed" && Boolean(model.version)
                   }
@@ -343,14 +344,14 @@ Item {
                 Text {
                   text: model.title
                   color: Qt.darker(depViewRoot.foreground, 1.3)
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   font.weight: Font.DemiBold
                 }
 
                 Text {
                   text: model.description
                   color: Qt.darker(depViewRoot.foreground, 1.6)
-                  font.pixelSize: 10
+                  font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
                   Layout.fillWidth: true
                 }
@@ -400,7 +401,7 @@ Item {
                     if (model.status === "checking") return "#f9e2af"
                     return depViewRoot.foreground
                   }
-                  font.pixelSize: 11
+                  font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
               }
@@ -428,7 +429,7 @@ Item {
             anchors.centerIn: parent
             text: depViewRoot.isChecking ? "Checking..." : "↻ Recheck"
             color: depViewRoot.isChecking ? Qt.darker(depViewRoot.foreground, 2) : depViewRoot.foreground
-            font.pixelSize: 11
+            font.pixelSize: Style.font.bodySmall
             font.bold: true
           }
 
@@ -470,7 +471,7 @@ Item {
               if (depViewRoot.isChecking || depViewRoot.isInstalling) return Qt.darker(depViewRoot.foreground, 2)
               return "#ffffff"
             }
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
             font.bold: true
           }
 
@@ -488,7 +489,7 @@ Item {
       Text {
         text: "Automatically launches an Omarchy floating presentation terminal running paru / yay / pacman to install prerequisites."
         color: Qt.darker(depViewRoot.foreground, 2.2)
-        font.pixelSize: 10
+        font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
         Layout.fillWidth: true
       }

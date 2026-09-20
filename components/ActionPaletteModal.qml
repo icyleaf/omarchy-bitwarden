@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import qs.Commons
 
 Rectangle {
   id: paletteRoot
@@ -64,7 +65,7 @@ Rectangle {
         Text {
           text: "\uf0e7"
           font.family: paletteRoot.fontFamily
-          font.pixelSize: 13
+          font.pixelSize: Style.font.subtitle
           color: paletteRoot.accent
         }
 
@@ -79,7 +80,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             color: paletteRoot.foreground
             font.family: "sans-serif"
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
             selectByMouse: true
             clip: true
             text: paletteRoot.actionFilterQuery
@@ -146,7 +147,7 @@ Rectangle {
             text: "Type an action name..."
             color: Qt.darker(paletteRoot.foreground, 1.8)
             font.family: "sans-serif"
-            font.pixelSize: 12
+            font.pixelSize: Style.font.body
             visible: !paletteFilterInput.text
           }
         }
@@ -154,7 +155,7 @@ Rectangle {
         Text {
           text: "Esc"
           color: Qt.darker(paletteRoot.foreground, 1.8)
-          font.pixelSize: 10
+          font.pixelSize: Style.font.caption
         }
       }
 
@@ -193,14 +194,14 @@ Rectangle {
             Text {
               text: modelData.icon || "\uf0e7"
               font.family: paletteRoot.fontFamily
-              font.pixelSize: 13
+              font.pixelSize: Style.font.subtitle
               color: actionDelegate.isSelected ? "#ffffff" : Qt.darker(paletteRoot.foreground, 1.3)
             }
 
             Text {
               text: modelData.label || ""
               color: actionDelegate.isSelected ? "#ffffff" : paletteRoot.foreground
-              font.pixelSize: 12
+              font.pixelSize: Style.font.body
               font.weight: Font.Medium
               elide: Text.ElideRight
               Layout.fillWidth: true
@@ -220,7 +221,7 @@ Rectangle {
                 anchors.centerIn: parent
                 text: modelData.shortcut || ""
                 color: Qt.darker(paletteRoot.foreground, 1.4)
-                font.pixelSize: 10
+                font.pixelSize: Style.font.caption
               }
             }
           }
