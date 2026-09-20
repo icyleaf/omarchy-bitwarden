@@ -8,7 +8,7 @@ Rectangle {
   property string overlayVersion: ""
   property string backendVersion: ""
   property bool isEngineInstalled: true
-  property bool isDownloadingCli: false
+  property bool isInstallingDependencies: false
   property bool updateAvailable: false
   property string latestVersion: ""
   property bool isUnlocked: true
@@ -23,7 +23,7 @@ Rectangle {
   signal syncTriggered()
   signal lockTriggered()
   signal settingsTriggered()
-  signal downloadCliTriggered()
+  signal installCliTriggered()
 
   height: 30
   Layout.fillWidth: true
@@ -255,9 +255,9 @@ Rectangle {
         font.pixelSize: 10
       }
 
-      // Downloading Engine Indicator
+      // Installing Engine Indicator
       Rectangle {
-        visible: footerRoot.isDownloadingCli
+        visible: footerRoot.isInstallingDependencies
         implicitHeight: 18
         implicitWidth: dlProgRow.implicitWidth + 10
         radius: 4
@@ -276,7 +276,7 @@ Rectangle {
             font.pixelSize: 9
           }
           Text {
-            text: "Downloading Engine..."
+            text: "Installing Engine..."
             color: footerRoot.accent
             font.pixelSize: 10
             font.weight: Font.Medium
@@ -284,9 +284,9 @@ Rectangle {
         }
       }
 
-      // Download Engine Button (When missing/not installed)
+      // Install Engine Button (When missing/not installed)
       Rectangle {
-        visible: !footerRoot.isEngineInstalled && !footerRoot.isDownloadingCli
+        visible: !footerRoot.isEngineInstalled && !footerRoot.isInstallingDependencies
         implicitHeight: 18
         implicitWidth: dlBadgeRow.implicitWidth + 10
         radius: 4
@@ -305,7 +305,7 @@ Rectangle {
             font.pixelSize: 9
           }
           Text {
-            text: "Download Engine"
+            text: "Install Engine"
             color: "#f87171"
             font.pixelSize: 10
             font.weight: Font.DemiBold
@@ -316,7 +316,7 @@ Rectangle {
           anchors.fill: parent
           cursorShape: Qt.PointingHandCursor
           hoverEnabled: true
-          onClicked: footerRoot.downloadCliTriggered()
+          onClicked: footerRoot.installCliTriggered()
         }
       }
 
