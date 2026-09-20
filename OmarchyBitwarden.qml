@@ -1646,12 +1646,11 @@ Item {
     var engineSourceStr = root.engineSource ? root.engineSource.toUpperCase() : "AUR"
     if (root.enginePackage) {
       engineSourceStr += " (" + root.enginePackage + ")"
-    } else if (root.engineSource === "builtin") {
-      engineSourceStr += " (local binary)"
+    } else if (root.engineSource === "system") {
+      engineSourceStr += " (system binary)"
     }
     report += "- **Engine Source**: " + engineSourceStr + "\n"
     report += "- **Engine Binary Path**: " + (root.helperPath || "Unknown") + "\n"
-    report += "- **Engine Attestation**: " + (root.engineAttestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (root.cliHealth && root.cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (root.cliHealth && root.cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
     report += "#### Recent Logs (" + (root.logBuffer ? root.logBuffer.length : 0) + " entries):\n\n```text\n"

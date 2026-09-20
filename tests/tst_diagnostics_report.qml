@@ -32,15 +32,14 @@ Item {
     report += "- **Configured Log Level**: " + lLevel + "\n"
     report += "- **Vault Status**: " + vStatus + "\n"
     report += "- **Engine Ready**: " + (cliHealth && cliHealth.installed ? "Yes" : "No") + "\n"
-    var engineSourceStr = engineSource ? engineSource.toUpperCase() : "BUILTIN"
+    var engineSourceStr = engineSource ? engineSource.toUpperCase() : "AUR"
     if (enginePackage) {
       engineSourceStr += " (" + enginePackage + ")"
-    } else if (engineSource === "builtin") {
-      engineSourceStr += " (local binary)"
+    } else if (engineSource === "system") {
+      engineSourceStr += " (system binary)"
     }
     report += "- **Engine Source**: " + engineSourceStr + "\n"
     report += "- **Engine Binary Path**: " + (helperPath || "Unknown") + "\n"
-    report += "- **Engine Attestation**: " + (attestationVerified ? "Verified (GitHub Artifact Attestation)" : "Unverified / SHA-256 Only") + "\n"
     report += "- **Keyring Available**: " + (cliHealth && cliHealth.keyring_available ? "Yes" : "No") + "\n"
     report += "- **Clipboard Available**: " + (cliHealth && cliHealth.clipboard_available ? "Yes" : "No") + "\n\n"
     report += "#### Recent Logs (" + (logBuffer ? logBuffer.length : 0) + " entries):\n\n```text\n"
@@ -78,19 +77,19 @@ Item {
     )
     check(binReport.indexOf("- **Engine Source**: AUR (omawarden-bin)") !== -1, "Report shows AUR (omawarden-bin)")
 
-    // 3. Local fallback builtin source
-    var builtinReport = formatDiagnosticsReport(
-      { version: "0.8.0-dev", installed: true, keyring_available: true, clipboard_available: true },
+    // 3. System source
+    var systemReport = formatDiagnosticsReport(
+      { version: "0.8.1", installed: true, keyring_available: true, clipboard_available: true },
       { server_url: "https://vault.bitwarden.com", log_level: "info" },
       { status: "unlocked" },
-      "builtin",
+      "system",
       "",
-      "/home/user/plugin/bin/omawarden",
+      "/usr/local/bin/omawarden",
       false,
       []
     )
-    check(builtinReport.indexOf("- **Engine Source**: BUILTIN (local binary)") !== -1, "Report shows BUILTIN (local binary)")
-    check(builtinReport.indexOf("- **Engine Binary Path**: /home/user/plugin/bin/omawarden") !== -1, "Report shows in-tree helperPath")
+    check(systemReport.indexOf("- **Engine Source**: SYSTEM (system binary)") !== -1, "Report shows SYSTEM (system binary)")
+    check(systemReport.indexOf("- **Engine Binary Path**: /usr/local/bin/omawarden") !== -1, "Report shows system helperPath")
 
     console.log("ALL DIAGNOSTICS REPORT TESTS PASSED!")
     Qt.exit(failures === 0 ? 0 : 1)
