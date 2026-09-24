@@ -399,6 +399,33 @@ pub fn get_device_identifier() -> String {
     )
 }
 
+/// Builds a default HTTP blocking client with standard Bitwarden client headers and the specified timeout.
+pub fn build_http_client(timeout: Duration) -> Client {
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert(
+        reqwest::header::USER_AGENT,
+        reqwest::header::HeaderValue::from_static("Bitwarden_Desktop/2026.7.0 (Linux)"),
+    );
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("bitwarden-client-name"),
+        reqwest::header::HeaderValue::from_static("desktop"),
+    );
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("bitwarden-client-version"),
+        reqwest::header::HeaderValue::from_static("2026.7.0"),
+    );
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("device-type"),
+        reqwest::header::HeaderValue::from_static("8"),
+    );
+
+    Client::builder()
+        .default_headers(default_headers)
+        .timeout(timeout)
+        .build()
+        .unwrap_or_default()
+}
+
 pub struct BitwardenApiClient {
     pub server_url: String,
     pub urls: EnvironmentUrls,
@@ -412,29 +439,7 @@ impl BitwardenApiClient {
 
     pub fn with_identity_url(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
         let urls = EnvironmentUrls::resolve(server_url, explicit_identity_url);
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        default_headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static("Bitwarden_Desktop/2025.1.0 (Linux)"),
-        );
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("bitwarden-client-name"),
-            reqwest::header::HeaderValue::from_static("desktop"),
-        );
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("bitwarden-client-version"),
-            reqwest::header::HeaderValue::from_static("2025.1.0"),
-        );
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("device-type"),
-            reqwest::header::HeaderValue::from_static("8"),
-        );
-
-        let client = Client::builder()
-            .default_headers(default_headers)
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
+        let client = build_http_client(Duration::from_secs(30));
         Self {
             server_url: urls.base_url.clone(),
             urls,
@@ -2999,6 +3004,62 @@ mod tests {
             }
             other => panic!("Expected ApiError::ResponseTooLarge, got {:?}", other),
         }
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_build_http_client_default_headers_and_timeout() {
+        use std::io::{Read, Write};
+        let client = build_http_client(Duration::from_secs(5));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                assert!(req.contains("user-agent: Bitwarden_Desktop/2026.7.0 (Linux)"));
+                assert!(req.contains("bitwarden-client-name: desktop"));
+                assert!(req.contains("bitwarden-client-version: 2026.7.0"));
+                assert!(req.contains("device-type: 8"));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let res = client.get(&server_url).send();
+        assert!(
+            res.is_ok(),
+            "Expected request with default headers to succeed"
+        );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_tls_verification_fails_closed_on_untrusted_endpoint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Point an HTTPS URL to a non-TLS server to ensure TLS handshake fails closed
+        let server_url = format!("https://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                // Return plain HTTP response rather than valid TLS handshake
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let client = build_http_client(Duration::from_secs(2));
+        let res = client.get(&server_url).send();
+        assert!(
+            res.is_err(),
+            "Expected HTTPS connection to fail closed on invalid TLS handshake"
+        );
 
         let _ = handle.join();
     }

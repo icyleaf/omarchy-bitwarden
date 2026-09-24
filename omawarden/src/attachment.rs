@@ -366,10 +366,7 @@ pub fn get_attachment(
         env_urls.api_url, item_id, attachment_id
     );
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .unwrap_or_default();
+    let client = crate::api::build_http_client(std::time::Duration::from_secs(45));
 
     let mut download_res = client
         .get(&download_url)

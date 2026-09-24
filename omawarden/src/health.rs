@@ -24,10 +24,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
     let server_clean = server_url.trim_end_matches('/');
 
     // 1. Check server reachability
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .build()
-        .unwrap_or_default();
+    let client = crate::api::build_http_client(Duration::from_secs(4));
 
     let env_urls = crate::api::EnvironmentUrls::resolve(server_url, None);
     let prelogin_url = if env_urls.is_cloud {
