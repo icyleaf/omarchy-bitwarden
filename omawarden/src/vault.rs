@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::RwLock;
 
-use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient};
+use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient, ClientContext};
 use crate::crypto::{
     parse_rsa_private_key_der, parse_symmetric_key_from_decrypted_bytes, EncString,
     SymmetricCryptoKey,
@@ -385,6 +385,13 @@ impl VaultManager {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
+        self.sync_with_client(None)
+    }
+
+    pub fn sync_with_client(
+        &self,
+        client_context: Option<&ClientContext>,
+    ) -> Result<usize, String> {
         crate::log_info!(
             "omawarden:vault",
             "Starting vault synchronization with server..."
@@ -399,7 +406,7 @@ impl VaultManager {
             .identity_url
             .as_deref()
             .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
+        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
 
         let initial_token = self
             .keyring_mgr
@@ -414,7 +421,7 @@ impl VaultManager {
                     "omawarden:vault",
                     "Access token is expired, attempting renewal..."
                 );
-                self.renew_session()?
+                self.renew_session_with_client(client_context)?
             }
             None => {
                 let has_refresh = self
@@ -428,7 +435,7 @@ impl VaultManager {
                     .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
                     .is_some();
                 if has_refresh || has_api_secret {
-                    self.renew_session()?
+                    self.renew_session_with_client(client_context)?
                 } else {
                     crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
                     return Err("Session token missing. Please log in.".to_string());
@@ -449,7 +456,7 @@ impl VaultManager {
                     "HTTP {} on sync. Attempting session renewal...",
                     code
                 );
-                let renewed_token = self.renew_session()?;
+                let renewed_token = self.renew_session_with_client(client_context)?;
                 client.sync_vault(&renewed_token).map_err(|e| {
                     crate::log_error!(
                         "omawarden:vault",
@@ -464,7 +471,7 @@ impl VaultManager {
                     "omawarden:vault",
                     "HTTP 401/403 on sync. Attempting session renewal..."
                 );
-                let renewed_token = self.renew_session()?;
+                let renewed_token = self.renew_session_with_client(client_context)?;
                 client.sync_vault(&renewed_token).map_err(|e| {
                     crate::log_error!(
                         "omawarden:vault",
@@ -526,6 +533,13 @@ impl VaultManager {
     }
 
     pub fn renew_session(&self) -> Result<String, String> {
+        self.renew_session_with_client(None)
+    }
+
+    pub fn renew_session_with_client(
+        &self,
+        client_context: Option<&ClientContext>,
+    ) -> Result<String, String> {
         let storage = self.storage_mgr.load();
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
@@ -536,7 +550,7 @@ impl VaultManager {
             .identity_url
             .as_deref()
             .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
+        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
 
         let mut had_credentials = false;
         let mut auth_failed = false;
@@ -860,6 +874,18 @@ impl VaultManager {
         folder_id: Option<&str>,
         user_key: &SymmetricCryptoKey,
     ) -> Result<VaultItem, String> {
+        self.create_ssh_key_with_client(name, ssh_key_data, notes, folder_id, user_key, None)
+    }
+
+    pub fn create_ssh_key_with_client(
+        &self,
+        name: &str,
+        ssh_key_data: &crate::ssh::GeneratedSshKey,
+        notes: Option<&str>,
+        folder_id: Option<&str>,
+        user_key: &SymmetricCryptoKey,
+        client_context: Option<&ClientContext>,
+    ) -> Result<VaultItem, String> {
         let storage = self.storage_mgr.load();
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
@@ -879,9 +905,9 @@ impl VaultManager {
                     "omawarden:vault",
                     "Access token is expired for create_ssh_key, attempting renewal..."
                 );
-                self.renew_session()?
+                self.renew_session_with_client(client_context)?
             }
-            None => self.renew_session()?,
+            None => self.renew_session_with_client(client_context)?,
         };
 
         let enc_name = user_key
@@ -934,7 +960,7 @@ impl VaultManager {
             .identity_url
             .as_deref()
             .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_identity_url(s_url, id_url);
+        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
 
         let created_cipher = match client.create_cipher(&active_token, &payload) {
             Ok(c) => c,
@@ -947,7 +973,7 @@ impl VaultManager {
                     "HTTP {} creating SSH key. Attempting session renewal...",
                     code
                 );
-                let renewed = self.renew_session()?;
+                let renewed = self.renew_session_with_client(client_context)?;
                 client
                     .create_cipher(&renewed, &payload)
                     .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
@@ -957,7 +983,7 @@ impl VaultManager {
                     "omawarden:vault",
                     "HTTP 401/403 creating SSH key. Attempting session renewal..."
                 );
-                let renewed = self.renew_session()?;
+                let renewed = self.renew_session_with_client(client_context)?;
                 client
                     .create_cipher(&renewed, &payload)
                     .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?

@@ -2,7 +2,8 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::crypto::{
@@ -399,24 +400,158 @@ pub fn get_device_identifier() -> String {
     )
 }
 
-/// Builds a default HTTP blocking client with standard Bitwarden client headers and the specified timeout.
-pub fn build_http_client(timeout: Duration) -> Client {
+pub const BITWARDEN_COMPAT_VERSION: &str = "2026.7.0";
+pub const BITWARDEN_CLIENT_NAME: &str = "desktop";
+pub const BITWARDEN_DEVICE_TYPE: &str = "8";
+
+/// Client context metadata identifying the calling frontend application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientContext {
+    pub name: String,
+    pub version: String,
+}
+
+impl ClientContext {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+
+    /// Validates that name and version adhere to a strict character whitelist:
+    /// Length: 1..=32 characters.
+    /// Characters allowed: alphanumeric ASCII, dot (.), hyphen (-), and underscore (_).
+    /// Rejects any whitespace, newlines, carriage returns, control characters, or invalid length.
+    pub fn is_valid(&self) -> bool {
+        fn is_valid_token(s: &str) -> bool {
+            if s.is_empty() || s.len() > 32 {
+                return false;
+            }
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        }
+
+        is_valid_token(&self.name) && is_valid_token(&self.version)
+    }
+}
+
+/// Formats the User-Agent header string.
+///
+/// When client metadata is present and valid, returns:
+/// `<ClientName>/<ClientVersion> (Omawarden/<engine_version>; Bitwarden/2026.7.0; Linux)`
+///
+/// When client metadata is absent or invalid, returns:
+/// `Omawarden/<engine_version> (Bitwarden/2026.7.0; Linux)`
+pub fn format_user_agent(context: Option<&ClientContext>) -> String {
+    let engine_version = env!("CARGO_PKG_VERSION");
+    if let Some(ctx) = context.filter(|c| c.is_valid()) {
+        format!(
+            "{}/{} (Omawarden/{}; Bitwarden/{}; Linux)",
+            ctx.name, ctx.version, engine_version, BITWARDEN_COMPAT_VERSION
+        )
+    } else {
+        format!(
+            "Omawarden/{} (Bitwarden/{}; Linux)",
+            engine_version, BITWARDEN_COMPAT_VERSION
+        )
+    }
+}
+
+/// Resolves the default filesystem path to the Omarchy Bitwarden plugin manifest.
+pub fn get_default_plugin_manifest_path() -> Option<PathBuf> {
+    if let Some(override_path) =
+        std::env::var_os("OMAWARDEN_PLUGIN_MANIFEST_PATH").filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(override_path));
+    }
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|s| !s.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
+    Some(
+        config_dir
+            .join("omarchy")
+            .join("plugins")
+            .join("icyleaf.bitwarden")
+            .join("manifest.json"),
+    )
+}
+
+/// Probes a plugin manifest at a specific path and extracts valid client context if present.
+pub fn probe_plugin_context_from_path(path: &Path) -> Option<ClientContext> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::Read::take(file, 64 * 1024);
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents).ok()?;
+
+    let val: Value = serde_json::from_str(&contents).ok()?;
+    let version = val.get("version").and_then(|v| v.as_str())?;
+
+    let ctx = ClientContext::new("Omarchy_Bitwarden", version);
+    Some(ctx).filter(|c| c.is_valid())
+}
+
+/// Probes the default Omarchy Bitwarden plugin manifest for client metadata.
+pub fn probe_plugin_context() -> Option<ClientContext> {
+    get_default_plugin_manifest_path()
+        .as_deref()
+        .and_then(probe_plugin_context_from_path)
+}
+
+/// Resolves the effective client context based on explicit overrides, interactive TTY detection,
+/// and automatic plugin manifest probing.
+pub fn resolve_effective_client_context(explicit: Option<&ClientContext>) -> Option<ClientContext> {
+    resolve_effective_client_context_internal(
+        explicit,
+        || std::io::stdout().is_terminal(),
+        get_default_plugin_manifest_path().as_deref(),
+    )
+}
+
+/// Internal resolution helper allowing pluggable terminal detector and manifest path for testing.
+pub fn resolve_effective_client_context_internal<F: Fn() -> bool>(
+    explicit: Option<&ClientContext>,
+    is_terminal_fn: F,
+    manifest_path: Option<&Path>,
+) -> Option<ClientContext> {
+    if let Some(ctx) = explicit {
+        return Some(ctx.clone()).filter(|c| c.is_valid());
+    }
+
+    if is_terminal_fn() {
+        return None;
+    }
+
+    manifest_path.and_then(probe_plugin_context_from_path)
+}
+
+/// Builds an HTTP blocking client with standard Bitwarden client headers and client-context-aware User-Agent.
+pub fn build_http_client_with_context(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+) -> Client {
     let mut default_headers = reqwest::header::HeaderMap::new();
-    default_headers.insert(
-        reqwest::header::USER_AGENT,
-        reqwest::header::HeaderValue::from_static("Bitwarden_Desktop/2026.7.0 (Linux)"),
-    );
+    let ua_str = format_user_agent(client_context);
+    let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
+        reqwest::header::HeaderValue::from_static("Omawarden (Bitwarden/2026.7.0; Linux)")
+    });
+    default_headers.insert(reqwest::header::USER_AGENT, ua_val);
     default_headers.insert(
         reqwest::header::HeaderName::from_static("bitwarden-client-name"),
-        reqwest::header::HeaderValue::from_static("desktop"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_CLIENT_NAME),
     );
     default_headers.insert(
         reqwest::header::HeaderName::from_static("bitwarden-client-version"),
-        reqwest::header::HeaderValue::from_static("2026.7.0"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_COMPAT_VERSION),
     );
     default_headers.insert(
         reqwest::header::HeaderName::from_static("device-type"),
-        reqwest::header::HeaderValue::from_static("8"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_DEVICE_TYPE),
     );
 
     Client::builder()
@@ -424,6 +559,11 @@ pub fn build_http_client(timeout: Duration) -> Client {
         .timeout(timeout)
         .build()
         .unwrap_or_default()
+}
+
+/// Builds a default HTTP blocking client with standard Bitwarden client headers and the specified timeout.
+pub fn build_http_client(timeout: Duration) -> Client {
+    build_http_client_with_context(timeout, None)
 }
 
 pub struct BitwardenApiClient {
@@ -438,8 +578,16 @@ impl BitwardenApiClient {
     }
 
     pub fn with_identity_url(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
+        Self::with_options(server_url, explicit_identity_url, None)
+    }
+
+    pub fn with_options(
+        server_url: &str,
+        explicit_identity_url: Option<&str>,
+        client_context: Option<&ClientContext>,
+    ) -> Self {
         let urls = EnvironmentUrls::resolve(server_url, explicit_identity_url);
-        let client = build_http_client(Duration::from_secs(30));
+        let client = build_http_client_with_context(Duration::from_secs(30), client_context);
         Self {
             server_url: urls.base_url.clone(),
             urls,
@@ -3021,7 +3169,11 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                assert!(req.contains("user-agent: Bitwarden_Desktop/2026.7.0 (Linux)"));
+                let expected_ua = format!(
+                    "user-agent: Omawarden/{} (Bitwarden/2026.7.0; Linux)",
+                    env!("CARGO_PKG_VERSION")
+                );
+                assert!(req.contains(&expected_ua));
                 assert!(req.contains("bitwarden-client-name: desktop"));
                 assert!(req.contains("bitwarden-client-version: 2026.7.0"));
                 assert!(req.contains("device-type: 8"));
@@ -3034,6 +3186,177 @@ mod tests {
             res.is_ok(),
             "Expected request with default headers to succeed"
         );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_client_context_validation_and_crlf_rejection() {
+        let valid1 = ClientContext::new("Omarchy_Bitwarden", "0.11.2");
+        assert!(valid1.is_valid());
+
+        let valid2 = ClientContext::new("my-custom-client.v1", "1.0.0-beta.2");
+        assert!(valid2.is_valid());
+
+        // CRLF injection attempts
+        let injection_crlf = ClientContext::new("evil\r\nX-Injected: true", "1.0.0");
+        assert!(!injection_crlf.is_valid());
+
+        let injection_ver = ClientContext::new("valid_name", "1.0\nSet-Cookie: evil");
+        assert!(!injection_ver.is_valid());
+
+        // Whitespace and symbols rejection
+        let space_name = ClientContext::new("Omarchy Bitwarden", "0.11.2");
+        assert!(!space_name.is_valid());
+
+        let colon_name = ClientContext::new("client:foo", "1.0");
+        assert!(!colon_name.is_valid());
+
+        // Empty strings
+        let empty_name = ClientContext::new("", "1.0");
+        assert!(!empty_name.is_valid());
+
+        let empty_ver = ClientContext::new("client", "");
+        assert!(!empty_ver.is_valid());
+
+        // Length limit (> 32 chars)
+        let long_name = ClientContext::new("a".repeat(33), "1.0");
+        assert!(!long_name.is_valid());
+
+        let max_len = ClientContext::new("a".repeat(32), "1.0");
+        assert!(max_len.is_valid());
+    }
+
+    #[test]
+    fn test_format_user_agent_cli_and_ui() {
+        let engine_ver = env!("CARGO_PKG_VERSION");
+
+        // CLI mode (no client context)
+        let cli_ua = format_user_agent(None);
+        assert_eq!(
+            cli_ua,
+            format!("Omawarden/{} (Bitwarden/2026.7.0; Linux)", engine_ver)
+        );
+
+        // UI mode (valid client context)
+        let ui_ctx = ClientContext::new("Omarchy_Bitwarden", "0.11.2");
+        let ui_ua = format_user_agent(Some(&ui_ctx));
+        assert_eq!(
+            ui_ua,
+            format!(
+                "Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; Linux)",
+                engine_ver
+            )
+        );
+
+        // UI mode with invalid context falls back safely to pure CLI mode
+        let invalid_ctx = ClientContext::new("evil\r\nHeader: foo", "0.11.2");
+        let fallback_ua = format_user_agent(Some(&invalid_ctx));
+        assert_eq!(
+            fallback_ua,
+            format!("Omawarden/{} (Bitwarden/2026.7.0; Linux)", engine_ver)
+        );
+    }
+
+    #[test]
+    fn test_probe_plugin_context_from_path() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // 1. Valid manifest
+        let valid_path = temp.path().join("manifest_valid.json");
+        std::fs::write(
+            &valid_path,
+            r#"{"name": "Omarchy Bitwarden", "version": "0.11.2"}"#,
+        )
+        .unwrap();
+        let ctx = probe_plugin_context_from_path(&valid_path).unwrap();
+        assert_eq!(ctx.name, "Omarchy_Bitwarden");
+        assert_eq!(ctx.version, "0.11.2");
+
+        // 2. Corrupted JSON
+        let corrupt_path = temp.path().join("manifest_corrupt.json");
+        std::fs::write(&corrupt_path, "{ broken json...").unwrap();
+        assert!(probe_plugin_context_from_path(&corrupt_path).is_none());
+
+        // 3. Missing version
+        let no_ver_path = temp.path().join("manifest_no_ver.json");
+        std::fs::write(&no_ver_path, r#"{"name": "Omarchy Bitwarden"}"#).unwrap();
+        assert!(probe_plugin_context_from_path(&no_ver_path).is_none());
+
+        // 4. Invalid version with injection
+        let invalid_ver_path = temp.path().join("manifest_invalid_ver.json");
+        std::fs::write(&invalid_ver_path, r#"{"version": "1.0\r\nevil"}"#).unwrap();
+        assert!(probe_plugin_context_from_path(&invalid_ver_path).is_none());
+
+        // 5. Non-existent file
+        let nonexistent_path = temp.path().join("missing.json");
+        assert!(probe_plugin_context_from_path(&nonexistent_path).is_none());
+    }
+
+    #[test]
+    fn test_resolve_effective_client_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("manifest.json");
+        std::fs::write(&manifest_path, r#"{"version": "0.11.2"}"#).unwrap();
+
+        // A. Explicit valid context overrides anything
+        let explicit = ClientContext::new("Custom_UI", "1.2.3");
+        let res = resolve_effective_client_context_internal(
+            Some(&explicit),
+            || true,
+            Some(&manifest_path),
+        );
+        assert_eq!(res, Some(explicit));
+
+        // B. Explicit invalid context returns None
+        let invalid_explicit = ClientContext::new("bad name", "1.0");
+        let res = resolve_effective_client_context_internal(
+            Some(&invalid_explicit),
+            || true,
+            Some(&manifest_path),
+        );
+        assert_eq!(res, None);
+
+        // C. Interactive TTY (is_terminal = true) -> pure CLI mode (None), even if manifest exists
+        let res = resolve_effective_client_context_internal(None, || true, Some(&manifest_path));
+        assert_eq!(res, None);
+
+        // D. Non-interactive (is_terminal = false) with valid manifest -> returns probed context
+        let res = resolve_effective_client_context_internal(None, || false, Some(&manifest_path));
+        assert_eq!(res, Some(ClientContext::new("Omarchy_Bitwarden", "0.11.2")));
+
+        // E. Non-interactive (is_terminal = false) without manifest -> returns None (headless fallback)
+        let res = resolve_effective_client_context_internal(None, || false, None);
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn test_build_http_client_with_context_wire_headers() {
+        use std::io::{Read, Write};
+        let ctx = ClientContext::new("Omarchy_Bitwarden", "0.11.2");
+        let client = build_http_client_with_context(Duration::from_secs(5), Some(&ctx));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let expected_ua = format!(
+                    "user-agent: Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; Linux)",
+                    env!("CARGO_PKG_VERSION")
+                );
+                assert!(req.contains(&expected_ua));
+                assert!(req.contains("bitwarden-client-name: desktop"));
+                assert!(req.contains("bitwarden-client-version: 2026.7.0"));
+                assert!(req.contains("device-type: 8"));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let res = client.get(&server_url).send();
+        assert!(res.is_ok());
         let _ = handle.join();
     }
 
