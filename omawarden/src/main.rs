@@ -894,8 +894,13 @@ fn main() -> ExitCode {
             );
             match action {
                 VaultAction::Sync => {
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
                     omawarden::daemon::ensure_daemon_running();
-                    let resp = send_daemon_request(&json!({ "action": "sync" }));
+                    let mut sync_req = json!({ "action": "sync" });
+                    if let Some(ref ctx) = client_ctx {
+                        sync_req["client"] = json!(ctx);
+                    }
+                    let resp = send_daemon_request(&sync_req);
                     if let Some(resp_val) = resp {
                         let ok = resp_val
                             .get("ok")
@@ -908,7 +913,7 @@ fn main() -> ExitCode {
                             ExitCode::FAILURE
                         }
                     } else {
-                        match vault_mgr.sync() {
+                        match vault_mgr.sync_with_client(client_ctx.as_ref()) {
                             Ok(_) => {
                                 println!(
                                     "{}",
@@ -1644,12 +1649,13 @@ fn main() -> ExitCode {
                     } else {
                         match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
                             Ok(user_key) => {
-                                match vault_mgr.create_ssh_key(
+                                match vault_mgr.create_ssh_key_with_client(
                                     &name,
                                     &keypair,
                                     notes.as_deref(),
                                     folder.as_deref(),
                                     &user_key,
+                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
@@ -1787,12 +1793,13 @@ fn main() -> ExitCode {
                     } else {
                         match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
                             Ok(user_key) => {
-                                match vault_mgr.create_ssh_key(
+                                match vault_mgr.create_ssh_key_with_client(
                                     &name,
                                     &keypair,
                                     notes.as_deref(),
                                     folder.as_deref(),
                                     &user_key,
+                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {

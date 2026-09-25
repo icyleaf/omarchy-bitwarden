@@ -175,7 +175,16 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
         return None;
     }
 
-    let payload = format!("{}\n", req);
+    let mut payload_val = req.clone();
+    if let Value::Object(ref mut map) = payload_val {
+        if !map.contains_key("client") {
+            if let Some(ctx) = crate::api::resolve_effective_client_context(None) {
+                map.insert("client".to_string(), json!(ctx));
+            }
+        }
+    }
+
+    let payload = format!("{}\n", payload_val);
     stream.write_all(payload.as_bytes()).ok()?;
     stream.flush().ok()?;
 
@@ -314,7 +323,14 @@ impl DaemonState {
     }
 
     pub fn sync(&self) -> Result<usize, String> {
-        let res = self.vault_mgr.sync();
+        self.sync_with_client(None)
+    }
+
+    pub fn sync_with_client(
+        &self,
+        client_context: Option<&crate::api::ClientContext>,
+    ) -> Result<usize, String> {
+        let res = self.vault_mgr.sync_with_client(client_context);
         if res.is_ok() {
             self.touch_activity();
         }
@@ -592,6 +608,11 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         state.touch_activity();
     }
 
+    let client_context: Option<crate::api::ClientContext> = req
+        .get("client")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .filter(|c: &crate::api::ClientContext| c.is_valid());
+
     let response = match action {
         "ping" => json!({
             "ok": true,
@@ -623,7 +644,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             crate::attachment::clear_preview_attachments(None);
             json!({ "ok": true, "status": "locked" })
         }
-        "sync" => match state.sync() {
+        "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
             Err(e) => json!({ "ok": false, "error": e }),
         },
@@ -655,10 +676,14 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                     fingerprint: fp.to_string(),
                 };
 
-                match state
-                    .vault_mgr
-                    .create_ssh_key(name, &ssh_data, notes, folder_id, &user_key)
-                {
+                match state.vault_mgr.create_ssh_key_with_client(
+                    name,
+                    &ssh_data,
+                    notes,
+                    folder_id,
+                    &user_key,
+                    client_context.as_ref(),
+                ) {
                     Ok(item) => json!({ "ok": true, "item": item }),
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
@@ -1239,5 +1264,56 @@ mod tests {
         assert!(state.check_auto_lock());
         assert!(!state.vault_mgr.is_unlocked());
         assert!(state.unlocked_at.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_handle_client_client_context_parsing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = Arc::clone(&state);
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", req);
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // 1. Valid client context in sync request (fails with missing session token error, proving sync_with_client was called)
+        let res_valid = send_req(json!({
+            "action": "sync",
+            "client": {
+                "name": "Omarchy_Bitwarden",
+                "version": "0.11.2"
+            }
+        }));
+        assert_eq!(res_valid.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert!(res_valid.get("error").is_some());
+
+        // 2. Invalid client context with CRLF injection is rejected/filtered
+        let res_injection = send_req(json!({
+            "action": "sync",
+            "client": {
+                "name": "evil\r\nHeader: foo",
+                "version": "0.11.2"
+            }
+        }));
+        assert_eq!(
+            res_injection.get("ok").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(res_injection.get("error").is_some());
     }
 }

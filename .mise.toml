@@ -1,5 +1,5 @@
 [tools]
-rust = "latest"
+rust = "1.98.0"
 
 [tasks.build]
 description = "Build the CLI"
