@@ -596,25 +596,15 @@ impl BitwardenApiClient {
     }
 
     pub fn prelogin(&self, email: &str) -> Result<PreloginResponse, ApiError> {
-        let try_identity_first = self.urls.is_cloud || self.urls.has_explicit_identity;
-        let (primary_url, fallback_url) = if try_identity_first {
-            (
-                format!("{}/accounts/prelogin", self.urls.identity_url),
-                Some(format!("{}/accounts/prelogin", self.urls.api_url)),
-            )
-        } else {
-            (
-                format!("{}/accounts/prelogin", self.urls.api_url),
-                Some(format!("{}/accounts/prelogin", self.urls.identity_url)),
-            )
-        };
+        let primary_url = format!("{}/accounts/prelogin", self.urls.identity_url);
+        let fallback_url = format!("{}/accounts/prelogin", self.urls.api_url);
 
         let email_payload = json!({ "email": email.trim().to_lowercase() });
         let mut resp = self.client.post(&primary_url).json(&email_payload).send();
 
-        if let (Some(ref fb_url), Ok(ref r)) = (fallback_url, &resp) {
+        if let Ok(ref r) = resp {
             if r.status() == reqwest::StatusCode::NOT_FOUND {
-                resp = self.client.post(fb_url).json(&email_payload).send();
+                resp = self.client.post(&fallback_url).json(&email_payload).send();
             }
         }
 
@@ -2473,14 +2463,18 @@ mod tests {
     }
 
     #[test]
-    fn test_client_prelogin_fallback_from_api_to_identity() {
+    fn test_client_prelogin_primary_identity_success() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use std::thread;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
 
         let handle = thread::spawn(move || {
             for stream in listener.incoming() {
@@ -2488,14 +2482,58 @@ mod tests {
                 let mut buf = [0u8; 1024];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
 
-                if req.contains("POST /api/accounts/prelogin") {
-                    // First request to /api/accounts/prelogin returns 404
+                if req.contains("POST /identity/accounts/prelogin") {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("user@example.com").unwrap();
+        assert_eq!(res.kdf, Some(0));
+        assert_eq!(res.kdf_iterations, Some(600_000));
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_client_prelogin_fallback_from_identity_to_api() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/accounts/prelogin") {
+                    // First request to /identity/accounts/prelogin returns 404
                     let resp =
                         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(resp.as_bytes());
-                } else if req.contains("POST /identity/accounts/prelogin") {
-                    // Fallback to /identity/accounts/prelogin returns 200
+                } else if req.contains("POST /api/accounts/prelogin") {
+                    // Fallback to /api/accounts/prelogin returns 200
                     let body = r#"{"kdf":0,"kdfIterations":600000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2513,6 +2551,50 @@ mod tests {
         assert_eq!(res.kdf, Some(0));
         assert_eq!(res.kdf_iterations, Some(600_000));
         let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_client_prelogin_identity_500_does_not_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/accounts/prelogin") {
+                    let resp =
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let err = client.prelogin("err@example.com").unwrap_err();
+        match err {
+            ApiError::HttpStatus(code, _) => {
+                assert_eq!(code, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("Expected HttpStatus(500), got: {:?}", other),
+        }
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
