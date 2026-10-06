@@ -27,12 +27,10 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
     let client = crate::api::build_http_client(Duration::from_secs(4));
 
     let env_urls = crate::api::EnvironmentUrls::resolve(server_url, None);
-    let prelogin_url = if env_urls.is_cloud {
-        format!("{}/accounts/prelogin", env_urls.identity_url)
-    } else {
-        format!("{}/accounts/prelogin", env_urls.api_url)
-    };
+    let prelogin_url = format!("{}/accounts/prelogin", env_urls.identity_url);
+    let legacy_prelogin_url = format!("{}/accounts/prelogin", env_urls.api_url);
     let server_reachable = client.get(&prelogin_url).send().is_ok()
+        || client.get(&legacy_prelogin_url).send().is_ok()
         || client.get(&env_urls.base_url).send().is_ok()
         || client.get(server_clean).send().is_ok();
 
