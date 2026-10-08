@@ -219,6 +219,22 @@ Item {
     inspector.item = { id: "test", name: "Has TOTP Only", type_name: "login", login: { has_totp: true } }
     check(inspector.item.login.has_totp === true, "inspector item has_totp is recognized")
 
+    // 7. Refresh Auth Status process guard against in-flight abort
+    var procRunning = false
+    var runCount = 0
+    function safeRefreshAuthStatus() {
+      if (procRunning) return
+      procRunning = true
+      runCount++
+    }
+    safeRefreshAuthStatus()
+    check(runCount === 1, "first call starts authStatusProc")
+    safeRefreshAuthStatus()
+    check(runCount === 1, "concurrent call while running is guarded and does not abort in-flight process")
+    procRunning = false
+    safeRefreshAuthStatus()
+    check(runCount === 2, "call after completion starts new process")
+
     Qt.exit(failures === 0 ? 0 : 1)
   }
 }

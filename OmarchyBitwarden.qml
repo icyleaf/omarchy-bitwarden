@@ -536,7 +536,7 @@ Item {
   }
 
   function refreshHealth() {
-    healthProc.running = false
+    if (healthProc.running) return
     healthProc.command = [
       "sh", "-c",
       "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" health; else exit 127; fi",
@@ -547,7 +547,7 @@ Item {
   }
 
   function refreshAuthStatus() {
-    authStatusProc.running = false
+    if (authStatusProc.running) return
     authStatusProc.command = [
       "sh", "-c",
       "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" auth status; else exit 127; fi",
