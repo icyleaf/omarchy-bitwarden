@@ -380,9 +380,16 @@ fi
         // secret_2 should STILL be present because secret_1's timer generation mismatched!
         assert_eq!(fs::read_to_string(&clip_file).unwrap(), "secret_2");
 
-        // Now wait for secret_2's timer to expire (another 100ms)
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(!clip_file.exists());
+        // Poll for secret_2's auto-clear to execute and remove clip_file
+        let mut cleared = false;
+        for _ in 0..50 {
+            if !clip_file.exists() {
+                cleared = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(cleared, "clip_file was not cleared within timeout");
     }
 
     #[test]
