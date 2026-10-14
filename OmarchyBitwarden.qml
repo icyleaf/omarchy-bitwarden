@@ -8,6 +8,7 @@ import qs.Commons
 import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
+import "./components/CardFormatter.js" as CardFormatter
 
 Item {
   id: root
@@ -1044,7 +1045,7 @@ Item {
         break
       case "card":
         if (item.card && item.card.number) {
-          copyToClipboard(item.card.number, true, "card number")
+          copyToClipboard(CardFormatter.sanitizeCardNumberForCopy(item.card.number), true, "card number")
         }
         break
       case "ssh_key":
@@ -1331,7 +1332,7 @@ Item {
         })
       }
     } else if (item.type_name === "card" && item.card) {
-      if (item.card.number) actions.push({ label: "Copy Card Number", icon: "\uf09d", shortcut: "↵", action: function() { root.copyToClipboard(item.card.number, true, "card number") } })
+      if (item.card.number) actions.push({ label: "Copy Card Number", icon: "\uf09d", shortcut: "↵", action: function() { root.copyToClipboard(CardFormatter.sanitizeCardNumberForCopy(item.card.number), true, "card number") } })
       if (item.card.code) actions.push({ label: "Copy Security Code (CVV)", icon: "\uf292", shortcut: "", action: function() { root.copyToClipboard(item.card.code, true, "CVV") } })
       if (item.card.cardholderName) actions.push({ label: "Copy Cardholder Name", icon: "\uf007", shortcut: "", action: function() { root.copyToClipboard(item.card.cardholderName, false, "cardholder") } })
       if (item.card.expMonth && item.card.expYear) {

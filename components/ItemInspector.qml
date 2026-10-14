@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
+import "./CardFormatter.js" as CardFormatter
 import qs.Commons
 
 ScrollView {
@@ -25,12 +26,6 @@ ScrollView {
   property bool showWebsiteIcons: false
   readonly property int keyPixelSize: Style.font.caption
   readonly property int valuePixelSize: Style.font.body
-
-  onItemChanged: {
-    showCardNumberRevealed = false
-    showCardCodeRevealed = false
-    showCustomHiddenRevealed = false
-  }
 
   signal copyRequested(string text, bool isSensitive, string label)
   signal viewAttachmentRequested(var item, var att)
@@ -204,13 +199,13 @@ ScrollView {
   }
 
   function formatMaskedCardNumber(num) {
-    if (!num) return "•••• •••• •••• ••••"
-    var clean = String(num).replace(/\s+/g, "")
-    if (clean.length > 4) {
-      var last4 = clean.slice(-4)
-      return "•••• •••• •••• " + last4
-    }
-    return "•••• •••• •••• ••••"
+    var brand = (inspectorRoot.item && inspectorRoot.item.card) ? inspectorRoot.item.card.brand : ""
+    return CardFormatter.formatMaskedCardNumber(num, brand)
+  }
+
+  function formatRevealedCardNumber(num) {
+    var brand = (inspectorRoot.item && inspectorRoot.item.card) ? inspectorRoot.item.card.brand : ""
+    return CardFormatter.formatRevealedCardNumber(num, brand)
   }
 
   function isAttachmentPreviewable(filename) {
@@ -975,7 +970,7 @@ ScrollView {
               spacing: 2
               Text { text: "Card Number"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
-                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? (inspectorRoot.item.card.number || "") : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
+                text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? inspectorRoot.formatRevealedCardNumber(inspectorRoot.item.card.number) : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
                 color: inspectorRoot.foreground
                 font.pixelSize: inspectorRoot.valuePixelSize
                 font.family: "monospace"
@@ -989,12 +984,12 @@ ScrollView {
             GhostIconButton {
               iconText: inspectorRoot.showCardNumberRevealed ? "\uf070" : "\uf06e"
               tooltip: inspectorRoot.showCardNumberRevealed ? "Hide card number" : "Show card number"
-              onClicked: inspectorRoot.showCardNumberRevealed = !inspectorRoot.showCardNumberRevealed
+              onClicked: inspectorRoot.toggleCardNumberRevealed()
             }
             GhostIconButton {
               iconText: "\uf0c5"
               tooltip: "Copy card number"
-              onClicked: inspectorRoot.copyRequested(inspectorRoot.item.card.number, true, "card number")
+              onClicked: inspectorRoot.copyRequested(CardFormatter.sanitizeCardNumberForCopy(inspectorRoot.item.card.number), true, "card number")
             }
           }
 
@@ -1070,7 +1065,7 @@ ScrollView {
             GhostIconButton {
               iconText: inspectorRoot.showCardCodeRevealed ? "\uf070" : "\uf06e"
               tooltip: inspectorRoot.showCardCodeRevealed ? "Hide CVV" : "Show CVV"
-              onClicked: inspectorRoot.showCardCodeRevealed = !inspectorRoot.showCardCodeRevealed
+              onClicked: inspectorRoot.toggleCardCodeRevealed()
             }
             GhostIconButton {
               iconText: "\uf0c5"
