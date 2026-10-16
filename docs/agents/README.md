@@ -6,13 +6,17 @@
 
 GitHub Issues (`icyleaf/omarchy-bitwarden`). See [issue-tracker.md](issue-tracker.md).
 
-### Git & PR Workflow
+### Triage labels
 
-Strict branch and pull request lifecycle. See [git.md](git.md).
+Five canonical roles (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See [triage-labels.md](triage-labels.md).
 
 ### Domain docs
 
-Single-context repository ([`CONTEXT.md`](../../CONTEXT.md) and [`docs/adr/`](../adr/)). See [domain.md](domain.md).
+Single-context repository ([`GLOSSARY.md`](../../GLOSSARY.md) and [`docs/adr/`](../adr/)). See [domain.md](domain.md).
+
+### Git & PR Workflow
+
+Strict branch and pull request lifecycle. See [git.md](git.md).
 
 ### Security & Guardrails
 
