@@ -28,10 +28,10 @@ description = "Restart the Omarchy plugin in development mode"
 run = "omarchy-restart-shell"
 
 [tasks.dev-deploy]
-description = "Deploy the CLI in development mode"
-depends = ["build-release", "dev-update-omarchy-plugin"]
+description = "Build, package and deploy the CLI and plugin in development mode"
+depends = ["dev-update-omarchy-plugin"]
 depends_post = ["dev-restart-omarchy"]
-run = "mkdir -p ~/.config/omarchy/plugins/icyleaf.bitwarden/bin && cp -f bin/omawarden ~/.config/omarchy/plugins/icyleaf.bitwarden/bin/omawarden"
+run = "./scripts/package-dev.sh --install"
 
 [tasks.pkg-dev]
 description = "Build and package omawarden as a local Arch Linux package (omawarden-bin)"
