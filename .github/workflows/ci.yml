@@ -75,7 +75,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-declarative-dev-tools qt6-qmllint-plugins
+          sudo apt-get install -y \
+            qt6-declarative-dev-tools \
+            qml6-module-qtquick \
+            qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates \
+            qml6-module-qtquick-window \
+            qml6-module-qtqml
           QMLLINT_BIN=$(find /usr -name qmllint -type f -executable 2>/dev/null | head -n 1)
           if [ -n "$QMLLINT_BIN" ]; then
             sudo ln -sf "$QMLLINT_BIN" /usr/local/bin/qmllint
