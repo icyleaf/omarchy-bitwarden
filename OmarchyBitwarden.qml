@@ -37,6 +37,12 @@ Item {
 
   property string helperPath: "omawarden"
   readonly property string minimumEngineVersion: "0.8.1"
+  readonly property string minimumGeneratorEngineVersion: "0.9.0"
+  readonly property bool isGeneratorEngineOutdated: {
+    var ver = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
+    if (!ver) return false
+    return root.compareSemVer(ver, root.minimumGeneratorEngineVersion) < 0
+  }
 
   function isEngineVersionSatisfied(ver) {
     if (!ver) return false
@@ -303,7 +309,9 @@ Item {
   property var sshKeyModalItem: null
   property bool showPasswordHistoryModal: false
   property var activePasswordHistoryItem: null
-  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal
+  property bool showPasswordGeneratorModal: false
+  property string passwordGeneratorModalMode: "password"
+  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -383,6 +391,16 @@ Item {
     root.showPasswordHistoryModal = false
     root.activePasswordHistoryItem = null
 
+    root.showPasswordGeneratorModal = false
+    if (passwordGeneratorModalComponent) {
+      passwordGeneratorModalComponent.generatedPassword = ""
+      passwordGeneratorModalComponent.errorMessage = ""
+    }
+    if (passwordGenProc.running) {
+      passwordGenProc.isCanceled = true
+      passwordGenProc.running = false
+    }
+
     root.showSshKeyModal = false
     root.sshKeyModalItem = null
 
@@ -423,6 +441,7 @@ Item {
       root.showActionPalette = false
       root.showSshKeyModal = false
       root.showPasswordHistoryModal = false
+      root.showPasswordGeneratorModal = false
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
       root.showCardNumberRevealed = false
@@ -459,6 +478,7 @@ Item {
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
+    root.showPasswordGeneratorModal = false
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -987,6 +1007,18 @@ Item {
     }
   }
 
+  onShowPasswordGeneratorModalChanged: {
+    if (!root.showPasswordGeneratorModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
+  function openPasswordGeneratorModal(mode) {
+    root.passwordGeneratorModalMode = mode || "password"
+    root.showActionPalette = false
+    root.showPasswordGeneratorModal = true
+  }
+
   onSelectedItemChanged: root.handleSelectedItemChanged()
 
   function updateTotpForSelected() {
@@ -1228,6 +1260,8 @@ Item {
   function getAvailableActions(item) {
     var actions = []
     if (!item) {
+      actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
+      actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
       actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
       actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
       actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
@@ -1504,6 +1538,8 @@ Item {
       })
     }
 
+    actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
+    actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
     actions.push({ label: "Import SSH Key", icon: "\uf019", shortcut: "", action: function() { root.openSshKeyModal("import", null) } })
     actions.push({ label: "Sync Vault Now", icon: "\uf021", shortcut: "Ctrl+R", action: function() { root.syncVault(false, true) } })
@@ -1892,6 +1928,14 @@ Item {
       }
 
       Shortcut {
+        sequence: "Ctrl+G"
+        enabled: root.opened && root.effectiveView === "search" && !root.hasActiveModal
+        onActivated: {
+          root.openPasswordGeneratorModal("password")
+        }
+      }
+
+      Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
         enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal
         onActivated: root.copyItemTotp(root.selectedItem)
@@ -1966,7 +2010,9 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showPasswordHistoryModal) {
+          if (root.showPasswordGeneratorModal) {
+            root.showPasswordGeneratorModal = false
+          } else if (root.showPasswordHistoryModal) {
             root.showPasswordHistoryModal = false
           } else if (root.showSshKeyModal) {
             root.showSshKeyModal = false
@@ -2038,6 +2084,14 @@ Item {
           return
         }
 
+        if (root.showPasswordGeneratorModal) {
+          if (event.key === Qt.Key_Escape) {
+            root.showPasswordGeneratorModal = false
+            event.accepted = true
+          }
+          return
+        }
+
         if (event.key === Qt.Key_Escape) {
           if (root.activeAttachmentPreview !== null) {
             root.activeAttachmentPreview = null
@@ -2088,6 +2142,9 @@ Item {
           } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.hasActiveModal) {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
+            event.accepted = true
+          } else if (event.key === Qt.Key_G && root.effectiveView === "search" && !root.hasActiveModal) {
+            root.openPasswordGeneratorModal("password")
             event.accepted = true
           } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.toggleItemRevealed()
@@ -2395,6 +2452,7 @@ Item {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
           }
+          onGeneratePasswordTriggered: { root.openPasswordGeneratorModal("password") }
           onSyncTriggered: { root.syncVault(false, true) }
           onLockTriggered: { root.doLock() }
           onSettingsTriggered: {
@@ -2470,12 +2528,135 @@ Item {
         onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
         onCloseRequested: { root.showPasswordHistoryModal = false }
       }
+
+      // 8. Password & Passphrase Generator Modal Overlay
+      PasswordGeneratorModal {
+        id: passwordGeneratorModalComponent
+        active: root.showPasswordGeneratorModal
+        mode: root.passwordGeneratorModalMode
+        isEngineOutdated: root.isGeneratorEngineOutdated
+        engineVersion: (root.cliHealth && root.cliHealth.version) || ""
+        requiredVersion: root.minimumGeneratorEngineVersion
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        borderColor: root.borderColor
+        onGenerateRequested: function(opts) { root.generatePasswordOrPassphrase(opts) }
+        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
+        onUpgradeRequested: {
+          root.showPasswordGeneratorModal = false
+          root.installPackage(root.enginePackage || "omawarden")
+        }
+        onCloseRequested: {
+          root.showPasswordGeneratorModal = false
+          if (passwordGenProc.running) {
+            passwordGenProc.isCanceled = true
+            passwordGenProc.running = false
+          }
+        }
+      }
     }
   }
 
   // ======================================================
   // QUICKSHELL IO BACKGROUND PROCESSES
   // ======================================================
+  Process {
+    id: passwordGenProc
+    property bool isCanceled: false
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!passwordGeneratorModalComponent) return
+        passwordGeneratorModalComponent.isGenerating = false
+        var out = (text || "").trim()
+        if (out) {
+          try {
+            var data = JSON.parse(out)
+            if (data && data.ok) {
+              passwordGeneratorModalComponent.errorMessage = ""
+              passwordGeneratorModalComponent.generatedPassword = data.password || ""
+              passwordGeneratorModalComponent.generatedEntropy = (typeof data.entropy === "number") ? data.entropy : passwordGeneratorModalComponent.calculateEntropy()
+            } else if (data && data.error) {
+              passwordGeneratorModalComponent.errorMessage = data.error
+              passwordGeneratorModalComponent.generatedPassword = ""
+            }
+          } catch (e) {
+            passwordGeneratorModalComponent.errorMessage = ""
+            passwordGeneratorModalComponent.generatedPassword = out
+            passwordGeneratorModalComponent.generatedEntropy = passwordGeneratorModalComponent.calculateEntropy()
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.handleProcessStderr(text, "omawarden:generate")
+        if (!passwordGeneratorModalComponent) return
+        passwordGeneratorModalComponent.isGenerating = false
+        var err = (text || "").trim()
+        if (err) {
+          err = err.replace(/^Error:\s*/i, "")
+          if (/unrecognized subcommand|not a recognized subcommand/i.test(err)) {
+            var currentVer = (root.cliHealth && root.cliHealth.version) ? (" (v" + root.cliHealth.version + ")") : ""
+            err = "omawarden engine is outdated" + currentVer + ". Please upgrade omawarden to >= " + root.minimumGeneratorEngineVersion + " to support credential generation."
+          }
+          if (!passwordGeneratorModalComponent.errorMessage) {
+            passwordGeneratorModalComponent.errorMessage = err
+            passwordGeneratorModalComponent.generatedPassword = ""
+          }
+        }
+      }
+    }
+    onExited: function(exitCode) {
+      if (passwordGenProc.isCanceled) {
+        passwordGenProc.isCanceled = false
+        return
+      }
+      if (!passwordGeneratorModalComponent) return
+      passwordGeneratorModalComponent.isGenerating = false
+      if (exitCode !== 0 && !passwordGeneratorModalComponent.errorMessage) {
+        passwordGeneratorModalComponent.errorMessage = "Process exited with error code " + exitCode
+        passwordGeneratorModalComponent.generatedPassword = ""
+      }
+    }
+  }
+
+  function generatePasswordOrPassphrase(options) {
+    if (!passwordGeneratorModalComponent) return
+    var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
+    if (cliVer && root.compareSemVer(cliVer, root.minimumGeneratorEngineVersion) < 0) {
+      passwordGeneratorModalComponent.isGenerating = false
+      passwordGeneratorModalComponent.generatedPassword = ""
+      passwordGeneratorModalComponent.errorMessage = "omawarden engine is outdated (v" + cliVer + "). Please upgrade omawarden to >= " + root.minimumGeneratorEngineVersion + " to support credential generation."
+      return
+    }
+    passwordGeneratorModalComponent.errorMessage = ""
+    passwordGeneratorModalComponent.isGenerating = true
+    if (passwordGenProc.running) {
+      passwordGenProc.isCanceled = true
+      passwordGenProc.running = false
+    }
+    var cmd = [root.helperPath, "generate", "--json"]
+    if (options && options.mode === "passphrase") {
+      cmd.push("--passphrase")
+      cmd.push("-w", String(options.words || 4))
+      cmd.push("-s", options.separator || "-")
+      if (options.capitalize) cmd.push("--capitalize")
+    } else {
+      cmd.push("-l", String((options && options.length) || 20))
+      if (options && !options.uppercase) cmd.push("--no-uppercase")
+      if (options && !options.lowercase) cmd.push("--no-lowercase")
+      if (options && !options.numbers) cmd.push("--no-numbers")
+      if (options && !options.special) cmd.push("--no-special")
+      if (options && options.avoidAmbiguous) cmd.push("--avoid-ambiguous")
+    }
+    passwordGenProc.command = cmd
+    passwordGenProc.running = true
+  }
+
   Process {
     id: sshKeyActionProc
     property string actionType: "create"

@@ -21,6 +21,7 @@ Rectangle {
   property string fontFamily: ""
 
   signal actionPaletteTriggered()
+  signal generatePasswordTriggered()
   signal syncTriggered()
   signal lockTriggered()
   signal settingsTriggered()
@@ -97,6 +98,49 @@ Rectangle {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: footerRoot.actionPaletteTriggered()
+          }
+        }
+
+        // Generate Password Ghost Button
+        Rectangle {
+          implicitHeight: 22
+          implicitWidth: generateBtnRow.implicitWidth + 12
+          radius: 4
+          color: generateMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          border.width: 0
+
+          RowLayout {
+            id: generateBtnRow
+            anchors.centerIn: parent
+            spacing: 4
+            RowLayout {
+              spacing: 3
+              Text {
+                text: "\uf084"
+                font.family: footerRoot.fontFamily
+                color: generateMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                text: "Generate"
+                color: generateMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                font.pixelSize: Style.font.bodySmall
+                font.weight: Font.Medium
+              }
+            }
+            Text {
+              text: "Ctrl+G"
+              color: Qt.darker(footerRoot.foreground, 1.8)
+              font.pixelSize: Style.fontPx(0.75)
+            }
+          }
+
+          MouseArea {
+            id: generateMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: footerRoot.generatePasswordTriggered()
           }
         }
 

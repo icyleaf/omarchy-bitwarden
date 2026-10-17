@@ -41,6 +41,8 @@ Item {
   property bool showPasswordHistoryModal: false
   property var activePasswordHistoryItem: null
 
+  property bool showPasswordGeneratorModal: false
+
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -68,6 +70,8 @@ Item {
 
     testRunner.showPasswordHistoryModal = false
     testRunner.activePasswordHistoryItem = null
+
+    testRunner.showPasswordGeneratorModal = false
 
     testRunner.showSshKeyModal = false
     testRunner.sshKeyModalItem = null
@@ -151,6 +155,8 @@ Item {
       passwordHistory: [{ password: "OldPassword1", lastUsedDate: "2026-01-01" }]
     }
 
+    showPasswordGeneratorModal = true
+
     showSshKeyModal = true
     sshKeyModalItem = {
       id: "ssh-1",
@@ -195,6 +201,8 @@ Item {
 
     assert(showPasswordHistoryModal === false, "Password history modal closed on lock")
     assert(activePasswordHistoryItem === null, "activePasswordHistoryItem nulled on lock")
+
+    assert(showPasswordGeneratorModal === false, "Password generator modal closed on lock")
 
     assert(showSshKeyModal === false, "SSH key modal closed on lock")
     assert(sshKeyModalItem === null, "sshKeyModalItem nulled on lock")

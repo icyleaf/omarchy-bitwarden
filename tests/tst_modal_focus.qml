@@ -22,8 +22,9 @@ Item {
   property bool showActionPalette: false
   property bool showSshKeyModal: false
   property bool showPasswordHistoryModal: false
+  property bool showPasswordGeneratorModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal
+  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal
 
   property int searchFocusRestoredCount: 0
 
@@ -89,6 +90,19 @@ Item {
 
     showActionPalette = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Action Palette")
+
+    // 5. Password Generator modal active
+    showPasswordGeneratorModal = true
+    check(hasActiveModal === true, "hasActiveModal is true when showPasswordGeneratorModal is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Password Generator modal")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Password Generator modal")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Password Generator modal is active")
+
+    showPasswordGeneratorModal = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Password Generator modal")
 
     // 5. No modals: focus restore executes
     searchFocusRestoredCount = 0
