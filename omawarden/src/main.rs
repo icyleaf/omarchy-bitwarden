@@ -135,6 +135,67 @@ enum Commands {
         #[arg(long)]
         auto_lock: Option<u64>,
     },
+    #[command(about = "Generate cryptographically secure passwords or Diceware passphrases")]
+    Generate {
+        #[arg(
+            short = 'l',
+            long,
+            default_value = "20",
+            help = "Length of the generated password (5-128, recommended: 14+)"
+        )]
+        length: usize,
+        #[arg(long, help = "Do not include uppercase letters")]
+        no_uppercase: bool,
+        #[arg(long, help = "Do not include lowercase letters")]
+        no_lowercase: bool,
+        #[arg(long, help = "Do not include numbers")]
+        no_numbers: bool,
+        #[arg(long, help = "Do not include special symbols")]
+        no_special: bool,
+        #[arg(
+            long,
+            help = "Avoid visually ambiguous characters (0, O, o, 1, l, I, |)"
+        )]
+        avoid_ambiguous: bool,
+        #[arg(long, default_value = "1", help = "Minimum number of numeric digits")]
+        min_numbers: usize,
+        #[arg(
+            long,
+            default_value = "1",
+            help = "Minimum number of special characters"
+        )]
+        min_special: usize,
+        #[arg(
+            short = 'p',
+            long,
+            help = "Generate a Diceware passphrase instead of a character password"
+        )]
+        passphrase: bool,
+        #[arg(
+            short = 'w',
+            long,
+            default_value = "4",
+            help = "Number of words in the passphrase (3-20)"
+        )]
+        words: usize,
+        #[arg(
+            short = 's',
+            long,
+            default_value = "-",
+            help = "Word separator for passphrase"
+        )]
+        separator: String,
+        #[arg(long, help = "Capitalize each word in the passphrase")]
+        capitalize: bool,
+        #[arg(
+            short = 'c',
+            long,
+            help = "Copy generated secret to Wayland clipboard with auto-clear"
+        )]
+        copy: bool,
+        #[arg(long, help = "Output generated secret as JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1996,6 +2057,116 @@ fn main() -> ExitCode {
                 }
             }
         }
+
+        Commands::Generate {
+            length,
+            no_uppercase,
+            no_lowercase,
+            no_numbers,
+            no_special,
+            avoid_ambiguous,
+            min_numbers,
+            min_special,
+            passphrase,
+            words,
+            separator,
+            capitalize,
+            copy,
+            json,
+        } => {
+            let secret_res = if passphrase {
+                let options = omawarden::generator::PassphraseOptions {
+                    words,
+                    separator,
+                    capitalize,
+                };
+                omawarden::generator::generate_passphrase(&options)
+            } else {
+                let options = omawarden::generator::PasswordOptions {
+                    length,
+                    uppercase: !no_uppercase,
+                    lowercase: !no_lowercase,
+                    numbers: !no_numbers,
+                    special: !no_special,
+                    avoid_ambiguous,
+                    min_numbers,
+                    min_special,
+                };
+                omawarden::generator::generate_password(&options)
+            };
+
+            let secret = match secret_res {
+                Ok(s) => s,
+                Err(e) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": e
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("Error: {}", e);
+                    }
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let clip_mgr = ClipboardManager::default();
+            let mut copied = false;
+            if copy {
+                let timeout = if cfg.clipboard_clear_seconds > 0 {
+                    cfg.clipboard_clear_seconds
+                } else {
+                    30
+                };
+                if clip_mgr.copy(&secret.value, true, timeout) {
+                    copied = true;
+                    if !json {
+                        println!(
+                            "Generated secret copied to clipboard (auto-clears in {}s)",
+                            timeout
+                        );
+                    }
+                } else {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": "Failed to copy generated secret to clipboard"
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("Failed to copy generated secret to clipboard");
+                    }
+                    return ExitCode::FAILURE;
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "password": secret.value,
+                        "entropy": secret.entropy,
+                        "type": secret.secret_type,
+                        "copied": copied
+                    }))
+                    .unwrap()
+                );
+                ExitCode::SUCCESS
+            } else if !copy {
+                println!("{}", secret.value);
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
     }
 }
 
@@ -2277,5 +2448,92 @@ mod tests {
             "123456"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn test_cli_generate_password_default_and_flags() {
+        let cli_default = Cli::try_parse_from(["omawarden", "generate"]).unwrap();
+        match cli_default.command {
+            Commands::Generate {
+                length,
+                no_uppercase,
+                no_lowercase,
+                no_numbers,
+                no_special,
+                avoid_ambiguous,
+                passphrase,
+                copy,
+                ..
+            } => {
+                assert_eq!(length, 20);
+                assert!(!no_uppercase);
+                assert!(!no_lowercase);
+                assert!(!no_numbers);
+                assert!(!no_special);
+                assert!(!avoid_ambiguous);
+                assert!(!passphrase);
+                assert!(!copy);
+            }
+            _ => panic!("Expected Commands::Generate"),
+        }
+
+        let cli_custom = Cli::try_parse_from([
+            "omawarden",
+            "generate",
+            "-l",
+            "32",
+            "--no-special",
+            "--avoid-ambiguous",
+            "-c",
+            "--json",
+        ])
+        .unwrap();
+        match cli_custom.command {
+            Commands::Generate {
+                length,
+                no_special,
+                avoid_ambiguous,
+                copy,
+                json,
+                ..
+            } => {
+                assert_eq!(length, 32);
+                assert!(no_special);
+                assert!(avoid_ambiguous);
+                assert!(copy);
+                assert!(json);
+            }
+            _ => panic!("Expected Commands::Generate"),
+        }
+    }
+
+    #[test]
+    fn test_cli_generate_passphrase_flags() {
+        let cli = Cli::try_parse_from([
+            "omawarden",
+            "generate",
+            "--passphrase",
+            "-w",
+            "6",
+            "-s",
+            ".",
+            "--capitalize",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Generate {
+                passphrase,
+                words,
+                separator,
+                capitalize,
+                ..
+            } => {
+                assert!(passphrase);
+                assert_eq!(words, 6);
+                assert_eq!(separator, ".");
+                assert!(capitalize);
+            }
+            _ => panic!("Expected Commands::Generate"),
+        }
     }
 }

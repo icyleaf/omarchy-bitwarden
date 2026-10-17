@@ -6,6 +6,7 @@ pub mod config;
 pub mod crypto;
 pub mod daemon;
 pub mod fs_util;
+pub mod generator;
 pub mod health;
 pub mod hook;
 pub mod keyring;
