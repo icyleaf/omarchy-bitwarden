@@ -26,3 +26,7 @@ Mandatory security principles and implementation invariants distilled from past 
 
 Unified JSON envelope specifications for CLI commands, daemon IPC, and frontend process invocation rules. See [contracts.md](contracts.md).
 
+### Frontend UI Specifications
+
+UI design standards, dynamic secret containers, process debouncing, and modal ergonomics. See [ui.md](ui.md).
+

@@ -18,7 +18,11 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      - Chores / Refactors: `chore/<description>` or `refactor/<description>`
 
 2. **Verify before pushing**:
-   - Run quality checks before opening a PR:
+   - Run the complete project test suite (Rust checks, Python workflow validation, `qmllint`, and QML unit test runner) before opening a PR:
+     ```bash
+     ./scripts/test-all.sh
+     ```
+   - Or run individual backend checks:
      ```bash
      cargo fmt --check
      cargo clippy --all-targets --all-features -- -D warnings
