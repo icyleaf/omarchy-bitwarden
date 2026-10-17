@@ -12,6 +12,8 @@ on:
       - ci/*
       - refactor/*
     paths:
+      - "*.qml"
+      - "components/**"
       - "omawarden/**"
       - "scripts/**"
       - "tests/**"
@@ -21,14 +23,16 @@ on:
       - main
       - develop
     paths:
+      - "*.qml"
+      - "components/**"
       - "omawarden/**"
       - "scripts/**"
       - "tests/**"
       - ".github/workflows/ci.yml"
 
 jobs:
-  test:
-    name: Test & Lint
+  backend:
+    name: Backend Test & Lint
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -60,3 +64,21 @@ jobs:
 
       - name: Run test suite
         run: cargo test --all-targets
+
+  frontend:
+    name: Frontend Lint & Workflow Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-declarative-dev-tools
+
+      - name: Run QML lint
+        run: qmllint OmarchyBitwarden.qml components/*.qml
+
+      - name: Run workflow action pinning check
+        run: python3 tests/test_workflow_action_pinning.py
