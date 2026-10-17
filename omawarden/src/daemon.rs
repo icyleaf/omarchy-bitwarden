@@ -352,6 +352,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "get_ssh_key"
             | "get_attachment_key"
             | "copy"
+            | "generate_password"
     )
 }
 
@@ -786,6 +787,80 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 json!({ "ok": true })
             } else {
                 json!({ "ok": false, "error": "Failed to copy to clipboard" })
+            }
+        }
+        "generate_password" => {
+            let is_passphrase = req
+                .get("passphrase")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_passphrase {
+                let options = crate::generator::PassphraseOptions {
+                    words: req
+                        .get("words")
+                        .and_then(|v| v.as_u64())
+                        .map(|w| w as usize)
+                        .unwrap_or(crate::generator::DEFAULT_PASSPHRASE_WORDS),
+                    separator: req
+                        .get("separator")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    capitalize: req
+                        .get("capitalize")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                };
+                match crate::generator::generate_passphrase(&options) {
+                    Ok(secret) => json!({
+                        "ok": true,
+                        "password": secret.value,
+                        "entropy": secret.entropy,
+                        "type": secret.secret_type,
+                    }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            } else {
+                let options = crate::generator::PasswordOptions {
+                    length: req
+                        .get("length")
+                        .and_then(|v| v.as_u64())
+                        .map(|l| l as usize)
+                        .unwrap_or(crate::generator::DEFAULT_PASSWORD_LENGTH),
+                    uppercase: req
+                        .get("uppercase")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                    lowercase: req
+                        .get("lowercase")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                    numbers: req.get("numbers").and_then(|v| v.as_bool()).unwrap_or(true),
+                    special: req.get("special").and_then(|v| v.as_bool()).unwrap_or(true),
+                    avoid_ambiguous: req
+                        .get("avoid_ambiguous")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    min_numbers: req
+                        .get("min_numbers")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(1),
+                    min_special: req
+                        .get("min_special")
+                        .and_then(|v| v.as_u64())
+                        .map(|s| s as usize)
+                        .unwrap_or(1),
+                };
+                match crate::generator::generate_password(&options) {
+                    Ok(secret) => json!({
+                        "ok": true,
+                        "password": secret.value,
+                        "entropy": secret.entropy,
+                        "type": secret.secret_type,
+                    }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
             }
         }
         "set_auto_lock" => {
@@ -1315,5 +1390,71 @@ mod tests {
             Some(false)
         );
         assert!(res_injection.get("error").is_some());
+    }
+
+    #[test]
+    fn test_daemon_generate_password_action() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            let payload = format!("{}\n", req);
+            client.write_all(payload.as_bytes()).unwrap();
+            client.flush().unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // 1. Password generation while locked
+        let res_pwd = send_req(json!({
+            "action": "generate_password",
+            "length": 25,
+            "uppercase": true,
+            "lowercase": true,
+            "numbers": true,
+            "special": true
+        }));
+        assert_eq!(res_pwd.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res_pwd.get("type").and_then(|v| v.as_str()),
+            Some("password")
+        );
+        let pwd_str = res_pwd
+            .get("password")
+            .and_then(|v| v.as_str())
+            .expect("missing password");
+        assert_eq!(pwd_str.len(), 25);
+        assert!(res_pwd.get("entropy").and_then(|v| v.as_f64()).unwrap() > 100.0);
+
+        // 2. Passphrase generation while locked
+        let res_phrase = send_req(json!({
+            "action": "generate_password",
+            "passphrase": true,
+            "words": 5,
+            "separator": ".",
+            "capitalize": true
+        }));
+        assert_eq!(res_phrase.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res_phrase.get("type").and_then(|v| v.as_str()),
+            Some("passphrase")
+        );
+        let phrase_str = res_phrase
+            .get("password")
+            .and_then(|v| v.as_str())
+            .expect("missing passphrase");
+        assert_eq!(phrase_str.split('.').count(), 5);
+        assert!(res_phrase.get("entropy").and_then(|v| v.as_f64()).unwrap() > 60.0);
     }
 }
