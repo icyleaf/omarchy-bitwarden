@@ -1,6 +1,6 @@
 [package]
 name = "omawarden"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 description = "High-performance and low memory Bitwarden CLI (Designed for Omarchy Plugin)"
 authors = ["icyleaf"]
@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["full"] }
 libc = "0.2"
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "crypto", "alloc"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
 rpassword = "7.3"
 
 [dev-dependencies]

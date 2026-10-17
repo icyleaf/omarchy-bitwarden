@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "omawarden"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "aes",
  "argon2",
@@ -1117,6 +1117,7 @@ dependencies = [
  "libc",
  "pbkdf2",
  "pkcs8 0.11.0",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "regex",
  "reqwest",
@@ -1411,6 +1412,7 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
+ "libc",
  "rand_chacha",
  "rand_core 0.6.4",
 ]
