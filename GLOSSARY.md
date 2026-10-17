@@ -76,6 +76,14 @@ _Avoid_: Shared folder, group
 A user-defined organizational container for grouping personal or organization ciphers.
 _Avoid_: Category, directory
 
+**Password Generator**:
+The cryptographic engine within Omawarden that generates random passwords and passphrases using OS entropy.
+_Avoid_: Secret generator, randomizer
+
+**Passphrase**:
+A sequence of random words derived from the EFF wordlist used as an easily memorable yet high-entropy credential.
+_Avoid_: Mnemonic password, word sequence, passphrase sentence
+
 ### UI & Interaction
 
 **Action Palette**:

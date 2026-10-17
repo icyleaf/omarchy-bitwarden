@@ -66,6 +66,7 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 | <kbd>Ctrl</kbd> + <kbd>H</kbd>         | Open password history modal for the selected login item                   |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd>         | Open primary website URL in default browser                               |
 | <kbd>Ctrl</kbd> + <kbd>K</kbd>         | Open Action Palette (Copy username, TOTP, PIN, Org Name, History, etc.)    |
+| <kbd>Ctrl</kbd> + <kbd>G</kbd>         | Open built-in Password & Passphrase Generator                             |
 | <kbd>Ctrl</kbd> + <kbd>,</kbd>         | Open / Toggle Settings configuration view                                 |
 | <kbd>Ctrl</kbd> + <kbd>L</kbd>         | Manually lock the vault immediately                                       |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd>         | Trigger manual vault sync with Bitwarden server                           |
@@ -269,15 +270,38 @@ flowchart TD
 - [x] Persistent search state (remembers query, category, and selected item across window sessions)
 - [x] Dual-channel structured logging & privacy-redacted diagnostics
 
-### Phase 2: In Progress / Upcoming (Full Vault Item Lifecycle & Editing)
+### Phase 2: In Progress (Secure Password & Passphrase Generator)
 
-- [ ] Vault item creation (Add Login, Card, Identity, Secure Note)
-- [ ] Built-in secure password & passphrase generator
-- [ ] In-place item editing & custom fields modification
-- [ ] Folder & collection reassignment
+- [ ] Cryptographically secure random password generation (length, charset options, ambiguity filters)
+- [ ] EFF Diceware passphrase generation with configurable word count and separators
+- [ ] Native `omawarden generate` CLI command with Clipboard Guard auto-clearing (`-c / --copy`)
+- [ ] Daemon IPC generation endpoint and structured response model
+- [ ] Overlay `PasswordGeneratorModal.qml` with interactive length/entropy controls and regeneration
+- [ ] Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) global generator shortcuts
+
+### Phase 3: Planned (Vault Item Creation)
+
+- [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
+- [ ] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
+- [ ] Bitwarden REST API POST `/ciphers` creation integration with auto-session renewal
+- [ ] Local zero-knowledge ciphertext cache synchronization upon creation
+- [ ] Integration with Phase 2 password generator for inline credential creation
+
+### Phase 4: Planned (Vault Item Mutation & Lifecycle)
+
+- [ ] In-place item editing (updating login credentials, cards, notes, custom fields)
+- [ ] Folder and organization collection reassignment
 - [ ] Secure item deletion & soft-delete (Recycle Bin) management
+- [ ] Client-side cipher update validation and server sync reconciliation
 
-### Phase 3: Future
+### Phase 5: Planned (OpenSSH Agent Protocol Service)
+
+- [ ] Implement OpenSSH Agent protocol Unix domain socket (`SSH_AUTH_SOCK`)
+- [ ] In-memory private key signing without writing decrypted keys to disk
+- [ ] Automatic key provisioning and lock-state awareness (suspends when vault locked)
+- [ ] Support prompt-on-use and session lifetime constraints
+
+### Phase 6: Future (Desktop Automation & Biometrics)
 
 - [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
 - [ ] Quick biometric / PAM / Fingerprint system unlock
