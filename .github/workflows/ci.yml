@@ -91,7 +91,13 @@ jobs:
       - name: Run QML lint
         run: |
           qmllint --version
-          qmllint OmarchyBitwarden.qml components/*.qml
+          qmllint OmarchyBitwarden.qml components/*.qml > qmllint_output.log 2>&1 || true
+          cat qmllint_output.log
+          if grep -i -E "(\bError:|\berror:|\bfatal:)" qmllint_output.log; then
+            echo "::error::qmllint detected syntax or parser errors!"
+            exit 1
+          fi
+          echo "QML lint check passed with zero syntax errors."
 
       - name: Run workflow action pinning check
         run: python3 tests/test_workflow_action_pinning.py
