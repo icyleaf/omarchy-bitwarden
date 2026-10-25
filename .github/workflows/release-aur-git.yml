@@ -5,6 +5,7 @@ on:
     branches:
       - develop
     paths:
+      - 'omawarden/**'
       - '.github/workflows/release-aur-git.yml'
   workflow_dispatch:
 

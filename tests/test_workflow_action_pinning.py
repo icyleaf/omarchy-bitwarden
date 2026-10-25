@@ -59,5 +59,15 @@ class TestWorkflowActionPinning(unittest.TestCase):
                         f"Action {action} in {wf.name} must be pinned to a 40-char commit SHA, got: {ref}"
                     )
 
+    def test_release_aur_git_trigger_paths(self):
+        workflow = REPO_ROOT / ".github" / "workflows" / "release-aur-git.yml"
+        self.assertTrue(workflow.exists(), f"{workflow} does not exist")
+        content = workflow.read_text(encoding="utf-8")
+
+        # Verify develop push paths include omawarden/** and workflow itself
+        self.assertIn("omawarden/**", content, "release-aur-git.yml must trigger on changes in omawarden/**")
+        self.assertIn(".github/workflows/release-aur-git.yml", content, "release-aur-git.yml must trigger on workflow file changes")
+
+
 if __name__ == "__main__":
     unittest.main()

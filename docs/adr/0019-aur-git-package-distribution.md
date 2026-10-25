@@ -36,7 +36,7 @@ We establish an official AUR VCS distribution lifecycle for `omawarden-git` alon
 - Ensures versions strictly increase monotonically as commits are integrated into `develop`, satisfying pacman version comparison rules.
 
 ### 3. Dedicated AUR Continuous Deployment Workflow
-- Added `.github/workflows/release-aur-git.yml` triggered on manual dispatch (`workflow_dispatch`) and on pushes to `develop` modifying `.github/workflows/release-aur-git.yml`.
+- Added `.github/workflows/release-aur-git.yml` triggered on manual dispatch (`workflow_dispatch`) and on pushes to `develop` modifying `omawarden/**` or `.github/workflows/release-aur-git.yml`.
 - Generates `PKGBUILD` inline (aligning with `release-omawarden.yml`), leaving the `dist/` directory uncommitted and purely for build output.
 - Deploys via `KSXGitHub/github-actions-deploy-aur@v4.1.1` to the AUR `omawarden-git` repository using established `AUR_KEY`, `AUR_USERNAME`, and `AUR_EMAIL` secrets.
 
