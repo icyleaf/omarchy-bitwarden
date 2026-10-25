@@ -18,13 +18,29 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | Dimension                      | omarchy-bitwarden (`omawarden`)                                      | Official Desktop App (Electron)    | Official CLI (`bw`)                                                          |
 | :----------------------------- | :------------------------------------------------------------------- | :--------------------------------- | :--------------------------------------------------------------------------- |
 | **Response Latency**           | **Sub-millisecond** (resident in-memory IPC socket)                  | Slow UI render (1.5s - 3s)         | Heavy Node.js startup delay                                                  |
-| **Memory Footprint**           | **Lightweight daemon (~10MB base / ~60-80MB with Argon2id)**         | 200MB - 400MB+ Chromium bloat      | Transient, high peak memory                                                  |
+| **Memory Footprint**           | **Lightweight daemon (~19MB base / ~60-80MB during Argon2id)**       | 500MB - 1GB+ Chromium bloat across multiple child processes | Transient, high peak memory (~80MB-120MB) |
 | **Process Security**           | **Zero-leakage** (protected stdin & 0600 socket)                     | Broad webview memory exposure      | Secrets prone to `argv`/`ps` snooping                                        |
 | **Token & Secret Storage**     | **System Keyring Isolation** (0 plaintext tokens in local cache)     | Desktop Keychain / Electron store  | Stored in plaintext cache file or relies on insecure, leak-prone `BW_SESSION` env export |
 | **Local Data Caching**         | **Zero-Knowledge Ciphertext Cache** (fast offline search, no tokens) | Local cache file mixed with session tokens                         | Local cache file mixed with session tokens                                   |
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
 | **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
+| **SSH Agent**                  | **Native OpenSSH Agent (`SSH_AUTH_SOCK`) with app-scoped approval cards** | Built into desktop app (eats ~1GB RAM) | None |
+| **Mutual TLS (mTLS)**          | **Native client cert authentication (PKCS#12 / PEM)**                | Requires system proxy configuration | None |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
+
+### Performance & Resource Benchmarks
+
+Tested on Arch Linux x86_64 under Wayland with a real-world vault containing ~500 items:
+
+| Tool / Component | Resident Memory (RSS) | Process Count | Search / Query Latency | Cold Start Latency | UI / Integration Type |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`omawarden` daemon + overlay** | **~19 MB** | **1 daemon** (+ ephemeral overlay) | **< 1 ms** (IPC socket) | **< 5 ms** | Hardware-accelerated Wayland QML |
+| **`rbw` (Unofficial Rust CLI)** | ~10 MB | 1 daemon | < 5 ms (Unix socket) | < 5 ms | None (CLI terminal output only) |
+| **Official Bitwarden Desktop** | ~500 MB – 1 GB+ | 8 – 12 processes (GPU, Webview, Utility) | 1.5s – 3s | 2s – 4s | Heavy Electron / Chromium Window |
+| **Official CLI (`bw`)** | ~80 MB – 120 MB | 1 process per call | 300 ms – 800 ms | 300 ms – 800 ms | None (Node.js runtime boot per invocation) |
+
+> [!NOTE]
+> Why this matters: In tiling window managers like Hyprland, password managers shouldn't idle at 1GB of RAM just to serve SSH agent keys or look up a login. `omawarden` stays dormant at **~19MB**, wakes instantly under 1ms, and cleans sensitive keys immediately upon lock or completion.
 
 ### Why omawarden instead of rbw?
 
@@ -37,10 +53,12 @@ The difference between them is not "CLI vs Desktop", but rather **the distinct d
 | Dimension | `omawarden` (Native Engine & Standalone CLI) | `rbw` (Unofficial Rust CLI) |
 | :--- | :--- | :--- |
 | **Item Type Support Depth** | **First-Class 5 Types**: Dedicated extraction flags and structured UI inspection for Logins, Cards (CVV/number), Identities, Notes, and SSH Keys | Primarily targets password and TOTP; viewing cards/identities requires dumping unformatted raw JSON (`--raw`) |
+| **OpenSSH Agent Capabilities** | **Vault-Backed Agent (`SSH_AUTH_SOCK`) + Key Generation**: Keys parsed only for single signature and zeroized; on-demand overlay unlock; per-app approval scoping (`first-use`), and interactive confirmation card with 600ms anti-misclick protection | **Agent Proxy**: Implements `SSH_AUTH_SOCK` to sign in-memory; lacks keypair generation, approval confirmation prompts, and per-app authorization scoping |
+| **Mutual TLS (mTLS) Reverse Proxy** | **Native Support**: Authenticates to Vaultwarden/Bitwarden behind mTLS reverse proxies (PKCS#12 `.p12`/`.pfx` and PEM `.crt`/`.key`) with keyring-isolated passphrases | **Not supported** |
+| **Password & Passphrase Generator** | **Dual Engine (GUI & CLI)**: Interactive `PasswordGeneratorModal.qml` with length/charset/entropy controls + Diceware word count/separators + `omawarden generate` with Wayland clipboard auto-clear guard | `rbw gen` CLI only (no GUI modal or Diceware passphrase support) |
 | **Attachment Decryption** | **Native**: Downloads encrypted blobs and decrypts binary payloads via `AES-256-CBC` for preview/export | **Not supported** (see open feature request [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
 | **Password Revision History** | **Native**: Decrypts and displays item password revision history | **Not supported** |
 | **Organizations & Collections** | **Full Support**: `RSA-OAEP-SHA1` Org key unwrapping, Multi-Org & Collection filtering | **Basic Support**: Focused on personal vault; limited organization & collection support ([doy/rbw#351](https://github.com/doy/rbw/issues/351)) |
-| **SSH Key Capabilities** | **Keypair Generation & OpenSSH Agent**: Generates Ed25519/RSA keypairs, exports keys, and serves vault keys on `SSH_AUTH_SOCK` with per-program approval prompts | **OpenSSH Agent Proxy**: Implements `SSH_AUTH_SOCK` to sign requests in-memory without keys touching disk (cannot generate keypairs) |
 | **Lock Screen Security Integration** | **Active Zeroize on Lock**: Listens to Hyprlock, Omarchy lock, D-Bus `logind` sleep/lock signals | **Passive Idle Timeout**: Secrets remain in memory during sleep/lock if idle timer hasn't expired |
 | **Authentication & Secret Storage** | **System Keyring (Secret Service) Integration**: Silent background token renewal without interrupting workflow | **GnuPG / pinentry Interaction**: Standard pinentry (supports TTY `pinentry-curses`); independent of desktop keyring |
 | **GUI IPC Integration** | **Dedicated Structured JSON IPC Socket**: Designed for high-throughput, instant desktop overlay rendering (<1ms) | Plain text stdout/stderr intended for terminal pipelines |
@@ -181,6 +199,27 @@ omarchy plugin remove icyleaf.bitwarden
 - **In Omarchy Overlay**: Switch the login tab to **API Key**, paste your `client_id` and `client_secret`, and log in. Once authenticated, subsequent unlocks are completed via your Master Password.
 - **Keyring Persistence & Silent Renewal**: Your `client_secret` is securely preserved in the system Keyring (never written to disk). When 2-hour access tokens expire, `omawarden` automatically and silently re-authenticates in the background without interrupting sync or kicking you back to re-login.
 
+### 3. Mutual TLS (mTLS) Client Certificate Authentication
+
+For self-hosted Vaultwarden or Bitwarden deployments protected behind reverse proxies with client certificate verification (mTLS, e.g., Cloudflare Access, NGINX, or Traefik):
+
+- **Supported Formats**:
+  - PKCS#12 bundle (`.p12` / `.pfx`)
+  - PEM encoded client certificate (`.crt` / `.pem`) with separate private key (`.key`)
+- **Keyring Passphrase Protection**: Passphrases for encrypted certificate files are stored in the system Keyring rather than in plaintext config.
+- **CLI Configuration**:
+  ```bash
+  # Configure PKCS#12 bundle with passphrase from stdin
+  echo "cert_passphrase" | omawarden config set \
+    --client-cert ~/.config/certs/client.p12 \
+    --client-cert-password-stdin
+
+  # Configure PEM certificate with separate private key
+  omawarden config set \
+    --client-cert ~/.config/certs/client.crt \
+    --client-key ~/.config/certs/client.key
+  ```
+
 ---
 
 ## Security Architecture & Privacy Safeguards
@@ -245,6 +284,77 @@ flowchart TD
 
 ---
 
+## Vault-Backed OpenSSH Agent
+
+`omawarden` includes a native OpenSSH agent implementation that serves SSH keys directly from your encrypted vault over the standard OpenSSH agent protocol.
+
+### Key Capabilities:
+- **Zero Disk Keys**: Private keys stay encrypted in the vault and are parsed in memory strictly for the duration of a single signature, zeroized immediately afterwards.
+- **Unlock on Demand**: When an SSH or Git client requests a key while the vault is locked, the daemon automatically summons the Omarchy overlay to prompt for your master password (waiting up to 60s).
+- **Interactive Approval Prompts**:
+  - `first-use` (default): Asks once per key, client binary, and launching application (e.g. your terminal or editor); remembered until logout.
+  - `always`: Confirms every individual signature request.
+  - `never`: Signs silently as long as the vault is unlocked.
+- **Agent Forwarding Defense**: Forwarded requests (`session-bind@openssh.com`) are cryptographically verified and **always prompt for approval**, preventing compromised remote servers from silently using your keys.
+- **Anti-Misclick Guard**: The approval card in Omarchy Shell ignores Enter and Allow for its first 600ms, preventing accidental approvals from stray keystrokes while typing in other windows.
+- **Fallback Notifications**: When the shell overlay is unavailable, falls back to desktop notifications with Approve/Deny buttons.
+- **No Idle Keep-Alive Leakage**: Listing keys (`ssh-add -l`) never refreshes the vault idle timer.
+
+### Usage:
+1. **Enable in Settings**:
+   - Toggle **SSH Agent** in Settings (<kbd>Ctrl</kbd>+<kbd>,</kbd>), or run:
+     ```bash
+     omawarden config set --ssh-agent true --ssh-agent-confirm first-use
+     ```
+2. **Export Environment Variable**:
+   Point `SSH_AUTH_SOCK` to the daemon's agent socket in `~/.bashrc`, `~/.zshrc`, or `~/.config/uwsm/env`:
+   ```bash
+   export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/omawarden-ssh-agent.sock"
+   ```
+   Or specify it in `~/.ssh/config`:
+   ```ssh-config
+   Host *
+       IdentityAgent ~/.config/omawarden/ssh-agent.sock  # or $XDG_RUNTIME_DIR/omawarden-ssh-agent.sock
+   ```
+3. **Inspect & Manage via CLI**:
+   ```bash
+   # Check agent running status and socket location
+   omawarden ssh-agent status
+
+   # List pending signatures waiting for approval
+   omawarden ssh-agent pending
+
+   # Answer a prompt from the terminal
+   omawarden ssh-agent reply <id> --allow
+   omawarden ssh-agent reply <id> --deny
+   ```
+
+---
+
+## Password & Passphrase Generator
+
+Generate cryptographically secure passwords or EFF Diceware passphrases directly in the overlay (<kbd>Ctrl</kbd>+<kbd>G</kbd>) or via the CLI.
+
+### Features:
+- **Character Passwords**: Configurable length (5–128), uppercase, lowercase, numbers, special symbols, minimum digit/symbol counts, and visual ambiguity filtering (`0`, `O`, `1`, `l`, `I`).
+- **Diceware Passphrases**: Word-based passphrases with configurable word count (3–20), custom separators (e.g., `-`, `_`, `.`), and word capitalization.
+- **Instant Entropy Rating**: Real-time visual entropy score in bits (Weak, Fair, Good, Strong) in the overlay modal.
+- **Clipboard Guard**: Direct copy to Wayland clipboard with automatic 30s auto-clearing TTL.
+
+### CLI Usage:
+```bash
+# Generate a 24-character password and copy to clipboard
+omawarden generate -l 24 -c
+
+# Generate password avoiding ambiguous characters (0, O, 1, l)
+omawarden generate -l 18 --avoid-ambiguous
+
+# Generate a 5-word Diceware passphrase separated by dots
+omawarden generate --passphrase -w 5 -s . --capitalize -c
+```
+
+---
+
 ## Roadmap
 
 ### Phase 1: Completed (Fast Lookup & Core Security)
@@ -270,16 +380,25 @@ flowchart TD
 - [x] Persistent search state (remembers query, category, and selected item across window sessions)
 - [x] Dual-channel structured logging & privacy-redacted diagnostics
 
-### Phase 2: In Progress (Secure Password & Passphrase Generator)
+### Phase 2: Completed (Secure Password & Passphrase Generator)
 
-- [ ] Cryptographically secure random password generation (length, charset options, ambiguity filters)
-- [ ] EFF Diceware passphrase generation with configurable word count and separators
-- [ ] Native `omawarden generate` CLI command with Clipboard Guard auto-clearing (`-c / --copy`)
-- [ ] Daemon IPC generation endpoint and structured response model
-- [ ] Overlay `PasswordGeneratorModal.qml` with interactive length/entropy controls and regeneration
-- [ ] Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) global generator shortcuts
+- [x] Cryptographically secure random password generation (length, charset options, ambiguity filters)
+- [x] EFF Diceware passphrase generation with configurable word count and separators
+- [x] Native `omawarden generate` CLI command with Clipboard Guard auto-clearing (`-c / --copy`)
+- [x] Daemon IPC generation endpoint and structured response model
+- [x] Overlay `PasswordGeneratorModal.qml` with interactive length/entropy controls and regeneration
+- [x] Action Palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) global generator shortcuts
 
-### Phase 3: Planned (Vault Item Creation)
+### Phase 3: Completed (Vault-Backed OpenSSH Agent Protocol Service)
+
+- [x] Implement OpenSSH Agent protocol Unix domain socket (`SSH_AUTH_SOCK`)
+- [x] In-memory private key signing without writing decrypted keys to disk
+- [x] Unlock-on-demand and lock-state awareness (opens overlay or suspends when vault is locked)
+- [x] Interactive approval card with 600ms anti-misclick guard & notify-send fallback
+- [x] Scoped `first-use` authorization (key, binary, ancestor app) & agent forwarding defense
+- [x] CLI commands (`omawarden ssh-agent status|pending|reply`)
+
+### Phase 4: Planned (Vault Item Creation)
 
 - [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
 - [ ] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
@@ -287,24 +406,17 @@ flowchart TD
 - [ ] Local zero-knowledge ciphertext cache synchronization upon creation
 - [ ] Integration with Phase 2 password generator for inline credential creation
 
-### Phase 4: Planned (Vault Item Mutation & Lifecycle)
+### Phase 5: Planned (Vault Item Mutation & Lifecycle)
 
 - [ ] In-place item editing (updating login credentials, cards, notes, custom fields)
 - [ ] Folder and organization collection reassignment
 - [ ] Secure item deletion & soft-delete (Recycle Bin) management
 - [ ] Client-side cipher update validation and server sync reconciliation
 
-### Phase 5: Planned (OpenSSH Agent Protocol Service)
-
-- [ ] Implement OpenSSH Agent protocol Unix domain socket (`SSH_AUTH_SOCK`)
-- [ ] In-memory private key signing without writing decrypted keys to disk
-- [ ] Automatic key provisioning and lock-state awareness (suspends when vault locked)
-- [ ] Support prompt-on-use and session lifetime constraints
-
 ### Phase 6: Future (Desktop Automation & Biometrics)
 
 - [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
-- [ ] Quick biometric / PAM / Fingerprint system unlock
+- [ ] Quick biometric / PAM / Fingerprint system unlock (ADR 0025)
 
 ---
 

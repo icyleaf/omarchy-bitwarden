@@ -18,13 +18,29 @@
 | 评估维度             | omarchy-bitwarden (`omawarden`)                         | 官方桌面端 (Electron)          | 官方命令行 (`bw`)                                            |
 | :------------------- | :------------------------------------------------------ | :----------------------------- | :----------------------------------------------------------- |
 | **响应延迟**         | **亚毫秒级**（常驻内存 IPC 套接字）                     | 界面渲染较慢（1.5 秒 - 3 秒）  | 较重的 Node.js 启动延迟                                      |
-| **内存开销**         | **轻量守护进程（基础 ~10MB / Argon2id ~60-80MB）**      | 200MB - 400MB+ Chromium 占用   | 瞬时高内存峰值                                               |
+| **内存开销**         | **轻量守护进程（日常常驻 ~19MB / 解锁 Argon2id 峰值 ~60-80MB）** | 500MB - 1GB+（多个 Chromium/Electron 子进程） | 瞬时高内存峰值（~80MB-120MB） |
 | **进程安全**         | **零泄漏**（受保护的 stdin 与 0600 套接字管道）         | 广泛的 Webview 内存暴露        | 易受到 `argv`/`ps` 进程窥探                                  |
 | **Token 与凭据存储** | **系统密钥环安全隔离**（本地缓存文件零明文 Token）     | 平台 Keychain / Electron 存储  | 曾默认明文写入本地缓存文件，或依赖不安全且易泄漏的 `BW_SESSION` 环境变量 |
 | **本地数据缓存**     | **纯零知识密文缓存**（离线毫秒级检索，无解密凭据）      | 本地缓存文件与认证凭据混杂                          | 本地缓存文件与认证凭据混杂                                     |
 | **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
 | **锁屏联动**         | **守护进程原生自动检测（Omarchy 锁屏、Hyprlock、D-Bus/logind 睡眠与挂起）** | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
+| **SSH Agent**        | **原生 OpenSSH Agent（`SSH_AUTH_SOCK`），带按调用程序作用域审批** | 桌面端内置（吃掉近 1GB 内存） | 无 |
+| **双向 TLS (mTLS)**  | **原生支持客户端证书认证（PKCS#12 / PEM）**              | 需配置复杂系统反向代理代理 | 无 |
 | **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
+
+### 性能基准测试与资源占用
+
+在 Arch Linux x86_64（Wayland 环境，约 500 条凭据真实库）实测数据：
+
+| 客户端 / 工具组件 | 常驻内存 (RSS) | 运行进程数 | 检索 / IPC 响应延迟 | 冷启动耗时 | 交互界面 / 集成形式 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`omawarden` 守护进程 + 覆盖层** | **~19 MB** | **1 个守护进程**（覆盖层按需唤起） | **< 1 ms**（IPC 本地套接字） | **< 5 ms** | 硬件加速 Wayland QML |
+| **`rbw`（非官方 Rust CLI）** | ~10 MB | 1 个守护进程 | < 5 ms（Unix 套接字） | < 5 ms | 无（纯终端命令行输出） |
+| **官方桌面端 (Bitwarden Electron)** | ~500 MB – 1 GB+ | 8 – 12 个进程（GPU、Webview、Utility） | 1.5s – 3s | 2s – 4s | 繁重的 Electron / Chromium 窗口 |
+| **官方 CLI (`bw`)** | ~80 MB – 120 MB | 每次调用独立进程 | 300 ms – 800 ms | 300 ms – 800 ms | 无（每次调用均有 Node.js V8 启动开销） |
+
+> [!NOTE]
+> 为什么资源占用对平铺窗口管理器（如 Hyprland）如此关键：作为日常必备的基础工具，用户不应仅仅为了提供后台 SSH Agent 密钥签名或快速查找密码而让一个吃掉近 1GB 内存的 Electron 桌面客户端常驻。`omawarden` 常驻状态仅需 **~19MB**，响应速度在 1 毫秒以内，并在锁定时或使用完毕后立即对内存敏感凭据进行零化覆写。
 
 ### 为什么自研 omawarden 而非直接采用 rbw？
 
@@ -37,10 +53,12 @@
 | 评估维度 | `omawarden`（原生引擎 & 独立 CLI） | `rbw`（非官方 Rust 命令行） |
 | :--- | :--- | :--- |
 | **条目类型支持深度** | **五大类型一等公民支持**：为登录、银行卡（CVV/卡号）、身份、便签及 SSH 密钥提供专用提取命令与结构化展示 | 主要面向登录密码与 TOTP；查看银行卡/身份等条目需使用 `--raw` 输出原始 JSON 自行提取 |
-| **加密附件处理** | **原生支持**：支持下载加密 Blob 并解密预览/导出 | **不支持**（参见长期未决 Issue [doy/rbw#130](https://github.com/doy/rbw/issues/130)） |
+| **OpenSSH Agent 能力** | **保险库密钥代理 (`SSH_AUTH_SOCK`) + 密钥对生成**：私钥仅在执行单次签名时在内存中临时解析并立即覆写清零；按需唤起解锁；按程序隔离作用域（`first-use`），带 600ms 防误触延迟的交互式审批卡片 | **Agent 代理**：实现 `SSH_AUTH_SOCK` 协议，仅支持内存签名；不支持本地生成密钥对，不支持签名审批确认与调用程序作用域隔离 |
+| **双向 TLS (mTLS) 反向代理** | **完整支持**：原生支持连接配置了 mTLS 客户端证书验证的自建 Vaultwarden / Bitwarden 实例（支持 PKCS#12 `.p12`/`.pfx` 及 PEM `.crt`/`.key`），证书密码隔离保存在系统密钥环中 | **不支持** |
+| **密码与密语生成器** | **双引擎支持（GUI & CLI）**：交互式 `PasswordGeneratorModal.qml` 提供长度/字符集/熵值评级 + Diceware 词数/分隔符配置，CLI 命令 `omawarden generate` 配合 Wayland 剪贴板阅后即焚防泄漏保护 | 仅支持 `rbw gen` 命令行（无图形界面，不支持 Diceware 密语生成） |
+| **加密附件处理** | **原生支持**：支持下载加密 Blob 并解密预览/导出 | **不支持**（参见长期未决 Issue [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
 | **密码历史记录** | **原生支持**：可解密并查看条目历史修改过的旧密码 | **不支持**查看历史密码 |
-| **多组织与集合** | **完整支持**：`RSA-OAEP-SHA1` 组织密钥解包，支持多组织与集合过滤 | **基础支持**：以个人密码库为主，多组织与集合管理较弱（参见 [doy/rbw#351](https://github.com/doy/rbw/issues/351)） |
-| **SSH 密钥能力** | **密钥对生成与 OpenSSH Agent**：支持本地生成 Ed25519/RSA 密钥对并导出，并通过 `SSH_AUTH_SOCK` 提供保险库密钥签名（按程序确认） | **OpenSSH Agent 代理**：实现 `SSH_AUTH_SOCK` 协议，私钥无需落盘直接充当系统 ssh 签名代理（但不支持生成密钥对） |
+| **多组织与集合** | **完整支持**：`RSA-OAEP-SHA1` 组织密钥解包，支持多组织与集合过滤 | **基础支持**：以个人密码库为主，多组织与集合管理较弱（参见 [doy/rbw#351](https://github.com/doy/rbw/issues/351)) |
 | **锁屏安全联动** | **主动监听系统锁屏与睡眠**：电脑合盖或锁屏（Hyprlock/Omarchy/D-Bus）瞬时抹除内存凭据并锁定 | **被动闲置超时倒计时**：合盖休眠期间若未超时，凭据依然驻留内存 |
 | **身份交互与凭据存储** | **系统密钥环（Keyring）深度集成**：后台无感静默刷新 Token，日常使用免频繁弹窗 | **GnuPG / pinentry 交互**：依靠系统的 pinentry（支持纯终端 `pinentry-curses`），不依赖桌面密钥环 |
 | **图形界面 IPC 对接** | **专用结构化 JSON IPC 套接字**：专为桌面 Overlay 瞬时全量吞吐设计 | 纯文本标准输入输出，专为终端管道设计 |
@@ -181,6 +199,27 @@ omarchy plugin remove icyleaf.bitwarden
 - **在覆盖层中登录**：切换登录标签至 **API Key**，粘贴对应凭据并登录。登录成功后，日常解锁仅需输入主密码即可。
 - **密钥环持久化与静默续期**：你的 `client_secret` 安全保存在系统密钥环中（绝不以明文落盘）。当短期 2 小时 Access Token 到期时，`omawarden` 会在后台自动完成静默续期重鉴权，不会打断同步或强制退回重登。
 
+### 3. 双向 TLS 客户端证书认证 (mTLS)
+
+适用于部署在要求双向证书校验的反向代理（如 Cloudflare Access、NGINX、Traefik 等 mTLS 保护层）后方的自建 Vaultwarden 或 Bitwarden 服务：
+
+- **支持证书格式**：
+  - PKCS#12 二进制证书包（`.p12` / `.pfx`）
+  - PEM 格式客户端证书（`.crt` / `.pem`）搭配独立私钥（`.key`）
+- **密钥环密码保护**：加密证书文件的解锁密码保存在系统密钥环中，绝不以明文形式写入配置文件。
+- **CLI 配置命令**：
+  ```bash
+  # 配置 PKCS#12 格式客户端证书（通过 stdin 安全传递密码）
+  echo "cert_passphrase" | omawarden config set \
+    --client-cert ~/.config/certs/client.p12 \
+    --client-cert-password-stdin
+
+  # 配置 PEM 独立公钥证书与私钥
+  omawarden config set \
+    --client-cert ~/.config/certs/client.crt \
+    --client-key ~/.config/certs/client.key
+  ```
+
 ---
 
 ## 安全架构与隐私保障
@@ -245,6 +284,77 @@ flowchart TD
 
 ---
 
+## 基于保险库的原生 OpenSSH Agent
+
+`omawarden` 内置了纯原生 OpenSSH Agent 协议服务实现，可直接通过标准的 OpenSSH agent 协议向 `ssh` 与 `git` 提供保险库中的私钥签名能力。
+
+### 核心特性与安全保障：
+- **私钥零落盘 (Zero Disk Keys)**：私钥全程以加密密文形式存放在保险库中，仅在执行单次签名请求的瞬间在物理锁定内存中临时解密解析，签名完成后立即覆写清零（`Zeroizing`）。
+- **按需唤起解锁 (Unlock on Demand)**：当保险库处于锁定状态时，若有 `ssh` 或 `git` 发起密钥使用请求，守护进程将自动拉起 Omarchy 覆盖层提示输入主密码解锁（最多等待 60 秒），解锁后直接继续签名流程。
+- **细粒度签名确认策略**：
+  - `first-use`（默认）：按“密钥、客户端可执行文件路径与父级调用程序（如终端或编辑器）”三元组进行授权，会话退出前仅需审批一次。在终端里批准 `ssh` 绝不会静默批准后台独立脚本执行的 `ssh`。
+  - `always`：每次签名必须由用户手动在弹窗中确认。
+  - `never`：只要保险库处于解锁状态，签名请求静默完成。
+- **Agent 转发防御**：严格校验 `session-bind@openssh.com` 扩展请求。对于远端转发过来的签名请求（`is_forwarding = true`），**无论何种策略均强制弹出确认卡片**，防止被攻破的远程服务器滥用本地私钥。
+- **600ms 防误触延迟**：Omarchy 覆盖层的审批卡片在前 600ms 内禁用回车（Enter）和允许键，彻底杜绝在其他窗口快速打字时刚好敲下回车键而误批准敏感签名的情况。
+- **系统通知回退**：若 Omarchy Shell 覆盖层不可用，自动回退到带“批准/拒绝”交互按钮的桌面系统通知（`notify-send`）。
+- **杜绝保活泄漏**：客户端执行 `ssh-add -l` 列出密钥列表绝不会刷新保险库的闲置超时计时器。
+
+### 使用方法：
+1. **在设置面板中启用**：
+   - 打开设置面板（<kbd>Ctrl</kbd>+<kbd>,</kbd>）开启 **SSH Agent** 开关，或使用命令行配置：
+     ```bash
+     omawarden config set --ssh-agent true --ssh-agent-confirm first-use
+     ```
+2. **导出套接字环境变量**：
+   将 `SSH_AUTH_SOCK` 指向守护进程套接字（可在 `~/.bashrc`、`~/.zshrc` 或 `~/.config/uwsm/env` 中配置）：
+   ```bash
+   export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/omawarden-ssh-agent.sock"
+   ```
+   或直接在 `~/.ssh/config` 中全局指定：
+   ```ssh-config
+   Host *
+       IdentityAgent ~/.config/omawarden/ssh-agent.sock  # 或 $XDG_RUNTIME_DIR/omawarden-ssh-agent.sock
+   ```
+3. **命令行状态检查与交互**：
+   ```bash
+   # 查看 Agent 运行状态及套接字路径
+   omawarden ssh-agent status
+
+   # 查看当前等待确认的签名请求
+   omawarden ssh-agent pending
+
+   # 在终端中应答签名审批
+   omawarden ssh-agent reply <id> --allow
+   omawarden ssh-agent reply <id> --deny
+   ```
+
+---
+
+## 密码与密语生成器
+
+支持在覆盖层内（<kbd>Ctrl</kbd>+<kbd>G</kbd>）或直接通过 CLI 批量生成密码学高强度随机密码与 EFF Diceware 口令短语。
+
+### 核心功能：
+- **随机字符密码**：自由调节长度（5–128 位），支持大写字母、小写字母、数字与特殊符号开关，可指定最少数字与符号个数，并支持过滤视觉易混淆字符（`0`, `O`, `1`, `l`, `I`）。
+- **Diceware 口令短语**：基于 EFF 词表生成由真实单词组成的密语短语，支持自定义单词数（3–20 个）、自定义连接符（如 `-`, `_`, `.`）以及首字母大写模式。
+- **实时熵值评级**：在覆盖层模态框中动态展示实时密码熵值（弱、一般、良好、强）。
+- **剪贴板安全防护**：一键复制至 Wayland 剪贴板，并自带 30 秒倒计时阅后即焚自动清空机制。
+
+### CLI 常用示例：
+```bash
+# 生成 24 位高强度随机密码并自动复制至剪贴板
+omawarden generate -l 24 -c
+
+# 生成过滤易混淆字符的 18 位密码
+omawarden generate -l 18 --avoid-ambiguous
+
+# 生成由点分隔、首字母大写的 5 词 Diceware 口令短语并复制
+omawarden generate --passphrase -w 5 -s . --capitalize -c
+```
+
+---
+
 ## 路线图
 
 ### 阶段一：已完成（快速检索、核心安全与分发体系）
@@ -270,16 +380,25 @@ flowchart TD
 - [x] 搜索状态会话持久化（在窗口开关间记忆上一次搜索词、分类及选中条目）
 - [x] 双通道结构化日志与脱敏诊断信息导出
 
-### 阶段二：进行中（安全密码与口令短语生成器）
+### 阶段二：已完成（安全密码与口令短语生成器）
 
-- [ ] 密码学安全伪随机字符密码生成（支持长度、字符集开关与易混淆字符过滤）
-- [ ] 基于 EFF 大词表的 Diceware 口令短语生成（支持自定义词数与连接符）
-- [ ] 原生 `omawarden generate` CLI 命令与阅后即焚剪贴板保护（`-c / --copy` 自动 30 秒 TTL 清空）
-- [ ] 常驻守护进程 IPC 生成接口与结构化响应模型
-- [ ] 覆盖层 `PasswordGeneratorModal.qml` 交互式长度/熵值滑块与动态重新生成
-- [ ] 动作面板（<kbd>Ctrl</kbd>+<kbd>K</kbd>）全局密码生成快捷动作
+- [x] 密码学安全伪随机字符密码生成（支持长度、字符集开关与易混淆字符过滤）
+- [x] 基于 EFF 大词表的 Diceware 口令短语生成（支持自定义词数与连接符）
+- [x] 原生 `omawarden generate` CLI 命令与阅后即焚剪贴板保护（`-c / --copy` 自动 30 秒 TTL 清空）
+- [x] 常驻守护进程 IPC 生成接口与结构化响应模型
+- [x] 覆盖层 `PasswordGeneratorModal.qml` 交互式长度/熵值滑块与动态重新生成
+- [x] 动作面板（<kbd>Ctrl</kbd>+<kbd>K</kbd>）全局密码生成快捷动作
 
-### 阶段三：规划中（密码库条目新建）
+### 阶段三：已完成（基于保险库的原生 OpenSSH Agent 协议服务）
+
+- [x] 实现 OpenSSH Agent 协议标准 Unix 域套接字（`SSH_AUTH_SOCK`）
+- [x] 纯内存私钥解密签名，私钥绝不落盘或导出明文
+- [x] 自动感知密码库锁定状态（按需拉起覆盖层输入主密码解锁）
+- [x] 交互式审批卡片（带 600ms 防误触延迟）与 `notify-send` 系统通知回退
+- [x] 精细化作用域授权（密钥、客户端程序、宿主应用）与 Agent 转发防滥用机制
+- [x] 完备的 CLI 控制命令（`omawarden ssh-agent status|pending|reply`）
+
+### 阶段四：规划中（密码库条目新建）
 
 - [ ] 覆盖层条目新建模态窗口（支持 Login, Secure Note, Card, Identity 四大核心类型）
 - [ ] 基于用户主密钥的客户端密文载荷加密（AES-256-CBC / HMAC）
@@ -287,24 +406,17 @@ flowchart TD
 - [ ] 创建成功后本地零知识密文缓存即时追加与索引同步
 - [ ] 深度联动阶段二生成器实现创建凭据时的内联密码生成
 
-### 阶段四：规划中（密码库条目生命周期与维护）
+### 阶段五：规划中（密码库条目生命周期与维护）
 
 - [ ] 条目就地编辑（更新登录凭据、卡片、备注及自定义字段）
 - [ ] 文件夹与组织集合重新归属分类调整
 - [ ] 条目安全删除与回收站（软删除）管理
 - [ ] 客户端条目修改冲突校验与服务器同步对齐
 
-### 阶段五：规划中（OpenSSH Agent 原生代理服务）
-
-- [ ] 实现 OpenSSH Agent 协议标准 Unix 域套接字（`SSH_AUTH_SOCK`）
-- [ ] 纯内存私钥解密签名，私钥绝不落盘或导出明文
-- [ ] 自动感知密码库锁定状态（锁定或锁屏时安全挂起签名并阻断请求）
-- [ ] 支持使用确认提示（Prompt-on-use）与会话存活时长约束
-
 ### 阶段六：远期规划（系统自动化与生物识别）
 
 - [ ] Wayland 自动填充 / 模拟按键输入（例如基于 `ydotool` / `wtype` 集成）
-- [ ] 快速生物识别 / PAM / 指纹系统级解锁
+- [ ] 快速生物识别 / PAM / 指纹系统级解锁（ADR 0025）
 
 ---
 
