@@ -1,7 +1,42 @@
 use std::collections::HashMap;
 use std::process::{Command, ExitStatus};
+use zeroize::Zeroize;
 
 use crate::vault::{VaultItem, VaultManager};
+
+/// Prohibited environment variable names that must not be injected to prevent hijacking.
+pub const PROHIBITED_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "PATH",
+    "IFS",
+    "SHELLOPTS",
+    "BASH_ENV",
+    "ENV",
+];
+
+/// Validates whether a string is a valid POSIX environment variable identifier:
+/// starts with `[A-Za-z_]` followed by `[A-Za-z0-9_]*`.
+pub fn is_valid_env_var_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Checks if an environment variable name is prohibited for security reasons.
+pub fn is_prohibited_env_var(name: &str) -> bool {
+    PROHIBITED_ENV_VARS
+        .iter()
+        .any(|b| b.eq_ignore_ascii_case(name))
+}
 
 /// Resolves environment variables from a single VaultItem.
 ///
@@ -23,7 +58,11 @@ pub fn resolve_item_env(item: &VaultItem) -> HashMap<String, String> {
             .unwrap_or("")
             .trim();
 
-        if !name.is_empty() && !value.is_empty() {
+        if !name.is_empty()
+            && !value.is_empty()
+            && is_valid_env_var_name(name)
+            && !is_prohibited_env_var(name)
+        {
             env.insert(name.to_string(), value.to_string());
         }
     }
@@ -73,6 +112,19 @@ pub fn resolve_broker_env(
         let var_name = parts[0].trim();
         let target = parts[1].trim();
 
+        if !is_valid_env_var_name(var_name) {
+            return Err(format!(
+                "Invalid environment variable name '{}' in mapping '{}'",
+                var_name, mapping
+            ));
+        }
+        if is_prohibited_env_var(var_name) {
+            return Err(format!(
+                "Prohibited environment variable name '{}' in mapping '{}'",
+                var_name, mapping
+            ));
+        }
+
         let (item_name, field_name) = if let Some(idx) = target.find('#') {
             (&target[..idx], Some(&target[idx + 1..]))
         } else {
@@ -117,12 +169,17 @@ pub fn resolve_broker_env(
             let item_env = resolve_item_env(&item);
             if let Some(v) = item_env.get(var_name) {
                 v.clone()
-            } else if let Some((_, first_val)) = item_env.iter().next() {
-                first_val.clone()
-            } else {
+            } else if item_env.len() == 1 {
+                item_env.into_values().next().unwrap()
+            } else if item_env.is_empty() {
                 return Err(format!(
                     "Item '{}' has no fields or secret value",
                     item_name
+                ));
+            } else {
+                return Err(format!(
+                    "Item '{}' has multiple fields; please specify the field using format {}=item#field",
+                    item_name, var_name
                 ));
             }
         };
@@ -133,10 +190,11 @@ pub fn resolve_broker_env(
     Ok(resolved)
 }
 
-/// Spawns the child command with injected environment variables and waits for completion.
+/// Spawns the child command with injected environment variables, zeroes out in-memory secrets,
+/// and waits for child completion.
 pub fn execute_child_process(
     cmd: &[String],
-    env_vars: &HashMap<String, String>,
+    mut env_vars: HashMap<String, String>,
 ) -> Result<ExitStatus, std::io::Error> {
     if cmd.is_empty() {
         return Err(std::io::Error::new(
@@ -150,11 +208,18 @@ pub fn execute_child_process(
         command.args(&cmd[1..]);
     }
 
-    for (k, v) in env_vars {
+    for (k, v) in &env_vars {
         command.env(k, v);
     }
 
     let mut child = command.spawn()?;
+
+    // Scrub secret strings in memory immediately after child process spawn
+    for v in env_vars.values_mut() {
+        v.zeroize();
+    }
+    drop(env_vars);
+
     child.wait()
 }
 
@@ -294,7 +359,128 @@ mod tests {
                 .to_string(),
         ];
 
-        let status = execute_child_process(&cmd, &env).unwrap();
+        let status = execute_child_process(&cmd, env).unwrap();
         assert_eq!(status.code(), Some(42));
+    }
+
+    #[test]
+    fn test_valid_and_prohibited_env_vars() {
+        assert!(is_valid_env_var_name("MY_KEY"));
+        assert!(is_valid_env_var_name("_SECRET_123"));
+        assert!(!is_valid_env_var_name("123_KEY"));
+        assert!(!is_valid_env_var_name("KEY=VAL"));
+        assert!(!is_valid_env_var_name("KEY-WITH-DASH"));
+        assert!(!is_valid_env_var_name(""));
+
+        assert!(is_prohibited_env_var("LD_PRELOAD"));
+        assert!(is_prohibited_env_var("ld_preload"));
+        assert!(is_prohibited_env_var("PATH"));
+        assert!(!is_prohibited_env_var("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_resolve_broker_env_rejects_dangerous_and_invalid_names() {
+        let vault_mgr = VaultManager::new("", None, None);
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        let note = VaultItem {
+            id: "note-1".into(),
+            name: "OpenAI".into(),
+            item_type: 2,
+            type_name: "secure_note".into(),
+            sub_title: "".into(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: None,
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![
+                json!({ "name": "OPENAI_API_KEY", "value": "sk-proj-test", "type": 1 }),
+                json!({ "name": "LD_PRELOAD", "value": "/tmp/evil.so", "type": 0 }),
+            ],
+            attachments: vec![],
+            search_text: "".into(),
+        };
+
+        *vault_mgr.decrypted_items.write().unwrap() = vec![note];
+
+        // 1. Prohibited field in item is filtered out automatically by resolve_item_env
+        let resolved = resolve_broker_env(&vault_mgr, Some("OpenAI"), &[]).unwrap();
+        assert_eq!(
+            resolved.get("OPENAI_API_KEY"),
+            Some(&"sk-proj-test".to_string())
+        );
+        assert!(!resolved.contains_key("LD_PRELOAD"));
+
+        // 2. Explicit mapping trying to inject LD_PRELOAD should error
+        let err = resolve_broker_env(
+            &vault_mgr,
+            None,
+            &["LD_PRELOAD=OpenAI#OPENAI_API_KEY".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.contains("Prohibited environment variable name"));
+
+        // 3. Explicit mapping with invalid identifier should error
+        let err2 = resolve_broker_env(
+            &vault_mgr,
+            None,
+            &["INVALID-NAME=OpenAI#OPENAI_API_KEY".to_string()],
+        )
+        .unwrap_err();
+        assert!(err2.contains("Invalid environment variable name"));
+    }
+
+    #[test]
+    fn test_resolve_broker_env_multi_field_requires_field_specifier() {
+        let vault_mgr = VaultManager::new("", None, None);
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        let note = VaultItem {
+            id: "note-1".into(),
+            name: "MultiField".into(),
+            item_type: 2,
+            type_name: "secure_note".into(),
+            sub_title: "".into(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: None,
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![
+                json!({ "name": "FIELD_A", "value": "val-a", "type": 0 }),
+                json!({ "name": "FIELD_B", "value": "val-b", "type": 0 }),
+            ],
+            attachments: vec![],
+            search_text: "".into(),
+        };
+
+        *vault_mgr.decrypted_items.write().unwrap() = vec![note];
+
+        // Mapping to MultiField with non-matching var_name must fail closed
+        let err =
+            resolve_broker_env(&vault_mgr, None, &["MY_VAR=MultiField".to_string()]).unwrap_err();
+        assert!(err.contains("has multiple fields; please specify the field"));
+
+        // If var_name matches one of the fields, it resolves cleanly
+        let resolved =
+            resolve_broker_env(&vault_mgr, None, &["FIELD_A=MultiField".to_string()]).unwrap();
+        assert_eq!(resolved.get("FIELD_A"), Some(&"val-a".to_string()));
     }
 }

@@ -389,6 +389,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "get_attachment_key"
             | "copy"
             | "generate_password"
+            | "broker_resolve"
     )
 }
 

@@ -851,10 +851,23 @@ fn main() -> ExitCode {
             BrokerAction::Exec {
                 item,
                 env,
-                no_network: _,
-                no_redact: _,
+                no_network,
+                no_redact,
                 command,
             } => {
+                if no_network {
+                    eprintln!(
+                        "Error: --no-network is not yet implemented (scheduled in Ticket #259)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                if no_redact {
+                    eprintln!(
+                        "Error: --no-redact is not yet implemented (scheduled in Ticket #256)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+
                 let mut env_map = std::collections::HashMap::new();
 
                 if item.is_some() || !env.is_empty() {
@@ -879,9 +892,11 @@ fn main() -> ExitCode {
                         if err.contains("Vault is locked") {
                             eprintln!("Vault is locked. Waiting up to 60s for unlock...");
                             // Try summoning overlay
-                            let _ = std::process::Command::new("omarchy-shell")
-                                .args(["summon", "icyleaf.bitwarden", "{}"])
-                                .spawn();
+                            if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
+                                let _ = std::process::Command::new(shell_cmd)
+                                    .args(["summon", "icyleaf.bitwarden", "{}"])
+                                    .spawn();
+                            }
 
                             let start = std::time::Instant::now();
                             let timeout = std::time::Duration::from_secs(60);
@@ -893,7 +908,7 @@ fn main() -> ExitCode {
                                     send_daemon_request(&json!({ "action": "status" }))
                                 {
                                     if st
-                                        .get("unlocked")
+                                        .get("is_unlocked")
                                         .and_then(|v| v.as_bool())
                                         .unwrap_or(false)
                                     {
@@ -930,9 +945,11 @@ fn main() -> ExitCode {
                             }
                         }
                     }
+                    drop(resp);
                 }
 
-                match omawarden::broker::execute_child_process(&command, &env_map) {
+                use std::os::unix::process::ExitStatusExt;
+                match omawarden::broker::execute_child_process(&command, env_map) {
                     Ok(status) => {
                         if let Some(code) = status.code() {
                             if code == 0 {
@@ -940,6 +957,8 @@ fn main() -> ExitCode {
                             } else {
                                 ExitCode::from(code as u8)
                             }
+                        } else if let Some(sig) = status.signal() {
+                            ExitCode::from((128 + sig) as u8)
                         } else {
                             ExitCode::FAILURE
                         }
