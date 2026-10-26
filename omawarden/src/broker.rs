@@ -921,6 +921,7 @@ pub fn execute_child_process(
     cmd: &[String],
     mut env_vars: HashMap<String, String>,
     redact: bool,
+    no_network: bool,
 ) -> Result<ExitStatus, std::io::Error> {
     if cmd.is_empty() {
         return Err(std::io::Error::new(
@@ -943,6 +944,29 @@ pub fn execute_child_process(
 
     for (k, v) in &env_vars {
         command.env(k, v);
+    }
+
+    #[cfg(target_os = "linux")]
+    if no_network {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::unshare(libc::CLONE_NEWNET) != 0
+                    && libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if no_network {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "--no-network network namespace isolation is only supported on Linux",
+        ));
     }
 
     if filter_opt.is_some() {
@@ -1122,7 +1146,7 @@ mod tests {
                 .to_string(),
         ];
 
-        let status = execute_child_process(&cmd, env, false).unwrap();
+        let status = execute_child_process(&cmd, env, false, false).unwrap();
         assert_eq!(status.code(), Some(42));
     }
 
@@ -1140,7 +1164,7 @@ mod tests {
             r#"echo "KEY is $API_SECRET_KEY""#.to_string(),
         ];
 
-        let status = execute_child_process(&cmd, env, true).unwrap();
+        let status = execute_child_process(&cmd, env, true, false).unwrap();
         assert_eq!(status.code(), Some(0));
     }
 
@@ -1234,8 +1258,29 @@ mod tests {
             "for i in $(seq 1 500); do echo stdout $i $MY_HEAVY_SECRET; echo stderr $i $MY_HEAVY_SECRET >&2; done".to_string(),
         ];
 
-        let status = execute_child_process(&cmd, env, true).unwrap();
+        let status = execute_child_process(&cmd, env, true, false).unwrap();
         assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    fn test_execute_child_process_no_network_isolation() {
+        // 1. Local execution inside isolated namespace succeeds
+        let local_cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo local_ok".to_string(),
+        ];
+        let status = execute_child_process(&local_cmd, HashMap::new(), false, true).unwrap();
+        assert_eq!(status.code(), Some(0));
+
+        // 2. Outbound socket connection inside isolated namespace fails immediately with network unreachable
+        let net_cmd = vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import socket; socket.create_connection(('1.1.1.1', 80), timeout=1)".to_string(),
+        ];
+        let net_status = execute_child_process(&net_cmd, HashMap::new(), false, true).unwrap();
+        assert!(!net_status.success());
     }
 
     #[test]

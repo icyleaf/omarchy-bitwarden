@@ -884,13 +884,6 @@ fn main() -> ExitCode {
                 no_redact,
                 command,
             } => {
-                if no_network {
-                    eprintln!(
-                        "Error: --no-network is not yet implemented (scheduled in Ticket #259)"
-                    );
-                    return ExitCode::FAILURE;
-                }
-
                 let redact = !no_redact;
                 let mut env_map = std::collections::HashMap::new();
 
@@ -1016,7 +1009,9 @@ fn main() -> ExitCode {
                 }
 
                 use std::os::unix::process::ExitStatusExt;
-                match omawarden::broker::execute_child_process(&command, env_map, redact) {
+                match omawarden::broker::execute_child_process(
+                    &command, env_map, redact, no_network,
+                ) {
                     Ok(status) => {
                         if let Some(code) = status.code() {
                             if code == 0 {

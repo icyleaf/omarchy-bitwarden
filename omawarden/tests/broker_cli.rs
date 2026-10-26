@@ -34,14 +34,38 @@ fn test_broker_exec_simple_command_execution() {
 }
 
 #[test]
-fn test_broker_exec_no_network_flag_fails_closed() {
+fn test_broker_exec_no_network_local_command_succeeds() {
     let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
-        .args(["broker", "exec", "--no-network", "--", "true"])
+        .args([
+            "broker",
+            "exec",
+            "--no-network",
+            "--",
+            "echo",
+            "NoNetworkLocalOk",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("NoNetworkLocalOk"));
+}
+
+#[test]
+fn test_broker_exec_no_network_blocks_socket_connections() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "broker",
+            "exec",
+            "--no-network",
+            "--",
+            "python3",
+            "-c",
+            "import socket; socket.create_connection(('1.1.1.1', 80), timeout=1)",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--no-network is not yet implemented"));
 }
 
 #[test]
