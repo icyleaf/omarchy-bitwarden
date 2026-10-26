@@ -45,14 +45,22 @@ fn test_broker_exec_no_network_flag_fails_closed() {
 }
 
 #[test]
-fn test_broker_exec_no_redact_flag_fails_closed() {
+fn test_broker_exec_no_redact_flag_allowed() {
     let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
-        .args(["broker", "exec", "--no-redact", "--", "true"])
+        .args([
+            "broker",
+            "exec",
+            "--no-redact",
+            "--",
+            "sh",
+            "-c",
+            "echo UnredactedOutput",
+        ])
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--no-redact is not yet implemented"));
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("UnredactedOutput"));
 }
 
 #[test]

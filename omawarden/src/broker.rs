@@ -1,8 +1,13 @@
 use std::collections::HashMap;
-use std::process::{Command, ExitStatus};
+use std::io::{Read, Write};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use zeroize::Zeroize;
 
 use crate::vault::{VaultItem, VaultManager};
+
+/// Placeholder text substituted in place of detected secret tokens.
+pub const REDACTION_PLACEHOLDER: &str = "[REDACTED:VAULT_SECRET]";
 
 /// Prohibited environment variable names that must not be injected to prevent hijacking.
 pub const PROHIBITED_ENV_VARS: &[&str] = &[
@@ -190,11 +195,107 @@ pub fn resolve_broker_env(
     Ok(resolved)
 }
 
+/// Builds an Aho-Corasick automaton from secret values and all their substrings of length >= 6.
+pub fn build_redaction_filter(secrets: &[&str]) -> Option<(aho_corasick::AhoCorasick, usize)> {
+    let mut patterns = std::collections::HashSet::new();
+    let mut max_len = 0;
+
+    for &secret in secrets {
+        let trimmed = secret.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Always include the full secret value
+        patterns.insert(trimmed.to_string());
+        if trimmed.len() > max_len {
+            max_len = trimmed.len();
+        }
+
+        // For secrets of length >= 6, generate all substrings with length >= 6
+        if trimmed.len() >= 6 {
+            let bytes = trimmed.as_bytes();
+            let limit = bytes.len().min(128);
+            for len in 6..=limit {
+                for window in bytes.windows(len) {
+                    if let Ok(s) = std::str::from_utf8(window) {
+                        if !s.trim().is_empty() {
+                            patterns.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if patterns.is_empty() {
+        return None;
+    }
+
+    let mut pattern_list: Vec<String> = patterns.into_iter().collect();
+    // Sort longest first to guarantee optimal leftmost longest match preference
+    pattern_list.sort_by_key(|a| std::cmp::Reverse(a.len()));
+
+    aho_corasick::AhoCorasick::builder()
+        .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+        .build(pattern_list)
+        .ok()
+        .map(|ac| (ac, max_len))
+}
+
+/// Streams data from `reader` to `writer`, replacing matched secrets with `REDACTION_PLACEHOLDER`.
+pub fn stream_redacted<R: Read, W: Write>(
+    mut reader: R,
+    mut writer: W,
+    filter: &aho_corasick::AhoCorasick,
+    max_pattern_len: usize,
+) -> std::io::Result<()> {
+    let replacement = REDACTION_PLACEHOLDER.as_bytes();
+    let replacements = vec![replacement; filter.patterns_len()];
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 4096];
+
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            // EOF: scrub any remaining pending bytes and flush
+            if !pending.is_empty() {
+                let redacted = filter.replace_all_bytes(&pending, &replacements);
+                writer.write_all(&redacted)?;
+                writer.flush()?;
+            }
+            break;
+        }
+
+        pending.extend_from_slice(&buf[..n]);
+
+        if let Some(last_nl) = pending.iter().rposition(|&b| b == b'\n') {
+            let chunk = &pending[..=last_nl];
+            let redacted = filter.replace_all_bytes(chunk, &replacements);
+            writer.write_all(&redacted)?;
+            writer.flush()?;
+            pending.drain(..=last_nl);
+        } else if pending.len() >= 8192 {
+            let split_at = pending.len().saturating_sub(max_pattern_len);
+            if split_at > 0 {
+                let chunk = &pending[..split_at];
+                let redacted = filter.replace_all_bytes(chunk, &replacements);
+                writer.write_all(&redacted)?;
+                writer.flush()?;
+                pending.drain(..split_at);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Spawns the child command with injected environment variables, zeroes out in-memory secrets,
-/// and waits for child completion.
+/// streams and redacts stdout and stderr in real-time (unless `redact == false`), and waits for completion.
 pub fn execute_child_process(
     cmd: &[String],
     mut env_vars: HashMap<String, String>,
+    redact: bool,
 ) -> Result<ExitStatus, std::io::Error> {
     if cmd.is_empty() {
         return Err(std::io::Error::new(
@@ -202,6 +303,13 @@ pub fn execute_child_process(
             "No command provided",
         ));
     }
+
+    let filter_opt = if redact {
+        let secret_values: Vec<&str> = env_vars.values().map(|s| s.as_str()).collect();
+        build_redaction_filter(&secret_values)
+    } else {
+        None
+    };
 
     let mut command = Command::new(&cmd[0]);
     if cmd.len() > 1 {
@@ -212,6 +320,11 @@ pub fn execute_child_process(
         command.env(k, v);
     }
 
+    if filter_opt.is_some() {
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+    }
+
     let mut child = command.spawn()?;
 
     // Scrub secret strings in memory immediately after child process spawn
@@ -220,7 +333,32 @@ pub fn execute_child_process(
     }
     drop(env_vars);
 
-    child.wait()
+    if let Some((filter, max_pattern_len)) = filter_opt {
+        let filter_arc = Arc::new(filter);
+        let mut child_stdout = child.stdout.take().expect("Piped child stdout");
+        let mut child_stderr = child.stderr.take().expect("Piped child stderr");
+
+        let filter_out = Arc::clone(&filter_arc);
+        let t_out = std::thread::spawn(move || {
+            let mut out = std::io::stdout();
+            let _ = stream_redacted(&mut child_stdout, &mut out, &filter_out, max_pattern_len);
+        });
+
+        let filter_err = Arc::clone(&filter_arc);
+        let t_err = std::thread::spawn(move || {
+            let mut err = std::io::stderr();
+            let _ = stream_redacted(&mut child_stderr, &mut err, &filter_err, max_pattern_len);
+        });
+
+        let status = child.wait()?;
+        let _ = t_out.join();
+        let _ = t_err.join();
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        Ok(status)
+    } else {
+        child.wait()
+    }
 }
 
 #[cfg(test)]
@@ -359,8 +497,120 @@ mod tests {
                 .to_string(),
         ];
 
-        let status = execute_child_process(&cmd, env).unwrap();
+        let status = execute_child_process(&cmd, env, false).unwrap();
         assert_eq!(status.code(), Some(42));
+    }
+
+    #[test]
+    fn test_execute_child_process_with_redaction() {
+        let mut env = HashMap::new();
+        env.insert(
+            "API_SECRET_KEY".to_string(),
+            "sk-proj-secret-99999".to_string(),
+        );
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"echo "KEY is $API_SECRET_KEY""#.to_string(),
+        ];
+
+        let status = execute_child_process(&cmd, env, true).unwrap();
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    fn test_stream_redacted_full_and_substring() {
+        use aho_corasick::{AhoCorasick, MatchKind};
+        let secret = "sk-proj-1234567890abcdef";
+        // Build patterns with full secret and substrings >= 6
+        let mut patterns = std::collections::HashSet::new();
+        patterns.insert(secret.to_string());
+        let bytes = secret.as_bytes();
+        for len in 6..=bytes.len().min(64) {
+            for window in bytes.windows(len) {
+                if let Ok(s) = std::str::from_utf8(window) {
+                    patterns.insert(s.to_string());
+                }
+            }
+        }
+        let mut pattern_list: Vec<String> = patterns.into_iter().collect();
+        pattern_list.sort_by_key(|a| std::cmp::Reverse(a.len()));
+
+        let ac = AhoCorasick::builder()
+            .match_kind(MatchKind::LeftmostLongest)
+            .build(&pattern_list)
+            .unwrap();
+
+        // Test 1: Full secret
+        let input1 = b"LOG: token=sk-proj-1234567890abcdef\n";
+        let mut out1 = Vec::new();
+        stream_redacted(&input1[..], &mut out1, &ac, 64).unwrap();
+        assert_eq!(
+            String::from_utf8(out1).unwrap(),
+            "LOG: token=[REDACTED:VAULT_SECRET]\n"
+        );
+
+        // Test 2: Substring >= 6
+        let input2 = b"DEBUG: prefix=sk-proj suffix=0abcdef\n";
+        let mut out2 = Vec::new();
+        stream_redacted(&input2[..], &mut out2, &ac, 64).unwrap();
+        assert_eq!(
+            String::from_utf8(out2).unwrap(),
+            "DEBUG: prefix=[REDACTED:VAULT_SECRET] suffix=[REDACTED:VAULT_SECRET]\n"
+        );
+
+        // Test 3: Substring < 6 (should NOT be redacted)
+        let input3 = b"INFO: small=sk-\n";
+        let mut out3 = Vec::new();
+        stream_redacted(&input3[..], &mut out3, &ac, 64).unwrap();
+        assert_eq!(String::from_utf8(out3).unwrap(), "INFO: small=sk-\n");
+    }
+
+    #[test]
+    fn test_build_redaction_filter_and_heavy_streaming() {
+        let secrets = ["sk-proj-heavy-secret-token-123456"];
+        let (filter, max_len) = build_redaction_filter(&secrets).expect("Build filter");
+        assert_eq!(max_len, "sk-proj-heavy-secret-token-123456".len());
+
+        // Generate 2MB of streaming chunks mixing secrets and padding
+        let mut large_input = Vec::new();
+        for i in 0..1000 {
+            large_input.extend_from_slice(
+                format!(
+                    "chunk {} containing sk-proj-heavy-secret-token-123456 and padding {:01000}\n",
+                    i, 0
+                )
+                .as_bytes(),
+            );
+        }
+
+        let mut output = Vec::new();
+        stream_redacted(&large_input[..], &mut output, &filter, max_len)
+            .expect("Stream redacts without error");
+
+        let out_str = String::from_utf8(output).expect("Valid utf8 output");
+        assert!(!out_str.contains("sk-proj-heavy-secret-token-123456"));
+        assert!(out_str.contains("[REDACTED:VAULT_SECRET]"));
+    }
+
+    #[test]
+    fn test_execute_child_process_heavy_streaming_no_deadlock() {
+        let mut env = HashMap::new();
+        env.insert(
+            "MY_HEAVY_SECRET".to_string(),
+            "sk-proj-secret-token-xyz".to_string(),
+        );
+
+        // Child process outputs 500 lines to stdout and stderr concurrently
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "for i in $(seq 1 500); do echo stdout $i $MY_HEAVY_SECRET; echo stderr $i $MY_HEAVY_SECRET >&2; done".to_string(),
+        ];
+
+        let status = execute_child_process(&cmd, env, true).unwrap();
+        assert_eq!(status.code(), Some(0));
     }
 
     #[test]

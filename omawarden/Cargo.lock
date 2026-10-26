@@ -1187,6 +1187,7 @@ name = "omawarden"
 version = "0.10.1"
 dependencies = [
  "aes",
+ "aho-corasick",
  "argon2",
  "base32",
  "base64 0.23.1",
