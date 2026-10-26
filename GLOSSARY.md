@@ -93,3 +93,25 @@ _Avoid_: Command menu, quick actions
 **Inspector**:
 The side panel within the overlay that reveals details, masked secrets, and metadata for the selected cipher.
 _Avoid_: Details pane, info view, sidebar
+
+### VaultBroker & Secret Execution
+
+**VaultBroker**:
+The execution, policy enforcement, and secret isolation subsystem within Omawarden that brokers vault ciphers into child process environments and tools without exposing plaintext credentials to users or AI agents.
+_Avoid_: Secret broker, proxy runner, credential injector, secret wrapper
+
+**Destination Binding**:
+A security policy constraint that strictly restricts a brokered cipher or token to authorized executable binary paths and argument prefixes.
+_Avoid_: Command whitelist, path allowlist, execution rule
+
+**Redaction**:
+The real-time streaming filter that scrubs secret values and sensitive substrings from child process standard output and standard error streams.
+_Avoid_: Masking, string replacement, log censoring
+
+**Project Manifest**:
+A zero-plaintext configuration file (`.omawarden.toml`) in a project workspace root declaring cipher references and destination policies.
+_Avoid_: Config file, env file, secret definition
+
+**Agent Skills**:
+The structured, machine-readable instructions and usage contract exposed by Omawarden for AI agents to discover safe credential execution without requesting plaintext secrets.
+_Avoid_: Agent prompt, LLM guide, agent instructions

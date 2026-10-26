@@ -632,6 +632,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             | "get_attachment_key"
             | "ssh_key_create"
             | "sync"
+            | "broker_resolve"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()))
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
@@ -762,6 +763,23 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 json!({ "ok": true, "item": item })
             } else {
                 json!({ "ok": false, "error": format!("Item '{}' not found in vault", query) })
+            }
+        }
+        "broker_resolve" => {
+            let item_query = req.get("item").and_then(|v| v.as_str());
+            let env_mappings: Vec<String> = req
+                .get("env")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            match crate::broker::resolve_broker_env(&state.vault_mgr, item_query, &env_mappings) {
+                Ok(env) => json!({ "ok": true, "env": env }),
+                Err(err) => json!({ "ok": false, "error": err }),
             }
         }
         "get_ssh_key" => {

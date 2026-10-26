@@ -1,6 +1,7 @@
 pub mod api;
 pub mod attachment;
 pub mod auth;
+pub mod broker;
 pub mod clipboard;
 pub mod config;
 pub mod crypto;

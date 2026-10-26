@@ -204,6 +204,44 @@ enum Commands {
         #[arg(long, help = "Output generated secret as JSON")]
         json: bool,
     },
+    #[command(about = "Secret broker execution and agent capabilities")]
+    Broker {
+        #[command(subcommand)]
+        action: BrokerAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BrokerAction {
+    #[command(
+        about = "Execute a command with secrets brokered from vault into environment variables"
+    )]
+    Exec {
+        #[arg(long, help = "Vault item ID or name to inject all fields from")]
+        item: Option<String>,
+        #[arg(
+            short = 'e',
+            long = "env",
+            help = "Explicit environment mapping VAR=item or VAR=item#field"
+        )]
+        env: Vec<String>,
+        #[arg(
+            long,
+            help = "Disable network access for child process via network namespace isolation"
+        )]
+        no_network: bool,
+        #[arg(
+            long,
+            help = "Disable automatic streaming redaction of secrets in output"
+        )]
+        no_redact: bool,
+        #[arg(
+            last = true,
+            required = true,
+            help = "Command and arguments to execute"
+        )]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -808,6 +846,111 @@ fn main() -> ExitCode {
                 }
             }
         }
+
+        Commands::Broker { action } => match action {
+            BrokerAction::Exec {
+                item,
+                env,
+                no_network: _,
+                no_redact: _,
+                command,
+            } => {
+                let mut env_map = std::collections::HashMap::new();
+
+                if item.is_some() || !env.is_empty() {
+                    ensure_daemon_running();
+
+                    let req = json!({
+                        "action": "broker_resolve",
+                        "item": item,
+                        "env": env,
+                    });
+
+                    let mut resp = match send_daemon_request(&req) {
+                        Some(r) => r,
+                        None => {
+                            eprintln!("Error: Failed to communicate with omawarden daemon.");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    // If vault is locked, wait up to 60s for unlock
+                    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+                        if err.contains("Vault is locked") {
+                            eprintln!("Vault is locked. Waiting up to 60s for unlock...");
+                            // Try summoning overlay
+                            let _ = std::process::Command::new("omarchy-shell")
+                                .args(["summon", "icyleaf.bitwarden", "{}"])
+                                .spawn();
+
+                            let start = std::time::Instant::now();
+                            let timeout = std::time::Duration::from_secs(60);
+                            let mut unlocked = false;
+
+                            while start.elapsed() < timeout {
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                if let Some(st) =
+                                    send_daemon_request(&json!({ "action": "status" }))
+                                {
+                                    if st
+                                        .get("unlocked")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                    {
+                                        unlocked = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if unlocked {
+                                if let Some(new_r) = send_daemon_request(&req) {
+                                    resp = new_r;
+                                }
+                            } else {
+                                eprintln!("Error: Vault was not unlocked within timeout.");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+
+                    if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let err = resp
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Failed to resolve secrets from vault");
+                        eprintln!("Error: {}", err);
+                        return ExitCode::FAILURE;
+                    }
+
+                    if let Some(obj) = resp.get("env").and_then(|v| v.as_object()) {
+                        for (k, v) in obj {
+                            if let Some(s) = v.as_str() {
+                                env_map.insert(k.clone(), s.to_string());
+                            }
+                        }
+                    }
+                }
+
+                match omawarden::broker::execute_child_process(&command, &env_map) {
+                    Ok(status) => {
+                        if let Some(code) = status.code() {
+                            if code == 0 {
+                                ExitCode::SUCCESS
+                            } else {
+                                ExitCode::from(code as u8)
+                            }
+                        } else {
+                            ExitCode::FAILURE
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Failed to execute child command: {}", e);
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
 
         Commands::Health => {
             let status = check_system_health(&cfg.server_url);
