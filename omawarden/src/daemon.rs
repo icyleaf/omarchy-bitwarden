@@ -774,6 +774,16 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
         "broker_resolve" => {
             let item_query = req.get("item").and_then(|v| v.as_str());
+            let items: Vec<String> = req
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let env_mappings: Vec<String> = req
                 .get("env")
                 .and_then(|v| v.as_array())
@@ -823,11 +833,16 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 if let Some(iq) = item_query {
                     target_ciphers.push(iq.to_string());
                 }
+                for itm in &items {
+                    if !target_ciphers.contains(itm) {
+                        target_ciphers.push(itm.clone());
+                    }
+                }
                 for m in &env_mappings {
                     if let Some(idx) = m.find('=') {
-                        let target = &m[idx + 1..];
+                        let target = m[idx + 1..].trim();
                         let item_name = if let Some(h) = target.find('#') {
-                            &target[..h]
+                            target[..h].trim()
                         } else {
                             target
                         };
@@ -949,18 +964,23 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 if let Some(violation_response) = policy_violation {
                     violation_response
                 } else {
-                    match crate::broker::resolve_broker_env(
+                    match crate::broker::resolve_broker_env_ext(
                         &state.vault_mgr,
                         item_query,
                         &env_mappings,
+                        &items,
                     ) {
                         Ok(env) => json!({ "ok": true, "env": env }),
                         Err(err) => json!({ "ok": false, "error": err }),
                     }
                 }
             } else {
-                match crate::broker::resolve_broker_env(&state.vault_mgr, item_query, &env_mappings)
-                {
+                match crate::broker::resolve_broker_env_ext(
+                    &state.vault_mgr,
+                    item_query,
+                    &env_mappings,
+                    &items,
+                ) {
                     Ok(env) => json!({ "ok": true, "env": env }),
                     Err(err) => json!({ "ok": false, "error": err }),
                 }
@@ -1014,7 +1034,11 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 _ => crate::broker::BrokerDecision::Deny,
             };
             let delivered = state.broker.reply(id, decision);
-            json!({ "ok": true, "delivered": delivered })
+            if delivered {
+                json!({ "ok": true, "delivered": true })
+            } else {
+                json!({ "ok": false, "delivered": false, "error": "Prompt expired or invalid ID" })
+            }
         }
         "get_ssh_key" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");

@@ -894,7 +894,39 @@ fn main() -> ExitCode {
                 let redact = !no_redact;
                 let mut env_map = std::collections::HashMap::new();
 
-                if item.is_some() || !env.is_empty() {
+                let mut effective_items = Vec::new();
+                let mut effective_env = Vec::new();
+
+                // 1. Base layer: search for .omawarden.toml in current working directory and ancestors
+                let curr_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                if let Some(manifest_path) =
+                    omawarden::broker::ProjectManifest::find_in_ancestors(&curr_dir)
+                {
+                    match omawarden::broker::ProjectManifest::load_from_file(&manifest_path) {
+                        Ok(manifest) => {
+                            for (k, v) in manifest.env {
+                                effective_env.push(format!("{}={}", k, v));
+                            }
+                            effective_items = manifest.items;
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+
+                // 2. CLI layer: explicit CLI parameters append and take precedence
+                if let Some(ref cli_item) = item {
+                    if !effective_items.contains(cli_item) {
+                        effective_items.push(cli_item.clone());
+                    }
+                }
+                for e in env {
+                    effective_env.push(e);
+                }
+
+                if !effective_env.is_empty() || !effective_items.is_empty() {
                     ensure_daemon_running();
 
                     let is_interactive = std::io::stdin().is_terminal()
@@ -903,8 +935,8 @@ fn main() -> ExitCode {
 
                     let req = json!({
                         "action": "broker_resolve",
-                        "item": item,
-                        "env": env,
+                        "items": effective_items,
+                        "env": effective_env,
                         "command": command,
                         "interactive": is_interactive,
                         "caller_pid": std::process::id(),
@@ -918,9 +950,13 @@ fn main() -> ExitCode {
                         }
                     };
 
-                    // If vault is locked, wait up to 60s for unlock
+                    // If vault is locked, wait up to 60s for unlock only in interactive desktop mode
                     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
                         if err.contains("Vault is locked") {
+                            if !is_interactive {
+                                eprintln!("Error: {}", err);
+                                return ExitCode::FAILURE;
+                            }
                             eprintln!("Vault is locked. Waiting up to 60s for unlock...");
                             // Try summoning overlay
                             if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
@@ -1095,7 +1131,11 @@ fn main() -> ExitCode {
                     } else if delivered {
                         println!("Approval reply delivered.");
                     } else {
-                        eprintln!("Error: Prompt expired or was not delivered.");
+                        let err = resp
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Prompt expired or was not delivered");
+                        eprintln!("Error: {}", err);
                     }
                     if delivered {
                         ExitCode::SUCCESS

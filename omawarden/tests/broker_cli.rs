@@ -124,3 +124,84 @@ fn test_broker_reply_json_help() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--json"));
 }
+
+#[test]
+fn test_broker_exec_malformed_omawarden_toml_fails_closed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toml_path = temp_dir.path().join(".omawarden.toml");
+    std::fs::write(&toml_path, "invalid_toml = [unclosed").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .current_dir(temp_dir.path())
+        .args(["broker", "exec", "--", "echo", "test"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Failed to parse manifest TOML"));
+}
+
+#[test]
+fn test_broker_exec_omawarden_toml_ancestor_discovery() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("my_proj");
+    let deep_nested = root.join("src").join("nested").join("sub");
+    std::fs::create_dir_all(&deep_nested).unwrap();
+
+    // Place malformed .omawarden.toml at the root directory
+    let toml_path = root.join(".omawarden.toml");
+    std::fs::write(&toml_path, "invalid = [bad").unwrap();
+
+    // Execute from the deeply nested subdirectory: should traverse up and fail on invalid TOML
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .current_dir(&deep_nested)
+        .args(["broker", "exec", "--", "echo", "test"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Failed to parse manifest TOML"));
+}
+
+#[test]
+fn test_broker_exec_cli_env_composites_with_omawarden_toml() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("my_proj_with_cli");
+    let deep_nested = root.join("services").join("worker");
+    std::fs::create_dir_all(&deep_nested).unwrap();
+
+    // Valid .omawarden.toml at root referencing a non-existent item to test daemon pass-through
+    let toml_path = root.join(".omawarden.toml");
+    std::fs::write(
+        &toml_path,
+        r#"
+items = ["NonExistentTestItemA"]
+"#,
+    )
+    .unwrap();
+
+    // Execute with an extra CLI -e flag: CLI -e should NOT disable .omawarden.toml
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .current_dir(&deep_nested)
+        .args([
+            "broker",
+            "exec",
+            "-e",
+            "EXTRA_KEY=NonExistentTestItemB",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+
+    // Must fail closed because items from either manifest or CLI were evaluated by the broker
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("NonExistentTestItem")
+            || stderr.contains("Vault is locked")
+            || stderr.contains("Failed to")
+    );
+}

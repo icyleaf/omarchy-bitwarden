@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -314,11 +314,343 @@ pub fn is_prohibited_env_var(name: &str) -> bool {
         .any(|b| b.eq_ignore_ascii_case(name))
 }
 
+/// File name for project secrets manifest.
+pub const MANIFEST_FILENAME: &str = ".omawarden.toml";
+
+/// Optional [project] section in .omawarden.toml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProjectSection {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// Project secrets manifest (`.omawarden.toml`) containing zero plaintext secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProjectManifest {
+    /// Explicit environment variable mappings: `KEY = "cipher_ref"` or `KEY = "cipher_ref#field"`
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
+    /// Items to auto-infer and inject environment variables from (using provider patterns or custom fields)
+    #[serde(default)]
+    pub items: Vec<String>,
+
+    /// Optional [project] section containing metadata and items
+    #[serde(default)]
+    pub project: Option<ProjectSection>,
+}
+
+impl ProjectManifest {
+    /// Loads and parses a project manifest from a file.
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read manifest file '{}': {}", path.display(), e))?;
+        let mut manifest: ProjectManifest = toml::from_str(&content).map_err(|e| {
+            format!(
+                "Failed to parse manifest TOML in '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+
+        if let Some(proj) = manifest.project.take() {
+            for itm in proj.items {
+                if !manifest.items.contains(&itm) {
+                    manifest.items.push(itm);
+                }
+            }
+        }
+
+        Ok(manifest)
+    }
+
+    /// Finds `.omawarden.toml` in `start_dir` or any of its parent directories.
+    pub fn find_in_ancestors(start_dir: &Path) -> Option<PathBuf> {
+        let abs_dir = if start_dir.is_absolute() {
+            start_dir.to_path_buf()
+        } else {
+            start_dir.canonicalize().unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("/"))
+                    .join(start_dir)
+            })
+        };
+        let mut curr = Some(abs_dir.as_path());
+        while let Some(dir) = curr {
+            let candidate = dir.join(MANIFEST_FILENAME);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            curr = dir.parent();
+        }
+        None
+    }
+}
+
+/// A mapping rule between provider name patterns and its standard canonical environment variable.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderPattern {
+    pub patterns: &'static [&'static str],
+    pub canonical_env: &'static str,
+}
+
+pub static PROVIDER_PATTERNS: &[ProviderPattern] = &[
+    // AI / LLM Providers (checked with highest precedence)
+    ProviderPattern {
+        patterns: &["azure_openai", "azureopenai", "azure-openai"],
+        canonical_env: "AZURE_OPENAI_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["openai", "chatgpt"],
+        canonical_env: "OPENAI_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["anthropic", "claude"],
+        canonical_env: "ANTHROPIC_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &[
+            "gemini",
+            "google_ai",
+            "googleai",
+            "google_gemini",
+            "google-gemini",
+        ],
+        canonical_env: "GEMINI_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["deepseek"],
+        canonical_env: "DEEPSEEK_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["groq"],
+        canonical_env: "GROQ_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["mistral"],
+        canonical_env: "MISTRAL_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["cohere"],
+        canonical_env: "CO_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["perplexity"],
+        canonical_env: "PERPLEXITY_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["together", "together_ai", "togetherai"],
+        canonical_env: "TOGETHER_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["replicate"],
+        canonical_env: "REPLICATE_API_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["huggingface", "hugging_face", "hf"],
+        canonical_env: "HF_TOKEN",
+    },
+    // Developer & Git Platforms
+    ProviderPattern {
+        patterns: &["github", "gh"],
+        canonical_env: "GITHUB_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["gitlab"],
+        canonical_env: "GITLAB_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["bitbucket"],
+        canonical_env: "BITBUCKET_TOKEN",
+    },
+    // Cloud & Infrastructure
+    ProviderPattern {
+        patterns: &["aws", "amazon_web_services"],
+        canonical_env: "AWS_SECRET_ACCESS_KEY",
+    },
+    ProviderPattern {
+        patterns: &["cloudflare"],
+        canonical_env: "CLOUDFLARE_API_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["digitalocean", "digital_ocean"],
+        canonical_env: "DIGITALOCEAN_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["flyio", "fly.io", "fly_io"],
+        canonical_env: "FLY_API_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["render"],
+        canonical_env: "RENDER_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["railway"],
+        canonical_env: "RAILWAY_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["vercel"],
+        canonical_env: "VERCEL_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["netlify"],
+        canonical_env: "NETLIFY_AUTH_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["gcp", "google_cloud", "googlecloud"],
+        canonical_env: "GOOGLE_APPLICATION_CREDENTIALS",
+    },
+    // Databases & Vector Stores
+    ProviderPattern {
+        patterns: &["supabase"],
+        canonical_env: "SUPABASE_KEY",
+    },
+    ProviderPattern {
+        patterns: &["neon"],
+        canonical_env: "NEON_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["pinecone"],
+        canonical_env: "PINECONE_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["qdrant"],
+        canonical_env: "QDRANT_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["weaviate"],
+        canonical_env: "WEAVIATE_API_KEY",
+    },
+    // Payments & Commerce
+    ProviderPattern {
+        patterns: &["stripe"],
+        canonical_env: "STRIPE_SECRET_KEY",
+    },
+    ProviderPattern {
+        patterns: &["shopify"],
+        canonical_env: "SHOPIFY_API_KEY",
+    },
+    // Messaging & Communications
+    ProviderPattern {
+        patterns: &["resend"],
+        canonical_env: "RESEND_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["sendgrid"],
+        canonical_env: "SENDGRID_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["twilio"],
+        canonical_env: "TWILIO_AUTH_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["mailgun"],
+        canonical_env: "MAILGUN_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["slack"],
+        canonical_env: "SLACK_BOT_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["discord"],
+        canonical_env: "DISCORD_BOT_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["telegram"],
+        canonical_env: "TELEGRAM_BOT_TOKEN",
+    },
+    // Monitoring & Observability
+    ProviderPattern {
+        patterns: &["sentry"],
+        canonical_env: "SENTRY_AUTH_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["datadog", "dd"],
+        canonical_env: "DD_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["newrelic", "new_relic"],
+        canonical_env: "NEW_RELIC_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["posthog"],
+        canonical_env: "POSTHOG_API_KEY",
+    },
+    // Package Registries & Tooling
+    ProviderPattern {
+        patterns: &["npm"],
+        canonical_env: "NPM_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["pypi"],
+        canonical_env: "PYPI_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["docker", "dockerhub"],
+        canonical_env: "DOCKER_PASSWORD",
+    },
+    ProviderPattern {
+        patterns: &["postman"],
+        canonical_env: "POSTMAN_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["linear"],
+        canonical_env: "LINEAR_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["jira", "atlassian"],
+        canonical_env: "JIRA_API_TOKEN",
+    },
+    ProviderPattern {
+        patterns: &["notion"],
+        canonical_env: "NOTION_API_KEY",
+    },
+    ProviderPattern {
+        patterns: &["algolia"],
+        canonical_env: "ALGOLIA_API_KEY",
+    },
+];
+
+/// Infers canonical environment variable name for a given provider or item name.
+pub fn infer_provider_env_var(item_name: &str) -> Option<&'static str> {
+    let lower = item_name.to_lowercase();
+    let clean_name = lower.replace(['-', '_', ' ', '.'], "");
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for rule in PROVIDER_PATTERNS {
+        for &pattern in rule.patterns {
+            let clean_pattern = pattern.replace(['-', '_', ' ', '.'], "");
+            let is_short_pattern = clean_pattern.len() <= 3;
+
+            // 1. Exact token match in parsed words (e.g. "openai", "aws", "gh") or exact normalized match
+            if words.contains(&pattern) || lower == pattern || clean_name == clean_pattern {
+                return Some(rule.canonical_env);
+            }
+
+            // 2. Phrase or compound match for longer patterns (len >= 4 only)
+            if !is_short_pattern {
+                if pattern.contains([' ', '_', '-']) && lower.contains(pattern) {
+                    return Some(rule.canonical_env);
+                }
+                if clean_name.starts_with(&clean_pattern) || clean_name.ends_with(&clean_pattern) {
+                    return Some(rule.canonical_env);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Resolves environment variables from a single VaultItem.
 ///
 /// Injects all custom fields where field name becomes the environment variable name.
-/// If the item is a Login with a password, and no field named `PASSWORD` or `API_KEY` is present,
-/// it will also expose `PASSWORD`.
+/// If the item is a Login with a password, it checks the provider pattern registry to
+/// auto-infer standard environment variables (e.g. OpenAI -> OPENAI_API_KEY).
+/// If no provider matches, it falls back to API_KEY (for sk-/ghp- tokens) or PASSWORD.
 pub fn resolve_item_env(item: &VaultItem) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
@@ -345,13 +677,17 @@ pub fn resolve_item_env(item: &VaultItem) -> HashMap<String, String> {
 
     if let Some(ref login) = item.login {
         if let Some(password) = login.get("password").and_then(|v| v.as_str()) {
-            if !password.is_empty() && !env.contains_key("PASSWORD") && !env.contains_key("API_KEY")
-            {
-                // If it looks like an API key or token, prefer API_KEY unless defined
-                if password.starts_with("sk-") || password.starts_with("ghp_") {
-                    env.insert("API_KEY".to_string(), password.to_string());
-                } else {
-                    env.insert("PASSWORD".to_string(), password.to_string());
+            if !password.is_empty() {
+                if let Some(inferred) = infer_provider_env_var(&item.name) {
+                    if !env.contains_key(inferred) {
+                        env.insert(inferred.to_string(), password.to_string());
+                    }
+                } else if !env.contains_key("PASSWORD") && !env.contains_key("API_KEY") {
+                    if password.starts_with("sk-") || password.starts_with("ghp_") {
+                        env.insert("API_KEY".to_string(), password.to_string());
+                    } else {
+                        env.insert("PASSWORD".to_string(), password.to_string());
+                    }
                 }
             }
         }
@@ -366,12 +702,30 @@ pub fn resolve_broker_env(
     item_query: Option<&str>,
     env_mappings: &[String],
 ) -> Result<HashMap<String, String>, String> {
+    resolve_broker_env_ext(vault_mgr, item_query, env_mappings, &[])
+}
+
+/// Resolves requested environment variables from the vault according to item queries, declared items, and explicit mappings.
+pub fn resolve_broker_env_ext(
+    vault_mgr: &VaultManager,
+    item_query: Option<&str>,
+    env_mappings: &[String],
+    items: &[String],
+) -> Result<HashMap<String, String>, String> {
     let mut resolved = HashMap::new();
 
     if let Some(query) = item_query {
         let item = vault_mgr
             .find_item(query, None)
             .ok_or_else(|| format!("Vault item '{}' not found", query))?;
+        let item_env = resolve_item_env(&item);
+        resolved.extend(item_env);
+    }
+
+    for itm in items {
+        let item = vault_mgr
+            .find_item(itm, None)
+            .ok_or_else(|| format!("Vault item '{}' not found", itm))?;
         let item_env = resolve_item_env(&item);
         resolved.extend(item_env);
     }
@@ -1113,5 +1467,237 @@ mod tests {
         let resolved =
             resolve_broker_env(&vault_mgr, None, &["FIELD_A=MultiField".to_string()]).unwrap();
         assert_eq!(resolved.get("FIELD_A"), Some(&"val-a".to_string()));
+    }
+
+    #[test]
+    fn test_provider_pattern_auto_inference() {
+        assert_eq!(infer_provider_env_var("OpenAI"), Some("OPENAI_API_KEY"));
+        assert_eq!(infer_provider_env_var("openai-dev"), Some("OPENAI_API_KEY"));
+        assert_eq!(
+            infer_provider_env_var("ChatGPT Pro"),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("Anthropic Claude"),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("Google Gemini 1.5"),
+            Some("GEMINI_API_KEY")
+        );
+        assert_eq!(infer_provider_env_var("DeepSeek"), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(infer_provider_env_var("Groq Cloud"), Some("GROQ_API_KEY"));
+        assert_eq!(
+            infer_provider_env_var("Mistral AI"),
+            Some("MISTRAL_API_KEY")
+        );
+        assert_eq!(infer_provider_env_var("GitHub Token"), Some("GITHUB_TOKEN"));
+        assert_eq!(
+            infer_provider_env_var("AWS Root"),
+            Some("AWS_SECRET_ACCESS_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("Stripe Live"),
+            Some("STRIPE_SECRET_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("Cloudflare API"),
+            Some("CLOUDFLARE_API_TOKEN")
+        );
+        assert_eq!(
+            infer_provider_env_var("Supabase Prod"),
+            Some("SUPABASE_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("Azure OpenAI"),
+            Some("AZURE_OPENAI_API_KEY")
+        );
+        assert_eq!(
+            infer_provider_env_var("PostHog Analytics"),
+            Some("POSTHOG_API_KEY")
+        );
+        assert_eq!(infer_provider_env_var("UnknownCustomItem"), None);
+
+        // Negative tests: words that contain short pattern substrings must NOT false-positive
+        assert_eq!(infer_provider_env_var("Reddit"), None);
+        assert_eq!(infer_provider_env_var("Lightroom"), None);
+        assert_eq!(infer_provider_env_var("Flight Booking"), None);
+        assert_eq!(infer_provider_env_var("Lawsuit"), None);
+        assert_eq!(infer_provider_env_var("Shift"), None);
+        assert_eq!(infer_provider_env_var("Address"), None);
+        assert_eq!(infer_provider_env_var("Middle"), None);
+        assert_eq!(infer_provider_env_var("Pudding"), None);
+    }
+
+    #[test]
+    fn test_resolve_item_env_with_provider_auto_inference() {
+        let mut login = serde_json::Map::new();
+        login.insert("password".into(), json!("sk-proj-test12345678"));
+
+        let item = VaultItem {
+            id: "item-openai".into(),
+            name: "OpenAI Production".into(),
+            item_type: 1,
+            type_name: "login".into(),
+            sub_title: "".into(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: Some(json!(login)),
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![json!({ "name": "ORG_ID", "value": "org-999", "type": 0 })],
+            attachments: vec![],
+            search_text: "".into(),
+        };
+
+        let env = resolve_item_env(&item);
+        assert_eq!(
+            env.get("OPENAI_API_KEY"),
+            Some(&"sk-proj-test12345678".to_string())
+        );
+        assert_eq!(env.get("ORG_ID"), Some(&"org-999".to_string()));
+    }
+
+    #[test]
+    fn test_project_manifest_parse_and_ancestor_search() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path().join("my_project");
+        let sub_dir = project_root.join("src").join("nested");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let manifest_content = r#"
+items = ["DeepSeek", "Stripe"]
+
+[env]
+OPENAI_API_KEY = "OpenAI"
+DATABASE_URL = "ProductionDB#url"
+"#;
+        let manifest_path = project_root.join(MANIFEST_FILENAME);
+        std::fs::write(&manifest_path, manifest_content).unwrap();
+
+        // 1. Test parsing
+        let manifest = ProjectManifest::load_from_file(&manifest_path).unwrap();
+        assert_eq!(
+            manifest.env.get("OPENAI_API_KEY"),
+            Some(&"OpenAI".to_string())
+        );
+        assert_eq!(
+            manifest.env.get("DATABASE_URL"),
+            Some(&"ProductionDB#url".to_string())
+        );
+        assert_eq!(
+            manifest.items,
+            vec!["DeepSeek".to_string(), "Stripe".to_string()]
+        );
+
+        // 2. Test ancestor search from deep nested directory
+        let found = ProjectManifest::find_in_ancestors(&sub_dir);
+        assert_eq!(found, Some(manifest_path));
+
+        // 3. Test [project] section parsing
+        let manifest_with_project_section = r#"
+[project]
+items = ["Anthropic", "Cloudflare"]
+
+[env]
+CUSTOM_KEY = "CustomItem"
+"#;
+        let manifest_path2 = project_root.join("test2.toml");
+        std::fs::write(&manifest_path2, manifest_with_project_section).unwrap();
+        let manifest2 = ProjectManifest::load_from_file(&manifest_path2).unwrap();
+        assert_eq!(
+            manifest2.items,
+            vec!["Anthropic".to_string(), "Cloudflare".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_broker_env_ext_manifest_overrides() {
+        let vault_mgr = VaultManager::new("", None, None);
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        let mut login1 = serde_json::Map::new();
+        login1.insert("password".into(), json!("inferred-openai-key"));
+        let item1 = VaultItem {
+            id: "item-1".into(),
+            name: "OpenAI".into(),
+            item_type: 1,
+            type_name: "login".into(),
+            sub_title: "".into(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: Some(json!(login1)),
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![],
+            attachments: vec![],
+            search_text: "".into(),
+        };
+
+        let mut login2 = serde_json::Map::new();
+        login2.insert("password".into(), json!("deepseek-key-123"));
+        let item2 = VaultItem {
+            id: "item-2".into(),
+            name: "DeepSeek".into(),
+            item_type: 1,
+            type_name: "login".into(),
+            sub_title: "".into(),
+            notes: None,
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: Some(json!(login2)),
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![json!({ "name": "CUSTOM_FIELD", "value": "custom-val", "type": 0 })],
+            attachments: vec![],
+            search_text: "".into(),
+        };
+
+        *vault_mgr.decrypted_items.write().unwrap() = vec![item1, item2];
+
+        // Explicit override: OPENAI_API_KEY maps to explicit value, overriding inferred
+        let explicit = vec!["OPENAI_API_KEY=DeepSeek#CUSTOM_FIELD".to_string()];
+        let items = vec!["OpenAI".to_string(), "DeepSeek".to_string()];
+
+        let resolved = resolve_broker_env_ext(&vault_mgr, None, &explicit, &items).unwrap();
+
+        // Inferred from DeepSeek
+        assert_eq!(
+            resolved.get("DEEPSEEK_API_KEY"),
+            Some(&"deepseek-key-123".to_string())
+        );
+        // Custom field from DeepSeek
+        assert_eq!(
+            resolved.get("CUSTOM_FIELD"),
+            Some(&"custom-val".to_string())
+        );
+        // Explicit mapping took precedence over OpenAI inferred key!
+        assert_eq!(
+            resolved.get("OPENAI_API_KEY"),
+            Some(&"custom-val".to_string())
+        );
     }
 }
