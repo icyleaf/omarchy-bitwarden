@@ -310,6 +310,11 @@ enum BrokerAction {
         about = "Run Model Context Protocol (MCP) server over stdio for AI assistants and tools"
     )]
     Mcp,
+    #[command(about = "Output dynamic agent instructions for zero-exposure secret execution")]
+    Skills {
+        #[arg(long, help = "Output instructions as structured JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1596,6 +1601,30 @@ fn main() -> ExitCode {
                 } else {
                     ExitCode::SUCCESS
                 }
+            }
+
+            BrokerAction::Skills { json } => {
+                let guide =
+                    omawarden::broker::generate_agent_skills_guide(env!("CARGO_PKG_VERSION"));
+                if json {
+                    let payload = serde_json::json!({
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "title": "Omawarden VaultBroker Agent Guide",
+                        "markdown": guide,
+                        "capabilities": {
+                            "exec": true,
+                            "manifest": true,
+                            "import": true,
+                            "no_network": true,
+                            "redaction": true,
+                            "mcp": true,
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                } else {
+                    print!("{}", guide);
+                }
+                ExitCode::SUCCESS
             }
         },
 

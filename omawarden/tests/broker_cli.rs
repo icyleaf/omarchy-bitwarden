@@ -444,3 +444,41 @@ fn test_broker_mcp_stdio_roundtrip_initialize_and_tools_list() {
     let status = child.wait().unwrap();
     assert!(status.success());
 }
+
+#[test]
+fn test_broker_skills_cli_markdown_output() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "skills"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("# Omawarden VaultBroker Agent Guide"));
+    assert!(stdout.contains("No-Read Invariant"));
+    assert!(stdout.contains("omawarden broker exec"));
+    assert!(stdout.contains(".omawarden.toml"));
+    assert!(stdout.contains("omawarden broker import"));
+    assert!(stdout.contains("omawarden broker mcp"));
+    assert!(stdout.contains("list_available_tokens"));
+    assert!(stdout.contains("exec_with_token"));
+}
+
+#[test]
+fn test_broker_skills_cli_json_output() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "skills", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["title"], "Omawarden VaultBroker Agent Guide");
+    assert!(parsed["version"].is_string());
+    assert_eq!(parsed["capabilities"]["exec"], true);
+    assert_eq!(parsed["capabilities"]["mcp"], true);
+    assert_eq!(parsed["capabilities"]["redaction"], true);
+    assert_eq!(parsed["capabilities"]["no_network"], true);
+    let markdown = parsed["markdown"].as_str().unwrap();
+    assert!(markdown.contains("# Omawarden VaultBroker Agent Guide"));
+}

@@ -1920,6 +1920,83 @@ pub fn run_mcp_server<R: std::io::BufRead, W: std::io::Write>(
     Ok(())
 }
 
+/// Generates machine-readable Markdown instructions for AI coding assistants and autonomous agents.
+pub fn generate_agent_skills_guide(version: &str) -> String {
+    format!(
+        r#"# Omawarden VaultBroker Agent Guide (v{version})
+
+VaultBroker provides zero-plaintext secret brokering and credential injection for AI coding assistants, autonomous agents, and terminal workflows on Omarchy Linux.
+
+## 1. Core Invariants (Zero-Exposure Contract)
+
+- **No-Read Invariant**: You (the AI assistant) NEVER need to see or handle plaintext secrets (API keys, tokens, passwords). Do NOT attempt to read credentials from the vault or request them from the user.
+- **Zero Disk Fallback**: Credentials are NEVER saved to plaintext disk files or `.env` files.
+- **Streaming Output Redaction**: All subprocess output on stdout and stderr is scrubbed in real-time. Any occurrences of resolved secret strings are automatically masked with `[REDACTED:VAULT_SECRET]`.
+- **Destination Binding**: Subprocess invocations are verified against executable path bindings. Unknown destinations trigger user approval via Wayland overlay cards.
+
+## 2. Command Execution (`omawarden broker exec`)
+
+Execute commands through `omawarden broker exec`. The broker transparently populates environment variables inside the child process without exposing them to your agent context or logs.
+
+```bash
+# Auto-inject from project manifest (.omawarden.toml)
+omawarden broker exec -- pytest
+
+# Inject specific vault cipher (auto-infers provider variables, e.g. OPENAI_API_KEY)
+omawarden broker exec --item OpenAI -- python3 agent.py
+
+# Inject explicit environment variable mapping
+omawarden broker exec -e GITHUB_TOKEN=GitHub#token -- gh release create
+
+# Offline execution with Linux network namespace jailing (outbound connections blocked)
+omawarden broker exec --no-network -- npm test
+```
+
+## 3. Project Manifest (`.omawarden.toml`)
+
+Projects define their required credentials in `.omawarden.toml`. This file contains zero secrets and is safe to commit to version control.
+
+```toml
+# Auto-inject standard provider variables (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY)
+items = [
+    "OpenAI",
+    "Anthropic",
+    "Database",
+]
+
+# Optional explicit environment variable mappings
+[env]
+CUSTOM_API_TOKEN = "MyService#api_token"
+```
+
+## 4. Legacy Migration (`omawarden broker import`)
+
+When entering a repository containing legacy plaintext `.env` files, run:
+
+```bash
+# Preview legacy secrets and planned .omawarden.toml scaffold
+omawarden broker import --dry-run
+
+# Import detected keys into Bitwarden vault, scaffold .omawarden.toml, and securely wipe plaintext files
+omawarden broker import --yes
+```
+
+## 5. Model Context Protocol (MCP) Integration
+
+When running in an MCP-capable environment (Cursor, Claude Code, Windsurf), register the omawarden broker stdio server:
+
+```bash
+omawarden broker mcp
+```
+
+### Available MCP Tools:
+- `list_available_tokens`: Inspect available credential names and field names without exposing secret values.
+- `exec_with_token`: Safely execute a command array with credentials injected and streaming output redaction applied.
+"#,
+        version = version
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2957,5 +3034,18 @@ LD_PRELOAD=/evil.so
         let out_str = String::from_utf8(output).unwrap();
         assert!(out_str.contains("\"id\":10"));
         assert!(out_str.contains("\"result\":{}"));
+    }
+
+    #[test]
+    fn test_generate_agent_skills_guide() {
+        let guide = generate_agent_skills_guide("0.10.1");
+        assert!(guide.contains("Omawarden VaultBroker Agent Guide (v0.10.1)"));
+        assert!(guide.contains("No-Read Invariant"));
+        assert!(guide.contains("omawarden broker exec"));
+        assert!(guide.contains(".omawarden.toml"));
+        assert!(guide.contains("omawarden broker import"));
+        assert!(guide.contains("omawarden broker mcp"));
+        assert!(guide.contains("list_available_tokens"));
+        assert!(guide.contains("exec_with_token"));
     }
 }
