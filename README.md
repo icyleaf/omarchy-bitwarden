@@ -25,6 +25,7 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
 | **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
 | **SSH Agent**                  | **Native OpenSSH Agent (`SSH_AUTH_SOCK`) with app-scoped approval cards** | Built into desktop app (eats ~1GB RAM) | None |
+| **Secret Brokering & AI Agents** | **Native VaultBroker (`broker exec`, `.omawarden.toml`, MCP Server, streaming redaction, `--no-network`)** | None | None (requires dumping plaintext secrets or insecure environment variables) |
 | **Mutual TLS (mTLS)**          | **Native client cert authentication (PKCS#12 / PEM)**                | Requires system proxy configuration | None |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
 
@@ -353,6 +354,143 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 
 ---
 
+## VaultBroker (Secret Brokering & AI Agent Execution)
+
+AI coding assistants (Claude Code, Cursor, Windsurf, OpenClaw) and automated workflows frequently require API tokens, database connection strings, and cloud credentials. Conventionally, developers store these in plaintext `.env` files—creating critical security vulnerabilities where malicious prompts or background agents exfiltrate credentials via `cat .env` or tool calls.
+
+The **VaultBroker** subsystem inside `omawarden` completely eliminates plaintext `.env` files by injecting credentials from your Bitwarden/Vaultwarden vault directly into child process environments in memory, enforcing real-time streaming output redaction, destination binding policies, and Linux network isolation.
+
+### Key Capabilities:
+- **Zero-Plaintext Invariant (Strict No-Read)**: Neither AI agents nor scripts can read or dump raw secret values. Omawarden exposes **no tool or command** that prints unmasked secrets.
+- **Real-Time Streaming Output Redaction**: All subprocess `stdout` and `stderr` streams are filtered using a streaming Aho-Corasick automaton. Any occurrence of a resolved secret is scrubbed on-the-fly and replaced with `[REDACTED:VAULT_SECRET]`.
+- **Destination Binding & Interactive Approval Cards**: Secret access is bound to authorized binary paths and arguments. Unbound commands trigger an Omarchy Wayland overlay approval card (with `allow-once`, `allow-always`, or `deny`).
+- **Linux Network Namespace Jailing (`--no-network`)**: Executes local build/test tools inside an unshared, isolated network namespace (`CLONE_NEWNET`), physically preventing network socket communication and data exfiltration.
+- **Provider Auto-Inference**: Automatically detects 50+ providers (OpenAI, Anthropic, Gemini, AWS, GitHub, Cloudflare, Stripe, Database, etc.) and injects their canonical environment variables (e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`).
+- **Project Manifest (`.omawarden.toml`)**: Zero-secret project configuration file safe to commit to Git.
+- **Native Model Context Protocol (MCP) Server**: Embedded stdio MCP server (`omawarden broker mcp`) offering `list_available_tokens` and `exec_with_token` tools for AI editors.
+
+---
+
+### CLI Usage:
+
+#### 1. Execute with Injected Secrets (`omawarden broker exec`)
+
+```bash
+# Execute command using credentials declared in .omawarden.toml
+omawarden broker exec -- pytest
+
+# Inject specific vault cipher (auto-infers provider variables like OPENAI_API_KEY)
+omawarden broker exec --item OpenAI -- python3 agent.py
+
+# Inject explicit environment variable mappings
+omawarden broker exec -e GITHUB_TOKEN=GitHub#token -e DB_URL=Database#url -- ./deploy.sh
+
+# Run offline in an isolated Linux network namespace (blocks outbound sockets)
+omawarden broker exec --no-network -- cargo test
+```
+
+#### 2. Migrate Legacy `.env` Files (`omawarden broker import`)
+
+```bash
+# Safe preview: scan .env* files, detect providers, and preview .omawarden.toml without modifying disk or vault
+omawarden broker import --dry-run
+
+# Import detected keys into Bitwarden vault, scaffold .omawarden.toml, and securely wipe plaintext files
+omawarden broker import --yes
+
+# Import into vault and preserve legacy .env files (automatically adds .env* to .gitignore)
+omawarden broker import --no-wipe
+```
+
+> [!NOTE]
+> **Secure Wiping**: When wiping files, `omawarden` overwrites disk bytes with zeros, invokes `sync_all()` to ensure kernel flush to physical media, zeroizes memory buffers, and deletes the file.
+
+#### 3. Destination Whitelist & Authorization (`omawarden broker allow`)
+
+```bash
+# Authorize /usr/bin/pytest to access OpenAI secrets
+omawarden broker allow OpenAI /usr/bin/pytest
+
+# Authorize python3 script prefix
+omawarden broker allow Database /usr/bin/python3 -m my_worker
+
+# List pending approval prompts
+omawarden broker pending
+
+# Reply to an approval prompt from terminal
+omawarden broker reply <id> --allow
+omawarden broker reply <id> --always
+omawarden broker reply <id> --deny
+```
+
+#### 4. Native Model Context Protocol (MCP) Server (`omawarden broker mcp`)
+
+Run the stdio MCP server for AI coding assistants:
+
+```bash
+omawarden broker mcp
+```
+
+**Configure in Claude Code (`~/.claude.json` / Claude Desktop):**
+```json
+{
+  "mcpServers": {
+    "omawarden": {
+      "command": "omawarden",
+      "args": ["broker", "mcp"]
+    }
+  }
+}
+```
+
+**Configure in Cursor (`~/.cursor/mcp.json`):**
+```json
+{
+  "mcpServers": {
+    "omawarden": {
+      "command": "omawarden",
+      "args": ["broker", "mcp"]
+    }
+  }
+}
+```
+
+**Available MCP Tools:**
+- `list_available_tokens`: Inspect credential and field names without exposing secret values.
+- `exec_with_token`: Safely execute a command with secrets injected and streaming output redaction applied.
+
+#### 5. Dynamic Agent Instructions (`omawarden broker skills`)
+
+```bash
+# Print agent skills guide in Markdown
+omawarden broker skills
+
+# Output guide and capability matrix in JSON
+omawarden broker skills --json
+```
+
+---
+
+### Project Manifest (`.omawarden.toml`)
+
+Create `.omawarden.toml` in your project root to declare required secrets. This file contains **zero plaintext secrets** and is safe to commit to version control:
+
+```toml
+# Automatically inject credentials using provider auto-inference or custom fields
+items = [
+    "OpenAI",
+    "Anthropic",
+    "Database",
+]
+
+# Optional explicit environment variable mappings (VAR = "Item#Field" or VAR = "Item")
+[env]
+CUSTOM_API_TOKEN = "MyService#api_token"
+DATABASE_URL = "Database#DATABASE_URL"
+```
+
+---
+
 ## Roadmap
 
 ### Phase 1: Completed (Fast Lookup & Core Security)
@@ -396,7 +534,18 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Scoped `first-use` authorization (key, binary, ancestor app) & agent forwarding defense
 - [x] CLI commands (`omawarden ssh-agent status|pending|reply`)
 
-### Phase 4: Planned (Vault Item Creation)
+### Phase 4: Completed (VaultBroker Subsystem & MCP Agent for Secret Brokering)
+
+- [x] Subprocess secret injection via `omawarden broker exec` with deterministic in-memory `zeroize`
+- [x] Real-time streaming Aho-Corasick output redaction on stdout and stderr (`[REDACTED:VAULT_SECRET]`)
+- [x] Destination binding whitelist policy (`broker allow`) and interactive Wayland overlay approval cards
+- [x] Project manifest (`.omawarden.toml`) with ancestor discovery and 50+ provider pattern auto-inference
+- [x] Linux network namespace isolation via `--no-network` (`unshare(CLONE_NEWNET)`)
+- [x] Legacy `.env` scanning, Bitwarden vault cipher creation, and secure zero-overwrite disk wiping (`omawarden broker import`)
+- [x] Native Model Context Protocol (MCP) server (`omawarden broker mcp`) with strict No-Read invariant
+- [x] Dynamic agent skills self-discovery guide (`omawarden broker skills [--json]`)
+
+### Phase 5: Planned (Vault Item Creation)
 
 - [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
 - [ ] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
@@ -404,14 +553,14 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [ ] Local zero-knowledge ciphertext cache synchronization upon creation
 - [ ] Integration with Phase 2 password generator for inline credential creation
 
-### Phase 5: Planned (Vault Item Mutation & Lifecycle)
+### Phase 6: Planned (Vault Item Mutation & Lifecycle)
 
 - [ ] In-place item editing (updating login credentials, cards, notes, custom fields)
 - [ ] Folder and organization collection reassignment
 - [ ] Secure item deletion & soft-delete (Recycle Bin) management
 - [ ] Client-side cipher update validation and server sync reconciliation
 
-### Phase 6: Future (Desktop Automation & Biometrics)
+### Phase 7: Future (Desktop Automation & Biometrics)
 
 - [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
 - [ ] Quick biometric / PAM / Fingerprint system unlock (ADR 0025)

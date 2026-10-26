@@ -25,6 +25,7 @@
 | **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
 | **锁屏联动**         | **守护进程原生自动检测（Omarchy 锁屏、Hyprlock、D-Bus/logind 睡眠与挂起）** | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
 | **SSH Agent**        | **原生 OpenSSH Agent（`SSH_AUTH_SOCK`），带按调用程序作用域审批** | 桌面端内置（吃掉近 1GB 内存） | 无 |
+| **凭据经纪与 AI 智能体** | **原生 VaultBroker（`broker exec`、`.omawarden.toml`、内置 MCP 服务端、流式脱敏与 `--no-network` 隔离）** | 无 | 无（需明文提取或暴露于终端历史与 Agent 提示词） |
 | **双向 TLS (mTLS)**  | **原生支持客户端证书认证（PKCS#12 / PEM）**              | 需配置复杂系统反向代理代理 | 无 |
 | **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
 
@@ -353,6 +354,143 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 
 ---
 
+## VaultBroker（开发者凭据经纪与 AI 智能体执行）
+
+AI 编码助手（如 Claude Code, Cursor, Windsurf, OpenClaw）与自动化构建脚本在开发过程中频繁需要 LLM API Key、数据库连接串及第三方云凭据。传统开发习惯将这些凭据保存在明文 `.env` 文件中，这带来了严峻的安全隐患：任何具备文件读取或终端命令权限的 AI Agent 均可能通过 `cat .env` 直接将明文密钥泄露至对话记录、监控日志或大模型训练数据中。
+
+`omawarden` 内置的 **VaultBroker** 凭据经纪子系统彻底消灭明文 `.env` 文件：它直接从 Bitwarden / Vaultwarden 加密保险库中按需将凭据在内存中注入到子进程环境变量中，并提供实时的标准输出/错误流式脱敏过滤、调用目标绑定审批与 Linux 网络命名空间隔离。
+
+### 核心安全特性：
+- **零明文暴露不变量（严格 No-Read 契约）**：无论是 AI Agent 还是命令行，均无法读取或打印未掩码的密钥原文。`omawarden` **绝不暴露任何获取或打印原始密钥字符串的工具或命令**。
+- **实时流式输出脱敏（Streaming Redaction）**：子进程的标准输出（`stdout`）与标准错误（`stderr`）均实时流经 Aho-Corasick 多模式匹配脱敏过滤器，任何出现解析密钥的位置均被实时擦除并替换为 `[REDACTED:VAULT_SECRET]`。
+- **目标程序绑定与交互式审批卡片（Destination Binding）**：支持将凭据授权绑定至特定的执行程序路径与参数前缀。遇到未授权的命令时，自动通过 Omarchy Wayland 桌面覆盖层弹出审批卡片（支持单次允许 `allow-once`、始终信任 `allow-always` 或拒绝 `deny`）。
+- **Linux 网络命名空间隔离（`--no-network`）**：在 Linux 内核上为子进程创建独立的空网络命名空间（`CLONE_NEWNET`），在物理层面阻断所有外部 Socket 网络通信，严防潜在的数据回传与凭据外泄。
+- **服务商自动推断（Provider Auto-Inference）**：内置 50+ 常见服务商模式（OpenAI、Anthropic、Gemini、AWS、GitHub、Cloudflare、Stripe、数据库等），自动将条目解析并映射至规范环境变量名（如 `OPENAI_API_KEY`、`GITHUB_TOKEN`）。
+- **零凭据项目清单（`.omawarden.toml`）**：项目根目录声明文件，不包含任何明文敏感信息，可安全提交至 Git 版本控制。
+- **原生 Model Context Protocol (MCP) 服务端**：内置标准 stdio MCP 协议端点（`omawarden broker mcp`），为 AI 编辑器无缝提供 `list_available_tokens` 与 `exec_with_token` 工具。
+
+---
+
+### CLI 常用操作：
+
+#### 1. 代理执行并注入凭据 (`omawarden broker exec`)
+
+```bash
+# 自动读取工程根目录（或祖先目录）中的 .omawarden.toml 并注入凭据
+omawarden broker exec -- pytest
+
+# 指定注入特定的保险库条目（自动推断对应服务商环境变量，如 OPENAI_API_KEY）
+omawarden broker exec --item OpenAI -- python3 agent.py
+
+# 显式指定环境变量映射关系
+omawarden broker exec -e GITHUB_TOKEN=GitHub#token -e DB_URL=Database#url -- ./deploy.sh
+
+# 离线隔离执行（利用 Linux 网络命名空间彻底阻断外部网络连接）
+omawarden broker exec --no-network -- cargo test
+```
+
+#### 2. 旧版 `.env` 智能扫描与迁移 (`omawarden broker import`)
+
+```bash
+# 安全预检：扫描当前目录下 .env* 文件，识别服务商模式并预览 .omawarden.toml，不修改磁盘与保险库
+omawarden broker import --dry-run
+
+# 导入检测到的密钥至 Bitwarden 保险库，生成 .omawarden.toml，并物理级安全覆写擦除旧文件
+omawarden broker import --yes
+
+# 导入保险库但保留原 .env 文件（自动将 .env* 规则追加写入 .gitignore）
+omawarden broker import --no-wipe
+```
+
+> [!NOTE]
+> **安全擦除保障**：执行擦除时，`omawarden` 会首先使用全零字节（`0x00`）覆盖文件全部数据块，调用 `sync_all()` 强制内核刷盘落盘，零化覆写内存缓冲区，再从文件系统中彻底删除。
+
+#### 3. 目标白名单授权管理 (`omawarden broker allow`)
+
+```bash
+# 授权 /usr/bin/pytest 访问 OpenAI 条目中的凭据
+omawarden broker allow OpenAI /usr/bin/pytest
+
+# 授权特定命令行前缀
+omawarden broker allow Database /usr/bin/python3 -m my_worker
+
+# 查看当前等待桌面确认的授权请求
+omawarden broker pending
+
+# 在终端中应答授权审批
+omawarden broker reply <id> --allow
+omawarden broker reply <id> --always
+omawarden broker reply <id> --deny
+```
+
+#### 4. 原生 Model Context Protocol (MCP) 服务端 (`omawarden broker mcp`)
+
+启动 stdio MCP 服务端供 AI 编码助手对接：
+
+```bash
+omawarden broker mcp
+```
+
+**在 Claude Code (`~/.claude.json` / Claude Desktop) 中配置：**
+```json
+{
+  "mcpServers": {
+    "omawarden": {
+      "command": "omawarden",
+      "args": ["broker", "mcp"]
+    }
+  }
+}
+```
+
+**在 Cursor (`~/.cursor/mcp.json`) 中配置：**
+```json
+{
+  "mcpServers": {
+    "omawarden": {
+      "command": "omawarden",
+      "args": ["broker", "mcp"]
+    }
+  }
+}
+```
+
+**MCP 工具清单：**
+- `list_available_tokens`：查看当前可用凭据名称与自定义字段名（绝不泄露凭据值）。
+- `exec_with_token`：在注入凭据并启用实时脱敏的受控沙箱中执行命令数组。
+
+#### 5. 动态 Agent 技能指南输出 (`omawarden broker skills`)
+
+```bash
+# 输出面向 AI Agent 的 Markdown 规范指南
+omawarden broker skills
+
+# 以标准 JSON 结构输出指南与能力矩阵
+omawarden broker skills --json
+```
+
+---
+
+### 项目清单 (`.omawarden.toml`)
+
+在代码仓库根目录创建 `.omawarden.toml` 声明所需凭据。该文件**不包含任何明文秘密**，可安全提交至代码仓库：
+
+```toml
+# 声明需要注入的保险库条目（支持服务商变量自动推断与自定义字段全量注入）
+items = [
+    "OpenAI",
+    "Anthropic",
+    "Database",
+]
+
+# 可选显式映射规则（变量名 = "条目名#字段名" 或 "条目名"）
+[env]
+CUSTOM_API_TOKEN = "MyService#api_token"
+DATABASE_URL = "Database#DATABASE_URL"
+```
+
+---
+
 ## 路线图
 
 ### 阶段一：已完成（快速检索、核心安全与分发体系）
@@ -396,7 +534,18 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] 精细化作用域授权（密钥、客户端程序、宿主应用）与 Agent 转发防滥用机制
 - [x] 完备的 CLI 控制命令（`omawarden ssh-agent status|pending|reply`）
 
-### 阶段四：规划中（密码库条目新建）
+### 阶段四：已完成（VaultBroker 凭据经纪子系统与 MCP 智能体端点）
+
+- [x] 通过 `omawarden broker exec` 在子进程启动前内存注入凭据并即时执行 `zeroize` 覆写
+- [x] 实时流式 Aho-Corasick 多模式脱敏过滤标准输出与标准错误（`[REDACTED:VAULT_SECRET]`）
+- [x] 目标程序白名单策略绑定（`broker allow`）与 Wayland 桌面审批卡片
+- [x] 零明文工程清单（`.omawarden.toml`）、祖先目录穿透检索与 50+ 服务商变量模式自动推断
+- [x] Linux 内核网络命名空间隔离（`--no-network` 与 `unshare(CLONE_NEWNET)`）
+- [x] 旧版 `.env` 智能扫描、Bitwarden 保险库导入与全零物理刷盘安全擦除（`omawarden broker import`）
+- [x] 原生 Model Context Protocol (MCP) 服务端（`omawarden broker mcp`），坚守严格 No-Read 不变量
+- [x] 动态 Agent 技能自发现指南输出（`omawarden broker skills [--json]`）
+
+### 阶段五：规划中（密码库条目新建）
 
 - [ ] 覆盖层条目新建模态窗口（支持 Login, Secure Note, Card, Identity 四大核心类型）
 - [ ] 基于用户主密钥的客户端密文载荷加密（AES-256-CBC / HMAC）
@@ -404,14 +553,14 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [ ] 创建成功后本地零知识密文缓存即时追加与索引同步
 - [ ] 深度联动阶段二生成器实现创建凭据时的内联密码生成
 
-### 阶段五：规划中（密码库条目生命周期与维护）
+### 阶段六：规划中（密码库条目生命周期与维护）
 
 - [ ] 条目就地编辑（更新登录凭据、卡片、备注及自定义字段）
 - [ ] 文件夹与组织集合重新归属分类调整
 - [ ] 条目安全删除与回收站（软删除）管理
 - [ ] 客户端条目修改冲突校验与服务器同步对齐
 
-### 阶段六：远期规划（系统自动化与生物识别）
+### 阶段七：远期规划（系统自动化与生物识别）
 
 - [ ] Wayland 自动填充 / 模拟按键输入（例如基于 `ydotool` / `wtype` 集成）
 - [ ] 快速生物识别 / PAM / 指纹系统级解锁（ADR 0025）
