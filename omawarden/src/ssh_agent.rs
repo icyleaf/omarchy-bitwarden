@@ -946,17 +946,17 @@ fn known_host_for(hostkey: &[u8]) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
-struct Peer {
-    pid: i32,
-    exe: String,
-    comm: String,
-    cmdline: String,
+pub(crate) struct Peer {
+    pub(crate) pid: i32,
+    pub(crate) exe: String,
+    pub(crate) comm: String,
+    pub(crate) cmdline: String,
     /// Executable of the app the request comes from (see [`Peer::find_app`]).
-    app: String,
+    pub(crate) app: String,
 }
 
 impl Peer {
-    fn of(stream: &UnixStream) -> Peer {
+    pub(crate) fn of(stream: &UnixStream) -> Peer {
         let mut cred = libc::ucred {
             pid: 0,
             uid: 0,
@@ -981,7 +981,7 @@ impl Peer {
         }
     }
 
-    fn from_pid(pid: i32) -> Peer {
+    pub(crate) fn from_pid(pid: i32) -> Peer {
         let proc = PathBuf::from(format!("/proc/{pid}"));
         let exe = fs::read_link(proc.join("exe"))
             .map(|p| {
@@ -1017,7 +1017,7 @@ impl Peer {
     /// scoped to it, so approving `ssh` in a terminal doesn't approve every
     /// other program that runs `ssh`. Read from `exe` links, which a process
     /// can't rename.
-    fn find_app(&self) -> String {
+    pub(crate) fn find_app(&self) -> String {
         let mut next = self.parent();
         for _ in 0..16 {
             let Some(p) = next else { break };
@@ -1076,7 +1076,7 @@ fn is_wrapper(exe: &str) -> bool {
         .unwrap_or_default();
     matches!(
         name.as_ref(),
-        "sh" | "bash" | "dash" | "zsh" | "fish" | "nu" | "ssh" | "git" | "ssh-keygen"
+        "sh" | "bash" | "dash" | "zsh" | "fish" | "nu" | "ssh" | "git" | "ssh-keygen" | "omawarden"
     )
 }
 

@@ -248,6 +248,8 @@ enum BrokerAction {
         cipher_ref: String,
         #[arg(help = "Authorized binary executable path")]
         binary_path: String,
+        #[arg(long, help = "Output response as JSON")]
+        json: bool,
         #[arg(
             trailing_var_arg = true,
             help = "Optional argument prefix restrictions"
@@ -266,6 +268,8 @@ enum BrokerAction {
         always: bool,
         #[arg(long, help = "Deny execution")]
         deny: bool,
+        #[arg(long, help = "Output response as JSON")]
+        json: bool,
     },
 }
 
@@ -893,11 +897,16 @@ fn main() -> ExitCode {
                 if item.is_some() || !env.is_empty() {
                     ensure_daemon_running();
 
+                    let is_interactive = std::io::stdin().is_terminal()
+                        && std::io::stdout().is_terminal()
+                        && std::env::var("CI").is_err();
+
                     let req = json!({
                         "action": "broker_resolve",
                         "item": item,
                         "env": env,
                         "command": command,
+                        "interactive": is_interactive,
                         "caller_pid": std::process::id(),
                     });
 
@@ -916,7 +925,7 @@ fn main() -> ExitCode {
                             // Try summoning overlay
                             if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
                                 let _ = std::process::Command::new(shell_cmd)
-                                    .args(["summon", "icyleaf.bitwarden", "{}"])
+                                    .args(["shell", "summon", "icyleaf.bitwarden", "{}"])
                                     .spawn();
                             }
 
@@ -995,6 +1004,7 @@ fn main() -> ExitCode {
             BrokerAction::Allow {
                 cipher_ref,
                 binary_path,
+                json,
                 args,
             } => {
                 let canon_path = which::which(&binary_path)
@@ -1008,7 +1018,14 @@ fn main() -> ExitCode {
                     "args": args,
                 });
                 if let Some(resp) = send_daemon_request(&req) {
-                    if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
+                    } else if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
                         println!("Destination binding authorized successfully.");
                         ExitCode::SUCCESS
                     } else {
@@ -1020,7 +1037,18 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 } else {
-                    eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": "The omawarden daemon is not responding."
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    }
                     ExitCode::FAILURE
                 }
             }
@@ -1042,6 +1070,7 @@ fn main() -> ExitCode {
                 allow,
                 always,
                 deny: _,
+                json,
             } => {
                 ensure_daemon_running();
                 let decision = if always {
@@ -1061,14 +1090,31 @@ fn main() -> ExitCode {
                         .get("delivered")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                    } else if delivered {
+                        println!("Approval reply delivered.");
+                    } else {
+                        eprintln!("Error: Prompt expired or was not delivered.");
+                    }
                     if delivered {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::FAILURE
                     }
                 } else {
-                    eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": "The omawarden daemon is not responding."
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    }
                     ExitCode::FAILURE
                 }
             }

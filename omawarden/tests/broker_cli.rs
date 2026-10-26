@@ -102,3 +102,25 @@ fn test_broker_reply_cli_help() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--allow") || stdout.contains("--always"));
 }
+
+#[test]
+fn test_broker_allow_json_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "allow", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--json"));
+}
+
+#[test]
+fn test_broker_reply_json_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "reply", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--json"));
+}

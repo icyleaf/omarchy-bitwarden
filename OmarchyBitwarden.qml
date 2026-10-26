@@ -532,7 +532,7 @@ Item {
     root.logInfo("omarchy:broker", "Replied " + decision + " for cipher " + p.cipher_ref + " to binary " + p.binary_path)
     root.brokerApprovalPrompt = null
     var flag = (decision === "allow_always") ? "--always" : (decision === "allow_once" ? "--allow" : "--deny")
-    brokerReplyProc.command = [root.helperPath, "broker", "reply", String(p.id), flag]
+    brokerReplyProc.command = [root.helperPath, "broker", "reply", "--json", String(p.id), flag]
     brokerReplyProc.running = true
   }
 
@@ -2903,12 +2903,31 @@ Item {
         if (!next && root.brokerApprovalOnly && root.opened) root.close()
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var err = (text || "").trim()
+        if (err.length > 0) root.logError("omarchy:broker", "broker pending error: " + err)
+      }
+    }
   }
 
   Process {
     id: brokerReplyProc
     command: []
-    onExited: root.refreshBrokerApprovals()
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var err = (text || "").trim()
+        if (err.length > 0) root.logError("omarchy:broker", "broker reply error: " + err)
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.logError("omarchy:broker", "broker reply process exited with code " + exitCode)
+      }
+      root.refreshBrokerApprovals()
+    }
   }
 
   Timer {

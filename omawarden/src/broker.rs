@@ -123,6 +123,19 @@ pub fn get_caller_exe(pid: u32) -> Option<String> {
     })
 }
 
+/// Resolves the invoking application for a caller PID by traversing parent process lineage.
+pub fn get_caller_app_from_pid(pid: u32) -> String {
+    let peer = crate::ssh_agent::Peer::from_pid(pid as i32);
+    let app = peer.find_app();
+    if !app.is_empty() {
+        app
+    } else if !peer.exe.is_empty() {
+        peer.exe
+    } else {
+        "unknown".to_string()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerDecision {

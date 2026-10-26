@@ -608,6 +608,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         return Ok(());
     }
 
+    let peer = crate::ssh_agent::Peer::of(&stream);
+
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -792,7 +794,24 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 })
                 .unwrap_or_default();
 
-            let caller_pid = req.get("caller_pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let caller_pid = if peer.pid > 0 {
+                peer.pid as u32
+            } else {
+                req.get("caller_pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+            };
+
+            let caller_app = if !peer.app.is_empty() {
+                peer.app.clone()
+            } else if caller_pid > 0 {
+                crate::broker::get_caller_app_from_pid(caller_pid)
+            } else {
+                "unknown".to_string()
+            };
+
+            let is_interactive = req
+                .get("interactive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             // Destination Binding Policy Enforcement
             if !command.is_empty() {
@@ -824,16 +843,29 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 let mut policy_violation = None;
 
                 for cipher in target_ciphers {
+                    let (resolved_id, resolved_name) =
+                        if let Some(item) = state.vault_mgr.find_item(&cipher, None) {
+                            (Some(item.id.clone()), Some(item.name.clone()))
+                        } else {
+                            (None, None)
+                        };
+
                     let is_allowed = {
                         let pol = state.broker.policy.read().unwrap();
                         pol.is_allowed(&cipher, &cmd_with_canon)
+                            || resolved_name
+                                .as_deref()
+                                .is_some_and(|name| pol.is_allowed(name, &cmd_with_canon))
+                            || resolved_id
+                                .as_deref()
+                                .is_some_and(|id| pol.is_allowed(id, &cmd_with_canon))
                     };
 
                     if !is_allowed {
                         // Check if desktop interactive overlay is available
                         let shell_opt = crate::daemon::get_omarchy_shell_cmd();
-                        if shell_opt.is_none() {
-                            // Non-interactive / headless mode: fail closed
+                        if !is_interactive || shell_opt.is_none() {
+                            // Non-interactive / headless / non-terminal mode: fail closed immediately
                             policy_violation = Some(json!({
                                 "ok": false,
                                 "error": format!(
@@ -845,16 +877,14 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                         }
 
                         // Desktop interactive mode: summon approval card
-                        let caller_app = crate::broker::get_caller_exe(caller_pid)
-                            .unwrap_or_else(|| "unknown".to_string());
-
+                        let prompt_cipher = resolved_name.unwrap_or_else(|| cipher.clone());
                         let prompt = crate::broker::BrokerPrompt {
                             id: 0,
-                            title: format!("Authorize Secret Access for {}", cipher),
+                            title: format!("Authorize Secret Access for {}", prompt_cipher),
                             cipher_ref: cipher.clone(),
                             command: command.join(" "),
                             binary_path: binary_path.clone(),
-                            caller_app,
+                            caller_app: caller_app.clone(),
                             caller_pid,
                             args: if command.len() > 1 {
                                 command[1..].to_vec()
@@ -867,10 +897,31 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                             if let Some(cmd) = crate::daemon::get_omarchy_shell_cmd() {
                                 let payload_str =
                                     serde_json::to_string(payload).unwrap_or_default();
-                                std::process::Command::new(cmd)
-                                    .args(["summon", "icyleaf.bitwarden", &payload_str])
-                                    .spawn()
-                                    .is_ok()
+                                let opened = std::process::Command::new(cmd)
+                                    .args(["shell", "summon", "icyleaf.bitwarden", &payload_str])
+                                    .stdin(std::process::Stdio::null())
+                                    .output()
+                                    .map(|o| {
+                                        o.status.success()
+                                            && String::from_utf8_lossy(&o.stdout).trim() == "ok"
+                                    })
+                                    .unwrap_or(false);
+
+                                if !opened {
+                                    let _ = std::process::Command::new("notify-send")
+                                        .args([
+                                            "--app-name=Bitwarden",
+                                            "--urgency=critical",
+                                            "VaultBroker: Secret Access Request",
+                                            &format!(
+                                                "Application '{}' requested secret access for '{}'",
+                                                caller_app, cipher
+                                            ),
+                                        ])
+                                        .stdin(std::process::Stdio::null())
+                                        .spawn();
+                                }
+                                opened
                             } else {
                                 false
                             }
