@@ -242,6 +242,31 @@ enum BrokerAction {
         )]
         command: Vec<String>,
     },
+    #[command(about = "Authorize an executable binary to access secrets for a vault cipher")]
+    Allow {
+        #[arg(help = "Vault item reference (name/ID) or * for all items")]
+        cipher_ref: String,
+        #[arg(help = "Authorized binary executable path")]
+        binary_path: String,
+        #[arg(
+            trailing_var_arg = true,
+            help = "Optional argument prefix restrictions"
+        )]
+        args: Vec<String>,
+    },
+    #[command(about = "List pending broker destination approval prompts (JSON)")]
+    Pending,
+    #[command(about = "Reply to a pending broker destination approval prompt")]
+    Reply {
+        #[arg(help = "Prompt ID from `broker pending`")]
+        id: u64,
+        #[arg(long, help = "Approve execution once")]
+        allow: bool,
+        #[arg(long, help = "Approve execution and persist rule to policy")]
+        always: bool,
+        #[arg(long, help = "Deny execution")]
+        deny: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -872,6 +897,8 @@ fn main() -> ExitCode {
                         "action": "broker_resolve",
                         "item": item,
                         "env": env,
+                        "command": command,
+                        "caller_pid": std::process::id(),
                     });
 
                     let mut resp = match send_daemon_request(&req) {
@@ -962,6 +989,87 @@ fn main() -> ExitCode {
                         eprintln!("Error: Failed to execute child command: {}", e);
                         ExitCode::FAILURE
                     }
+                }
+            }
+
+            BrokerAction::Allow {
+                cipher_ref,
+                binary_path,
+                args,
+            } => {
+                let canon_path = which::which(&binary_path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or(binary_path);
+                ensure_daemon_running();
+                let req = json!({
+                    "action": "broker_allow",
+                    "cipher_ref": cipher_ref,
+                    "binary_path": canon_path,
+                    "args": args,
+                });
+                if let Some(resp) = send_daemon_request(&req) {
+                    if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        println!("Destination binding authorized successfully.");
+                        ExitCode::SUCCESS
+                    } else {
+                        let err = resp
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Failed to save destination rule");
+                        eprintln!("Error: {}", err);
+                        ExitCode::FAILURE
+                    }
+                } else {
+                    eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    ExitCode::FAILURE
+                }
+            }
+
+            BrokerAction::Pending => {
+                ensure_daemon_running();
+                let req = json!({ "action": "broker_pending" });
+                if let Some(resp) = send_daemon_request(&req) {
+                    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    ExitCode::FAILURE
+                }
+            }
+
+            BrokerAction::Reply {
+                id,
+                allow,
+                always,
+                deny: _,
+            } => {
+                ensure_daemon_running();
+                let decision = if always {
+                    "allow_always"
+                } else if allow {
+                    "allow_once"
+                } else {
+                    "deny"
+                };
+                let req = json!({
+                    "action": "broker_reply",
+                    "id": id,
+                    "decision": decision,
+                });
+                if let Some(resp) = send_daemon_request(&req) {
+                    let delivered = resp
+                        .get("delivered")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                    if delivered {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                } else {
+                    eprintln!("Error: Failed to communicate with omawarden daemon.");
+                    ExitCode::FAILURE
                 }
             }
         },

@@ -236,6 +236,7 @@ pub struct DaemonState {
     pub unlocked_at: Mutex<Option<Instant>>,
     pub max_session_lifetime: Mutex<Duration>,
     pub ssh_agent: Arc<crate::ssh_agent::SshAgent>,
+    pub broker: Arc<crate::broker::BrokerApprovalState>,
 }
 
 impl DaemonState {
@@ -248,6 +249,7 @@ impl DaemonState {
             unlocked_at: Mutex::new(None),
             max_session_lifetime: Mutex::new(Duration::from_secs(12 * 3600)),
             ssh_agent: Arc::new(crate::ssh_agent::SshAgent::default()),
+            broker: Arc::new(crate::broker::BrokerApprovalState::new()),
         }
     }
 
@@ -390,6 +392,8 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "copy"
             | "generate_password"
             | "broker_resolve"
+            | "broker_allow"
+            | "broker_reply"
     )
 }
 
@@ -778,10 +782,188 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 })
                 .unwrap_or_default();
 
-            match crate::broker::resolve_broker_env(&state.vault_mgr, item_query, &env_mappings) {
-                Ok(env) => json!({ "ok": true, "env": env }),
-                Err(err) => json!({ "ok": false, "error": err }),
+            let command: Vec<String> = req
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let caller_pid = req.get("caller_pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+            // Destination Binding Policy Enforcement
+            if !command.is_empty() {
+                let binary_path = which::which(&command[0])
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| command[0].clone());
+
+                let mut target_ciphers = Vec::new();
+                if let Some(iq) = item_query {
+                    target_ciphers.push(iq.to_string());
+                }
+                for m in &env_mappings {
+                    if let Some(idx) = m.find('=') {
+                        let target = &m[idx + 1..];
+                        let item_name = if let Some(h) = target.find('#') {
+                            &target[..h]
+                        } else {
+                            target
+                        };
+                        if !target_ciphers.contains(&item_name.to_string()) {
+                            target_ciphers.push(item_name.to_string());
+                        }
+                    }
+                }
+
+                let mut cmd_with_canon = command.clone();
+                cmd_with_canon[0] = binary_path.clone();
+
+                let mut policy_violation = None;
+
+                for cipher in target_ciphers {
+                    let is_allowed = {
+                        let pol = state.broker.policy.read().unwrap();
+                        pol.is_allowed(&cipher, &cmd_with_canon)
+                    };
+
+                    if !is_allowed {
+                        // Check if desktop interactive overlay is available
+                        let shell_opt = crate::daemon::get_omarchy_shell_cmd();
+                        if shell_opt.is_none() {
+                            // Non-interactive / headless mode: fail closed
+                            policy_violation = Some(json!({
+                                "ok": false,
+                                "error": format!(
+                                    "Destination binding policy violation: binary '{}' is not authorized to access vault secrets for '{}'. Run 'omawarden broker allow {} {}' to authorize.",
+                                    binary_path, cipher, cipher, binary_path
+                                )
+                            }));
+                            break;
+                        }
+
+                        // Desktop interactive mode: summon approval card
+                        let caller_app = crate::broker::get_caller_exe(caller_pid)
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let prompt = crate::broker::BrokerPrompt {
+                            id: 0,
+                            title: format!("Authorize Secret Access for {}", cipher),
+                            cipher_ref: cipher.clone(),
+                            command: command.join(" "),
+                            binary_path: binary_path.clone(),
+                            caller_app,
+                            caller_pid,
+                            args: if command.len() > 1 {
+                                command[1..].to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                        };
+
+                        let decision = state.broker.ask(prompt, |payload| {
+                            if let Some(cmd) = crate::daemon::get_omarchy_shell_cmd() {
+                                let payload_str =
+                                    serde_json::to_string(payload).unwrap_or_default();
+                                std::process::Command::new(cmd)
+                                    .args(["summon", "icyleaf.bitwarden", &payload_str])
+                                    .spawn()
+                                    .is_ok()
+                            } else {
+                                false
+                            }
+                        });
+
+                        match decision {
+                            crate::broker::BrokerDecision::AllowOnce
+                            | crate::broker::BrokerDecision::AllowAlways => {
+                                // Approved by user, continue
+                            }
+                            crate::broker::BrokerDecision::Deny => {
+                                policy_violation = Some(json!({
+                                    "ok": false,
+                                    "error": format!(
+                                        "Destination binding approval was denied for '{}' by user.",
+                                        cipher
+                                    )
+                                }));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(violation_response) = policy_violation {
+                    violation_response
+                } else {
+                    match crate::broker::resolve_broker_env(
+                        &state.vault_mgr,
+                        item_query,
+                        &env_mappings,
+                    ) {
+                        Ok(env) => json!({ "ok": true, "env": env }),
+                        Err(err) => json!({ "ok": false, "error": err }),
+                    }
+                }
+            } else {
+                match crate::broker::resolve_broker_env(&state.vault_mgr, item_query, &env_mappings)
+                {
+                    Ok(env) => json!({ "ok": true, "env": env }),
+                    Err(err) => json!({ "ok": false, "error": err }),
+                }
             }
+        }
+        "broker_allow" => {
+            let cipher_ref = req
+                .get("cipher_ref")
+                .and_then(|v| v.as_str())
+                .unwrap_or("*");
+            let binary_path = req
+                .get("binary_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if binary_path.is_empty() {
+                json!({ "ok": false, "error": "binary_path is required" })
+            } else {
+                let args: Vec<String> = req
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut policy = state.broker.policy.write().unwrap();
+                policy.allow_rule(cipher_ref, binary_path, &args);
+                match policy.save_to_file(&state.broker.policy_path) {
+                    Ok(_) => json!({ "ok": true }),
+                    Err(e) => {
+                        json!({ "ok": false, "error": format!("Failed to save policy: {}", e) })
+                    }
+                }
+            }
+        }
+        "broker_pending" => {
+            let pending = state.broker.list_pending();
+            json!({ "ok": true, "pending": pending })
+        }
+        "broker_reply" => {
+            let id = req.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let decision_str = req
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("deny");
+            let decision = match decision_str {
+                "allow_always" | "always" => crate::broker::BrokerDecision::AllowAlways,
+                "allow_once" | "allow" | "once" => crate::broker::BrokerDecision::AllowOnce,
+                _ => crate::broker::BrokerDecision::Deny,
+            };
+            let delivered = state.broker.reply(id, decision);
+            json!({ "ok": true, "delivered": delivered })
         }
         "get_ssh_key" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");

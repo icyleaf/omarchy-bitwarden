@@ -71,3 +71,34 @@ fn test_broker_exec_signal_exit_code_propagation() {
         .unwrap();
     assert_eq!(out.status.code(), Some(128 + 9));
 }
+
+#[test]
+fn test_broker_allow_cli_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "allow", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("cipher-ref") || stdout.contains("CIPHER_REF"));
+}
+
+#[test]
+fn test_broker_pending_cli_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "pending", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+}
+
+#[test]
+fn test_broker_reply_cli_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "reply", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--allow") || stdout.contains("--always"));
+}

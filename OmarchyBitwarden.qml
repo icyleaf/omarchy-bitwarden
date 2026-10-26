@@ -315,6 +315,11 @@ Item {
   // Set while closing the overlay with prompts still pending: they are denied
   // one by one so `ssh` fails now instead of hanging until the daemon times out.
   property bool sshDenyingOnClose: false
+  // VaultBroker destination approval prompt from `broker pending`
+  property var brokerApprovalPrompt: null
+  property bool brokerApprovalOnly: false
+  property int brokerApprovalRemaining: 0
+  property bool brokerDenyingOnClose: false
   property bool showPasswordHistoryModal: false
   property var activePasswordHistoryItem: null
   property bool showPasswordGeneratorModal: false
@@ -434,8 +439,16 @@ Item {
       }
       root.sshApprovalOnly = true
       root.refreshSshApprovals()
+    } else if (payload.view === "broker-approval") {
+      if (root.opened) {
+        root.refreshBrokerApprovals()
+        return
+      }
+      root.brokerApprovalOnly = true
+      root.refreshBrokerApprovals()
     }
     root.sshDenyingOnClose = false
+    root.brokerDenyingOnClose = false
     root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
@@ -507,6 +520,22 @@ Item {
     sshReplyProc.running = true
   }
 
+  function refreshBrokerApprovals() {
+    if (brokerPendingProc.running) return
+    brokerPendingProc.command = [root.helperPath, "broker", "pending"]
+    brokerPendingProc.running = true
+  }
+
+  function replyBrokerApproval(decision) {
+    var p = root.brokerApprovalPrompt
+    if (!p || brokerReplyProc.running) return
+    root.logInfo("omarchy:broker", "Replied " + decision + " for cipher " + p.cipher_ref + " to binary " + p.binary_path)
+    root.brokerApprovalPrompt = null
+    var flag = (decision === "allow_always") ? "--always" : (decision === "allow_once" ? "--allow" : "--deny")
+    brokerReplyProc.command = [root.helperPath, "broker", "reply", String(p.id), flag]
+    brokerReplyProc.running = true
+  }
+
   function close() {
     // Closing the window without answering counts as Deny.
     if (root.sshApprovalPrompt) {
@@ -514,6 +543,11 @@ Item {
       root.replySshApproval(false)
     }
     root.sshApprovalOnly = false
+    if (root.brokerApprovalPrompt) {
+      root.brokerDenyingOnClose = true
+      root.replyBrokerApproval("deny")
+    }
+    root.brokerApprovalOnly = false
     root.opened = false
     totpGenProc.running = false
     root.showActionPalette = false
@@ -2589,6 +2623,18 @@ Item {
         onReplyRequested: function(approve) { root.replySshApproval(approve) }
       }
 
+      BrokerApprovalModal {
+        id: brokerApprovalModalComponent
+        active: root.opened
+        prompt: root.brokerApprovalPrompt
+        remaining: root.brokerApprovalRemaining
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        borderColor: root.borderColor
+        onReplyRequested: function(decision) { root.replyBrokerApproval(decision) }
+      }
+
       PasswordHistoryModal {
         id: passwordHistoryModalComponent
         active: root.showPasswordHistoryModal
@@ -2829,6 +2875,49 @@ Item {
     onTriggered: {
       if (root.sshApprovalRemaining > 0) root.sshApprovalRemaining--
       root.refreshSshApprovals()
+    }
+  }
+
+  Process {
+    id: brokerPendingProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var prompts = []
+        try {
+          var data = JSON.parse((text || "").trim() || "{}")
+          prompts = Array.isArray(data.pending) ? data.pending : []
+        } catch (e) {
+          root.logError("omarchy:broker", "Failed to parse pending broker prompts: " + e)
+        }
+        var next = prompts.length > 0 ? prompts[0] : null
+        if (next && (!root.brokerApprovalPrompt || root.brokerApprovalPrompt.id !== next.id)) root.brokerApprovalRemaining = 60
+        root.brokerApprovalPrompt = next
+        if (root.brokerDenyingOnClose) {
+          if (next) root.replyBrokerApproval("deny")
+          else root.brokerDenyingOnClose = false
+          return
+        }
+        if (next) Qt.callLater(function() { brokerApprovalModalComponent.forceActiveFocus() })
+        if (!next && root.brokerApprovalOnly && root.opened) root.close()
+      }
+    }
+  }
+
+  Process {
+    id: brokerReplyProc
+    command: []
+    onExited: root.refreshBrokerApprovals()
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.opened && root.brokerApprovalPrompt !== null
+    onTriggered: {
+      if (root.brokerApprovalRemaining > 0) root.brokerApprovalRemaining--
+      root.refreshBrokerApprovals()
     }
   }
 

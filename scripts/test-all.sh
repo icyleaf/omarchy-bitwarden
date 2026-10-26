@@ -38,6 +38,7 @@ STANDALONE_TESTS=(
   "tests/tst_input_clipping.qml"
   "tests/tst_settings_ssh_agent.qml"
   "tests/tst_ssh_approval_modal.qml"
+  "tests/tst_broker_approval_modal.qml"
 )
 
 # The components import qs.Commons from Quickshell; use the stub, and run

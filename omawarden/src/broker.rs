@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use zeroize::Zeroize;
@@ -8,6 +10,262 @@ use crate::vault::{VaultItem, VaultManager};
 
 /// Placeholder text substituted in place of detected secret tokens.
 pub const REDACTION_PLACEHOLDER: &str = "[REDACTED:VAULT_SECRET]";
+
+/// A single destination binding whitelist rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DestinationRule {
+    /// Cipher / secret reference (e.g., "OpenAI" or "*" for any item)
+    pub cipher_ref: String,
+    /// Absolute or normalized path to the authorized binary (e.g. "/usr/bin/python3")
+    pub binary_path: String,
+    /// Optional argument prefix restrictions (e.g. ["-m", "my_agent"])
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+}
+
+/// Whitelist policy managing destination bindings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrokerPolicy {
+    #[serde(default)]
+    pub rules: Vec<DestinationRule>,
+}
+
+impl BrokerPolicy {
+    /// Adds or updates an allowed destination binding rule.
+    pub fn allow_rule(&mut self, cipher_ref: &str, binary_path: &str, args: &[String]) {
+        self.rules.retain(|r| {
+            !(r.cipher_ref.eq_ignore_ascii_case(cipher_ref)
+                && r.binary_path == binary_path
+                && r.args == args)
+        });
+
+        self.rules.push(DestinationRule {
+            cipher_ref: cipher_ref.to_string(),
+            binary_path: binary_path.to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    /// Checks whether an execution with the given cipher reference and command is permitted.
+    pub fn is_allowed(&self, cipher_ref: &str, cmd: &[String]) -> bool {
+        if cmd.is_empty() {
+            return false;
+        }
+
+        let binary = &cmd[0];
+        let args = &cmd[1..];
+
+        for rule in &self.rules {
+            let cipher_matches =
+                rule.cipher_ref == "*" || rule.cipher_ref.eq_ignore_ascii_case(cipher_ref);
+            if !cipher_matches {
+                continue;
+            }
+
+            let binary_matches =
+                rule.binary_path == *binary || Path::new(&rule.binary_path) == Path::new(binary);
+
+            if !binary_matches {
+                continue;
+            }
+
+            if !rule.args.is_empty() {
+                if args.len() < rule.args.len() {
+                    continue;
+                }
+                if &args[..rule.args.len()] != rule.args.as_slice() {
+                    continue;
+                }
+            }
+
+            return true;
+        }
+
+        false
+    }
+
+    /// Resolves the policy file path (`broker_policy.json`).
+    pub fn default_policy_path() -> PathBuf {
+        let storage_path = crate::storage::resolve_default_storage_path();
+        let parent = storage_path.parent().unwrap_or_else(|| Path::new("."));
+        parent.join("broker_policy.json")
+    }
+
+    /// Loads broker policy from disk. Returns default empty policy if file does not exist.
+    pub fn load_from_file(path: &Path) -> Self {
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Saves broker policy atomically to disk with permissions 0o600.
+    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        crate::fs_util::atomic_write_str(path, &content, 0o600)
+    }
+}
+
+/// Inspects the caller process that executed the broker command.
+pub fn get_caller_exe(pid: u32) -> Option<String> {
+    let proc_path = PathBuf::from(format!("/proc/{}/exe", pid));
+    std::fs::read_link(proc_path).ok().map(|p| {
+        p.to_string_lossy()
+            .trim_end_matches(" (deleted)")
+            .to_string()
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerDecision {
+    #[default]
+    Deny,
+    AllowOnce,
+    AllowAlways,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerPrompt {
+    pub id: u64,
+    pub title: String,
+    pub cipher_ref: String,
+    pub command: String,
+    pub binary_path: String,
+    pub caller_app: String,
+    pub caller_pid: u32,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+pub struct PendingBrokerApproval {
+    pub prompt: BrokerPrompt,
+    pub decision: Option<BrokerDecision>,
+}
+
+pub struct BrokerApprovalState {
+    pub next_id: std::sync::atomic::AtomicU64,
+    pub pending: std::sync::Mutex<HashMap<u64, PendingBrokerApproval>>,
+    pub answered: std::sync::Condvar,
+    pub prompt_timeout: std::time::Duration,
+    pub policy: std::sync::RwLock<BrokerPolicy>,
+    pub policy_path: PathBuf,
+}
+
+impl Default for BrokerApprovalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrokerApprovalState {
+    pub fn new() -> Self {
+        let policy_path = BrokerPolicy::default_policy_path();
+        let policy = BrokerPolicy::load_from_file(&policy_path);
+        Self {
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            answered: std::sync::Condvar::new(),
+            prompt_timeout: std::time::Duration::from_secs(60),
+            policy: std::sync::RwLock::new(policy),
+            policy_path,
+        }
+    }
+
+    pub fn list_pending(&self) -> Vec<BrokerPrompt> {
+        let Ok(pending) = self.pending.lock() else {
+            return Vec::new();
+        };
+        let mut list: Vec<BrokerPrompt> = pending.values().map(|p| p.prompt.clone()).collect();
+        list.sort_by_key(|p| p.id);
+        list
+    }
+
+    pub fn reply(&self, id: u64, decision: BrokerDecision) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+
+        match pending.get_mut(&id) {
+            Some(p) if p.decision.is_none() => {
+                p.decision = Some(decision);
+                if decision == BrokerDecision::AllowAlways {
+                    let mut pol = self.policy.write().unwrap();
+                    pol.allow_rule(&p.prompt.cipher_ref, &p.prompt.binary_path, &p.prompt.args);
+                    let _ = pol.save_to_file(&self.policy_path);
+                }
+                self.answered.notify_all();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn ask<F>(&self, mut prompt: BrokerPrompt, summon_fn: F) -> BrokerDecision
+    where
+        F: FnOnce(&serde_json::Value) -> bool,
+    {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        prompt.id = id;
+
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(
+                id,
+                PendingBrokerApproval {
+                    prompt: prompt.clone(),
+                    decision: None,
+                },
+            );
+        }
+
+        let payload = serde_json::json!({
+            "view": "broker-approval",
+            "id": id,
+            "cipher_ref": prompt.cipher_ref,
+            "binary_path": prompt.binary_path,
+            "caller_app": prompt.caller_app,
+        });
+
+        if !summon_fn(&payload) {
+            // Summon failed; clean up and deny
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            return BrokerDecision::Deny;
+        }
+
+        let deadline = std::time::Instant::now() + self.prompt_timeout;
+        let Ok(mut pending) = self.pending.lock() else {
+            return BrokerDecision::Deny;
+        };
+
+        let decision = loop {
+            if let Some(d) = pending.get(&id).and_then(|p| p.decision) {
+                break d;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break BrokerDecision::Deny;
+            }
+            match self.answered.wait_timeout(pending, deadline - now) {
+                Ok((guard, _)) => pending = guard,
+                Err(_) => return BrokerDecision::Deny,
+            }
+        };
+
+        pending.remove(&id);
+        decision
+    }
+}
 
 /// Prohibited environment variable names that must not be injected to prevent hijacking.
 pub const PROHIBITED_ENV_VARS: &[&str] = &[
@@ -611,6 +869,116 @@ mod tests {
 
         let status = execute_child_process(&cmd, env, true).unwrap();
         assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    fn test_destination_policy_matching() {
+        let mut policy = BrokerPolicy::default();
+        policy.allow_rule(
+            "OpenAI",
+            "/usr/bin/python3",
+            &["-m".to_string(), "my_agent".to_string()],
+        );
+        policy.allow_rule("*", "/usr/bin/cargo", &[]);
+
+        // Exact match with prefix args
+        let cmd1 = vec![
+            "/usr/bin/python3".to_string(),
+            "-m".to_string(),
+            "my_agent".to_string(),
+            "--run".to_string(),
+        ];
+        assert!(policy.is_allowed("OpenAI", &cmd1));
+
+        // Different args: not allowed
+        let cmd2 = vec![
+            "/usr/bin/python3".to_string(),
+            "-c".to_string(),
+            "print(1)".to_string(),
+        ];
+        assert!(!policy.is_allowed("OpenAI", &cmd2));
+
+        // Different cipher: not allowed for python3
+        assert!(!policy.is_allowed("GitHub", &cmd1));
+
+        // Wildcard cipher: allowed for cargo
+        let cmd3 = vec!["/usr/bin/cargo".to_string(), "test".to_string()];
+        assert!(policy.is_allowed("AnySecret", &cmd3));
+
+        // Unregistered binary: not allowed
+        let cmd4 = vec![
+            "/usr/bin/curl".to_string(),
+            "https://example.com".to_string(),
+        ];
+        assert!(!policy.is_allowed("OpenAI", &cmd4));
+    }
+
+    #[test]
+    fn test_broker_policy_persistence_and_caller_inspection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("broker_policy.json");
+
+        let mut policy = BrokerPolicy::default();
+        policy.allow_rule("GitHub", "/usr/bin/git", &["push".to_string()]);
+        policy.save_to_file(&policy_path).unwrap();
+
+        let loaded = BrokerPolicy::load_from_file(&policy_path);
+        assert_eq!(loaded.rules.len(), 1);
+        assert_eq!(loaded.rules[0].cipher_ref, "GitHub");
+        assert_eq!(loaded.rules[0].binary_path, "/usr/bin/git");
+        assert_eq!(loaded.rules[0].args, vec!["push".to_string()]);
+
+        // Current process caller inspection
+        let current_pid = std::process::id();
+        let exe = get_caller_exe(current_pid);
+        assert!(exe.is_some());
+    }
+
+    #[test]
+    fn test_broker_approval_state_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("broker_policy.json");
+
+        let state = Arc::new(BrokerApprovalState {
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            answered: std::sync::Condvar::new(),
+            prompt_timeout: std::time::Duration::from_millis(500),
+            policy: std::sync::RwLock::new(BrokerPolicy::default()),
+            policy_path: policy_path.clone(),
+        });
+
+        let prompt = BrokerPrompt {
+            id: 0,
+            title: "Authorize Vault Secret".to_string(),
+            cipher_ref: "Stripe".to_string(),
+            command: "python3 agent.py".to_string(),
+            binary_path: "/usr/bin/python3".to_string(),
+            caller_app: "alacritty".to_string(),
+            caller_pid: 1234,
+            args: vec!["agent.py".to_string()],
+        };
+
+        // Thread simulating overlay user approval with AllowAlways
+        let state_clone = Arc::clone(&state);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let list = state_clone.list_pending();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].cipher_ref, "Stripe");
+            let ok = state_clone.reply(list[0].id, BrokerDecision::AllowAlways);
+            assert!(ok);
+        });
+
+        let decision = state.ask(prompt, |_payload| true);
+        assert_eq!(decision, BrokerDecision::AllowAlways);
+
+        // Verify AllowAlways persisted the rule
+        let policy = state.policy.read().unwrap();
+        assert!(policy.is_allowed(
+            "Stripe",
+            &["/usr/bin/python3".to_string(), "agent.py".to_string()]
+        ));
     }
 
     #[test]
