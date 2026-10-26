@@ -357,3 +357,90 @@ fn test_broker_import_non_interactive_without_yes_fails_closed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Interactive confirmation required"));
 }
+
+#[test]
+fn test_broker_mcp_cli_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "mcp", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Model Context Protocol"));
+}
+
+#[test]
+fn test_broker_mcp_stdio_roundtrip_initialize_and_tools_list() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Send initialize
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut line1 = String::new();
+    reader.read_line(&mut line1).unwrap();
+    let resp1: serde_json::Value = serde_json::from_str(&line1).unwrap();
+    assert_eq!(resp1["id"], 1);
+    assert_eq!(resp1["result"]["serverInfo"]["name"], "omawarden-broker");
+
+    // 2. Send tools/list
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut line2 = String::new();
+    reader.read_line(&mut line2).unwrap();
+    let resp2: serde_json::Value = serde_json::from_str(&line2).unwrap();
+    assert_eq!(resp2["id"], 2);
+    let tools = resp2["result"]["tools"].as_array().unwrap();
+
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+        .collect();
+
+    assert!(tool_names.contains(&"list_available_tokens"));
+    assert!(tool_names.contains(&"exec_with_token"));
+
+    // Strict No-Read Invariant
+    assert!(!tool_names.contains(&"read_secret"));
+    assert!(!tool_names.contains(&"get_token"));
+
+    // 3. Send tools/call exec_with_token
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"exec_with_token","arguments":{{"command":["echo","McpEchoIntegrationOk"]}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut line3 = String::new();
+    reader.read_line(&mut line3).unwrap();
+    let resp3: serde_json::Value = serde_json::from_str(&line3).unwrap();
+    assert_eq!(resp3["id"], 3);
+    assert_eq!(resp3["result"]["isError"], false);
+    let text = resp3["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("McpEchoIntegrationOk"));
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}

@@ -1396,6 +1396,530 @@ pub fn execute_child_process(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildOutput {
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Spawns the child command with injected environment variables, zeroes out in-memory secrets,
+/// captures and redacts stdout and stderr, and returns the exit code and captured streams.
+pub fn execute_child_process_capture(
+    cmd: &[String],
+    mut env_vars: HashMap<String, String>,
+    redact: bool,
+    no_network: bool,
+) -> Result<ChildOutput, std::io::Error> {
+    if cmd.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "No command provided",
+        ));
+    }
+
+    let filter_opt = if redact {
+        let secret_values: Vec<&str> = env_vars.values().map(|s| s.as_str()).collect();
+        build_redaction_filter(&secret_values)
+    } else {
+        None
+    };
+
+    let mut command = Command::new(&cmd[0]);
+    if cmd.len() > 1 {
+        command.args(&cmd[1..]);
+    }
+
+    for (k, v) in &env_vars {
+        command.env(k, v);
+    }
+
+    #[cfg(target_os = "linux")]
+    if no_network {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::unshare(libc::CLONE_NEWNET) != 0
+                    && libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if no_network {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "--no-network network namespace isolation is only supported on Linux",
+        ));
+    }
+
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn()?;
+
+    // Scrub secret strings in memory immediately after child process spawn
+    for v in env_vars.values_mut() {
+        v.zeroize();
+    }
+    drop(env_vars);
+
+    let mut child_stdout = child.stdout.take().expect("Piped child stdout");
+    let mut child_stderr = child.stderr.take().expect("Piped child stderr");
+
+    let (t_out, t_err) = if let Some((filter, max_pattern_len)) = filter_opt {
+        let filter_arc = Arc::new(filter);
+        let filter_out = Arc::clone(&filter_arc);
+        let t_out = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = stream_redacted(&mut child_stdout, &mut out, &filter_out, max_pattern_len);
+            out
+        });
+
+        let filter_err = Arc::clone(&filter_arc);
+        let t_err = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            let _ = stream_redacted(&mut child_stderr, &mut err, &filter_err, max_pattern_len);
+            err
+        });
+        (t_out, t_err)
+    } else {
+        let t_out = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = child_stdout.read_to_end(&mut out);
+            out
+        });
+        let t_err = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            let _ = child_stderr.read_to_end(&mut err);
+            err
+        });
+        (t_out, t_err)
+    };
+
+    let status = child.wait()?;
+    let out_bytes = t_out.join().unwrap_or_default();
+    let err_bytes = t_err.join().unwrap_or_default();
+
+    #[cfg(target_os = "linux")]
+    let code = status.code().or_else(|| {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().map(|s| 128 + s)
+    });
+    #[cfg(not(target_os = "linux"))]
+    let code = status.code();
+
+    Ok(ChildOutput {
+        code,
+        stdout: String::from_utf8_lossy(&out_bytes).to_string(),
+        stderr: String::from_utf8_lossy(&err_bytes).to_string(),
+    })
+}
+
+fn json_rpc_error(id: Option<serde_json::Value>, code: i64, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(serde_json::Value::Null),
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
+/// Handles a single MCP JSON-RPC message string and returns an optional JSON-RPC response.
+pub fn handle_mcp_request(
+    line: &str,
+    daemon_sender: &dyn Fn(&serde_json::Value) -> Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let req: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return Some(json_rpc_error(None, -32700, "Parse error")),
+    };
+
+    let id = req.get("id").cloned();
+    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
+
+    match method {
+        "initialize" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "omawarden-broker",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        })),
+        "notifications/initialized" => None,
+        "ping" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        })),
+        "tools/list" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "tools": [
+                    {
+                        "name": "list_available_tokens",
+                        "description": "List available credential names and provider tokens in the Bitwarden vault without exposing secret values.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "description": "Optional category or provider filter"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "exec_with_token",
+                        "description": "Execute a command with secrets from vault ciphers injected directly into subprocess environment variables. Output is scrubbed in real-time to redact secrets. Network isolation (--no-network) is optionally supported.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Command and arguments to execute as an array of strings (e.g. [\"python3\", \"script.py\"])"
+                                },
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Vault item names or references to inject (e.g. [\"OpenAI\", \"GitHub\"])"
+                                },
+                                "env": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Explicit environment mappings in format VAR=item or VAR=item#field"
+                                },
+                                "no_network": {
+                                    "type": "boolean",
+                                    "description": "Disable outbound network access via Linux network namespace jailing"
+                                },
+                                "no_redact": {
+                                    "type": "boolean",
+                                    "description": "Disable automatic streaming output redaction (not recommended)"
+                                }
+                            },
+                            "required": ["command"]
+                        }
+                    }
+                ]
+            }
+        })),
+        "tools/call" => {
+            let params = req.get("params").cloned().unwrap_or(serde_json::json!({}));
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+
+            match tool_name {
+                "list_available_tokens" => {
+                    let list_req = serde_json::json!({ "action": "list" });
+                    let resp = daemon_sender(&list_req);
+
+                    let Some(items_val) = resp else {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Error: Failed to communicate with omawarden daemon."
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        }));
+                    };
+
+                    if let Some(err) = items_val.get("error").and_then(|v| v.as_str()) {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": format!("Error: {}", err)
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        }));
+                    }
+
+                    let items = items_val.as_array();
+                    let mut out = String::from("Available vault credentials:\n");
+                    if let Some(arr) = items {
+                        if arr.is_empty() {
+                            out.push_str("  (No vault items found)\n");
+                        } else {
+                            for item in arr {
+                                let name = item
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unnamed");
+                                out.push_str(&format!("- Item: {}\n", name));
+                                if let Some(inferred) = infer_provider_env_var(name) {
+                                    out.push_str(&format!("    Inferred Env: {}\n", inferred));
+                                }
+                                if let Some(fields) = item.get("fields").and_then(|v| v.as_array())
+                                {
+                                    let field_names: Vec<&str> = fields
+                                        .iter()
+                                        .filter_map(|f| f.get("name").and_then(|v| v.as_str()))
+                                        .filter(|n| !n.is_empty())
+                                        .collect();
+                                    if !field_names.is_empty() {
+                                        out.push_str(&format!(
+                                            "    Fields: {}\n",
+                                            field_names.join(", ")
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        out.push_str("  (No vault items found)\n");
+                    }
+
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": out.trim_end().to_string()
+                                }
+                            ],
+                            "isError": false
+                        }
+                    }))
+                }
+                "exec_with_token" => {
+                    let cmd_arr = arguments.get("command").and_then(|v| v.as_array());
+                    let Some(cmd_raw) = cmd_arr else {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Error: Missing required parameter 'command'"
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        }));
+                    };
+
+                    let command: Vec<String> = cmd_raw
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    if command.is_empty() {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Error: 'command' array cannot be empty"
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        }));
+                    }
+
+                    let mut effective_items = Vec::new();
+                    let mut effective_env = Vec::new();
+
+                    // Read .omawarden.toml in ancestors if present
+                    let curr_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    if let Some(manifest_path) = ProjectManifest::find_in_ancestors(&curr_dir) {
+                        if let Ok(manifest) = ProjectManifest::load_from_file(&manifest_path) {
+                            for (k, v) in manifest.env {
+                                effective_env.push(format!("{}={}", k, v));
+                            }
+                            effective_items = manifest.items;
+                        }
+                    }
+
+                    if let Some(items) = arguments.get("items").and_then(|v| v.as_array()) {
+                        for itm in items.iter().filter_map(|v| v.as_str()) {
+                            if !effective_items.contains(&itm.to_string()) {
+                                effective_items.push(itm.to_string());
+                            }
+                        }
+                    }
+
+                    if let Some(env_arr) = arguments.get("env").and_then(|v| v.as_array()) {
+                        for e in env_arr.iter().filter_map(|v| v.as_str()) {
+                            effective_env.push(e.to_string());
+                        }
+                    }
+
+                    let no_network = arguments
+                        .get("no_network")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let no_redact = arguments
+                        .get("no_redact")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    let mut env_map = HashMap::new();
+                    if !effective_items.is_empty() || !effective_env.is_empty() {
+                        let resolve_req = serde_json::json!({
+                            "action": "broker_resolve",
+                            "items": effective_items,
+                            "env": effective_env,
+                            "command": command,
+                            "interactive": false,
+                            "caller_pid": std::process::id(),
+                        });
+
+                        let resp = daemon_sender(&resolve_req);
+                        let Some(resolve_resp) = resp else {
+                            return Some(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "Error: Failed to communicate with omawarden daemon."
+                                        }
+                                    ],
+                                    "isError": true
+                                }
+                            }));
+                        };
+
+                        if let Some(err) = resolve_resp.get("error").and_then(|v| v.as_str()) {
+                            return Some(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": format!("Broker authorization failed: {}", err)
+                                        }
+                                    ],
+                                    "isError": true
+                                }
+                            }));
+                        }
+
+                        if let Some(env_obj) = resolve_resp.get("env").and_then(|v| v.as_object()) {
+                            for (k, v) in env_obj {
+                                if let Some(val_str) = v.as_str() {
+                                    env_map.insert(k.clone(), val_str.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    match execute_child_process_capture(&command, env_map, !no_redact, no_network) {
+                        Ok(child_out) => {
+                            let exit_code = child_out.code.unwrap_or(-1);
+                            let formatted = format!(
+                                "Exit code: {}\n\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                                exit_code, child_out.stdout, child_out.stderr
+                            );
+                            Some(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": formatted
+                                        }
+                                    ],
+                                    "isError": exit_code != 0
+                                }
+                            }))
+                        }
+                        Err(e) => Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": format!("Execution error: {}", e)
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        })),
+                    }
+                }
+                _ => Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": format!("Unknown tool '{}'", tool_name)
+                            }
+                        ],
+                        "isError": true
+                    }
+                })),
+            }
+        }
+        _ => Some(json_rpc_error(id, -32601, "Method not found")),
+    }
+}
+
+/// Runs the MCP server reading line-delimited JSON-RPC from `reader` and writing responses to `writer`.
+pub fn run_mcp_server<R: std::io::BufRead, W: std::io::Write>(
+    reader: R,
+    mut writer: W,
+    daemon_sender: &dyn Fn(&serde_json::Value) -> Option<serde_json::Value>,
+) -> Result<(), std::io::Error> {
+    for line_res in reader.lines() {
+        let line = line_res?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(resp) = handle_mcp_request(trimmed, daemon_sender) {
+            let s = serde_json::to_string(&resp)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            writeln!(writer, "{}", s)?;
+            writer.flush()?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2279,5 +2803,159 @@ LD_PRELOAD=/evil.so
         // Second time should not duplicate
         let appended_again = ensure_in_gitignore(tmp.path(), ".env*").unwrap();
         assert!(!appended_again);
+    }
+
+    #[test]
+    fn test_execute_child_process_capture_with_redaction() {
+        let mut env = HashMap::new();
+        env.insert(
+            "API_SECRET_KEY".to_string(),
+            "super-secret-capture-token-12345".to_string(),
+        );
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"echo "OUT is $API_SECRET_KEY"; echo "ERR is $API_SECRET_KEY" >&2"#.to_string(),
+        ];
+
+        let out = execute_child_process_capture(&cmd, env, true, false).unwrap();
+        assert_eq!(out.code, Some(0));
+        assert!(out.stdout.contains("OUT is [REDACTED:VAULT_SECRET]"));
+        assert!(out.stderr.contains("ERR is [REDACTED:VAULT_SECRET]"));
+        assert!(!out.stdout.contains("super-secret-capture-token"));
+        assert!(!out.stderr.contains("super-secret-capture-token"));
+    }
+
+    #[test]
+    fn test_mcp_initialize_and_ping() {
+        let mock_daemon = |_req: &serde_json::Value| None;
+
+        let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let resp = handle_mcp_request(init_req, &mock_daemon).unwrap();
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["serverInfo"]["name"], "omawarden-broker");
+
+        let init_notif = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let resp_notif = handle_mcp_request(init_notif, &mock_daemon);
+        assert!(resp_notif.is_none());
+
+        let ping_req = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        let resp_ping = handle_mcp_request(ping_req, &mock_daemon).unwrap();
+        assert_eq!(resp_ping["id"], 2);
+    }
+
+    #[test]
+    fn test_mcp_tools_list_strict_no_read_invariant() {
+        let mock_daemon = |_req: &serde_json::Value| None;
+
+        let list_req = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}"#;
+        let resp = handle_mcp_request(list_req, &mock_daemon).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+
+        assert!(tool_names.contains(&"list_available_tokens"));
+        assert!(tool_names.contains(&"exec_with_token"));
+
+        // Strict No-Read Invariant: no tool exists to extract or read raw secret strings!
+        assert!(!tool_names.contains(&"read_secret"));
+        assert!(!tool_names.contains(&"get_token"));
+        assert!(!tool_names.contains(&"read_token"));
+        assert!(!tool_names.contains(&"export_secrets"));
+    }
+
+    #[test]
+    fn test_mcp_list_available_tokens_does_not_leak_secrets() {
+        let raw_password = "super-secret-password-123456";
+        let raw_field_val = "super-secret-field-val-654321";
+
+        let mock_daemon = move |req: &serde_json::Value| {
+            let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            if action == "list" {
+                Some(serde_json::json!([
+                    {
+                        "name": "OpenAI",
+                        "fields": [],
+                        "login": { "password": raw_password }
+                    },
+                    {
+                        "name": "Database",
+                        "fields": [
+                            { "name": "DATABASE_URL", "value": raw_field_val, "type": 1 }
+                        ]
+                    }
+                ]))
+            } else {
+                None
+            }
+        };
+
+        let call_req = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_available_tokens","arguments":{}}}"#;
+        let resp = handle_mcp_request(call_req, &mock_daemon).unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+
+        assert!(text.contains("OpenAI"));
+        assert!(text.contains("OPENAI_API_KEY"));
+        assert!(text.contains("Database"));
+        assert!(text.contains("DATABASE_URL"));
+
+        // Critical security assertion: values MUST NOT appear in the response!
+        assert!(!text.contains(raw_password));
+        assert!(!text.contains(raw_field_val));
+    }
+
+    #[test]
+    fn test_mcp_exec_with_token_execution_and_redaction() {
+        let secret = "very-confidential-mcp-key-777";
+        let mock_daemon = move |req: &serde_json::Value| {
+            let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            if action == "broker_resolve" {
+                Some(serde_json::json!({
+                    "ok": true,
+                    "env": {
+                        "CONF_KEY": secret,
+                    }
+                }))
+            } else {
+                None
+            }
+        };
+
+        let call_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "exec_with_token",
+                "arguments": {
+                    "command": ["sh", "-c", "echo CONF_KEY_IS=$CONF_KEY"],
+                    "items": ["ConfItem"],
+                }
+            }
+        })
+        .to_string();
+
+        let resp = handle_mcp_request(&call_req, &mock_daemon).unwrap();
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("CONF_KEY_IS=[REDACTED:VAULT_SECRET]"));
+        assert!(!text.contains(secret));
+    }
+
+    #[test]
+    fn test_mcp_run_mcp_server_roundtrip() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"}\n";
+        let mut output = Vec::new();
+        let mock_daemon = |_req: &serde_json::Value| None;
+
+        run_mcp_server(std::io::Cursor::new(input), &mut output, &mock_daemon).unwrap();
+        let out_str = String::from_utf8(output).unwrap();
+        assert!(out_str.contains("\"id\":10"));
+        assert!(out_str.contains("\"result\":{}"));
     }
 }

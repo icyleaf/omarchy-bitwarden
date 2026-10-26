@@ -306,6 +306,10 @@ enum BrokerAction {
         #[arg(long, help = "Output response as JSON")]
         json: bool,
     },
+    #[command(
+        about = "Run Model Context Protocol (MCP) server over stdio for AI assistants and tools"
+    )]
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -1574,6 +1578,24 @@ fn main() -> ExitCode {
                 }
 
                 ExitCode::SUCCESS
+            }
+
+            BrokerAction::Mcp => {
+                let stdin = std::io::stdin();
+                let stdout = std::io::stdout();
+                let daemon_sender = |req: &serde_json::Value| -> Option<serde_json::Value> {
+                    ensure_daemon_running();
+                    send_daemon_request(req)
+                };
+
+                if let Err(e) =
+                    omawarden::broker::run_mcp_server(stdin.lock(), stdout.lock(), &daemon_sender)
+                {
+                    eprintln!("MCP server error: {}", e);
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
             }
         },
 
