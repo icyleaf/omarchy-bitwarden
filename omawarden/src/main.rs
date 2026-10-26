@@ -271,6 +271,41 @@ enum BrokerAction {
         #[arg(long, help = "Output response as JSON")]
         json: bool,
     },
+    #[command(
+        about = "Scan legacy .env files, import into vault ciphers, and scaffold .omawarden.toml"
+    )]
+    Import {
+        #[arg(
+            short = 'd',
+            long = "dir",
+            help = "Project directory to scan for legacy .env files (default: current directory)"
+        )]
+        dir: Option<std::path::PathBuf>,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Confirm import and file wiping without prompting"
+        )]
+        yes: bool,
+        #[arg(
+            long,
+            help = "Preview detected secrets and actions without modifying vault or disk"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Securely wipe legacy plaintext .env files after import (default: true)"
+        )]
+        wipe: bool,
+        #[arg(
+            long,
+            conflicts_with = "wipe",
+            help = "Do not wipe legacy .env files (add them to .gitignore instead)"
+        )]
+        no_wipe: bool,
+        #[arg(long, help = "Output response as JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1152,6 +1187,393 @@ fn main() -> ExitCode {
                     }
                     ExitCode::FAILURE
                 }
+            }
+
+            BrokerAction::Import {
+                dir,
+                yes,
+                dry_run,
+                wipe: _,
+                no_wipe,
+                json,
+            } => {
+                let target_dir = dir.unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let abs_dir = target_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| target_dir.clone());
+
+                let effective_wipe = !no_wipe;
+
+                // 1. Scan for legacy .env files
+                let scanned_files = omawarden::broker::scan_legacy_env_files(&abs_dir);
+                if scanned_files.is_empty() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": format!("No legacy .env files found in '{}'", abs_dir.display())
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!(
+                            "Error: No legacy .env files found in '{}'",
+                            abs_dir.display()
+                        );
+                    }
+                    return ExitCode::FAILURE;
+                }
+
+                // 2. Read and parse environment variables
+                let mut all_vars = Vec::new();
+                for file_path in &scanned_files {
+                    match std::fs::read_to_string(file_path) {
+                        Ok(content) => {
+                            let parsed = omawarden::broker::parse_env_file_content(&content);
+                            all_vars.extend(parsed);
+                        }
+                        Err(e) => {
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string(&json!({
+                                        "ok": false,
+                                        "error": format!("Failed to read file '{}': {}", file_path.display(), e)
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!(
+                                    "Error: Failed to read file '{}': {}",
+                                    file_path.display(),
+                                    e
+                                );
+                            }
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+
+                if all_vars.is_empty() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": "No valid environment variables found in legacy .env files"
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!(
+                            "Error: No valid environment variables found in legacy .env files"
+                        );
+                    }
+                    return ExitCode::FAILURE;
+                }
+
+                // 3. Categorize by provider patterns
+                let project_name = abs_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Project");
+                let groups = omawarden::broker::group_env_vars_by_provider(&all_vars, project_name);
+                let manifest = omawarden::broker::scaffold_manifest_from_groups(&groups);
+
+                // 4. Handle Dry-Run Mode
+                if dry_run {
+                    let mut categories_map = serde_json::Map::new();
+                    for (group, vars) in &groups {
+                        let keys: Vec<String> = vars.iter().map(|(k, _)| k.clone()).collect();
+                        categories_map.insert(group.clone(), json!(keys));
+                    }
+
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "dry_run": true,
+                                "scanned_files": scanned_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                                "categories": categories_map,
+                                "manifest": manifest,
+                                "wipe": effective_wipe,
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        println!("[Dry-Run] Scanned {} legacy file(s):", scanned_files.len());
+                        for f in &scanned_files {
+                            println!("  - {}", f.display());
+                        }
+                        println!("\nDetected secret(s) in {} category(s):", groups.len());
+                        for (group, vars) in &groups {
+                            println!("  - {}:", group);
+                            for (k, _) in vars {
+                                println!("      * {}", k);
+                            }
+                        }
+                        println!("\nPlanned .omawarden.toml scaffold:");
+                        if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
+                            println!("{}", toml_str.trim());
+                        }
+                        if effective_wipe {
+                            println!("\nPlaintext files scheduled to be securely wiped:");
+                            for f in &scanned_files {
+                                println!("  - {}", f.display());
+                            }
+                        } else {
+                            println!("\nLegacy files will be preserved and added to .gitignore.");
+                        }
+                    }
+                    return ExitCode::SUCCESS;
+                }
+
+                // 5. Interactive Confirmation Gate
+                let is_interactive = std::io::stdin().is_terminal()
+                    && std::io::stdout().is_terminal()
+                    && std::env::var("CI").is_err();
+
+                if !yes {
+                    if !is_interactive {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string(&json!({
+                                    "ok": false,
+                                    "error": "Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments."
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments.");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let action_desc = if effective_wipe {
+                        "importing secrets to vault and securely wiping plaintext .env files"
+                    } else {
+                        "importing secrets to vault and adding .env files to .gitignore"
+                    };
+                    print!("Proceed with {}? [y/N]: ", action_desc);
+                    let _ = std::io::stdout().flush();
+                    let mut input = String::new();
+                    if std::io::stdin().read_line(&mut input).is_err()
+                        || !input.trim().eq_ignore_ascii_case("y")
+                    {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string(&json!({ "ok": false, "cancelled": true }))
+                                    .unwrap()
+                            );
+                        } else {
+                            println!("Import cancelled by user.");
+                        }
+                        return ExitCode::SUCCESS;
+                    }
+                }
+
+                // 6. Connect to daemon and create ciphers in vault
+                ensure_daemon_running();
+                let mut created_items = Vec::new();
+
+                for (group_name, vars) in &groups {
+                    let fields: Vec<serde_json::Value> = vars
+                        .iter()
+                        .map(|(k, v)| {
+                            json!({
+                                "name": k,
+                                "value": v,
+                                "type": 1,
+                            })
+                        })
+                        .collect();
+
+                    let req = json!({
+                        "action": "cipher_create",
+                        "name": group_name,
+                        "type": 2, // SecureNote
+                        "notes": format!("Imported by omawarden broker from legacy .env files in {}", abs_dir.display()),
+                        "fields": fields,
+                    });
+
+                    let mut resp = match send_daemon_request(&req) {
+                        Some(r) => r,
+                        None => {
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string(&json!({
+                                        "ok": false,
+                                        "error": "The omawarden daemon is not responding."
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: Failed to communicate with omawarden daemon.");
+                            }
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+                        if err.contains("Vault is locked") {
+                            if !is_interactive {
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string(
+                                            &json!({ "ok": false, "error": err })
+                                        )
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {}", err);
+                                }
+                                return ExitCode::FAILURE;
+                            }
+                            eprintln!("Vault is locked. Waiting up to 60s for unlock...");
+                            if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
+                                let _ = std::process::Command::new(shell_cmd)
+                                    .args(["shell", "summon", "icyleaf.bitwarden", "{}"])
+                                    .spawn();
+                            }
+                            let start = std::time::Instant::now();
+                            let timeout = std::time::Duration::from_secs(60);
+                            let mut unlocked = false;
+                            while start.elapsed() < timeout {
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                if let Some(st) =
+                                    send_daemon_request(&json!({ "action": "status" }))
+                                {
+                                    if st
+                                        .get("is_unlocked")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                    {
+                                        unlocked = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if unlocked {
+                                if let Some(new_r) = send_daemon_request(&req) {
+                                    resp = new_r;
+                                }
+                            } else {
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string(&json!({
+                                            "ok": false,
+                                            "error": "Vault was not unlocked within timeout."
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: Vault was not unlocked within timeout.");
+                                }
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+
+                    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string(&json!({
+                                    "ok": false,
+                                    "error": format!("Failed to create cipher '{}': {}", group_name, err)
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Failed to create cipher '{}': {}", group_name, err);
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    created_items.push(group_name.clone());
+                }
+
+                // 7. Write .omawarden.toml manifest to project root
+                let manifest_path = abs_dir.join(omawarden::broker::MANIFEST_FILENAME);
+                let toml_str = match toml::to_string_pretty(&manifest) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error: Failed to serialize manifest TOML: {}", e);
+                        return ExitCode::FAILURE;
+                    }
+                };
+                if let Err(e) = std::fs::write(&manifest_path, toml_str) {
+                    eprintln!(
+                        "Error: Failed to write manifest to '{}': {}",
+                        manifest_path.display(),
+                        e
+                    );
+                    return ExitCode::FAILURE;
+                }
+
+                // 8. Wipe or gitignore legacy files
+                let mut processed_files = Vec::new();
+                if effective_wipe {
+                    for f in &scanned_files {
+                        if let Err(e) = omawarden::broker::secure_wipe_file(f) {
+                            eprintln!(
+                                "Warning: Failed to securely wipe file '{}': {}",
+                                f.display(),
+                                e
+                            );
+                        } else {
+                            processed_files.push(f.display().to_string());
+                        }
+                    }
+                } else {
+                    let _ = omawarden::broker::ensure_in_gitignore(&abs_dir, ".env*");
+                    for f in &scanned_files {
+                        processed_files.push(f.display().to_string());
+                    }
+                }
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "created_items": created_items,
+                            "manifest_path": manifest_path.display().to_string(),
+                            "wiped_files": if effective_wipe { json!(processed_files) } else { json!([]) },
+                            "ignored_files": if !effective_wipe { json!(processed_files) } else { json!([]) },
+                        }))
+                        .unwrap()
+                    );
+                } else {
+                    println!(
+                        "Successfully imported secrets across {} vault cipher(s):",
+                        created_items.len()
+                    );
+                    for item in &created_items {
+                        println!("  - {}", item);
+                    }
+                    println!("Scaffolded manifest: {}", manifest_path.display());
+                    if effective_wipe {
+                        println!(
+                            "Securely wiped {} plaintext .env file(s).",
+                            processed_files.len()
+                        );
+                    } else {
+                        println!("Preserved legacy files and added .env* to .gitignore.");
+                    }
+                }
+
+                ExitCode::SUCCESS
             }
         },
 

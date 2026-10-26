@@ -645,6 +645,392 @@ pub fn infer_provider_env_var(item_name: &str) -> Option<&'static str> {
     None
 }
 
+/// Returns standard display name for a provider pattern.
+pub fn get_provider_display_name(pattern: &str) -> &'static str {
+    match pattern {
+        "azure_openai" | "azureopenai" | "azure-openai" => "Azure OpenAI",
+        "openai" | "chatgpt" => "OpenAI",
+        "anthropic" | "claude" => "Anthropic",
+        "gemini" | "google_ai" | "googleai" | "google_gemini" | "google-gemini" => "Google Gemini",
+        "mistral" => "Mistral",
+        "cohere" => "Cohere",
+        "perplexity" => "Perplexity",
+        "together" | "together_ai" | "togetherai" => "Together AI",
+        "replicate" => "Replicate",
+        "huggingface" | "hugging_face" | "hf" => "Hugging Face",
+        "github" | "gh" => "GitHub",
+        "gitlab" => "GitLab",
+        "bitbucket" => "BitBucket",
+        "aws" | "amazon_web_services" => "AWS",
+        "cloudflare" => "Cloudflare",
+        "digitalocean" | "digital_ocean" => "DigitalOcean",
+        "flyio" | "fly.io" | "fly_io" => "Fly.io",
+        "vercel" => "Vercel",
+        "netlify" => "Netlify",
+        "heroku" => "Heroku",
+        "render" => "Render",
+        "supabase" => "Supabase",
+        "firebase" => "Firebase",
+        "neon" => "Neon",
+        "upstash" => "Upstash",
+        "planetscale" => "PlanetScale",
+        "pinecone" => "Pinecone",
+        "qdrant" => "Qdrant",
+        "weaviate" => "Weaviate",
+        "stripe" => "Stripe",
+        "shopify" => "Shopify",
+        "resend" => "Resend",
+        "sendgrid" => "SendGrid",
+        "twilio" => "Twilio",
+        "mailgun" => "Mailgun",
+        "slack" => "Slack",
+        "discord" => "Discord",
+        "telegram" => "Telegram",
+        "sentry" => "Sentry",
+        "datadog" | "dd" => "Datadog",
+        "newrelic" | "new_relic" => "New Relic",
+        "posthog" => "PostHog",
+        "npm" | "npmjs" => "npm",
+        "cargo" | "cratesio" => "Cargo",
+        "pypi" => "PyPI",
+        "docker" | "dockerhub" => "Docker",
+        "jira" | "atlassian" => "Jira",
+        "notion" => "Notion",
+        "algolia" => "Algolia",
+        "groq" => "Groq",
+        "deepseek" => "DeepSeek",
+        "ollama" => "Ollama",
+        "voyage" => "Voyage AI",
+        _ => "Provider",
+    }
+}
+
+/// Infers the provider category / display name for an environment variable key name.
+pub fn infer_provider_from_env_key(key: &str) -> Option<&'static str> {
+    let upper = key.to_ascii_uppercase();
+
+    // 1. Direct canonical match against known providers
+    for rule in PROVIDER_PATTERNS {
+        if upper == rule.canonical_env {
+            return Some(get_provider_display_name(rule.patterns[0]));
+        }
+    }
+
+    // 2. Database and storage patterns
+    if upper == "DATABASE_URL"
+        || upper.starts_with("POSTGRES_")
+        || upper.starts_with("POSTGRESQL_")
+        || upper.starts_with("PG_")
+        || upper.starts_with("MYSQL_")
+        || upper.starts_with("REDIS_")
+        || upper.starts_with("MONGODB_")
+        || upper.starts_with("MONGO_")
+    {
+        return Some("Database");
+    }
+
+    // 3. Known AI and Cloud specialized prefixes
+    if upper.starts_with("AZURE_OPENAI") {
+        return Some("Azure OpenAI");
+    }
+    if upper.starts_with("OPENAI") || upper.starts_with("CHATGPT") {
+        return Some("OpenAI");
+    }
+    if upper.starts_with("ANTHROPIC") || upper.starts_with("CLAUDE") {
+        return Some("Anthropic");
+    }
+    if upper.starts_with("GEMINI")
+        || upper.starts_with("GOOGLE_AI")
+        || upper.starts_with("GOOGLE_GEMINI")
+    {
+        return Some("Google Gemini");
+    }
+    if upper.starts_with("GROQ") {
+        return Some("Groq");
+    }
+    if upper.starts_with("DEEPSEEK") {
+        return Some("DeepSeek");
+    }
+    if upper.starts_with("OLLAMA") {
+        return Some("Ollama");
+    }
+    if upper.starts_with("VOYAGE") {
+        return Some("Voyage AI");
+    }
+
+    // 4. Prefix matching against registered pattern stems
+    for rule in PROVIDER_PATTERNS {
+        for &pattern in rule.patterns {
+            let pat_upper = pattern.to_ascii_uppercase();
+            let pat_with_underscore = format!("{}_", pat_upper);
+
+            if pattern.len() <= 3 {
+                // Short pattern (e.g. "gh", "dd", "aws", "hf"): require exact prefix with underscore
+                if upper.starts_with(&pat_with_underscore) {
+                    return Some(get_provider_display_name(rule.patterns[0]));
+                }
+            } else {
+                // Longer pattern: prefix or compound segment match
+                if upper.starts_with(&pat_upper)
+                    || upper.starts_with(&pat_with_underscore)
+                    || upper.contains(&format!("_{}_", pat_upper))
+                {
+                    return Some(get_provider_display_name(rule.patterns[0]));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parses the contents of a legacy `.env` file into key-value pairs.
+///
+/// Strips comments, handles single and double quotes, unescapes strings,
+/// skips invalid or prohibited environment variable names, and preserves in-file ordering.
+pub fn parse_env_file_content(content: &str) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(stripped) = line.strip_prefix("export ") {
+            line = stripped.trim();
+        }
+
+        let Some(eq_idx) = line.find('=') else {
+            continue;
+        };
+
+        let key = line[..eq_idx].trim();
+        if !is_valid_env_var_name(key) || is_prohibited_env_var(key) {
+            continue;
+        }
+
+        let raw_val = line[eq_idx + 1..].trim();
+        let value = if let Some(stripped) = raw_val.strip_prefix('\'') {
+            // Single quoted string: find closing quote or trim
+            if let Some(end_idx) = stripped.find('\'') {
+                stripped[..end_idx].to_string()
+            } else {
+                stripped.trim_end_matches('\'').to_string()
+            }
+        } else if let Some(stripped) = raw_val.strip_prefix('"') {
+            // Double quoted string: handle escapes and closing quote
+            let val_chars = stripped.chars();
+            let mut unescaped = String::new();
+            let mut in_escape = false;
+            let mut closed = false;
+
+            for ch in val_chars {
+                if in_escape {
+                    match ch {
+                        'n' => unescaped.push('\n'),
+                        'r' => unescaped.push('\r'),
+                        't' => unescaped.push('\t'),
+                        '\\' => unescaped.push('\\'),
+                        '"' => unescaped.push('"'),
+                        '$' => unescaped.push('$'),
+                        other => {
+                            unescaped.push('\\');
+                            unescaped.push(other);
+                        }
+                    }
+                    in_escape = false;
+                } else if ch == '\\' {
+                    in_escape = true;
+                } else if ch == '"' {
+                    closed = true;
+                    break;
+                } else {
+                    unescaped.push(ch);
+                }
+            }
+            if !closed && raw_val.ends_with('"') && raw_val.len() > 1 {
+                raw_val[1..raw_val.len() - 1].to_string()
+            } else {
+                unescaped
+            }
+        } else {
+            // Unquoted string: strip trailing comment if any
+            let val_without_comment = if let Some(comment_idx) = raw_val.find(" #") {
+                &raw_val[..comment_idx]
+            } else {
+                raw_val
+            };
+            val_without_comment.trim().to_string()
+        };
+
+        vars.push((key.to_string(), value));
+    }
+
+    vars
+}
+
+/// Scans a directory for legacy environment files (e.g. `.env`, `.env.local`, `.env.development`).
+/// Excludes examples, templates, distributions, and backup files.
+pub fn scan_legacy_env_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+
+        if !name.starts_with(".env") {
+            continue;
+        }
+
+        let lower = name.to_lowercase();
+        if lower.ends_with(".example")
+            || lower.ends_with(".sample")
+            || lower.ends_with(".template")
+            || lower.ends_with(".dist")
+            || lower.ends_with(".bak")
+            || lower.ends_with(".backup")
+            || lower.ends_with('~')
+        {
+            continue;
+        }
+
+        files.push(path);
+    }
+
+    files.sort_by(|a, b| {
+        let name_a = a.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let name_b = b.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        let rank = |name: &str| match name {
+            ".env" => 0,
+            ".env.local" => 1,
+            ".env.development" => 2,
+            ".env.development.local" => 3,
+            ".env.test" => 4,
+            ".env.test.local" => 5,
+            ".env.production" => 6,
+            ".env.production.local" => 7,
+            _ => 10,
+        };
+
+        let rank_a = rank(name_a);
+        let rank_b = rank(name_b);
+
+        if rank_a != rank_b {
+            rank_a.cmp(&rank_b)
+        } else {
+            name_a.cmp(name_b)
+        }
+    });
+
+    files
+}
+
+/// Groups environment variable key-value pairs by provider or project fallback name.
+/// Deduplicates keys across multiple files, preserving the latest assigned value.
+pub fn group_env_vars_by_provider(
+    vars: &[(String, String)],
+    project_fallback: &str,
+) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut groups: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    for (k, v) in vars {
+        let group_name = infer_provider_from_env_key(k)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                if project_fallback.is_empty() {
+                    "Project".to_string()
+                } else {
+                    project_fallback.to_string()
+                }
+            });
+
+        groups
+            .entry(group_name)
+            .or_default()
+            .insert(k.clone(), v.clone());
+    }
+
+    let mut result: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (group_name, key_map) in groups {
+        let list: Vec<(String, String)> = key_map.into_iter().collect();
+        result.insert(group_name, list);
+    }
+    result
+}
+
+/// Scaffolds a `ProjectManifest` from categorized provider groups.
+pub fn scaffold_manifest_from_groups(
+    groups: &BTreeMap<String, Vec<(String, String)>>,
+) -> ProjectManifest {
+    let mut manifest = ProjectManifest::default();
+    for group_name in groups.keys() {
+        if !manifest.items.contains(group_name) {
+            manifest.items.push(group_name.clone());
+        }
+    }
+    manifest
+}
+
+/// Securely wipes a file on disk by overwriting with zeros, flushing to disk, and removing it.
+pub fn secure_wipe_file(path: &Path) -> Result<(), std::io::Error> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::metadata(path)?;
+    let len = metadata.len() as usize;
+    if len > 0 {
+        let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+        let mut zeros = vec![0u8; len];
+        file.write_all(&zeros)?;
+        file.sync_all()?;
+        zeros.zeroize();
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Appends a pattern to `.gitignore` in `project_dir` if not already present.
+pub fn ensure_in_gitignore(project_dir: &Path, pattern: &str) -> Result<bool, std::io::Error> {
+    let gitignore_path = project_dir.join(".gitignore");
+    let existing = if gitignore_path.exists() {
+        std::fs::read_to_string(&gitignore_path)?
+    } else {
+        String::new()
+    };
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == pattern || (pattern == ".env*" && (trimmed == ".env" || trimmed == ".env*")) {
+            return Ok(false);
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore_path)?;
+
+    let prefix = if !existing.is_empty() && !existing.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    file.write_all(format!("{}{}\n", prefix, pattern).as_bytes())?;
+    file.sync_all()?;
+    Ok(true)
+}
+
 /// Resolves environment variables from a single VaultItem.
 ///
 /// Injects all custom fields where field name becomes the environment variable name.
@@ -1744,5 +2130,154 @@ CUSTOM_KEY = "CustomItem"
             resolved.get("OPENAI_API_KEY"),
             Some(&"custom-val".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_env_file_content() {
+        let content = r#"
+# Comment at start
+export OPENAI_API_KEY=sk-test123456
+ANTHROPIC_API_KEY='sk-ant-abc' # single quote with inline comment
+GITHUB_TOKEN="ghp_quoted # with hash"
+DATABASE_URL=postgres://user:pass@localhost:5432/mydb # unquoted inline comment
+MULTILINE_ESCAPE="line1\nline2\ttab"
+EMPTY_VAL=
+123_INVALID=ignored
+LD_PRELOAD=/evil.so
+"#;
+        let parsed = parse_env_file_content(content);
+        let map: HashMap<String, String> = parsed.into_iter().collect();
+
+        assert_eq!(
+            map.get("OPENAI_API_KEY"),
+            Some(&"sk-test123456".to_string())
+        );
+        assert_eq!(
+            map.get("ANTHROPIC_API_KEY"),
+            Some(&"sk-ant-abc".to_string())
+        );
+        assert_eq!(
+            map.get("GITHUB_TOKEN"),
+            Some(&"ghp_quoted # with hash".to_string())
+        );
+        assert_eq!(
+            map.get("DATABASE_URL"),
+            Some(&"postgres://user:pass@localhost:5432/mydb".to_string())
+        );
+        assert_eq!(
+            map.get("MULTILINE_ESCAPE"),
+            Some(&"line1\nline2\ttab".to_string())
+        );
+        assert_eq!(map.get("EMPTY_VAL"), Some(&"".to_string()));
+        assert!(!map.contains_key("123_INVALID"));
+        assert!(!map.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn test_infer_provider_from_env_key() {
+        assert_eq!(
+            infer_provider_from_env_key("OPENAI_API_KEY"),
+            Some("OpenAI")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("ANTHROPIC_API_KEY"),
+            Some("Anthropic")
+        );
+        assert_eq!(infer_provider_from_env_key("GITHUB_TOKEN"), Some("GitHub"));
+        assert_eq!(infer_provider_from_env_key("GH_TOKEN"), Some("GitHub"));
+        assert_eq!(
+            infer_provider_from_env_key("AWS_SECRET_ACCESS_KEY"),
+            Some("AWS")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("AWS_ACCESS_KEY_ID"),
+            Some("AWS")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("DATABASE_URL"),
+            Some("Database")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("POSTGRES_PASSWORD"),
+            Some("Database")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("STRIPE_SECRET_KEY"),
+            Some("Stripe")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("SENTRY_AUTH_TOKEN"),
+            Some("Sentry")
+        );
+        assert_eq!(infer_provider_from_env_key("DD_API_KEY"), Some("Datadog"));
+        assert_eq!(
+            infer_provider_from_env_key("DEEPSEEK_API_KEY"),
+            Some("DeepSeek")
+        );
+        assert_eq!(infer_provider_from_env_key("GROQ_API_KEY"), Some("Groq"));
+        assert_eq!(infer_provider_from_env_key("CUSTOM_SECRET_APP_KEY"), None);
+    }
+
+    #[test]
+    fn test_scan_legacy_env_files_and_grouping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let env_path = root.join(".env");
+        let env_local_path = root.join(".env.local");
+        let example_path = root.join(".env.example");
+        let backup_path = root.join(".env.bak");
+
+        std::fs::write(&env_path, "OPENAI_API_KEY=sk-1\nPORT=3000\n").unwrap();
+        std::fs::write(&env_local_path, "PORT=8080\nDATABASE_URL=postgres://\n").unwrap();
+        std::fs::write(&example_path, "OPENAI_API_KEY=your_key\n").unwrap();
+        std::fs::write(&backup_path, "OLD_KEY=val\n").unwrap();
+
+        let scanned = scan_legacy_env_files(root);
+        assert_eq!(scanned.len(), 2);
+        assert_eq!(scanned[0].file_name().unwrap(), ".env");
+        assert_eq!(scanned[1].file_name().unwrap(), ".env.local");
+
+        let mut all_vars = Vec::new();
+        for file in &scanned {
+            let content = std::fs::read_to_string(file).unwrap();
+            all_vars.extend(parse_env_file_content(&content));
+        }
+
+        let groups = group_env_vars_by_provider(&all_vars, "MyService");
+        assert!(groups.contains_key("OpenAI"));
+        assert!(groups.contains_key("Database"));
+        assert!(groups.contains_key("MyService"));
+
+        // PORT was overridden by .env.local to 8080
+        let my_service_vars = groups.get("MyService").unwrap();
+        let port_tuple = my_service_vars.iter().find(|(k, _)| k == "PORT").unwrap();
+        assert_eq!(port_tuple.1, "8080");
+
+        let manifest = scaffold_manifest_from_groups(&groups);
+        assert!(manifest.items.contains(&"OpenAI".to_string()));
+        assert!(manifest.items.contains(&"Database".to_string()));
+        assert!(manifest.items.contains(&"MyService".to_string()));
+    }
+
+    #[test]
+    fn test_secure_wipe_file_and_gitignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join(".env.secret");
+        std::fs::write(&file_path, "SECRET_DATA=top_secret_12345").unwrap();
+        assert!(file_path.exists());
+
+        secure_wipe_file(&file_path).unwrap();
+        assert!(!file_path.exists());
+
+        // Test ensure_in_gitignore
+        let appended = ensure_in_gitignore(tmp.path(), ".env*").unwrap();
+        assert!(appended);
+        let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".env*"));
+
+        // Second time should not duplicate
+        let appended_again = ensure_in_gitignore(tmp.path(), ".env*").unwrap();
+        assert!(!appended_again);
     }
 }

@@ -1043,6 +1043,172 @@ impl VaultManager {
         Ok(decrypted_item)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_item(
+        &self,
+        name: &str,
+        cipher_type: u32,
+        notes: Option<&str>,
+        fields: &[(String, String, i64)],
+        folder_id: Option<&str>,
+        user_key: &SymmetricCryptoKey,
+    ) -> Result<VaultItem, String> {
+        self.create_item_with_client(name, cipher_type, notes, fields, folder_id, user_key, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_item_with_client(
+        &self,
+        name: &str,
+        cipher_type: u32,
+        notes: Option<&str>,
+        fields: &[(String, String, i64)],
+        folder_id: Option<&str>,
+        user_key: &SymmetricCryptoKey,
+        client_context: Option<&ClientContext>,
+    ) -> Result<VaultItem, String> {
+        let storage = self.storage_mgr.load();
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+        let initial_token = self
+            .keyring_mgr
+            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session(s_url))
+            .or_else(|| storage.access_token.clone());
+
+        let active_token = match initial_token {
+            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
+            Some(_) => {
+                crate::log_info!(
+                    "omawarden:vault",
+                    "Access token is expired for create_item, attempting renewal..."
+                );
+                self.renew_session_with_client(client_context)?
+            }
+            None => self.renew_session_with_client(client_context)?,
+        };
+
+        let enc_name = user_key
+            .encrypt_string(name)
+            .map_err(|e| format!("Failed to encrypt item name: {:?}", e))?;
+
+        let enc_notes = if let Some(n) = notes.filter(|s| !s.is_empty()) {
+            Some(
+                user_key
+                    .encrypt_string(n)
+                    .map_err(|e| format!("Failed to encrypt notes: {:?}", e))?,
+            )
+        } else {
+            None
+        };
+
+        let mut enc_fields = Vec::new();
+        for (f_name, f_val, f_type) in fields {
+            let enc_fn = user_key
+                .encrypt_string(f_name)
+                .map_err(|e| format!("Failed to encrypt field name: {:?}", e))?;
+            let enc_fv = user_key
+                .encrypt_string(f_val)
+                .map_err(|e| format!("Failed to encrypt field value: {:?}", e))?;
+            enc_fields.push(json!({
+                "name": enc_fn,
+                "value": enc_fv,
+                "type": f_type,
+            }));
+        }
+
+        let mut payload = json!({
+            "type": cipher_type,
+            "folderId": folder_id,
+            "organizationId": null,
+            "name": enc_name,
+            "notes": enc_notes,
+            "favorite": false,
+            "reprompt": 0,
+            "fields": enc_fields,
+        });
+
+        if cipher_type == 2 {
+            payload["secureNote"] = json!({ "type": 0 });
+        }
+
+        let s_url = if !storage.server_url.is_empty() {
+            &storage.server_url
+        } else {
+            &self.server_url
+        };
+        let id_url = self
+            .identity_url
+            .as_deref()
+            .or(storage.identity_url.as_deref());
+        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
+
+        let created_cipher = match client.create_cipher(&active_token, &payload) {
+            Ok(c) => c,
+            Err(ApiError::HttpStatus(code, _))
+                if code == reqwest::StatusCode::UNAUTHORIZED
+                    || code == reqwest::StatusCode::FORBIDDEN =>
+            {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "HTTP {} creating item. Attempting session renewal...",
+                    code
+                );
+                let renewed = self.renew_session_with_client(client_context)?;
+                client
+                    .create_cipher(&renewed, &payload)
+                    .map_err(|e| format!("Failed to create item on server: {:?}", e))?
+            }
+            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "HTTP 401/403 creating item. Attempting session renewal..."
+                );
+                let renewed = self.renew_session_with_client(client_context)?;
+                client
+                    .create_cipher(&renewed, &payload)
+                    .map_err(|e| format!("Failed to create item on server: {:?}", e))?
+            }
+            Err(e) => return Err(format!("Failed to create item on server: {:?}", e)),
+        };
+
+        // Update local storage data.json
+        let mut updated_storage = self.storage_mgr.load();
+        updated_storage.ciphers.push(created_cipher.clone());
+        let _ = self.storage_mgr.save(&updated_storage);
+
+        // Decrypt the created item into a VaultItem
+        let decrypted_items = decrypt_sync_ciphers_with_context(
+            &[created_cipher],
+            &updated_storage.folders,
+            &updated_storage.organizations,
+            user_key,
+            updated_storage.enc_private_key.as_deref(),
+        );
+
+        let decrypted_item = decrypted_items
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Failed to decrypt newly created cipher item".to_string())?;
+
+        // Update in-memory items if unlocked
+        if let Ok(mut items) = self.decrypted_items.write() {
+            items.push(decrypted_item.clone());
+        }
+
+        crate::log_info!(
+            "omawarden:vault",
+            "Successfully created and stored vault item '{}' ({})",
+            decrypted_item.name,
+            decrypted_item.id
+        );
+
+        Ok(decrypted_item)
+    }
+
     pub fn find_item(&self, query: &str, category: Option<&str>) -> Option<VaultItem> {
         let items = self.get_items();
         let target = query.trim();

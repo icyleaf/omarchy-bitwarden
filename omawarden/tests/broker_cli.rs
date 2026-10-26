@@ -229,3 +229,131 @@ items = ["NonExistentTestItemA"]
             || stderr.contains("Failed to")
     );
 }
+
+#[test]
+fn test_broker_import_help() {
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "import", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--dir"));
+    assert!(stdout.contains("--dry-run"));
+    assert!(stdout.contains("--yes"));
+    assert!(stdout.contains("--wipe"));
+    assert!(stdout.contains("--no-wipe"));
+    assert!(stdout.contains("--json"));
+}
+
+#[test]
+fn test_broker_import_no_files_found_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "broker",
+            "import",
+            "--dir",
+            tmp.path().to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("No legacy .env files found"));
+}
+
+#[test]
+fn test_broker_import_dry_run_scans_and_groups_secrets_without_leaking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join(".env");
+    let secret_val = "sk-super-secret-key-999888";
+    std::fs::write(
+        &env_file,
+        format!(
+            "OPENAI_API_KEY={}\nDATABASE_URL=postgres://localhost/db\nCUSTOM_PORT=5000\n",
+            secret_val
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "broker",
+            "import",
+            "--dir",
+            tmp.path().to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Verifies categorized sections
+    assert!(stdout.contains("[Dry-Run]"));
+    assert!(stdout.contains("OpenAI:"));
+    assert!(stdout.contains("Database:"));
+    assert!(stdout.contains("CUSTOM_PORT"));
+    assert!(stdout.contains(".omawarden.toml"));
+
+    // Critical security invariant: secret value MUST NOT be printed!
+    assert!(!stdout.contains(secret_val));
+
+    // File must NOT be deleted in dry-run
+    assert!(env_file.exists());
+}
+
+#[test]
+fn test_broker_import_dry_run_json_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join(".env");
+    std::fs::write(
+        &env_file,
+        "ANTHROPIC_API_KEY=ant-key-123\nAWS_SECRET_ACCESS_KEY=aws-secret-456\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "broker",
+            "import",
+            "--dir",
+            tmp.path().to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["dry_run"], true);
+    assert!(parsed["categories"]["Anthropic"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("ANTHROPIC_API_KEY")));
+    assert!(parsed["categories"]["AWS"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("AWS_SECRET_ACCESS_KEY")));
+}
+
+#[test]
+fn test_broker_import_non_interactive_without_yes_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join(".env");
+    std::fs::write(&env_file, "OPENAI_API_KEY=sk-test\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(["broker", "import", "--dir", tmp.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Interactive confirmation required"));
+}

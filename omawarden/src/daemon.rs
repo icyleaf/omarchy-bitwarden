@@ -638,6 +638,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             | "get_ssh_key"
             | "get_attachment_key"
             | "ssh_key_create"
+            | "cipher_create"
             | "sync"
             | "broker_resolve"
     ) || (action == "totp"
@@ -752,6 +753,41 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                     name,
                     &ssh_data,
                     notes,
+                    folder_id,
+                    &user_key,
+                    client_context.as_ref(),
+                ) {
+                    Ok(item) => json!({ "ok": true, "item": item }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            } else {
+                json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
+            }
+        }
+        "cipher_create" => {
+            if let Some(user_key) = state.vault_mgr.get_user_key() {
+                let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let cipher_type = req.get("type").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+                let notes = req.get("notes").and_then(|v| v.as_str());
+                let folder_id = req.get("folder_id").and_then(|v| v.as_str());
+
+                let mut fields = Vec::new();
+                if let Some(fields_arr) = req.get("fields").and_then(|v| v.as_array()) {
+                    for f in fields_arr {
+                        let fname = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let fval = f.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        let ftype = f.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
+                        if !fname.is_empty() {
+                            fields.push((fname.to_string(), fval.to_string(), ftype));
+                        }
+                    }
+                }
+
+                match state.vault_mgr.create_item_with_client(
+                    name,
+                    cipher_type,
+                    notes,
+                    &fields,
                     folder_id,
                     &user_key,
                     client_context.as_ref(),
