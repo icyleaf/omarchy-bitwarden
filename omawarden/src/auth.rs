@@ -117,6 +117,29 @@ pub fn is_jwt_expired(token: &str) -> bool {
     false
 }
 
+/// Extracts the user ID (`sub` claim) from a Bitwarden JWT access token.
+pub fn extract_jwt_sub(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+
+    let payload = parts[1];
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .or_else(|_| STANDARD.decode(payload))
+        .ok()?;
+
+    let val = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+    val.get("sub")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthStatus {
     pub status: String,
@@ -1353,6 +1376,32 @@ mod tests {
         assert!(is_jwt_expired(&expired_token));
         assert!(!is_jwt_expired(&valid_token));
         assert!(!is_jwt_expired("invalid_token_not_three_parts"));
+    }
+
+    #[test]
+    fn test_extract_jwt_sub() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "sub": "user-uuid-abc-123",
+            "email": "user@example.com",
+            "exp": 9999999999i64
+        });
+        let b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("header.{}.sig", b64);
+
+        assert_eq!(
+            extract_jwt_sub(&token),
+            Some("user-uuid-abc-123".to_string())
+        );
+        assert_eq!(extract_jwt_sub("malformed.jwt"), None);
+        assert_eq!(extract_jwt_sub("header.invalid_base64.sig"), None);
+
+        let no_sub = serde_json::json!({ "email": "test@example.com" });
+        let no_sub_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&no_sub).unwrap());
+        let token_no_sub = format!("header.{}.sig", no_sub_b64);
+        assert_eq!(extract_jwt_sub(&token_no_sub), None);
     }
 
     #[test]

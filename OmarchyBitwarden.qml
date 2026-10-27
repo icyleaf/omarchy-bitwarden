@@ -583,6 +583,10 @@ Item {
     else root.open("{}")
   }
 
+  function isOpen() {
+    return root.opened
+  }
+
   function refreshConfig() {
     root.checkUpdatesEnabled = false
     root.showWebsiteIcons = false

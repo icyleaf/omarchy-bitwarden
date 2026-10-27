@@ -954,7 +954,12 @@ impl VaultManager {
             .encrypt_string(&ssh_key_data.fingerprint)
             .map_err(|e| format!("Failed to encrypt fingerprint: {:?}", e))?;
 
-        let payload = json!({
+        let effective_user_id = storage
+            .user_id
+            .clone()
+            .or_else(|| crate::auth::extract_jwt_sub(&active_token));
+
+        let mut payload = json!({
             "type": 5,
             "folderId": folder_id,
             "organizationId": null,
@@ -968,6 +973,10 @@ impl VaultManager {
                 "keyFingerprint": enc_fingerprint,
             }
         });
+
+        if let Some(uid) = effective_user_id.as_deref() {
+            payload["encryptedFor"] = json!(uid);
+        }
 
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
@@ -1120,6 +1129,11 @@ impl VaultManager {
             }));
         }
 
+        let effective_user_id = storage
+            .user_id
+            .clone()
+            .or_else(|| crate::auth::extract_jwt_sub(&active_token));
+
         let mut payload = json!({
             "type": cipher_type,
             "folderId": folder_id,
@@ -1130,6 +1144,10 @@ impl VaultManager {
             "reprompt": 0,
             "fields": enc_fields,
         });
+
+        if let Some(uid) = effective_user_id.as_deref() {
+            payload["encryptedFor"] = json!(uid);
+        }
 
         if cipher_type == 2 {
             payload["secureNote"] = json!({ "type": 0 });
@@ -2511,6 +2529,100 @@ esac
             Some("valid_ref_token".to_string())
         );
 
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_create_item_includes_encrypted_for() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten().take(1) {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req_text = String::from_utf8_lossy(&buf[..n]);
+
+                // Verify encryptedFor is present in the POST /ciphers body
+                if let Some(body_start) = req_text.find("\r\n\r\n") {
+                    let body = &req_text[body_start + 4..];
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(body) {
+                        assert_eq!(
+                            json_val.get("encryptedFor").and_then(|v| v.as_str()),
+                            Some("test-user-id-5678")
+                        );
+                        assert_eq!(json_val.get("type").and_then(|v| v.as_i64()), Some(2));
+                    }
+                }
+
+                let resp_body = serde_json::json!({
+                    "id": "new-cipher-id-999",
+                    "type": 2,
+                    "name": "2.encname",
+                    "notes": null,
+                    "fields": [],
+                    "creationDate": "2026-10-27T00:00:00Z",
+                    "revisionDate": "2026-10-27T00:00:00Z"
+                })
+                .to_string();
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("test_create_item.json");
+        let storage_mgr = StorageManager::new(storage_path.clone());
+        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+
+        // Create a valid future token with sub
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let token_payload = serde_json::json!({
+            "sub": "test-user-id-5678",
+            "exp": chrono::Utc::now().timestamp() + 3600
+        });
+        let b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&token_payload).unwrap());
+        let valid_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", b64);
+
+        let storage_data = serde_json::json!({
+            "server_url": server_url.clone(),
+            "user_id": "test-user-id-5678",
+            "access_token": valid_token,
+            "ciphers": []
+        });
+        std::fs::write(&storage_path, storage_data.to_string()).unwrap();
+
+        let vault_mgr = VaultManager::new(&server_url, Some(storage_mgr), Some(mock_keyring));
+
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&[0x42u8; 64]).unwrap();
+        let fields = vec![("FEISHU_APP_ID".to_string(), "11223".to_string(), 1i64)];
+
+        let result = vault_mgr.create_item_with_client(
+            "Feishu",
+            2,
+            Some("Imported note"),
+            &fields,
+            None,
+            &user_key,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Expected create_item_with_client to succeed: {:?}",
+            result.err()
+        );
         let _ = handle.join();
     }
 }

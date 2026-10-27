@@ -987,48 +987,88 @@ fn main() -> ExitCode {
                         }
                     };
 
-                    // If vault is locked, wait up to 60s for unlock only in interactive desktop mode
+                    // If vault is locked, unlock via desktop overlay or terminal prompt
                     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
                         if err.contains("Vault is locked") {
                             if !is_interactive {
                                 eprintln!("Error: {}", err);
                                 return ExitCode::FAILURE;
                             }
-                            eprintln!("Vault is locked. Waiting up to 60s for unlock...");
-                            // Try summoning overlay
+
                             if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
+                                eprintln!("Vault is locked. Waiting for unlock via Omarchy desktop overlay (or press Ctrl+C to cancel)...");
                                 let _ = std::process::Command::new(shell_cmd)
-                                    .args(["shell", "summon", "icyleaf.bitwarden", "{}"])
+                                    .args(["-q", "shell", "summon", "icyleaf.bitwarden", "{}"])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
                                     .spawn();
-                            }
 
-                            let start = std::time::Instant::now();
-                            let timeout = std::time::Duration::from_secs(60);
-                            let mut unlocked = false;
+                                let start = std::time::Instant::now();
+                                let timeout = std::time::Duration::from_secs(60);
+                                let mut unlocked = false;
+                                let mut saw_active = false;
 
-                            while start.elapsed() < timeout {
-                                std::thread::sleep(std::time::Duration::from_millis(300));
-                                if let Some(st) =
-                                    send_daemon_request(&json!({ "action": "status" }))
-                                {
-                                    if st
-                                        .get("is_unlocked")
+                                while start.elapsed() < timeout {
+                                    std::thread::sleep(std::time::Duration::from_millis(300));
+                                    if let Some(st) =
+                                        send_daemon_request(&json!({ "action": "status" }))
+                                    {
+                                        if st
+                                            .get("is_unlocked")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false)
+                                        {
+                                            unlocked = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if omawarden::daemon::is_plugin_active("icyleaf.bitwarden") {
+                                        saw_active = true;
+                                    } else if saw_active {
+                                        eprintln!("Unlock cancelled by user.");
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+
+                                if unlocked {
+                                    if let Some(new_r) = send_daemon_request(&req) {
+                                        resp = new_r;
+                                    }
+                                } else {
+                                    eprintln!("Error: Vault was not unlocked within timeout.");
+                                    return ExitCode::FAILURE;
+                                }
+                            } else {
+                                // Pure CLI fallback: prompt for Master Password directly in terminal
+                                let pwd = rpassword::prompt_password(
+                                    "Vault is locked. Enter Master Password: ",
+                                )
+                                .unwrap_or_default();
+                                let unlock_req = json!({ "action": "unlock", "password": pwd });
+                                if let Some(unlock_resp) = send_daemon_request(&unlock_req) {
+                                    if unlock_resp
+                                        .get("ok")
                                         .and_then(|v| v.as_bool())
                                         .unwrap_or(false)
                                     {
-                                        unlocked = true;
-                                        break;
+                                        if let Some(new_r) = send_daemon_request(&req) {
+                                            resp = new_r;
+                                        }
+                                    } else {
+                                        let uerr = unlock_resp
+                                            .get("error")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Failed to unlock vault");
+                                        eprintln!("Error: {}", uerr);
+                                        return ExitCode::FAILURE;
                                     }
+                                } else {
+                                    eprintln!(
+                                        "Error: Failed to communicate with omawarden daemon."
+                                    );
+                                    return ExitCode::FAILURE;
                                 }
-                            }
-
-                            if unlocked {
-                                if let Some(new_r) = send_daemon_request(&req) {
-                                    resp = new_r;
-                                }
-                            } else {
-                                eprintln!("Error: Vault was not unlocked within timeout.");
-                                return ExitCode::FAILURE;
                             }
                         }
                     }
@@ -1342,25 +1382,26 @@ fn main() -> ExitCode {
                     return ExitCode::SUCCESS;
                 }
 
-                // 5. Interactive Confirmation Gate
+                // 5. Confirmation Gate
                 let is_interactive = std::io::stdin().is_terminal()
                     && std::io::stdout().is_terminal()
                     && std::env::var("CI").is_err();
 
                 if !yes {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": "Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments."
+                            }))
+                            .unwrap()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
                     if !is_interactive {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string(&json!({
-                                    "ok": false,
-                                    "error": "Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments."
-                                }))
-                                .unwrap()
-                            );
-                        } else {
-                            eprintln!("Error: Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments.");
-                        }
+                        eprintln!("Error: Interactive confirmation required. Use --yes (-y) to confirm import in non-interactive environments.");
                         return ExitCode::FAILURE;
                     }
 
@@ -1375,15 +1416,7 @@ fn main() -> ExitCode {
                     if std::io::stdin().read_line(&mut input).is_err()
                         || !input.trim().eq_ignore_ascii_case("y")
                     {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string(&json!({ "ok": false, "cancelled": true }))
-                                    .unwrap()
-                            );
-                        } else {
-                            println!("Import cancelled by user.");
-                        }
+                        println!("Import cancelled by user.");
                         return ExitCode::SUCCESS;
                     }
                 }
@@ -1433,62 +1466,96 @@ fn main() -> ExitCode {
 
                     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
                         if err.contains("Vault is locked") {
-                            if !is_interactive {
-                                if json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string(
-                                            &json!({ "ok": false, "error": err })
-                                        )
-                                        .unwrap()
-                                    );
-                                } else {
-                                    eprintln!("Error: {}", err);
-                                }
+                            // If invoked with --json (by plugin or programmatic tool), fail fast with structured JSON
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string(&json!({
+                                        "ok": false,
+                                        "error": "Vault is locked. Please unlock the vault first.",
+                                        "locked": true
+                                    }))
+                                    .unwrap()
+                                );
                                 return ExitCode::FAILURE;
                             }
-                            eprintln!("Vault is locked. Waiting up to 60s for unlock...");
-                            if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
-                                let _ = std::process::Command::new(shell_cmd)
-                                    .args(["shell", "summon", "icyleaf.bitwarden", "{}"])
-                                    .spawn();
+
+                            if !is_interactive {
+                                eprintln!("Error: {}", err);
+                                return ExitCode::FAILURE;
                             }
-                            let start = std::time::Instant::now();
-                            let timeout = std::time::Duration::from_secs(60);
-                            let mut unlocked = false;
-                            while start.elapsed() < timeout {
-                                std::thread::sleep(std::time::Duration::from_millis(300));
-                                if let Some(st) =
-                                    send_daemon_request(&json!({ "action": "status" }))
-                                {
-                                    if st
-                                        .get("is_unlocked")
+
+                            if let Some(shell_cmd) = omawarden::daemon::get_omarchy_shell_cmd() {
+                                eprintln!("Vault is locked. Waiting for unlock via Omarchy desktop overlay (or press Ctrl+C to cancel)...");
+                                let _ = std::process::Command::new(shell_cmd)
+                                    .args(["-q", "shell", "summon", "icyleaf.bitwarden", "{}"])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                                let start = std::time::Instant::now();
+                                let timeout = std::time::Duration::from_secs(60);
+                                let mut unlocked = false;
+                                let mut saw_active = false;
+                                while start.elapsed() < timeout {
+                                    std::thread::sleep(std::time::Duration::from_millis(300));
+                                    if let Some(st) =
+                                        send_daemon_request(&json!({ "action": "status" }))
+                                    {
+                                        if st
+                                            .get("is_unlocked")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false)
+                                        {
+                                            unlocked = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if omawarden::daemon::is_plugin_active("icyleaf.bitwarden") {
+                                        saw_active = true;
+                                    } else if saw_active {
+                                        eprintln!("Unlock cancelled by user.");
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                                if unlocked {
+                                    if let Some(new_r) = send_daemon_request(&req) {
+                                        resp = new_r;
+                                    }
+                                } else {
+                                    eprintln!("Error: Vault was not unlocked within timeout.");
+                                    return ExitCode::FAILURE;
+                                }
+                            } else {
+                                // Pure CLI fallback: prompt for Master Password directly in terminal
+                                let pwd = rpassword::prompt_password(
+                                    "Vault is locked. Enter Master Password: ",
+                                )
+                                .unwrap_or_default();
+                                let unlock_req = json!({ "action": "unlock", "password": pwd });
+                                if let Some(unlock_resp) = send_daemon_request(&unlock_req) {
+                                    if unlock_resp
+                                        .get("ok")
                                         .and_then(|v| v.as_bool())
                                         .unwrap_or(false)
                                     {
-                                        unlocked = true;
-                                        break;
+                                        if let Some(new_r) = send_daemon_request(&req) {
+                                            resp = new_r;
+                                        }
+                                    } else {
+                                        let uerr = unlock_resp
+                                            .get("error")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Failed to unlock vault");
+                                        eprintln!("Error: {}", uerr);
+                                        return ExitCode::FAILURE;
                                     }
-                                }
-                            }
-                            if unlocked {
-                                if let Some(new_r) = send_daemon_request(&req) {
-                                    resp = new_r;
-                                }
-                            } else {
-                                if json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string(&json!({
-                                            "ok": false,
-                                            "error": "Vault was not unlocked within timeout."
-                                        }))
-                                        .unwrap()
-                                    );
                                 } else {
-                                    eprintln!("Error: Vault was not unlocked within timeout.");
+                                    eprintln!(
+                                        "Error: Failed to communicate with omawarden daemon."
+                                    );
+                                    return ExitCode::FAILURE;
                                 }
-                                return ExitCode::FAILURE;
                             }
                         }
                     }
@@ -1517,16 +1584,38 @@ fn main() -> ExitCode {
                 let toml_str = match toml::to_string_pretty(&manifest) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("Error: Failed to serialize manifest TOML: {}", e);
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string(&json!({
+                                    "ok": false,
+                                    "error": format!("Failed to serialize manifest TOML: {}", e)
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Failed to serialize manifest TOML: {}", e);
+                        }
                         return ExitCode::FAILURE;
                     }
                 };
                 if let Err(e) = std::fs::write(&manifest_path, toml_str) {
-                    eprintln!(
-                        "Error: Failed to write manifest to '{}': {}",
-                        manifest_path.display(),
-                        e
-                    );
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "ok": false,
+                                "error": format!("Failed to write manifest to '{}': {}", manifest_path.display(), e)
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!(
+                            "Error: Failed to write manifest to '{}': {}",
+                            manifest_path.display(),
+                            e
+                        );
+                    }
                     return ExitCode::FAILURE;
                 }
 

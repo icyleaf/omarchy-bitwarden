@@ -519,6 +519,61 @@ pub fn is_omarchy_locked() -> bool {
     false
 }
 
+/// Checks whether an Omarchy Shell plugin overlay or window is currently open and active.
+pub fn is_plugin_active(plugin_id: &str) -> bool {
+    // 1. If running under Hyprland, inspect active windows for the plugin window.
+    if let Ok(output) = Command::new("hyprctl").args(["clients", "-j"]).output() {
+        if output.status.success() {
+            if let Ok(clients) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) {
+                let target_title = match plugin_id {
+                    "icyleaf.bitwarden" => "Bitwarden",
+                    _ => "",
+                };
+                let has_window = clients.iter().any(|c| {
+                    let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let init_title = c.get("initialTitle").and_then(|v| v.as_str()).unwrap_or("");
+                    let class = c.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                    let init_class = c.get("initialClass").and_then(|v| v.as_str()).unwrap_or("");
+                    let mapped = c.get("mapped").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let hidden = c.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                    let title_match = (!target_title.is_empty()
+                        && (title == target_title || init_title == target_title))
+                        || (!plugin_id.is_empty()
+                            && (title.contains(plugin_id) || init_title.contains(plugin_id)));
+                    let class_match = class == "org.quickshell"
+                        || init_class == "org.quickshell"
+                        || class.contains("quickshell");
+
+                    title_match && class_match && mapped && !hidden
+                });
+                return has_window;
+            }
+        }
+    }
+
+    // 2. Query the plugin's isOpen() method via omarchy-shell IPC if supported
+    if let Some(cmd) = get_omarchy_shell_cmd() {
+        if let Ok(output) = Command::new(cmd)
+            .args(["shell", "call", plugin_id, "isOpen", ""])
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .to_lowercase();
+                if s == "true" {
+                    return true;
+                } else if s == "false" {
+                    return false;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 pub fn is_screen_locker_running() -> bool {
     let locker_regex = SCREEN_LOCKER_PROCESS_NAMES.join("|");
     if let Ok(output) = Command::new("pgrep").args(["-x", &locker_regex]).output() {
@@ -2002,5 +2057,11 @@ mod tests {
             .expect("missing passphrase");
         assert_eq!(phrase_str.split('.').count(), 5);
         assert!(res_phrase.get("entropy").and_then(|v| v.as_f64()).unwrap() > 60.0);
+    }
+
+    #[test]
+    fn test_is_plugin_active_does_not_panic() {
+        let _ = is_plugin_active("icyleaf.bitwarden");
+        let _ = is_plugin_active("nonexistent.plugin");
     }
 }

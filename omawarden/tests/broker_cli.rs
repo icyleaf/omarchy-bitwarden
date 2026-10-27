@@ -359,6 +359,32 @@ fn test_broker_import_non_interactive_without_yes_fails_closed() {
 }
 
 #[test]
+fn test_broker_import_json_without_yes_returns_json_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join(".env");
+    std::fs::write(&env_file, "OPENAI_API_KEY=sk-test\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "broker",
+            "import",
+            "--dir",
+            tmp.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("Interactive confirmation required"));
+}
+
+#[test]
 fn test_broker_mcp_cli_help() {
     let out = Command::new(env!("CARGO_BIN_EXE_omawarden"))
         .args(["broker", "mcp", "--help"])

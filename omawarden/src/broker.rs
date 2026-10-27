@@ -460,6 +460,10 @@ pub static PROVIDER_PATTERNS: &[ProviderPattern] = &[
         canonical_env: "GITLAB_TOKEN",
     },
     ProviderPattern {
+        patterns: &["gitea"],
+        canonical_env: "GITEA_TOKEN",
+    },
+    ProviderPattern {
         patterns: &["bitbucket"],
         canonical_env: "BITBUCKET_TOKEN",
     },
@@ -500,6 +504,15 @@ pub static PROVIDER_PATTERNS: &[ProviderPattern] = &[
         patterns: &["gcp", "google_cloud", "googlecloud"],
         canonical_env: "GOOGLE_APPLICATION_CREDENTIALS",
     },
+    // Security & Identity
+    ProviderPattern {
+        patterns: &["turnstile"],
+        canonical_env: "TURNSTILE_SECRET_KEY",
+    },
+    ProviderPattern {
+        patterns: &["ldap"],
+        canonical_env: "LDAP_PASSWORD",
+    },
     // Databases & Vector Stores
     ProviderPattern {
         patterns: &["supabase"],
@@ -531,6 +544,14 @@ pub static PROVIDER_PATTERNS: &[ProviderPattern] = &[
         canonical_env: "SHOPIFY_API_KEY",
     },
     // Messaging & Communications
+    ProviderPattern {
+        patterns: &["feishu", "lark"],
+        canonical_env: "FEISHU_APP_SECRET",
+    },
+    ProviderPattern {
+        patterns: &["smtp", "action_mailer", "actionmailer"],
+        canonical_env: "SMTP_PASSWORD",
+    },
     ProviderPattern {
         patterns: &["resend"],
         canonical_env: "RESEND_API_KEY",
@@ -660,9 +681,12 @@ pub fn get_provider_display_name(pattern: &str) -> &'static str {
         "huggingface" | "hugging_face" | "hf" => "Hugging Face",
         "github" | "gh" => "GitHub",
         "gitlab" => "GitLab",
+        "gitea" => "Gitea",
         "bitbucket" => "BitBucket",
         "aws" | "amazon_web_services" => "AWS",
         "cloudflare" => "Cloudflare",
+        "turnstile" => "Turnstile",
+        "ldap" => "LDAP",
         "digitalocean" | "digital_ocean" => "DigitalOcean",
         "flyio" | "fly.io" | "fly_io" => "Fly.io",
         "vercel" => "Vercel",
@@ -679,6 +703,8 @@ pub fn get_provider_display_name(pattern: &str) -> &'static str {
         "weaviate" => "Weaviate",
         "stripe" => "Stripe",
         "shopify" => "Shopify",
+        "feishu" | "lark" => "Feishu",
+        "smtp" | "action_mailer" | "actionmailer" => "SMTP",
         "resend" => "Resend",
         "sendgrid" => "SendGrid",
         "twilio" => "Twilio",
@@ -758,7 +784,26 @@ pub fn infer_provider_from_env_key(key: &str) -> Option<&'static str> {
         return Some("Voyage AI");
     }
 
-    // 4. Prefix matching against registered pattern stems
+    // 4. Strip common frontend and framework prefixes (e.g. NEXT_PUBLIC_, REACT_APP_, VITE_)
+    const FRAMEWORK_PREFIXES: &[&str] = &[
+        "NEXT_PUBLIC_",
+        "REACT_APP_",
+        "VITE_",
+        "EXPO_PUBLIC_",
+        "NUXT_",
+        "PUBLIC_",
+        "GATSBY_",
+    ];
+
+    let mut core_key = upper.as_str();
+    for pfx in FRAMEWORK_PREFIXES {
+        if let Some(stripped) = core_key.strip_prefix(pfx) {
+            core_key = stripped;
+            break;
+        }
+    }
+
+    // 5. Prefix and pattern stem matching
     for rule in PROVIDER_PATTERNS {
         for &pattern in rule.patterns {
             let pat_upper = pattern.to_ascii_uppercase();
@@ -766,16 +811,40 @@ pub fn infer_provider_from_env_key(key: &str) -> Option<&'static str> {
 
             if pattern.len() <= 3 {
                 // Short pattern (e.g. "gh", "dd", "aws", "hf"): require exact prefix with underscore
-                if upper.starts_with(&pat_with_underscore) {
+                if core_key.starts_with(&pat_with_underscore) {
                     return Some(get_provider_display_name(rule.patterns[0]));
                 }
             } else {
-                // Longer pattern: prefix or compound segment match
-                if upper.starts_with(&pat_upper)
-                    || upper.starts_with(&pat_with_underscore)
-                    || upper.contains(&format!("_{}_", pat_upper))
-                {
+                // Exact pattern stem match (e.g. "GITHUB") or prefixed stem (e.g. "GITHUB_APP_ID")
+                if core_key == pat_upper || core_key.starts_with(&pat_with_underscore) {
                     return Some(get_provider_display_name(rule.patterns[0]));
+                }
+
+                // For compound keys containing _{provider}_, ensure it is an actual credential
+                // and NOT an application configuration switch (e.g. ZEALOT_SENTRY_DISABLE should NOT match Sentry)
+                if core_key.contains(&format!("_{}_", pat_upper)) {
+                    let is_credential = core_key.ends_with("_TOKEN")
+                        || core_key.ends_with("_KEY")
+                        || core_key.ends_with("_SECRET")
+                        || core_key.ends_with("_DSN")
+                        || core_key.ends_with("_PASSWORD")
+                        || core_key.ends_with("_CREDENTIAL")
+                        || core_key.ends_with("_CREDENTIALS")
+                        || core_key.ends_with("_AUTH")
+                        || core_key.ends_with("_CERT")
+                        || core_key.ends_with("_PRIVATE_KEY");
+
+                    let is_toggle_or_flag = core_key.ends_with("_DISABLE")
+                        || core_key.ends_with("_DISABLED")
+                        || core_key.ends_with("_ENABLE")
+                        || core_key.ends_with("_ENABLED")
+                        || core_key.ends_with("_MODE")
+                        || core_key.ends_with("_DEBUG")
+                        || core_key.ends_with("_FLAG");
+
+                    if is_credential && !is_toggle_or_flag {
+                        return Some(get_provider_display_name(rule.patterns[0]));
+                    }
                 }
             }
         }
@@ -936,24 +1005,53 @@ pub fn scan_legacy_env_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Formats a project identifier or directory name into a title-cased display name.
+/// (e.g. "zealot" -> "Zealot", "my-cool-app" -> "My Cool App", "my_service" -> "My Service")
+pub fn format_project_display_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "Project".to_string();
+    }
+
+    let parts: Vec<&str> = trimmed
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return "Project".to_string();
+    }
+
+    parts
+        .into_iter()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let mut s = first.to_uppercase().to_string();
+                    s.extend(chars);
+                    s
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Groups environment variable key-value pairs by provider or project fallback name.
 /// Deduplicates keys across multiple files, preserving the latest assigned value.
 pub fn group_env_vars_by_provider(
     vars: &[(String, String)],
     project_fallback: &str,
 ) -> BTreeMap<String, Vec<(String, String)>> {
+    let fallback_display = format_project_display_name(project_fallback);
     let mut groups: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for (k, v) in vars {
         let group_name = infer_provider_from_env_key(k)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                if project_fallback.is_empty() {
-                    "Project".to_string()
-                } else {
-                    project_fallback.to_string()
-                }
-            });
+            .unwrap_or_else(|| fallback_display.clone());
 
         groups
             .entry(group_name)
@@ -2816,7 +2914,56 @@ LD_PRELOAD=/evil.so
             Some("DeepSeek")
         );
         assert_eq!(infer_provider_from_env_key("GROQ_API_KEY"), Some("Groq"));
+        assert_eq!(
+            infer_provider_from_env_key("FEISHU_APP_SECRET"),
+            Some("Feishu")
+        );
+        assert_eq!(infer_provider_from_env_key("FEISHU_APP_ID"), Some("Feishu"));
+        assert_eq!(infer_provider_from_env_key("GITEA_SECRET"), Some("Gitea"));
+        assert_eq!(infer_provider_from_env_key("LDAP_PASSWORD"), Some("LDAP"));
+        assert_eq!(
+            infer_provider_from_env_key("TURNSTILE_SECRET_KEY"),
+            Some("Turnstile")
+        );
+        assert_eq!(infer_provider_from_env_key("SMTP_PASSWORD"), Some("SMTP"));
+        assert_eq!(infer_provider_from_env_key("SMTP_PORT"), Some("SMTP"));
+        assert_eq!(
+            infer_provider_from_env_key("ACTION_MAILER_DEFAULT_FROM"),
+            Some("SMTP")
+        );
+        // Framework prefix stripping
+        assert_eq!(
+            infer_provider_from_env_key("NEXT_PUBLIC_SENTRY_DSN"),
+            Some("Sentry")
+        );
+        assert_eq!(
+            infer_provider_from_env_key("VITE_GITHUB_TOKEN"),
+            Some("GitHub")
+        );
+        // Application flags containing provider names should NOT match provider
+        assert_eq!(infer_provider_from_env_key("ZEALOT_SENTRY_DISABLE"), None);
+        assert_eq!(
+            infer_provider_from_env_key("ENABLE_DEVELOPMENT_MAILER_TEST"),
+            None
+        );
         assert_eq!(infer_provider_from_env_key("CUSTOM_SECRET_APP_KEY"), None);
+    }
+
+    #[test]
+    fn test_format_project_display_name() {
+        assert_eq!(format_project_display_name("zealot"), "Zealot");
+        assert_eq!(
+            format_project_display_name("my-cool-project"),
+            "My Cool Project"
+        );
+        assert_eq!(format_project_display_name("my_service"), "My Service");
+        assert_eq!(
+            format_project_display_name("omarchy-bitwarden"),
+            "Omarchy Bitwarden"
+        );
+        assert_eq!(format_project_display_name("MyService"), "MyService");
+        assert_eq!(format_project_display_name(""), "Project");
+        assert_eq!(format_project_display_name("   "), "Project");
     }
 
     #[test]
