@@ -357,6 +357,11 @@ trait Host: Send + Sync + 'static {
     ) -> bool;
     /// See [`summon_overlay`].
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool;
+    /// ADR-0025: attempt the polkit-backed quick unlock. False means the
+    /// caller should fall back to the overlay summon.
+    fn try_quick_unlock(&self) -> bool {
+        false
+    }
 }
 
 impl Host for DaemonState {
@@ -394,6 +399,9 @@ impl Host for DaemonState {
     }
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool {
         summon_overlay(payload)
+    }
+    fn try_quick_unlock(&self) -> bool {
+        self.perform_quick_unlock().is_ok()
     }
 }
 
@@ -604,6 +612,8 @@ fn vault_keys(state: &DaemonState) -> Vec<AgentKey> {
 }
 
 /// Wait for the vault to be unlocked, opening the overlay so the person can.
+/// With quick unlock enabled (ADR-0025) the first attempt goes through the
+/// system authentication prompt instead.
 fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
     if host.is_unlocked() {
         return true;
@@ -611,22 +621,29 @@ fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
     let agent = host.agent();
     // One unlock prompt at a time, however many ssh processes are waiting.
     if !agent.unlock_prompted.swap(true, Ordering::SeqCst) {
-        host.summon_overlay(&serde_json::json!({}));
-        let h = host.clone();
-        let spawned = host.notify(
-            "Vault locked",
-            "An SSH key was requested. Unlock your vault to continue.",
-            &[("default", "Unlock")],
-            agent.unlock_timeout,
-            Box::new(move |action| {
-                if action == "default" {
-                    h.summon_overlay(&serde_json::json!({}));
-                }
-                h.agent().unlock_prompted.store(false, Ordering::SeqCst);
-            }),
-        );
-        if !spawned {
+        if host.try_quick_unlock() {
             agent.unlock_prompted.store(false, Ordering::SeqCst);
+            if host.is_unlocked() {
+                return true;
+            }
+        } else {
+            host.summon_overlay(&serde_json::json!({}));
+            let h = host.clone();
+            let spawned = host.notify(
+                "Vault locked",
+                "An SSH key was requested. Unlock your vault to continue.",
+                &[("default", "Unlock")],
+                agent.unlock_timeout,
+                Box::new(move |action| {
+                    if action == "default" {
+                        h.summon_overlay(&serde_json::json!({}));
+                    }
+                    h.agent().unlock_prompted.store(false, Ordering::SeqCst);
+                }),
+            );
+            if !spawned {
+                agent.unlock_prompted.store(false, Ordering::SeqCst);
+            }
         }
     }
     let deadline = Instant::now() + agent.unlock_timeout;

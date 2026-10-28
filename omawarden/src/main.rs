@@ -283,6 +283,11 @@ enum ConfigAction {
         ssh_agent: Option<String>,
         #[arg(long, help = "Confirm SSH signatures: always, first-use or never")]
         ssh_agent_confirm: Option<String>,
+        #[arg(
+            long,
+            help = "Unlock via system authentication after a soft lock (true/false; ADR-0025)"
+        )]
+        quick_unlock: Option<String>,
     },
 }
 
@@ -318,6 +323,10 @@ enum AuthAction {
     Fido2Status,
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
+    #[command(about = "Unlock vault via system authentication, polkit-backed (ADR-0025)")]
+    QuickUnlock,
+    #[command(about = "Report whether quick unlock is enabled and a retained key is available")]
+    QuickUnlockCheck,
     #[command(about = "Lock vault and clear session")]
     Lock,
     #[command(about = "Logout from Bitwarden account")]
@@ -590,6 +599,7 @@ fn main() -> ExitCode {
                             println!("{}", cfg.client_cert_server.as_deref().unwrap_or(""))
                         }
                         "ssh_agent_enabled" | "ssh_agent" => println!("{}", cfg.ssh_agent_enabled),
+                        "quick_unlock" => println!("{}", cfg.quick_unlock),
                         "ssh_agent_confirm" => println!("{}", cfg.ssh_agent_confirm),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
@@ -618,6 +628,7 @@ fn main() -> ExitCode {
                 client_key,
                 ssh_agent,
                 ssh_agent_confirm,
+                quick_unlock,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -720,6 +731,9 @@ fn main() -> ExitCode {
                         .as_ref()
                         .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes")),
                     ssh_agent_confirm: ssh_agent_confirm.clone(),
+                    quick_unlock: quick_unlock
+                        .as_ref()
+                        .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes")),
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -1072,6 +1086,39 @@ fn main() -> ExitCode {
                     } else {
                         ExitCode::FAILURE
                     }
+                }
+                AuthAction::QuickUnlock => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let resp = send_daemon_request(&json!({ "action": "quick_unlock" }))
+                        .unwrap_or_else(|| {
+                            json!({
+                                "ok": false,
+                                "status": "locked",
+                                "error": "omawarden daemon is not running."
+                            })
+                        });
+                    print_json_redacting_session(&resp);
+                    if resp.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
+                AuthAction::QuickUnlockCheck => {
+                    let ready = send_daemon_request(&json!({ "action": "ping" }))
+                        .and_then(|resp| resp.get("quick_unlock").and_then(Value::as_bool))
+                        .unwrap_or(false);
+                    let enabled = ConfigManager::default().load().quick_unlock;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "enabled": enabled,
+                            "available": ready,
+                        }))
+                        .unwrap()
+                    );
+                    ExitCode::SUCCESS
                 }
                 AuthAction::Lock => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));

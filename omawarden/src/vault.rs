@@ -270,6 +270,9 @@ pub struct VaultManager {
     pub decrypted_items: RwLock<Vec<VaultItem>>,
     pub user_key: RwLock<Option<SymmetricCryptoKey>>,
     pub is_unlocked: RwLock<bool>,
+    /// ADR-0025: user key retained across soft locks so a polkit check can
+    /// re-unlock without the master password. Never leaves mlocked memory.
+    pub quick_unlock_key: RwLock<Option<SymmetricCryptoKey>>,
 }
 
 impl VaultManager {
@@ -316,6 +319,7 @@ impl VaultManager {
             decrypted_items: RwLock::new(Vec::new()),
             user_key: RwLock::new(None),
             is_unlocked: RwLock::new(false),
+            quick_unlock_key: RwLock::new(None),
         }
     }
 
@@ -323,7 +327,7 @@ impl VaultManager {
         self.is_unlocked.read().map(|g| *g).unwrap_or(false)
     }
 
-    pub fn lock(&self) {
+    fn purge_decrypted_state(&self) {
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = false;
         }
@@ -334,6 +338,111 @@ impl VaultManager {
             *key = None;
         }
         crate::attachment::clear_preview_attachments(None);
+    }
+
+    /// Full lock: purges decrypted state AND the quick-unlock slot. This is
+    /// the fail-safe default — retention happens only through soft_lock().
+    pub fn lock(&self) {
+        self.purge_decrypted_state();
+        self.wipe_quick_unlock();
+    }
+
+    /// Soft lock (ADR-0025): purge everything a hard lock purges, except the
+    /// user key, which moves to the quick-unlock slot so a later polkit check
+    /// can restore the session. Reports whether a key was retained.
+    pub fn soft_lock(&self) -> bool {
+        let retained = match self.user_key.write() {
+            Ok(mut src) => {
+                let taken = src.take();
+                let had = taken.is_some();
+                if let Ok(mut slot) = self.quick_unlock_key.write() {
+                    *slot = taken;
+                }
+                had
+            }
+            Err(_) => false,
+        };
+        self.purge_decrypted_state();
+        if retained {
+            crate::log_info!(
+                "omawarden:vault",
+                "Soft-locked vault; user key retained for quick unlock."
+            );
+        }
+        retained
+    }
+
+    /// Hard lock: everything lock() does (explicit alias for readability at
+    /// ADR-0025 call sites: suspend, max session lifetime, explicit lock,
+    /// three failed polkit checks, server/account change).
+    pub fn hard_lock(&self) {
+        self.lock();
+    }
+
+    pub fn quick_unlock_available(&self) -> bool {
+        self.quick_unlock_key
+            .read()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn wipe_quick_unlock(&self) {
+        if let Ok(mut slot) = self.quick_unlock_key.write() {
+            // Dropping the LockedMemory-backed key zeroizes its page.
+            *slot = None;
+        }
+    }
+
+    /// Re-unlock from the retained key (ADR-0025): same decryption path as
+    /// unlock(), minus the master-password KDF. The slot keeps a copy so
+    /// subsequent soft locks retain it again.
+    pub fn quick_unlock_restore(&self) -> Result<usize, String> {
+        let key = {
+            let slot = self
+                .quick_unlock_key
+                .read()
+                .map_err(|_| "Quick unlock slot unavailable".to_string())?;
+            slot.clone()
+        }
+        .ok_or_else(|| "No key retained for quick unlock".to_string())?;
+
+        let fresh_storage = self.storage_mgr.load();
+        if fresh_storage.enc_user_key.is_none() {
+            return Err("Account not logged in or missing encryption keys.".to_string());
+        }
+
+        let items = decrypt_sync_ciphers_with_context(
+            &fresh_storage.ciphers,
+            &fresh_storage.folders,
+            &fresh_storage.organizations,
+            &key,
+            fresh_storage.enc_private_key.as_deref(),
+        );
+        let count = items.len();
+
+        if let Ok(mut dec_items) = self.decrypted_items.write() {
+            *dec_items = items;
+        }
+        if let Ok(mut key_slot) = self.user_key.write() {
+            *key_slot = Some(key.clone());
+        }
+        if let Ok(mut unl) = self.is_unlocked.write() {
+            *unl = true;
+        }
+        if let Ok(mut st) = self.storage.write() {
+            *st = fresh_storage;
+        }
+        // Keep the retained copy current with the key now in use.
+        if let Ok(mut slot) = self.quick_unlock_key.write() {
+            *slot = Some(key);
+        }
+
+        crate::log_info!(
+            "omawarden:vault",
+            "Quick-unlocked vault; {} items restored.",
+            count
+        );
+        Ok(count)
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -367,7 +476,14 @@ impl VaultManager {
             *dec_items = items;
         }
         if let Ok(mut key) = self.user_key.write() {
-            *key = Some(user_key);
+            *key = Some(user_key.clone());
+        }
+        // If a soft lock retained a key earlier, keep that copy current with
+        // the key now in use (e.g. after a server-side key rotation).
+        if let Ok(mut slot) = self.quick_unlock_key.write() {
+            if slot.is_some() {
+                *slot = Some(user_key);
+            }
         }
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = true;
@@ -1531,9 +1647,128 @@ impl VaultManager {
 }
 
 #[cfg(test)]
-mod tests {
+// pub(crate): daemon tests reuse the seeded vault fixture for the IPC
+// quick-unlock flow.
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Builds a VaultManager whose data.json carries a real login: a type-2
+    /// EncString wrapping the raw 64-byte user key under the master key, so
+    /// unlock(password) exercises the production key-unwrapping path.
+    pub(crate) fn seeded_vault(dir: &std::path::Path, password: &str) -> VaultManager {
+        use crate::crypto::{derive_master_key, KdfType, SymmetricCryptoKey, BASE64};
+        use base64::Engine as _;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use hmac::Mac;
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+        type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+        let email = "quick@unlock.test";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 600_000, None, None)
+                .expect("master key");
+        let master_sym = SymmetricCryptoKey::from_master_key(master_key.as_slice());
+        let raw = [42u8; 64];
+
+        let iv = [9u8; 16];
+        let enc = Aes256CbcEnc::new_from_slices(&master_sym.enc_key, &iv).expect("cipher");
+        let mut buf = vec![0u8; raw.len() + 16];
+        let ct = enc
+            .encrypt_padded_b2b_mut::<cbc::cipher::block_padding::Pkcs7>(&raw, &mut buf)
+            .expect("encrypt");
+        let mut mac = HmacSha256::new_from_slice(master_sym.mac_key.as_ref().expect("mac key"))
+            .expect("hmac");
+        mac.update(&iv);
+        mac.update(ct);
+        let mac = mac.finalize().into_bytes();
+        let enc_user_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let storage = VaultStorage {
+            server_url: "https://vault.example.com".to_string(),
+            user_email: email.to_string(),
+            kdf: Some(0),
+            kdf_iterations: Some(600_000),
+            enc_user_key: Some(enc_user_key),
+            ..Default::default()
+        };
+        let storage_mgr = StorageManager::new(dir.join("data.json"));
+        storage_mgr.save(&storage).expect("save storage");
+        VaultManager::new("", Some(storage_mgr), None)
+    }
+
+    #[test]
+    fn test_soft_lock_retains_key_and_quick_unlock_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        assert!(!vault.quick_unlock_available());
+
+        assert_eq!(vault.unlock("master-pw").unwrap(), 0);
+        assert!(vault.is_unlocked());
+
+        assert!(vault.soft_lock(), "an unlocked vault must retain its key");
+        assert!(!vault.is_unlocked());
+        assert!(vault.decrypted_items.read().unwrap().is_empty());
+        assert!(vault.user_key.read().unwrap().is_none());
+        assert!(vault.quick_unlock_available());
+
+        assert_eq!(vault.quick_unlock_restore().unwrap(), 0);
+        assert!(vault.is_unlocked());
+        assert!(vault.user_key.read().unwrap().is_some());
+        assert!(vault.quick_unlock_available(), "slot stays primed");
+
+        // A second soft lock keeps retention working.
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_restore().is_ok());
+
+        // Hard lock wipes the slot; restore now fails.
+        vault.hard_lock();
+        assert!(!vault.quick_unlock_available());
+        assert!(vault.quick_unlock_restore().is_err());
+    }
+
+    #[test]
+    fn test_plain_lock_wipes_quick_unlock_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // lock() is the fail-safe path: any caller that has not opted into
+        // retention must not leave the slot behind.
+        vault.unlock("master-pw").unwrap();
+        vault.lock();
+        assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_soft_lock_without_unlock_retains_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        assert!(!vault.soft_lock());
+        assert!(!vault.quick_unlock_available());
+        assert!(vault.quick_unlock_restore().is_err());
+    }
+
+    #[test]
+    fn test_unlock_refreshes_stale_retained_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        // A fresh password unlock replaces the retained copy with the key now
+        // in use, so a later restore cannot resurrect an old key.
+        vault.unlock("master-pw").unwrap();
+        vault.lock();
+        assert!(!vault.quick_unlock_available());
+    }
 
     #[test]
     fn test_fuzzy_match() {

@@ -55,6 +55,10 @@ pub struct Config {
     /// When to confirm signatures: "always", "first-use" (until logout) or "never".
     #[serde(default = "default_ssh_agent_confirm")]
     pub ssh_agent_confirm: String,
+    /// ADR-0025: retain the user key across soft locks and require a polkit
+    /// check (system password / fingerprint) instead of the master password.
+    #[serde(default)]
+    pub quick_unlock: bool,
 }
 
 fn default_server_url() -> String {
@@ -114,6 +118,7 @@ impl Default for Config {
             client_cert_server: None,
             ssh_agent_enabled: false,
             ssh_agent_confirm: default_ssh_agent_confirm(),
+            quick_unlock: false,
         }
     }
 }
@@ -341,6 +346,15 @@ impl ConfigManager {
         if let Some(v) = options.ssh_agent_confirm {
             cfg.ssh_agent_confirm = v;
         }
+        if let Some(v) = options.quick_unlock {
+            cfg.quick_unlock = v;
+            if !v {
+                // Turning the feature off must not leave a retained key behind.
+                crate::daemon::send_daemon_request(&serde_json::json!({
+                    "action": "wipe_quick_unlock"
+                }));
+            }
+        }
         if let Some(v) = options.max_attachment_size_mb {
             cfg.max_attachment_size_mb = v;
         }
@@ -403,6 +417,7 @@ pub struct ConfigUpdateOptions {
     pub client_key_path: Option<String>,
     pub ssh_agent_enabled: Option<bool>,
     pub ssh_agent_confirm: Option<String>,
+    pub quick_unlock: Option<bool>,
 }
 
 #[cfg(test)]

@@ -236,11 +236,34 @@ pub struct DaemonState {
     pub unlocked_at: Mutex<Option<Instant>>,
     pub max_session_lifetime: Mutex<Duration>,
     pub ssh_agent: Arc<crate::ssh_agent::SshAgent>,
+    /// Failed polkit checks since the last successful quick unlock. Three in
+    /// a row wipe the retained key (ADR-0025).
+    pub quick_unlock_failures: Mutex<u32>,
+    /// Held for the duration of an interactive polkit prompt so concurrent
+    /// requests don't stack dialogs.
+    pub quick_unlock_busy: Mutex<()>,
+    /// Injectable for tests; defaults to `pkcheck` resolved from PATH.
+    pub polkit_binary: PathBuf,
 }
+
+/// What locked the session. Sleep is treated harder than a screen lock
+/// everywhere: a soft lock never survives a suspend (ADR-0025).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockSignal {
+    None,
+    Screen,
+    Sleep,
+}
+
+/// Hard limit of consecutive denied quick-unlock prompts before the retained
+/// key is wiped and the master password is required again.
+pub const MAX_QUICK_UNLOCK_FAILURES: u32 = 3;
 
 impl DaemonState {
     pub fn new(storage_mgr: StorageManager, auto_lock_minutes: u64) -> Self {
         let vault_mgr = Arc::new(VaultManager::new("", Some(storage_mgr), None));
+        let polkit_binary =
+            which::which("pkcheck").unwrap_or_else(|_| std::path::PathBuf::from("pkcheck"));
         Self {
             vault_mgr,
             last_activity: Mutex::new(Instant::now()),
@@ -248,9 +271,95 @@ impl DaemonState {
             unlocked_at: Mutex::new(None),
             max_session_lifetime: Mutex::new(Duration::from_secs(12 * 3600)),
             ssh_agent: Arc::new(crate::ssh_agent::SshAgent::default()),
+            quick_unlock_failures: Mutex::new(0),
+            quick_unlock_busy: Mutex::new(()),
+            polkit_binary,
         }
     }
 
+    fn quick_unlock_enabled(&self) -> bool {
+        crate::config::ConfigManager::default().load().quick_unlock
+    }
+
+    /// Quick unlock availability as advertised over IPC: enabled in settings
+    /// AND a key currently retained by a soft lock.
+    pub fn quick_unlock_ready(&self) -> bool {
+        self.quick_unlock_enabled() && self.vault_mgr.quick_unlock_available()
+    }
+
+    /// ADR-0025: re-unlock the vault behind a polkit system-authentication
+    /// check instead of the master password. Fail-closed on every rejection;
+    /// three consecutive denials wipe the retained key.
+    pub fn perform_quick_unlock(&self) -> Result<usize, &'static str> {
+        if !self.quick_unlock_enabled() {
+            return Err("Quick unlock is disabled in settings.");
+        }
+        if !self.vault_mgr.quick_unlock_available() {
+            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+        }
+        // One interactive prompt at a time; concurrent callers fail fast and
+        // the overlay falls back to the master password field.
+        let _guard = match self.quick_unlock_busy.try_lock() {
+            Ok(g) => g,
+            Err(_) => return Err("Quick unlock is already in progress."),
+        };
+        // Re-check: a wipe may have raced with acquiring the busy lock.
+        if !self.vault_mgr.quick_unlock_available() {
+            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+        }
+
+        match crate::polkit::check(
+            crate::polkit::POLKIT_ACTION_ID,
+            &self.polkit_binary,
+            crate::polkit::DEFAULT_CHECK_TIMEOUT,
+        ) {
+            crate::polkit::PolkitOutcome::Authorized => {}
+            crate::polkit::PolkitOutcome::Denied => {
+                let strike = {
+                    match self.quick_unlock_failures.lock() {
+                        Ok(mut n) => {
+                            *n += 1;
+                            *n
+                        }
+                        Err(_) => MAX_QUICK_UNLOCK_FAILURES,
+                    }
+                };
+                if strike >= MAX_QUICK_UNLOCK_FAILURES {
+                    crate::log_warn!(
+                        "omawarden:daemon",
+                        "Quick unlock denied {} times; wiping retained key",
+                        strike
+                    );
+                    self.vault_mgr.wipe_quick_unlock();
+                    if let Ok(mut n) = self.quick_unlock_failures.lock() {
+                        *n = 0;
+                    }
+                }
+                return Err("System authentication was denied.");
+            }
+            crate::polkit::PolkitOutcome::Unavailable(reason) => {
+                crate::log_warn!("omawarden:daemon", "polkit unavailable: {}", reason);
+                return Err("System authentication is unavailable right now.");
+            }
+        }
+
+        match self.vault_mgr.quick_unlock_restore() {
+            Ok(count) => {
+                if let Ok(mut n) = self.quick_unlock_failures.lock() {
+                    *n = 0;
+                }
+                self.touch_activity();
+                Ok(count)
+            }
+            Err(e) => {
+                crate::log_error!("omawarden:daemon", "Quick unlock restore failed: {}", e);
+                Err("Quick unlock failed to restore the vault.")
+            }
+        }
+    }
+}
+
+impl DaemonState {
     pub fn set_auto_lock_duration(&self, duration: Duration) {
         if let Ok(mut dur) = self.auto_lock_duration.lock() {
             *dur = duration;
@@ -308,9 +417,10 @@ impl DaemonState {
             };
 
             if idle_expired {
+                // Idle timeout is a soft lock: with quick unlock enabled the
+                // key is retained for a later polkit check (ADR-0025).
                 crate::log_info!("omawarden:daemon", "Idle timeout elapsed; locking vault");
-                self.lock();
-                crate::attachment::clear_preview_attachments(None);
+                self.soft_lock();
                 return true;
             }
         }
@@ -318,17 +428,31 @@ impl DaemonState {
     }
 
     pub fn check_screen_lock(&self) -> bool {
-        self.check_screen_lock_with(is_system_or_screen_locked)
+        self.check_screen_lock_with(system_lock_signal)
     }
 
     pub fn check_screen_lock_with<F>(&self, detector: F) -> bool
     where
-        F: FnOnce() -> bool,
+        F: FnOnce() -> LockSignal,
     {
-        if self.vault_mgr.is_unlocked() && detector() {
-            self.lock();
-            crate::attachment::clear_preview_attachments(None);
-            return true;
+        if self.vault_mgr.is_unlocked() {
+            match detector() {
+                LockSignal::None => {}
+                LockSignal::Sleep => {
+                    // A suspend must never leave the key retained.
+                    crate::log_info!(
+                        "omawarden:daemon",
+                        "System is going to sleep; hard-locking vault"
+                    );
+                    self.lock();
+                    return true;
+                }
+                LockSignal::Screen => {
+                    // soft_lock() itself hard-locks when quick unlock is off.
+                    self.soft_lock();
+                    return true;
+                }
+            }
         }
         false
     }
@@ -339,11 +463,32 @@ impl DaemonState {
         }
     }
 
+    /// Hard lock (ADR-0025): wipes the retained key. Used by explicit lock,
+    /// logout, stop, sleep and every other non-soft path.
     pub fn lock(&self) {
         if let Ok(mut ua) = self.unlocked_at.lock() {
             *ua = None;
         }
-        self.vault_mgr.lock();
+        if let Ok(mut n) = self.quick_unlock_failures.lock() {
+            *n = 0;
+        }
+        self.vault_mgr.hard_lock();
+        let _ = crate::clipboard::ClipboardManager::default()
+            .without_detached_worker()
+            .clear();
+    }
+
+    /// Soft lock (ADR-0025): purges decrypted state but retains the user key
+    /// in locked memory when quick unlock is enabled in settings.
+    pub fn soft_lock(&self) {
+        if let Ok(mut ua) = self.unlocked_at.lock() {
+            *ua = None;
+        }
+        if self.quick_unlock_enabled() {
+            self.vault_mgr.soft_lock();
+        } else {
+            self.vault_mgr.hard_lock();
+        }
         let _ = crate::clipboard::ClipboardManager::default()
             .without_detached_worker()
             .clear();
@@ -546,26 +691,13 @@ pub fn is_screen_locker_running() -> bool {
 }
 
 pub fn is_logind_locked_or_sleeping() -> bool {
-    // 1. Check session LockedHint
-    if let Ok(output) = Command::new("busctl")
-        .args([
-            "get-property",
-            "org.freedesktop.login1",
-            "/org/freedesktop/login1/session/auto",
-            "org.freedesktop.login1.Session",
-            "LockedHint",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout);
-            if s.trim() == "b true" {
-                return true;
-            }
-        }
-    }
+    matches!(logind_lock_signal(), LockSignal::Screen | LockSignal::Sleep)
+}
 
-    // 2. Check Manager PreparingForSleep
+/// logind session state as a lock signal. Sleep wins over a locked hint:
+/// both together must produce the hard lock.
+pub fn logind_lock_signal() -> LockSignal {
+    // 1. Check Manager PreparingForSleep
     if let Ok(output) = Command::new("busctl")
         .args([
             "get-property",
@@ -579,16 +711,48 @@ pub fn is_logind_locked_or_sleeping() -> bool {
         if output.status.success() {
             let s = String::from_utf8_lossy(&output.stdout);
             if s.trim() == "b true" {
-                return true;
+                return LockSignal::Sleep;
             }
         }
     }
 
-    false
+    // 2. Check session LockedHint
+    if let Ok(output) = Command::new("busctl")
+        .args([
+            "get-property",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1/session/auto",
+            "org.freedesktop.login1.Session",
+            "LockedHint",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.trim() == "b true" {
+                return LockSignal::Screen;
+            }
+        }
+    }
+
+    LockSignal::None
+}
+
+/// Combine every desktop signal into the strongest applicable lock kind.
+pub fn system_lock_signal() -> LockSignal {
+    // Sleep dominates: it must hard-lock even if a screen lock is also up.
+    let logind = logind_lock_signal();
+    if logind == LockSignal::Sleep {
+        return LockSignal::Sleep;
+    }
+    if is_omarchy_locked() || is_screen_locker_running() || logind == LockSignal::Screen {
+        return LockSignal::Screen;
+    }
+    LockSignal::None
 }
 
 pub fn is_system_or_screen_locked() -> bool {
-    is_omarchy_locked() || is_screen_locker_running() || is_logind_locked_or_sleeping()
+    system_lock_signal() != LockSignal::None
 }
 
 fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
@@ -661,6 +825,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
+            "quick_unlock": state.quick_unlock_ready(),
         }),
         "stop" => {
             state.lock();
@@ -702,6 +867,20 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 }),
                 Err(e) => json!({ "ok": false, "status": "locked", "error": e }),
             }
+        }
+        // ADR-0025: system-authentication re-unlock from the retained key.
+        "quick_unlock" => match state.perform_quick_unlock() {
+            Ok(count) => json!({
+                "ok": true,
+                "status": "unlocked",
+                "items_count": count,
+            }),
+            Err(reason) => json!({ "ok": false, "status": "locked", "error": reason }),
+        },
+        // Config side-effect: drop the retained key without locking.
+        "wipe_quick_unlock" => {
+            state.vault_mgr.wipe_quick_unlock();
+            json!({ "ok": true })
         }
         "lock" => {
             state.lock();
@@ -1414,7 +1593,7 @@ mod tests {
         let mut called = false;
         assert!(!state.check_screen_lock_with(|| {
             called = true;
-            true
+            LockSignal::Screen
         }));
         assert!(!called);
         assert!(!state.vault_mgr.is_unlocked());
@@ -1423,16 +1602,252 @@ mod tests {
         *state.vault_mgr.is_unlocked.write().unwrap() = true;
         assert!(state.vault_mgr.is_unlocked());
 
-        // Detector returns false -> vault remains unlocked
-        assert!(!state.check_screen_lock_with(|| false));
+        // No lock signal -> vault remains unlocked
+        assert!(!state.check_screen_lock_with(|| LockSignal::None));
         assert!(state.vault_mgr.is_unlocked());
 
-        // Detector returns true -> vault locks immediately
-        assert!(state.check_screen_lock_with(|| true));
+        // Screen signal -> locks
+        assert!(state.check_screen_lock_with(|| LockSignal::Screen));
         assert!(!state.vault_mgr.is_unlocked());
 
         // Subsequent call returns false because already locked
-        assert!(!state.check_screen_lock_with(|| true));
+        assert!(!state.check_screen_lock_with(|| LockSignal::Screen));
+    }
+
+    #[test]
+    fn test_sleep_signal_hard_locks_and_screen_signal_soft_locks() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        let key = crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap();
+
+        // Screen lock with quick unlock enabled: key must survive in the slot.
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        *state.vault_mgr.user_key.write().unwrap() = Some(key.clone());
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        assert!(state.check_screen_lock_with(|| LockSignal::Screen));
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(
+            state.vault_mgr.quick_unlock_available(),
+            "screen lock must retain the key when quick unlock is on"
+        );
+
+        // Sleep signal: retention must be wiped even while quick unlock is on.
+        *state.vault_mgr.user_key.write().unwrap() = Some(key);
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        assert!(state.check_screen_lock_with(|| LockSignal::Sleep));
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(
+            !state.vault_mgr.quick_unlock_available(),
+            "sleep must hard-lock: no key may survive a suspend"
+        );
+
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_quick_unlock_ipc_disabled_and_unavailable() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            client.write_all(format!("{}\n", req).as_bytes()).unwrap();
+            client.flush().unwrap();
+            let mut line = String::new();
+            BufReader::new(client).read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let res = send_req(json!({ "action": "quick_unlock" }));
+        assert_eq!(res["ok"], false);
+        assert!(
+            res["error"].as_str().unwrap().contains("disabled"),
+            "got: {res}"
+        );
+
+        // Enabled but nothing retained (hard-locked vault) must fail closed.
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let res = send_req(json!({ "action": "quick_unlock" }));
+        assert_eq!(res["ok"], false);
+        assert!(
+            res["error"].as_str().unwrap().contains("unavailable"),
+            "got: {res}"
+        );
+
+        old_runtime.map_or_else(
+            || std::env::remove_var("XDG_RUNTIME_DIR"),
+            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
+        );
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_quick_unlock_ipc_authorized_and_three_denies_wipe() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+
+        // A real login on disk so a successful polkit check can restore.
+        let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
+        let mut daemon_state =
+            DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
+
+        // Mock pkcheck whose exit code is driven by a file the test flips.
+        let pk = dir.path().join("mock-pkcheck");
+        crate::write_test_executable(
+            &pk,
+            format!(
+                r#"#!/bin/sh
+exit $(cat {})
+"#,
+                dir.path().join("pk_code").display()
+            ),
+        );
+        daemon_state.polkit_binary = pk.clone();
+        let state = Arc::new(daemon_state);
+
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        // Prime retention the way a soft lock would.
+        *state.vault_mgr.user_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap());
+        assert!(state.vault_mgr.soft_lock());
+        assert_eq!(*state.quick_unlock_failures.lock().unwrap(), 0);
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            client.write_all(format!("{}\n", req).as_bytes()).unwrap();
+            client.flush().unwrap();
+            let mut line = String::new();
+            BufReader::new(client).read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // 1. polkit authorizes: IPC reports an unlocked vault.
+        fs::write(dir.path().join("pk_code"), "0").unwrap();
+        let res = send_req(json!({ "action": "quick_unlock" }));
+        assert_eq!(res["ok"], true, "got: {res}");
+        assert_eq!(res["status"], "unlocked");
+        assert_eq!(*state.quick_unlock_failures.lock().unwrap(), 0);
+
+        // 2. Three denials in a row wipe the retained key.
+        fs::write(dir.path().join("pk_code"), "1").unwrap();
+        for i in 1..=3 {
+            let res = send_req(json!({ "action": "quick_unlock" }));
+            assert_eq!(res["ok"], false, "attempt {i}: {res}");
+            assert!(
+                res["error"].as_str().unwrap().contains("denied"),
+                "attempt {i}: {res}"
+            );
+        }
+        assert!(
+            !state.vault_mgr.quick_unlock_available(),
+            "three denials must wipe the retained key"
+        );
+        assert_eq!(*state.quick_unlock_failures.lock().unwrap(), 0);
+
+        // 3. After the wipe the action fails closed without calling polkit.
+        fs::write(dir.path().join("pk_code"), "0").unwrap();
+        let res = send_req(json!({ "action": "quick_unlock" }));
+        assert_eq!(res["ok"], false);
+        assert!(res["error"].as_str().unwrap().contains("unavailable"));
+
+        // 4. wipe_quick_unlock action is a harmless explicit no-op.
+        let res = send_req(json!({ "action": "wipe_quick_unlock" }));
+        assert_eq!(res["ok"], true);
+
+        old_runtime.map_or_else(
+            || std::env::remove_var("XDG_RUNTIME_DIR"),
+            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
+        );
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_ping_advertises_quick_unlock_only_when_ready() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        // Disabled by default and nothing retained.
+        assert!(!state.quick_unlock_ready());
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        // Enabled but no retained key: still not ready.
+        assert!(!state.quick_unlock_ready());
+        *state.vault_mgr.quick_unlock_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[9u8; 64]).unwrap());
+        assert!(state.quick_unlock_ready());
+
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
     }
 
     #[test]
