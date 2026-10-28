@@ -1,7 +1,7 @@
 # ADR 0025: Quick Unlock with System Authentication
 
 ## Status
-Proposed
+Accepted (implemented by `feat(quick-unlock)`: polkit check via `pkcheck`, retained key in the daemon's locked memory, policy file shipped by the packages)
 
 ## Context
 The vault locks on screen lock, suspend, idle timeout and the maximum session lifetime (Security Handbook Rule 3, Rule 9), and unlocking always takes the master password. On Omarchy the screen locks after a few minutes idle, so with the SSH agent (ADR 0024) a normal working day means typing the master password into the overlay many times, usually because `ssh` or `git` needed a key.

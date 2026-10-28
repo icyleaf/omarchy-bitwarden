@@ -402,6 +402,15 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Scoped `first-use` authorization (key, binary, ancestor app) & agent forwarding defense
 - [x] CLI commands (`omawarden ssh-agent status|pending|reply`)
 
+### Phase 3.5: Completed (Quick Unlock with System Authentication)
+
+- [x] Polkit-backed quick unlock (ADR 0025): after a soft lock, unlocking asks for the login password or fingerprint instead of the master password
+- [x] User key retained in mlocked, non-dumpable daemon memory across soft locks; never written to disk or the keyring
+- [x] Hard locks wipe the retained key: suspend, maximum session lifetime, explicit lock/logout, daemon exit, three denied prompts, server/account change
+- [x] SSH agent: a locked key request triggers the system authentication prompt natively
+- [x] Opt-in `quick_unlock` setting (`omawarden config set --quick-unlock true|false`) with an overlay toggle and honest trade-off disclosure
+- [x] Packaged polkit policy (`/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy`); master password always remains as fallback
+
 ### Phase 4: Planned (Vault Item Creation)
 
 - [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
@@ -420,7 +429,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 ### Phase 6: Future (Desktop Automation & Biometrics)
 
 - [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
-- [ ] Quick biometric / PAM / Fingerprint system unlock (ADR 0025)
+- [x] Quick biometric / PAM / Fingerprint system unlock (ADR 0025) — shipped in Phase 3.5 via polkit
 
 ---
 
