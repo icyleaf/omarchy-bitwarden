@@ -39,6 +39,7 @@ STANDALONE_TESTS=(
   "tests/tst_settings_ssh_agent.qml"
   "tests/tst_ssh_approval_modal.qml"
   "tests/tst_commons_stub.qml"
+  "tests/tst_theme_color_adaptation.qml"
 )
 
 # The components import qs.Commons from Quickshell; use the stub, and run
