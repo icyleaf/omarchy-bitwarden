@@ -356,7 +356,12 @@ impl VaultManager {
                 let taken = src.take();
                 let had = taken.is_some();
                 if let Ok(mut slot) = self.quick_unlock_key.write() {
-                    *slot = taken;
+                    // Keep a previously retained key if this call had nothing
+                    // to move (called on an already-locked vault): dropping
+                    // retention would be a surprising side effect.
+                    if had || slot.is_none() {
+                        *slot = taken;
+                    }
                 }
                 had
             }
@@ -419,6 +424,64 @@ impl VaultManager {
             fresh_storage.enc_private_key.as_deref(),
         );
         let count = items.len();
+
+        // Fail closed on a stale key (server-side rotation, password change
+        // elsewhere, account switch while soft-locked): decryption failures
+        // fall back to "Untitled" names, so the vault would otherwise look
+        // unlocked with garbage content. Validation, strongest first:
+        // 1. enc_private_key is wrapped under the user key (type 0..=2) and
+        //    must decrypt;
+        // 2. failing that, at least one personal cipher without its own
+        //    item key must have a name that decrypts under the user key.
+        //    Ciphers that all carry their own keys/org wrappers offer no
+        //    cheap check and are allowed through.
+        if let Some(enc_priv) = fresh_storage.enc_private_key.as_deref() {
+            if let Ok(parsed) = crate::crypto::EncString::parse(enc_priv) {
+                if parsed.enc_type <= 2 && parsed.decrypt(&key).is_err() {
+                    crate::log_warn!(
+                        "omawarden:vault",
+                        "Retained key fails to decrypt the private key; wiping quick unlock"
+                    );
+                    self.wipe_quick_unlock();
+                    return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+                }
+            }
+        } else {
+            let mut candidates = 0usize;
+            let mut decrypted_any = false;
+            for c in &fresh_storage.ciphers {
+                let deleted = c
+                    .get("deletedDate")
+                    .or_else(|| c.get("DeletedDate"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                if deleted
+                    || c.get("organizationId")
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false)
+                    || c.get("key").is_some()
+                {
+                    continue;
+                }
+                candidates += 1;
+                if let Some(name) = c.get("name").and_then(|v| v.as_str()) {
+                    if let Ok(parsed_name) = crate::crypto::EncString::parse(name) {
+                        if parsed_name.decrypt_string(&key).is_ok() {
+                            decrypted_any = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if candidates > 0 && !decrypted_any {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Retained key fails to decrypt any personal cipher; wiping quick unlock"
+                );
+                self.wipe_quick_unlock();
+                return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+            }
+        }
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
             *dec_items = items;
@@ -1768,6 +1831,49 @@ pub(crate) mod tests {
         vault.unlock("master-pw").unwrap();
         vault.lock();
         assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_fails_closed_on_stale_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // Simulate a vault whose ciphers were re-encrypted under a different
+        // key (rotation / account switch): the retained key decrypts none of
+        // them, which previously surfaced as an "unlocked" empty vault.
+        let mut stale = vault.storage_mgr.load();
+        stale.ciphers = vec![serde_json::json!({
+            "id": "cipher-1",
+            "type": 1,
+            "name": "2.not-a-valid-encstring",
+            "login": null,
+        })];
+        vault.storage_mgr.save(&stale).unwrap();
+
+        let err = vault.quick_unlock_restore().unwrap_err();
+        assert!(err.contains("no longer matches"), "got: {err}");
+        assert!(
+            !vault.is_unlocked(),
+            "restore must not leave the vault unlocked"
+        );
+        assert!(
+            !vault.quick_unlock_available(),
+            "a stale retained key must be wiped, not re-primed"
+        );
+    }
+
+    #[test]
+    fn test_soft_lock_on_locked_vault_keeps_existing_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        // Calling soft_lock again (nothing to move) must not drop retention.
+        assert!(!vault.soft_lock());
+        assert!(vault.quick_unlock_available());
     }
 
     #[test]

@@ -49,7 +49,12 @@ pub fn check(action_id: &str, binary: &Path, timeout: Duration) -> PolkitOutcome
             Ok(Some(status)) => {
                 return if status.success() {
                     PolkitOutcome::Authorized
-                } else if status.code() == Some(1) {
+                } else if matches!(status.code(), Some(1) | Some(3)) {
+                    // pkcheck exit codes: 1 = not authorized (negative answer),
+                    // 3 = the user dismissed the authentication dialog. Both
+                    // are user denials and both count toward the 3-strike
+                    // wipe; everything else (2 = no agent / polkit error, ...)
+                    // is treated as polkit being unavailable.
                     PolkitOutcome::Denied
                 } else {
                     PolkitOutcome::Unavailable(format!("pkcheck exited with {status}"))
@@ -122,9 +127,23 @@ exit {exit_code}
     }
 
     #[test]
+    fn test_check_dismissed_dialog_counts_as_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        // pkcheck exit 3 = "the authentication dialog was dismissed by the
+        // user" — a denial, not an infrastructure failure.
+        let bin = mock_pkcheck(dir.path(), "pk-dismiss", "3", 0);
+        assert_eq!(
+            check(POLKIT_ACTION_ID, &bin, Duration::from_secs(5)),
+            PolkitOutcome::Denied
+        );
+    }
+
+    #[test]
     fn test_check_unavailable_on_unexpected_exit() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = mock_pkcheck(dir.path(), "pk-err", "3", 0);
+        // Exit 4+: not authorized for an unspecified reason beyond deny (1)
+        // and dismiss (3) — treat as polkit being unavailable.
+        let bin = mock_pkcheck(dir.path(), "pk-err", "4", 0);
         assert!(matches!(
             check(POLKIT_ACTION_ID, &bin, Duration::from_secs(5)),
             PolkitOutcome::Unavailable(_)

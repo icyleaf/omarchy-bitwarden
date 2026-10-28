@@ -244,6 +244,14 @@ pub struct DaemonState {
     pub quick_unlock_busy: Mutex<()>,
     /// Injectable for tests; defaults to `pkcheck` resolved from PATH.
     pub polkit_binary: PathBuf,
+    /// Rule 9 / ADR-0025: when the current session's last master-password
+    /// unlock happened. Survives soft locks so the 12h ceiling bounds the
+    /// retained key too; cleared by every hard lock.
+    pub session_anchor: Mutex<Option<Instant>>,
+    /// CLOCK_BOOTTIME minus CLOCK_MONOTONIC, in whole seconds, as of the last
+    /// watchdog tick. Suspend time accumulates in BOOTTIME only, so a growing
+    /// delta is a deterministic resume-edge detector (no D-Bus needed).
+    pub last_boot_delta_secs: Mutex<Option<u64>>,
 }
 
 /// What locked the session. Sleep is treated harder than a screen lock
@@ -274,7 +282,75 @@ impl DaemonState {
             quick_unlock_failures: Mutex::new(0),
             quick_unlock_busy: Mutex::new(()),
             polkit_binary,
+            session_anchor: Mutex::new(None),
+            last_boot_delta_secs: Mutex::new(None),
         }
+    }
+
+    /// CLOCK_BOOTTIME minus CLOCK_MONOTONIC in whole seconds. The two clocks
+    /// run together while awake; suspend time accrues only to BOOTTIME.
+    pub fn boot_delta_secs() -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut boot = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let mut mono = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let ok = unsafe {
+                libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut boot) == 0
+                    && libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut mono) == 0
+            };
+            if !ok {
+                return None;
+            }
+            let delta = boot.tv_sec - mono.tv_sec;
+            Some(delta.unsigned_abs())
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    /// Pure resume-edge predicate: the delta only grows by whole suspend
+    /// periods, so a jump over one second means at least one suspend since
+    /// the previous sample. Shrinkage (clock skew between the two reads) is
+    /// ignored rather than treated as an event.
+    pub fn suspend_happened(prev: Option<u64>, current: Option<u64>) -> bool {
+        match (prev, current) {
+            (Some(prev), Some(cur)) => cur > prev + 1,
+            // First sample after start: if the machine already suspended since
+            // boot the cached value is None, but nothing was retained before
+            // the daemon started either, so treat it as no event.
+            _ => false,
+        }
+    }
+
+    /// Watchdog step: wipe/hard-lock on suspend regardless of vault state.
+    /// Runs every tick, cheap (two clock reads), and is the guarantee behind
+    /// ADR decision 4 — the polled PreparingForSleep property alone can be
+    /// missed while the daemon is frozen.
+    pub fn check_suspend_drift_with(&self, current_delta: Option<u64>) -> bool {
+        let prev = self.last_boot_delta_secs.lock().ok().and_then(|g| *g);
+        if let Ok(mut cache) = self.last_boot_delta_secs.lock() {
+            *cache = current_delta;
+        }
+        if !Self::suspend_happened(prev, current_delta) {
+            return false;
+        }
+        crate::log_info!(
+            "omawarden:daemon",
+            "Suspend detected (boottime drift); wiping quick unlock retention"
+        );
+        // lock() is the hard path: wipes the retained key AND locks.
+        self.lock();
+        true
+    }
+
+    pub fn check_suspend_drift(&self) -> bool {
+        self.check_suspend_drift_with(Self::boot_delta_secs())
     }
 
     fn quick_unlock_enabled(&self) -> bool {
@@ -348,6 +424,14 @@ impl DaemonState {
                 if let Ok(mut n) = self.quick_unlock_failures.lock() {
                     *n = 0;
                 }
+                // Rule 9: re-arm the per-unlock anchor so the idle/lifetime
+                // watchdogs keep running after a quick unlock. The session
+                // anchor is deliberately NOT touched: quick unlocks extend
+                // nothing; the 12h ceiling is measured from the master
+                // password unlock (ADR-0025 decision 4).
+                if let Ok(mut ua) = self.unlocked_at.lock() {
+                    *ua = Some(Instant::now());
+                }
                 self.touch_activity();
                 Ok(count)
             }
@@ -371,8 +455,33 @@ impl DaemonState {
     }
 
     pub fn check_auto_lock(&self) -> bool {
+        // Rule 9 / ADR-0025: the 12h ceiling is anchored to the last
+        // master-password unlock and bounds the retained key as well: a vault
+        // that stays soft-locked (key retained) past the ceiling is wiped.
+        // Quick unlocks re-arm only the per-unlock anchor (idle watchdogs);
+        // they never extend the session anchor.
+        let session_expired = {
+            let anchor = self.session_anchor.lock().ok().and_then(|g| *g);
+            let max = self.max_session_lifetime.lock().ok().map(|g| *g);
+            matches!(
+                (anchor, max),
+                (Some(a), Some(max)) if !max.is_zero() && a.elapsed() > max
+            )
+        };
+        if session_expired
+            && (self.vault_mgr.is_unlocked() || self.vault_mgr.quick_unlock_available())
+        {
+            crate::log_info!(
+                "omawarden:daemon",
+                "Maximum session lifetime reached; locking vault and wiping retention"
+            );
+            self.lock();
+            return true;
+        }
+
         if self.vault_mgr.is_unlocked() {
-            // 1. Check absolute maximum session lifetime (e.g. 12 hours)
+            // 1. Per-unlock absolute lifetime (unchanged behavior when quick
+            // unlock is off: identical to the session anchor in that case).
             let max_lifetime_expired = {
                 if let Ok(ua_guard) = self.unlocked_at.lock() {
                     if let Some(unlocked_time) = *ua_guard {
@@ -435,7 +544,10 @@ impl DaemonState {
     where
         F: FnOnce() -> LockSignal,
     {
-        if self.vault_mgr.is_unlocked() {
+        // The detector must also run while soft-locked: a Sleep signal while
+        // a key is retained must wipe it (ADR decision 4). The suspend-drift
+        // watchdog covers the resume edge this poll can miss.
+        if self.vault_mgr.is_unlocked() || self.vault_mgr.quick_unlock_available() {
             match detector() {
                 LockSignal::None => {}
                 LockSignal::Sleep => {
@@ -448,9 +560,12 @@ impl DaemonState {
                     return true;
                 }
                 LockSignal::Screen => {
-                    // soft_lock() itself hard-locks when quick unlock is off.
-                    self.soft_lock();
-                    return true;
+                    if self.vault_mgr.is_unlocked() {
+                        // soft_lock() itself hard-locks when quick unlock is off.
+                        self.soft_lock();
+                        return true;
+                    }
+                    // Already soft-locked: the screen signal changes nothing.
                 }
             }
         }
@@ -468,6 +583,9 @@ impl DaemonState {
     pub fn lock(&self) {
         if let Ok(mut ua) = self.unlocked_at.lock() {
             *ua = None;
+        }
+        if let Ok(mut anchor) = self.session_anchor.lock() {
+            *anchor = None;
         }
         if let Ok(mut n) = self.quick_unlock_failures.lock() {
             *n = 0;
@@ -498,6 +616,14 @@ impl DaemonState {
         let count = self.vault_mgr.unlock(password)?;
         if let Ok(mut ua_guard) = self.unlocked_at.lock() {
             *ua_guard = Some(Instant::now());
+        }
+        // A master-password unlock (re)anchors the hard 12h session ceiling.
+        if let Ok(mut anchor) = self.session_anchor.lock() {
+            *anchor = Some(Instant::now());
+        }
+        // A successful master unlock supersedes any earlier denials.
+        if let Ok(mut n) = self.quick_unlock_failures.lock() {
+            *n = 0;
         }
         self.touch_activity();
         Ok(count)
@@ -566,6 +692,10 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
             Duration::from_secs(5)
         };
         std::thread::sleep(sleep_duration);
+        // Resume-edge suspend detection must run regardless of lock state:
+        // the dominant quick-unlock state (soft-locked) is exactly when the
+        // screen detector above would otherwise never fire.
+        state_clone.check_suspend_drift();
         state_clone.check_auto_lock();
         state_clone.check_screen_lock();
     });
@@ -1580,6 +1710,175 @@ mod tests {
         let (client, server) = UnixStream::pair().unwrap();
         assert!(verify_peer_credentials(&client).is_ok());
         assert!(verify_peer_credentials(&server).is_ok());
+    }
+
+    #[test]
+    fn test_suspend_happened_predicate() {
+        fn f(prev: Option<u64>, current: Option<u64>) -> bool {
+            DaemonState::suspend_happened(prev, current)
+        }
+        assert!(!f(None, Some(100)), "first sample is never an event");
+        assert!(
+            !f(Some(100), Some(100)),
+            "equal deltas: awake the whole time"
+        );
+        assert!(
+            !f(Some(100), Some(101)),
+            "one second of clock skew is not suspend"
+        );
+        assert!(f(Some(100), Some(103)), "grew by 3s: suspend happened");
+        assert!(!f(Some(100), Some(99)), "shrinkage ignored");
+        assert!(!f(Some(100), None), "clock unavailable is not an event");
+    }
+
+    #[test]
+    fn test_suspend_drift_wipes_retained_key_while_soft_locked() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
+
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        // Soft-locked with a retained key: the dominant quick-unlock state.
+        *state.vault_mgr.user_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap());
+        assert!(state.vault_mgr.soft_lock());
+        assert!(state.vault_mgr.quick_unlock_available());
+
+        // First tick primes the cache; second tick observes the drift.
+        assert!(!state.check_suspend_drift_with(Some(1_000)));
+        assert!(
+            state.check_suspend_drift_with(Some(1_900)),
+            "900s of accumulated suspend time must be detected"
+        );
+        assert!(
+            !state.vault_mgr.quick_unlock_available(),
+            "suspend must wipe the retained key even while soft-locked"
+        );
+        assert!(!state.vault_mgr.is_unlocked());
+
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_suspend_drift_hard_locks_unlocked_vault() {
+        let dir = tempdir().unwrap();
+        let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        assert!(!state.check_suspend_drift_with(Some(10)));
+        assert!(state.check_suspend_drift_with(Some(600)));
+        assert!(!state.vault_mgr.is_unlocked());
+    }
+
+    #[test]
+    fn test_session_anchor_ceiling_wipes_retained_key_while_soft_locked() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
+
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        // Unlocked 13h ago (session anchor), then soft-locked with retention.
+        *state.session_anchor.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(13 * 3600));
+        *state.vault_mgr.user_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap());
+        assert!(state.vault_mgr.soft_lock());
+
+        assert!(
+            state.check_auto_lock(),
+            "the 12h ceiling must fire for a retained key past the session anchor"
+        );
+        assert!(
+            !state.vault_mgr.quick_unlock_available(),
+            "ceiling must wipe the retained key"
+        );
+        assert!(
+            state.session_anchor.lock().unwrap().is_none(),
+            "hard lock clears the anchor"
+        );
+
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_quick_unlock_re_arms_unlocked_at_but_not_session_anchor() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+
+        let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
+        let mut daemon_state =
+            DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
+
+        let pk = dir.path().join("mock-pkcheck");
+        crate::write_test_executable(&pk, "#!/bin/sh\nexit 0\n");
+        daemon_state.polkit_binary = pk;
+        let state = Arc::new(daemon_state);
+
+        let mut cfg = crate::config::ConfigManager::default().load();
+        cfg.quick_unlock = true;
+        fs::write(
+            dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+
+        // Session anchored 13h ago by the master-password unlock.
+        *state.session_anchor.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(13 * 3600));
+        *state.vault_mgr.user_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap());
+        assert!(state.vault_mgr.soft_lock());
+
+        assert!(state.perform_quick_unlock().is_ok());
+        assert!(
+            state.unlocked_at.lock().unwrap().is_some(),
+            "quick unlock must re-arm the per-unlock anchor (Rule 9 while unlocked)"
+        );
+
+        // The session anchor is untouched, so the ceiling still fires even
+        // though the vault was just quick-unlocked.
+        assert!(
+            state.check_auto_lock(),
+            "quick unlock must not extend the 12h session ceiling"
+        );
+        assert!(!state.vault_mgr.is_unlocked());
+
+        old_runtime.map_or_else(
+            || std::env::remove_var("XDG_RUNTIME_DIR"),
+            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
+        );
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
     }
 
     #[test]
