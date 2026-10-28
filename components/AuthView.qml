@@ -24,6 +24,9 @@ Item {
   property int emailSentCount: 0
   property bool isSendingEmail: false
   property bool isInstalling: false
+  // ADR-0025: true when the engine reports quick unlock is enabled and a
+  // soft-locked key is retained; shows the system-authentication button.
+  property bool quickUnlockAvailable: false
   property bool showServerConfig: false
   property bool enableMtlsChecked: false
   property color foreground: Commons.Color.menu.text
@@ -56,6 +59,7 @@ Item {
   }
 
   signal unlockRequested(string password)
+  signal quickUnlockRequested()
   signal loginPasswordRequested(string email, string password, string code, var provider)
   signal loginApiKeyRequested(string clientId, string clientSecret)
   signal logoutRequested()
@@ -282,6 +286,29 @@ Item {
                   visible: !unlockPasswordField.text
                 }
               }
+            }
+          }
+
+          // Quick Unlock Button (ADR-0025): system authentication instead of
+          // the master password after a soft lock.
+          Rectangle {
+            Layout.fillWidth: true
+            height: 32
+            radius: 5
+            visible: authRoot.quickUnlockAvailable && !authRoot.isBusy
+            color: Qt.rgba(1, 1, 1, 0.08)
+
+            Text {
+              anchors.centerIn: parent
+              text: "Unlock with System Authentication"
+              color: authRoot.foreground
+              font.pixelSize: Style.font.body
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: authRoot.quickUnlockRequested()
             }
           }
 

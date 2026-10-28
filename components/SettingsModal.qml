@@ -84,6 +84,7 @@ Item {
   }
   property bool sshAgentChecked: false
   property string sshAgentConfirm: "first-use"
+  property bool quickUnlockChecked: false
 
   onConfigChanged: {
     if (config) checkUpdatesChecked = (config.check_updates !== false)
@@ -101,6 +102,7 @@ Item {
     }
     if (config) sshAgentChecked = (config.ssh_agent_enabled === true)
     if (config && config.ssh_agent_confirm) sshAgentConfirm = config.ssh_agent_confirm
+    if (config) quickUnlockChecked = (config.quick_unlock === true)
   }
 
   function buildPayload() {
@@ -123,7 +125,8 @@ Item {
       check_updates: settingsRoot.checkUpdatesChecked,
       remember_last_search: settingsRoot.rememberLastSearchChecked,
       ssh_agent_enabled: settingsRoot.sshAgentChecked,
-      ssh_agent_confirm: settingsRoot.sshAgentConfirm
+      ssh_agent_confirm: settingsRoot.sshAgentConfirm,
+      quick_unlock: settingsRoot.quickUnlockChecked
     }
   }
 
@@ -972,6 +975,35 @@ Item {
                   }
                 }
               }
+            }
+          }
+
+          // Quick Unlock Toggle (ADR-0025)
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.quickUnlockChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.quickUnlockChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: "#ffffff"
+                  font.pixelSize: Style.fontPx(0.75)
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.quickUnlockChecked = !settingsRoot.quickUnlockChecked }
+              }
+              Text { text: "Quick Unlock (System Authentication)"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "After a screen lock or idle timeout, unlocking asks for your login password or fingerprint (polkit) instead of the master password. The vault key stays in locked memory only: suspend, logout and three denied prompts wipe it. Requires the packaged polkit policy."
+              color: settingsRoot.mutedForeground
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
