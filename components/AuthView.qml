@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 import qs.Commons
+import qs.Commons as Commons
 import "IconPolicy.js" as IconPolicy
 
 Item {
@@ -25,9 +26,15 @@ Item {
   property bool isInstalling: false
   property bool showServerConfig: false
   property bool enableMtlsChecked: false
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.menu.text
+  property color accent: Commons.Color.menu.selectedText
+  property color borderColor: Commons.Color.menu.border
+  property color muted: Commons.Color.muted
+  // Label/glyph color for accent-filled controls. The accent fill itself can
+  // be light or dark per theme, so pick the contrasting pole by luminance —
+  // Commons.Color.menu.selectedText cannot be used here because it is what
+  // fills those controls (root maps accent := Color.menu.selectedText).
+  readonly property color textOnAccent: (0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7 ? Commons.Color.menu.background : "#ffffff"
   property string fontFamily: ""
 
   readonly property string curServerUrl: (authServerUrlInput && authServerUrlInput.text.trim()) ? authServerUrlInput.text.trim() : ((config && config.server_url) ? config.server_url : "")
@@ -220,7 +227,7 @@ Item {
             Text {
               Layout.alignment: Qt.AlignHCenter
               text: "Logged in as " + (authRoot.authState.user_email || "user")
-              color: Qt.darker(authRoot.foreground, 1.6)
+              color: authRoot.muted
               font.pixelSize: Style.font.bodySmall
             }
           }
@@ -236,7 +243,7 @@ Item {
               Layout.fillWidth: true
               height: 32
               radius: 5
-              color: Qt.rgba(0, 0, 0, 0.25)
+              color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
               border.color: unlockPasswordField.activeFocus ? authRoot.accent : authRoot.borderColor
               border.width: 1
 
@@ -269,7 +276,7 @@ Item {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   text: "Enter master password..."
-                  color: Qt.darker(authRoot.foreground, 2.0)
+                  color: authRoot.muted
                   font.family: "sans-serif"
                   font.pixelSize: Style.font.body
                   visible: !unlockPasswordField.text
@@ -288,7 +295,7 @@ Item {
             Text {
               anchors.centerIn: parent
               text: authRoot.isBusy ? "Unlocking..." : "Unlock Vault"
-              color: "#ffffff"
+              color: authRoot.textOnAccent
               font.pixelSize: Style.font.body
               font.weight: Font.Medium
             }
@@ -313,7 +320,7 @@ Item {
             // Logout Link
             Text {
               text: "Log out from account"
-              color: Qt.darker(authRoot.foreground, 1.6)
+              color: authRoot.muted
               font.pixelSize: Style.font.bodySmall
               MouseArea {
                 anchors.fill: parent
@@ -348,14 +355,14 @@ Item {
               spacing: 6
               Text {
                 text: (authRoot.config && authRoot.config.server_url) ? authRoot.config.server_url : "https://vault.bitwarden.com"
-                color: Qt.darker(authRoot.foreground, 1.8)
+                color: authRoot.muted
                 font.pixelSize: Style.font.caption
               }
               Rectangle {
                 implicitWidth: changeServerRow.implicitWidth + 8
                 implicitHeight: 18
                 radius: 3
-                color: changeServerMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                color: changeServerMouse.containsMouse ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08) : "transparent"
                 border.color: authRoot.borderColor
                 border.width: 1
 
@@ -401,7 +408,7 @@ Item {
             visible: authRoot.showServerConfig
             Layout.fillWidth: true
             radius: 6
-            color: Qt.rgba(0, 0, 0, 0.3)
+            color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.10)
             border.color: authRoot.borderColor
             border.width: 1
             implicitHeight: serverConfigCol.implicitHeight + 20
@@ -425,7 +432,7 @@ Item {
                 spacing: 3
                 Text { text: "Server URL:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
                 Rectangle {
-                  Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: authServerUrlInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                  Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: authServerUrlInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                   TextInput {
                     id: authServerUrlInput
                     anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
@@ -444,7 +451,7 @@ Item {
                 visible: authRoot.isOfficialServer
                 Layout.fillWidth: true
                 text: "Official Bitwarden cloud uses standard HTTPS and does not require client certificates."
-                color: Qt.darker(authRoot.foreground, 1.8)
+                color: authRoot.muted
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
               }
@@ -455,14 +462,14 @@ Item {
                 spacing: 6
                 Rectangle {
                   width: 14; height: 14; radius: 3
-                  color: authRoot.enableMtlsChecked ? authRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                  color: authRoot.enableMtlsChecked ? authRoot.accent : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.10)
                   border.color: authRoot.borderColor; border.width: 1
                   Text {
                     anchors.centerIn: parent
                     visible: authRoot.enableMtlsChecked
                     text: "\uf00c"
                     font.family: authRoot.fontFamily
-                    color: "#ffffff"
+                    color: authRoot.textOnAccent
                     font.pixelSize: Style.fontPx(0.75)
                   }
                   MouseArea {
@@ -496,7 +503,7 @@ Item {
                   spacing: 3
                   Text { text: "Client Certificate Path (.pem / .crt):"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
                   Rectangle {
-                    Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: authClientCertInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                    Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: authClientCertInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                     TextInput {
                       id: authClientCertInput
                       anchors.left: parent.left; anchors.right: authCertBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
@@ -510,7 +517,7 @@ Item {
                     Text {
                       anchors.left: parent.left; anchors.right: authCertBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
                       text: "e.g. /home/user/.certs/client.crt"
-                      color: Qt.darker(authRoot.foreground, 2.0)
+                      color: authRoot.muted
                       font.family: "sans-serif"; font.pixelSize: Style.font.body
                       elide: Text.ElideRight
                       visible: authClientCertInput.text.length === 0
@@ -534,7 +541,7 @@ Item {
                   spacing: 3
                   Text { text: "Client Private Key Path (optional if merged):"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
                   Rectangle {
-                    Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: authClientKeyInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                    Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: authClientKeyInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                     TextInput {
                       id: authClientKeyInput
                       anchors.left: parent.left; anchors.right: authKeyBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
@@ -548,7 +555,7 @@ Item {
                     Text {
                       anchors.left: parent.left; anchors.right: authKeyBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
                       text: "e.g. /home/user/.certs/client.key (0600 mode)"
-                      color: Qt.darker(authRoot.foreground, 2.0)
+                      color: authRoot.muted
                       font.family: "sans-serif"; font.pixelSize: Style.font.body
                       elide: Text.ElideRight
                       visible: authClientKeyInput.text.length === 0
@@ -589,7 +596,7 @@ Item {
                 Text {
                   Layout.fillWidth: true
                   text: "Private key files must be restricted to 0600 or 0400 file permissions."
-                  color: Qt.darker(authRoot.foreground, 1.8)
+                  color: authRoot.muted
                   font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
                 }
@@ -609,7 +616,7 @@ Item {
                     id: saveServerTxt
                     anchors.centerIn: parent
                     text: "Save & Apply"
-                    color: "#ffffff"
+                    color: authRoot.textOnAccent
                     font.pixelSize: Style.font.bodySmall
                     font.weight: Font.Medium
                   }
@@ -641,7 +648,7 @@ Item {
                     id: resetServerTxt
                     anchors.centerIn: parent
                     text: "Reset to Official"
-                    color: Qt.darker(authRoot.foreground, 1.3)
+                    color: authRoot.muted
                     font.pixelSize: Style.font.bodySmall
                   }
                   MouseArea {
@@ -706,7 +713,7 @@ Item {
               spacing: 3
               Text { text: "Email:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginEmailInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: loginEmailInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginEmailInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
@@ -728,7 +735,7 @@ Item {
               spacing: 3
               Text { text: "Master Password:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: loginPwdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: loginPwdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: loginPwdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
@@ -819,7 +826,7 @@ Item {
                 Layout.fillWidth: true
                 implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 58
                 radius: 5
-                color: Qt.rgba(0, 0, 0, 0.25)
+                color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
                 border.color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
                 border.width: 1
 
@@ -864,7 +871,7 @@ Item {
                         implicitWidth: checkAgainBtnText.implicitWidth + 12
                         implicitHeight: 20
                         radius: 3
-                        color: checkAgainMouseArea.containsMouse ? Qt.lighter(Qt.rgba(1, 1, 1, 0.1), 1.2) : Qt.rgba(1, 1, 1, 0.08)
+                        color: checkAgainMouseArea.containsMouse ? Qt.lighter(Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.1), 1.2) : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
                         border.color: authRoot.borderColor
                         border.width: 1
 
@@ -898,7 +905,7 @@ Item {
                             : (authRoot.fido2Status === "no_device"
                                 ? "Insert your USB security key. It will be detected automatically."
                                 : "Click 'Verify with Security Key' and touch your key."))
-                      color: Qt.darker(authRoot.foreground, 1.4)
+                      color: authRoot.muted
                       font.pixelSize: Style.font.caption
                       wrapMode: Text.WordWrap
                       Layout.fillWidth: true
@@ -910,7 +917,7 @@ Item {
                       Layout.fillWidth: true
                       implicitHeight: 24
                       radius: 3
-                      color: Qt.rgba(0, 0, 0, 0.35)
+                      color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.12)
                       border.color: authRoot.borderColor
                       border.width: 1
 
@@ -934,12 +941,12 @@ Item {
                           implicitWidth: authRoot.isInstalling ? 68 : 46
                           implicitHeight: 18
                           radius: 2
-                          color: authRoot.isInstalling ? Qt.rgba(1, 1, 1, 0.15) : (installMouse.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
+                          color: authRoot.isInstalling ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.15) : (installMouse.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
 
                           Text {
                             anchors.centerIn: parent
                             text: authRoot.isInstalling ? "Installing..." : "Install"
-                            color: authRoot.isInstalling ? authRoot.muted : "#ffffff"
+                            color: authRoot.isInstalling ? authRoot.muted : authRoot.textOnAccent
                             font.pixelSize: Style.fontPx(0.75)
                             font.weight: Font.Medium
                           }
@@ -959,12 +966,12 @@ Item {
                           implicitWidth: copyTimer.running ? 46 : 38
                           implicitHeight: 18
                           radius: 2
-                          color: copyTimer.running ? "#10b981" : Qt.rgba(1, 1, 1, 0.15)
+                          color: copyTimer.running ? "#10b981" : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.15)
 
                           Text {
                             anchors.centerIn: parent
                             text: copyTimer.running ? "Copied" : "Copy"
-                            color: "#ffffff"
+                            color: copyTimer.running ? "#ffffff" : authRoot.foreground
                             font.pixelSize: Style.fontPx(0.75)
                             font.weight: Font.Medium
                           }
@@ -1010,7 +1017,7 @@ Item {
                 }
 
                 Rectangle {
-                  Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                  Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: login2FAInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
 
                   TextInput {
                     id: login2FAInput
@@ -1044,7 +1051,7 @@ Item {
                     height: 24
                     radius: 3
                     color: (resendCooldownTimer.running || authRoot.isSendingEmail)
-                      ? Qt.rgba(1, 1, 1, 0.08)
+                      ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
                       : (resendMouseArea.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
                     opacity: (resendCooldownTimer.running || authRoot.isBusy || authRoot.isSendingEmail) ? 0.7 : 1.0
 
@@ -1056,7 +1063,7 @@ Item {
                         : (resendCooldownTimer.running
                             ? ("Resend (" + authRoot.resendCooldown + "s)")
                             : (authRoot.emailSentCount > 0 ? "Resend Email" : "Send Email"))
-                      color: (resendCooldownTimer.running || authRoot.isSendingEmail) ? authRoot.foreground : "#ffffff"
+                      color: (resendCooldownTimer.running || authRoot.isSendingEmail) ? authRoot.foreground : authRoot.textOnAccent
                       font.pixelSize: Style.font.caption
                       font.weight: Font.Medium
                     }
@@ -1083,13 +1090,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: authRoot.rememberEmailChecked ? authRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: authRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: authRoot.rememberEmailChecked ? authRoot.accent : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.10); border.color: authRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: authRoot.rememberEmailChecked
                   text: "\uf00c"
                   font.family: authRoot.fontFamily
-                  color: "#ffffff"
+                  color: authRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: authRoot.rememberEmailChecked = !authRoot.rememberEmailChecked }
@@ -1115,7 +1122,7 @@ Item {
 
               color: isSubmitEnabled
                 ? (submitMouseArea.containsMouse ? Qt.lighter(authRoot.accent, 1.1) : authRoot.accent)
-                : Qt.rgba(1, 1, 1, 0.08)
+                : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
 
               Text {
                 anchors.centerIn: parent
@@ -1134,7 +1141,7 @@ Item {
                   }
                   return "Log In"
                 }
-                color: submitButton.isSubmitEnabled ? "#ffffff" : authRoot.muted
+                color: submitButton.isSubmitEnabled ? authRoot.textOnAccent : authRoot.muted
                 font.pixelSize: Style.font.body
                 font.weight: Font.Medium
               }
@@ -1172,7 +1179,7 @@ Item {
               spacing: 3
               Text { text: "API Client ID (`user.xxxxxxxx`):"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientIdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: apiClientIdInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: apiClientIdInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
@@ -1193,7 +1200,7 @@ Item {
               spacing: 3
               Text { text: "API Client Secret:"; color: authRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: apiClientSecInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08); border.color: apiClientSecInput.activeFocus ? authRoot.accent : authRoot.borderColor; border.width: 1
                 TextInput {
                   id: apiClientSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
@@ -1212,7 +1219,7 @@ Item {
             // Submit Button
             Rectangle {
               Layout.fillWidth: true; height: 32; radius: 5; color: authRoot.accent
-              Text { anchors.centerIn: parent; text: authRoot.isBusy ? "Logging in..." : "Log In with API Key"; color: "#ffffff"; font.pixelSize: Style.font.body; font.weight: Font.Medium }
+              Text { anchors.centerIn: parent; text: authRoot.isBusy ? "Logging in..." : "Log In with API Key"; color: authRoot.textOnAccent; font.pixelSize: Style.font.body; font.weight: Font.Medium }
               MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                 onClicked: {
