@@ -79,6 +79,7 @@ jobs:
           mkdir -p "${DIST_DIR}"
           cp "omawarden/target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
           cp LICENSE README.md "${DIST_DIR}/"
+          cp packaging/org.omarchy.bitwarden.policy "${DIST_DIR}/"
 
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
@@ -202,6 +203,7 @@ jobs:
           package() {
               install -Dm755 "\${srcdir}"/omawarden-*/omawarden "\${pkgdir}/usr/bin/omawarden"
               install -Dm644 "\${srcdir}"/omawarden-*/LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+              install -Dm644 "\${srcdir}"/omawarden-*/org.omarchy.bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy"
           }
           EOF
 

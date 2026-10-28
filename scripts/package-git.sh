@@ -75,6 +75,7 @@ package() {
     cd "\${srcdir}/omarchy-bitwarden"
     install -Dm755 omawarden/target/release/omawarden "\${pkgdir}/usr/bin/omawarden"
     install -Dm644 LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+    install -Dm644 packaging/org.omarchy.bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy"
 }
 PKG_EOF
 

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <!-- ADR-0025: quick unlock re-opens the vault after a soft lock once the
+       user authenticates with the system (password or fingerprint). The
+       daemon's own process is the polkit subject. -->
+  <action id="org.omarchy.bitwarden.unlock">
+    <description>Unlock the Omarchy Bitwarden vault</description>
+    <message>Authentication is required to unlock the Bitwarden vault</message>
+    <defaults>
+      <allow_any>auth_self</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
