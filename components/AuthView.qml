@@ -296,7 +296,7 @@ Item {
             Layout.preferredHeight: 32
             radius: 5
             visible: authRoot.quickUnlockAvailable && !authRoot.isBusy
-            color: Qt.rgba(1, 1, 1, 0.08)
+            color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
 
             Text {
               anchors.centerIn: parent

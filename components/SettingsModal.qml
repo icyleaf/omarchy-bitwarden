@@ -985,13 +985,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.quickUnlockChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: settingsRoot.quickUnlockChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: settingsRoot.quickUnlockChecked
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
+                  color: settingsRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.quickUnlockChecked = !settingsRoot.quickUnlockChecked }
@@ -1001,7 +1001,7 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "After a screen lock or idle timeout, unlocking asks for your login password or fingerprint (polkit) instead of the master password. The vault key stays in locked memory only: suspend, logout and three denied prompts wipe it. Requires the packaged polkit policy."
-              color: settingsRoot.mutedForeground
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
