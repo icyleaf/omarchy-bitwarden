@@ -267,11 +267,36 @@ pub enum LockSignal {
 /// key is wiped and the master password is required again.
 pub const MAX_QUICK_UNLOCK_FAILURES: u32 = 3;
 
+/// Resolve pkcheck from trusted system locations only, requiring a
+/// root-owned regular file that group/other cannot write. A plain PATH
+/// lookup would let any same-UID process plant a fake `pkcheck` in
+/// ~/.local/bin that authorizes every quick unlock without a dialog
+/// (full-review security finding).
+fn resolve_pkcheck() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for candidate in ["/usr/bin/pkcheck", "/usr/sbin/pkcheck"] {
+        let path = Path::new(candidate);
+        let Ok(meta) = fs::metadata(path) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        if meta.uid() != 0 {
+            continue;
+        }
+        if meta.permissions().mode() & 0o022 != 0 {
+            continue;
+        }
+        return Some(path.to_path_buf());
+    }
+    None
+}
+
 impl DaemonState {
     pub fn new(storage_mgr: StorageManager, auto_lock_minutes: u64) -> Self {
         let vault_mgr = Arc::new(VaultManager::new("", Some(storage_mgr), None));
-        let polkit_binary =
-            which::which("pkcheck").unwrap_or_else(|_| std::path::PathBuf::from("pkcheck"));
+        let polkit_binary = resolve_pkcheck().unwrap_or_default();
         Self {
             vault_mgr,
             last_activity: Mutex::new(Instant::now()),
@@ -369,6 +394,13 @@ impl DaemonState {
     pub fn perform_quick_unlock(&self) -> Result<usize, &'static str> {
         if !self.quick_unlock_enabled() {
             return Err("Quick unlock is disabled in settings.");
+        }
+        if self.vault_mgr.is_unlocked() {
+            // Already unlocked: never re-prompt or re-arm timers.
+            return Err("Vault is already unlocked.");
+        }
+        if self.polkit_binary.as_os_str().is_empty() {
+            return Err("System authentication is unavailable right now.");
         }
         if !self.vault_mgr.quick_unlock_available() {
             return Err("Quick unlock is unavailable: the vault was hard-locked.");
@@ -2081,6 +2113,19 @@ exit $(cat {})
         assert_eq!(res["ok"], true, "got: {res}");
         assert_eq!(res["status"], "unlocked");
         assert_eq!(*state.quick_unlock_failures.lock().unwrap(), 0);
+
+        // 1b. While unlocked the action must not re-prompt (state-machine
+        // hole closed in review): it fails fast without touching polkit.
+        fs::write(dir.path().join("pk_code"), "0").unwrap();
+        let res = send_req(json!({ "action": "quick_unlock" }));
+        assert_eq!(res["ok"], false, "got: {res}");
+        assert!(
+            res["error"].as_str().unwrap().contains("already unlocked"),
+            "got: {res}"
+        );
+
+        // Back to the soft-locked state for the denial loop.
+        assert!(state.vault_mgr.soft_lock());
 
         // 2. Three denials in a row wipe the retained key.
         fs::write(dir.path().join("pk_code"), "1").unwrap();

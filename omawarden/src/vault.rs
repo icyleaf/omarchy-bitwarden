@@ -273,6 +273,10 @@ pub struct VaultManager {
     /// ADR-0025: user key retained across soft locks so a polkit check can
     /// re-unlock without the master password. Never leaves mlocked memory.
     pub quick_unlock_key: RwLock<Option<SymmetricCryptoKey>>,
+    /// Bumped on every quick-unlock wipe. quick_unlock_restore samples it
+    /// before decrypting and aborts if a wipe landed mid-restore, so a hard
+    /// lock racing a restore can never be overridden.
+    pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl VaultManager {
@@ -320,6 +324,7 @@ impl VaultManager {
             user_key: RwLock::new(None),
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
+            quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -392,6 +397,8 @@ impl VaultManager {
     }
 
     pub fn wipe_quick_unlock(&self) {
+        self.quick_unlock_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut slot) = self.quick_unlock_key.write() {
             // Dropping the LockedMemory-backed key zeroizes its page.
             *slot = None;
@@ -399,9 +406,13 @@ impl VaultManager {
     }
 
     /// Re-unlock from the retained key (ADR-0025): same decryption path as
-    /// unlock(), minus the master-password KDF. The slot keeps a copy so
-    /// subsequent soft locks retain it again.
+    /// unlock(), minus the master-password KDF. The slot keeps its key
+    /// untouched; a wipe landing mid-restore aborts via the epoch guard
+    /// instead of being silently overridden.
     pub fn quick_unlock_restore(&self) -> Result<usize, String> {
+        let epoch_before = self
+            .quick_unlock_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         let key = {
             let slot = self
                 .quick_unlock_key
@@ -431,22 +442,27 @@ impl VaultManager {
         // unlocked with garbage content. Validation, strongest first:
         // 1. enc_private_key is wrapped under the user key (type 0..=2) and
         //    must decrypt;
-        // 2. failing that, at least one personal cipher without its own
-        //    item key must have a name that decrypts under the user key.
-        //    Ciphers that all carry their own keys/org wrappers offer no
-        //    cheap check and are allowed through.
+        // 2. otherwise (absent, unparseable or asymmetric), at least one
+        //    personal cipher without its own item key must have a name that
+        //    decrypts under the user key. Ciphers that all carry their own
+        //    keys/org wrappers offer no cheap check and are allowed through.
+        let mut validated_by_private_key = false;
         if let Some(enc_priv) = fresh_storage.enc_private_key.as_deref() {
             if let Ok(parsed) = crate::crypto::EncString::parse(enc_priv) {
-                if parsed.enc_type <= 2 && parsed.decrypt(&key).is_err() {
-                    crate::log_warn!(
-                        "omawarden:vault",
-                        "Retained key fails to decrypt the private key; wiping quick unlock"
-                    );
-                    self.wipe_quick_unlock();
-                    return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+                if parsed.enc_type <= 2 {
+                    validated_by_private_key = true;
+                    if parsed.decrypt(&key).is_err() {
+                        crate::log_warn!(
+                            "omawarden:vault",
+                            "Retained key fails to decrypt the private key; wiping quick unlock"
+                        );
+                        self.wipe_quick_unlock();
+                        return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+                    }
                 }
             }
-        } else {
+        }
+        if !validated_by_private_key {
             let mut candidates = 0usize;
             let mut decrypted_any = false;
             for c in &fresh_storage.ciphers {
@@ -483,11 +499,26 @@ impl VaultManager {
             }
         }
 
+        // A hard lock (suspend drift, 12h ceiling, explicit lock/logout)
+        // landing during the decryption above must win: abort instead of
+        // writing unlocked state over a fresh wipe.
+        if self
+            .quick_unlock_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != epoch_before
+        {
+            crate::log_warn!(
+                "omawarden:vault",
+                "Vault was locked during quick unlock; aborting restore"
+            );
+            return Err("The vault was locked during unlock. Try again.".to_string());
+        }
+
         if let Ok(mut dec_items) = self.decrypted_items.write() {
             *dec_items = items;
         }
         if let Ok(mut key_slot) = self.user_key.write() {
-            *key_slot = Some(key.clone());
+            *key_slot = Some(key);
         }
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = true;
@@ -495,10 +526,9 @@ impl VaultManager {
         if let Ok(mut st) = self.storage.write() {
             *st = fresh_storage;
         }
-        // Keep the retained copy current with the key now in use.
-        if let Ok(mut slot) = self.quick_unlock_key.write() {
-            *slot = Some(key);
-        }
+        // The retained slot is intentionally left untouched: it still holds
+        // the same key, and rewriting it would resurrect a key a concurrent
+        // wipe just destroyed.
 
         crate::log_info!(
             "omawarden:vault",

@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 
 Item {
   id: testRunner
@@ -27,7 +26,7 @@ Item {
       return
     }
     try {
-      var data = JSON.parse((text || "").trim())
+      let data = JSON.parse((text || "").trim())
       quickUnlockReady = Boolean(data && data.available)
     } catch (e) {
       quickUnlockReady = false
