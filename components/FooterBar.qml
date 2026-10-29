@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: footerRoot
@@ -15,9 +16,10 @@ Rectangle {
   property bool isUnlocked: true
   property bool isBusy: false
   property color background: "transparent"
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
 
   signal actionPaletteTriggered()
@@ -63,7 +65,7 @@ Rectangle {
           implicitHeight: 22
           implicitWidth: actionsBtnRow.implicitWidth + 12
           radius: 4
-          color: actionsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          color: actionsMouse.containsMouse ? Qt.rgba(footerRoot.foreground.r, footerRoot.foreground.g, footerRoot.foreground.b, 0.08) : "transparent"
           border.width: 0
 
           RowLayout {
@@ -75,19 +77,19 @@ Rectangle {
               Text {
                 text: "\uf0e7"
                 font.family: footerRoot.fontFamily
-                color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: actionsMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Actions"
-                color: actionsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: actionsMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+K"
-              color: Qt.darker(footerRoot.foreground, 1.8)
+              color: footerRoot.muted
               font.pixelSize: Style.fontPx(0.75)
             }
           }
@@ -106,7 +108,7 @@ Rectangle {
           implicitHeight: 22
           implicitWidth: generateBtnRow.implicitWidth + 12
           radius: 4
-          color: generateMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          color: generateMouse.containsMouse ? Qt.rgba(footerRoot.foreground.r, footerRoot.foreground.g, footerRoot.foreground.b, 0.08) : "transparent"
           border.width: 0
 
           RowLayout {
@@ -118,19 +120,19 @@ Rectangle {
               Text {
                 text: "\uf084"
                 font.family: footerRoot.fontFamily
-                color: generateMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: generateMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Generate"
-                color: generateMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: generateMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+G"
-              color: Qt.darker(footerRoot.foreground, 1.8)
+              color: footerRoot.muted
               font.pixelSize: Style.fontPx(0.75)
             }
           }
@@ -149,7 +151,7 @@ Rectangle {
           implicitHeight: 22
           implicitWidth: syncBtnRow.implicitWidth + 12
           radius: 4
-          color: syncMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          color: syncMouse.containsMouse ? Qt.rgba(footerRoot.foreground.r, footerRoot.foreground.g, footerRoot.foreground.b, 0.08) : "transparent"
           border.width: 0
 
           RowLayout {
@@ -161,19 +163,19 @@ Rectangle {
               Text {
                 text: "\uf021"
                 font.family: footerRoot.fontFamily
-                color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: syncMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Sync"
-                color: syncMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: syncMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+R"
-              color: Qt.darker(footerRoot.foreground, 1.8)
+              color: footerRoot.muted
               font.pixelSize: Style.fontPx(0.75)
             }
           }
@@ -192,7 +194,7 @@ Rectangle {
           implicitHeight: 22
           implicitWidth: lockBtnRow.implicitWidth + 12
           radius: 4
-          color: lockMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+          color: lockMouse.containsMouse ? Qt.rgba(footerRoot.foreground.r, footerRoot.foreground.g, footerRoot.foreground.b, 0.08) : "transparent"
           border.width: 0
 
           RowLayout {
@@ -204,19 +206,19 @@ Rectangle {
               Text {
                 text: "\uf023"
                 font.family: footerRoot.fontFamily
-                color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: lockMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
               }
               Text {
                 text: "Lock"
-                color: lockMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+                color: lockMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
             }
             Text {
               text: "Ctrl+L"
-              color: Qt.darker(footerRoot.foreground, 1.8)
+              color: footerRoot.muted
               font.pixelSize: Style.fontPx(0.75)
             }
           }
@@ -236,7 +238,7 @@ Rectangle {
         implicitHeight: 22
         implicitWidth: settingsBtnRow.implicitWidth + 12
         radius: 4
-        color: settingsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+        color: settingsMouse.containsMouse ? Qt.rgba(footerRoot.foreground.r, footerRoot.foreground.g, footerRoot.foreground.b, 0.08) : "transparent"
         border.width: 0
 
         RowLayout {
@@ -248,19 +250,19 @@ Rectangle {
             Text {
               text: "\uf013"
               font.family: footerRoot.fontFamily
-              color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              color: settingsMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               text: "Settings"
-              color: settingsMouse.containsMouse ? footerRoot.foreground : Qt.darker(footerRoot.foreground, 1.3)
+              color: settingsMouse.containsMouse ? footerRoot.foreground : footerRoot.muted
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
           }
           Text {
             text: "Ctrl+,"
-            color: Qt.darker(footerRoot.foreground, 1.8)
+            color: footerRoot.muted
             font.pixelSize: Style.fontPx(0.75)
           }
         }
@@ -283,20 +285,20 @@ Rectangle {
 
       Text {
         text: "Omarchy Bitwarden " + footerRoot.overlayVersion
-        color: Qt.darker(footerRoot.foreground, 1.8)
+        color: footerRoot.muted
         font.pixelSize: Style.font.caption
       }
 
       Text {
         text: "•"
-        color: Qt.darker(footerRoot.foreground, 2.2)
+        color: footerRoot.muted
         font.pixelSize: Style.font.caption
       }
 
       Text {
         visible: footerRoot.isEngineInstalled && !footerRoot.updateAvailable
         text: "Omawarden " + footerRoot.backendVersion
-        color: Qt.darker(footerRoot.foreground, 1.8)
+        color: footerRoot.muted
         font.pixelSize: Style.font.caption
       }
 

@@ -2255,6 +2255,7 @@ Item {
           background: root.background
           foreground: root.foreground
           accent: root.accent
+          muted: root.muted
           borderColor: root.borderColor
           onSearchQueryChanged: root.searchQuery = searchQuery
           onCategorySelected: function(cat) { root.activeCategory = cat }
@@ -2320,6 +2321,8 @@ Item {
               fontFamily: root.fontFamily
               foreground: root.foreground
               accent: root.accent
+              selectedText: root.accent
+              muted: root.muted
               selectedBackground: root.selectedBackground
               borderColor: root.borderColor
               onItemSelected: function(idx) { root.selectedIndex = idx }
@@ -2512,6 +2515,7 @@ Item {
           fontFamily: root.fontFamily
           foreground: root.foreground
           accent: root.accent
+          muted: root.muted
           borderColor: root.borderColor
           onActionPaletteTriggered: {
             root.actionPaletteIndex = 0

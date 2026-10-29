@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 ColumnLayout {
   id: searchHeaderRoot
@@ -12,10 +13,11 @@ ColumnLayout {
   property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
   property var rawVaultItems: []
-  property color background: "#1f2937"
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color background: Commons.Color.menu.background
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
   property bool modalsActive: false
 
@@ -156,7 +158,7 @@ ColumnLayout {
     Layout.fillWidth: true
     height: 34
     radius: 6
-    color: Qt.rgba(0, 0, 0, 0.25)
+    color: Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08)
     border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
     border.width: 1
 
@@ -273,7 +275,7 @@ ColumnLayout {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           text: "Search Bitwarden vault (names, usernames, notes, tags)..."
-          color: Qt.darker(searchHeaderRoot.foreground, 2.0)
+          color: searchHeaderRoot.muted
           font.family: "sans-serif"
           font.pixelSize: Style.font.body
           visible: !searchInputField.text
@@ -285,7 +287,7 @@ ColumnLayout {
         visible: Boolean(searchInputField.text)
         text: "\uf00d"
         font.family: searchHeaderRoot.fontFamily
-        color: clearMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.5)
+        color: clearMouse.containsMouse ? searchHeaderRoot.foreground : searchHeaderRoot.muted
         font.pixelSize: Style.font.bodySmall
         Layout.alignment: Qt.AlignVCenter
 
@@ -344,6 +346,7 @@ ColumnLayout {
       rawVaultItems: searchHeaderRoot.rawVaultItems
       foreground: searchHeaderRoot.foreground
       accent: searchHeaderRoot.accent
+      muted: searchHeaderRoot.muted
       borderColor: searchHeaderRoot.borderColor
       onCategorySelected: function(cat) {
         searchHeaderRoot.categorySelected(cat)
@@ -361,14 +364,14 @@ ColumnLayout {
         implicitWidth: 18
         implicitHeight: 18
         radius: 4
-        color: createMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+        color: createMouse.containsMouse ? Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08) : "transparent"
 
         Text {
           anchors.centerIn: parent
           text: "\uf067"
           font.family: searchHeaderRoot.fontFamily
           font.pixelSize: Style.font.caption
-          color: createMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
+          color: createMouse.containsMouse ? searchHeaderRoot.foreground : searchHeaderRoot.muted
         }
 
         MouseArea {
@@ -388,14 +391,14 @@ ColumnLayout {
         implicitWidth: 18
         implicitHeight: 18
         radius: 4
-        color: importMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+        color: importMouse.containsMouse ? Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08) : "transparent"
 
         Text {
           anchors.centerIn: parent
           text: "\uf019"
           font.family: searchHeaderRoot.fontFamily
           font.pixelSize: Style.font.caption
-          color: importMouse.containsMouse ? searchHeaderRoot.foreground : Qt.darker(searchHeaderRoot.foreground, 1.4)
+          color: importMouse.containsMouse ? searchHeaderRoot.foreground : searchHeaderRoot.muted
         }
 
         MouseArea {

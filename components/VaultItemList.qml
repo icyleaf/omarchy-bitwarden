@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: itemListRoot
@@ -14,10 +15,12 @@ Item {
   property string searchQuery: ""
   property string activeVaultScope: "all"
   property string activeFolderScope: "all"
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color selectedBackground: Qt.rgba(0.23, 0.51, 0.96, 0.25)
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color selectedBackground: Commons.Color.menu.selectedBackground
+  property color selectedText: Commons.Color.menu.selectedText
+  property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
   property bool showWebsiteIcons: false
 
@@ -103,13 +106,13 @@ Item {
         text: "\uf002"
         font.family: itemListRoot.fontFamily
         font.pixelSize: Style.font.displayLarge
-        color: Qt.darker(itemListRoot.foreground, 1.8)
+        color: itemListRoot.muted
       }
 
       Text {
         Layout.alignment: Qt.AlignHCenter
         text: (itemListRoot.searchQuery || itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "No matching items found" : "Vault is empty"
-        color: Qt.darker(itemListRoot.foreground, 1.4)
+        color: itemListRoot.foreground
         font.pixelSize: Style.font.body
         font.weight: Font.Medium
       }
@@ -118,7 +121,7 @@ Item {
         visible: Boolean(itemListRoot.searchQuery || itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all")
         Layout.alignment: Qt.AlignHCenter
         text: (itemListRoot.activeVaultScope !== "all" || itemListRoot.activeFolderScope !== "all") ? "Try resetting scope filters or press Esc" : "Try a different keyword or press Tab to switch category"
-        color: Qt.darker(itemListRoot.foreground, 2.0)
+        color: itemListRoot.muted
         font.pixelSize: Style.font.bodySmall
       }
     }
@@ -144,7 +147,7 @@ Item {
       contentItem: Rectangle {
         implicitWidth: 4
         radius: 2
-        color: vScrollBar.pressed ? Qt.rgba(1, 1, 1, 0.4) : (vScrollBar.hovered ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.15))
+        color: vScrollBar.pressed ? Qt.rgba(itemListRoot.foreground.r, itemListRoot.foreground.g, itemListRoot.foreground.b, 0.4) : (vScrollBar.hovered ? Qt.rgba(itemListRoot.foreground.r, itemListRoot.foreground.g, itemListRoot.foreground.b, 0.25) : Qt.rgba(itemListRoot.foreground.r, itemListRoot.foreground.g, itemListRoot.foreground.b, 0.15))
       }
     }
 
@@ -156,7 +159,7 @@ Item {
       width: listView.width
       height: 48
       radius: 6
-      color: isSelected ? itemListRoot.selectedBackground : (delegateMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.04) : "transparent")
+      color: isSelected ? itemListRoot.selectedBackground : (delegateMouse.containsMouse ? Qt.rgba(itemListRoot.foreground.r, itemListRoot.foreground.g, itemListRoot.foreground.b, 0.05) : "transparent")
       border.color: isSelected ? Qt.rgba(itemListRoot.accent.r, itemListRoot.accent.g, itemListRoot.accent.b, 0.6) : "transparent"
       border.width: 1
 
@@ -190,7 +193,7 @@ Item {
             text: itemListRoot.getItemIcon(modelData)
             font.family: itemListRoot.fontFamily
             font.pixelSize: Style.font.title
-            color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
+            color: itemDelegate.isSelected ? itemListRoot.selectedText : itemListRoot.muted
           }
         }
 
@@ -207,7 +210,7 @@ Item {
 
             Text {
               text: modelData.name || "Untitled"
-              color: itemDelegate.isSelected ? "#ffffff" : itemListRoot.foreground
+              color: itemDelegate.isSelected ? itemListRoot.selectedText : itemListRoot.foreground
               font.pixelSize: Style.font.body
               font.weight: Font.Medium
               elide: Text.ElideRight
@@ -267,7 +270,7 @@ Item {
               text: "\uf0c6"
               font.family: itemListRoot.fontFamily
               font.pixelSize: Style.font.bodySmall
-              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.5)
+              color: itemDelegate.isSelected ? itemListRoot.selectedText : itemListRoot.muted
             }
 
             // Monochrome Favorite Indicator (Always at the far right)
@@ -276,7 +279,7 @@ Item {
               text: "\uf005"
               font.family: itemListRoot.fontFamily
               font.pixelSize: Style.font.bodySmall
-              color: itemDelegate.isSelected ? "#ffffff" : Qt.darker(itemListRoot.foreground, 1.4)
+              color: itemDelegate.isSelected ? itemListRoot.selectedText : itemListRoot.muted
             }
           }
 
@@ -285,7 +288,7 @@ Item {
             property string sub: itemListRoot.getSubtitle(modelData)
             visible: Boolean(sub)
             text: sub
-            color: itemDelegate.isSelected ? Qt.rgba(1, 1, 1, 0.8) : Qt.darker(itemListRoot.foreground, 1.6)
+            color: itemDelegate.isSelected ? Qt.rgba(itemListRoot.selectedText.r, itemListRoot.selectedText.g, itemListRoot.selectedText.b, 0.85) : itemListRoot.muted
             font.pixelSize: Style.font.bodySmall
             elide: Text.ElideRight
             Layout.fillWidth: true
