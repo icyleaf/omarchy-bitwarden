@@ -2,15 +2,17 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 ScrollView {
   id: emptyInspectorRoot
 
   property var rawVaultItems: []
   property var authState: ({})
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
 
   clip: true
@@ -21,7 +23,7 @@ ScrollView {
     contentItem: Rectangle {
       implicitWidth: 4
       radius: 2
-      color: emptyVScrollBar.pressed ? Qt.rgba(1, 1, 1, 0.4) : (emptyVScrollBar.hovered ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.15))
+      color: emptyVScrollBar.pressed ? Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.4) : (emptyVScrollBar.hovered ? Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.25) : Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.15))
     }
   }
 
@@ -32,7 +34,7 @@ ScrollView {
     // Shortcuts Cheat Sheet Header
     Text {
       text: "KEYBOARD SHORTCUTS"
-      color: Qt.darker(emptyInspectorRoot.foreground, 1.8)
+      color: emptyInspectorRoot.muted
       font.pixelSize: Style.fontPx(0.75)
       font.weight: Font.DemiBold
     }
@@ -48,7 +50,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k3.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -62,7 +64,7 @@ ScrollView {
       }
       Text {
         text: "Switch Category Filter (Logins, Cards, Secure Note, SSH)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -73,7 +75,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kAltV.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -87,7 +89,7 @@ ScrollView {
       }
       Text {
         text: "Switch Vault Scope (All Vaults, Personal, Organizations)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -98,7 +100,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kAltF.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -112,7 +114,7 @@ ScrollView {
       }
       Text {
         text: "Switch Folder Scope (All Folders, Specific Folder)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -123,7 +125,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k1.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -137,7 +139,7 @@ ScrollView {
       }
       Text {
         text: "Copy Primary Credential (Password / Card / Key)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -148,7 +150,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kEnterTotp.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -162,7 +164,7 @@ ScrollView {
       }
       Text {
         text: "Copy Live TOTP Code"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -173,7 +175,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kU.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -187,7 +189,7 @@ ScrollView {
       }
       Text {
         text: "Copy Username"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -198,7 +200,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kT.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -212,7 +214,7 @@ ScrollView {
       }
       Text {
         text: "Toggle Field / Secret Visibility"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -223,7 +225,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kH.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -237,7 +239,7 @@ ScrollView {
       }
       Text {
         text: "Open Password History Modal"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -248,7 +250,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: kO.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -262,7 +264,7 @@ ScrollView {
       }
       Text {
         text: "Open Primary Website in Default Browser"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -273,7 +275,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k2.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -287,7 +289,7 @@ ScrollView {
       }
       Text {
         text: "Open Action Palette (Copy Attributes, PIN, Attachments)"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -298,7 +300,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k4.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -312,7 +314,7 @@ ScrollView {
       }
       Text {
         text: "Sync Vault with Server"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -323,7 +325,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k5.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -337,7 +339,7 @@ ScrollView {
       }
       Text {
         text: "Lock Vault Immediately"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
@@ -348,7 +350,7 @@ ScrollView {
         implicitHeight: 20
         implicitWidth: k6.implicitWidth + 10
         radius: 3
-        color: Qt.rgba(0, 0, 0, 0.25)
+        color: Qt.rgba(emptyInspectorRoot.foreground.r, emptyInspectorRoot.foreground.g, emptyInspectorRoot.foreground.b, 0.08)
         border.color: emptyInspectorRoot.borderColor
         border.width: 1
         Text {
@@ -362,7 +364,7 @@ ScrollView {
       }
       Text {
         text: "Open Settings & Configuration"
-        color: Qt.darker(emptyInspectorRoot.foreground, 1.3)
+        color: emptyInspectorRoot.muted
         font.pixelSize: Style.font.caption
         Layout.fillWidth: true
         wrapMode: Text.WordWrap

@@ -2362,6 +2362,7 @@ Item {
                 fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
+                muted: root.muted
                 borderColor: root.borderColor
                 onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
@@ -2395,6 +2396,7 @@ Item {
                 fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
+                muted: root.muted
                 borderColor: root.borderColor
               }
             }

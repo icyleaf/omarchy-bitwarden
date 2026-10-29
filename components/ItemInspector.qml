@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
 import "./CardFormatter.js" as CardFormatter
 import qs.Commons
+import qs.Commons as Commons
 
 ScrollView {
   id: inspectorRoot
@@ -19,9 +20,10 @@ ScrollView {
   property bool showCustomHiddenRevealed: false
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
   property bool showWebsiteIcons: false
   readonly property int keyPixelSize: Style.font.caption
@@ -47,7 +49,7 @@ ScrollView {
     contentItem: Rectangle {
       implicitWidth: 4
       radius: 2
-      color: inspVScrollBar.pressed ? Qt.rgba(1, 1, 1, 0.4) : (inspVScrollBar.hovered ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.15))
+      color: inspVScrollBar.pressed ? Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.4) : (inspVScrollBar.hovered ? Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.25) : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.15))
     }
   }
 
@@ -360,7 +362,7 @@ ScrollView {
           Layout.fillWidth: true
           Text {
             text: "Text Content Preview"
-            color: Qt.darker(inspectorRoot.foreground, 1.4)
+            color: inspectorRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
           Item { Layout.fillWidth: true }
@@ -379,7 +381,7 @@ ScrollView {
           Layout.fillWidth: true
           Layout.preferredHeight: 240
           radius: 4
-          color: Qt.rgba(0, 0, 0, 0.3)
+          color: Commons.Color.popups.background
           border.color: inspectorRoot.borderColor
           border.width: 1
 
@@ -415,13 +417,13 @@ ScrollView {
           text: "\uf15b"
           font.family: inspectorRoot.fontFamily
           font.pixelSize: Style.fontPx(3.0)
-          color: Qt.darker(inspectorRoot.foreground, 1.8)
+          color: inspectorRoot.muted
         }
 
         Text {
           Layout.alignment: Qt.AlignHCenter
           text: "Preview not available for this file format"
-          color: Qt.darker(inspectorRoot.foreground, 1.4)
+          color: inspectorRoot.muted
           font.pixelSize: Style.font.body
           font.weight: Font.Medium
         }
@@ -504,7 +506,7 @@ ScrollView {
             text: inspectorRoot.getItemIcon(inspectorRoot.item)
             font.family: inspectorRoot.fontFamily
             font.pixelSize: Style.font.title
-            color: Qt.darker(inspectorRoot.foreground, 1.3)
+            color: inspectorRoot.muted
           }
         }
 
@@ -534,8 +536,8 @@ ScrollView {
               implicitHeight: 18
               implicitWidth: favRow.implicitWidth + 10
               radius: 3
-              color: Qt.rgba(1, 1, 1, 0.08)
-              border.color: Qt.rgba(1, 1, 1, 0.15)
+              color: Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.08)
+              border.color: inspectorRoot.borderColor
               border.width: 1
 
               RowLayout {
@@ -546,11 +548,11 @@ ScrollView {
                   text: "\uf005"
                   font.family: inspectorRoot.fontFamily
                   font.pixelSize: Style.fontPx(0.75)
-                  color: Qt.darker(inspectorRoot.foreground, 1.2)
+                  color: inspectorRoot.muted
                 }
                 Text {
                   text: "Favorite"
-                  color: Qt.darker(inspectorRoot.foreground, 1.2)
+                  color: inspectorRoot.muted
                   font.pixelSize: Style.font.caption
                   font.weight: Font.Medium
                 }
@@ -602,7 +604,7 @@ ScrollView {
 
           Text {
             text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
-            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            color: inspectorRoot.muted
             font.pixelSize: Style.font.bodySmall
             elide: Text.ElideRight
             Layout.fillWidth: true
@@ -619,7 +621,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: loginColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -639,7 +641,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Username"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Username"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.login) ? (inspectorRoot.item.login.username || "") : ""
                 color: inspectorRoot.foreground
@@ -663,7 +665,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.username && inspectorRoot.item.login.password)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Password
@@ -676,7 +678,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Password"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Password"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: inspectorRoot.showPasswordRevealed ? (inspectorRoot.item.login.password || "") : "••••••••••••••••"
                 color: inspectorRoot.foreground
@@ -706,7 +708,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.password || inspectorRoot.item.login.username) && inspectorRoot.getProcessedUris(inspectorRoot.item).length > 0)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Websites / App Schemes list
@@ -729,7 +731,7 @@ ScrollView {
                 visible: index > 0
                 Layout.fillWidth: true
                 height: 1
-                color: Qt.rgba(255, 255, 255, 0.05)
+                color: inspectorRoot.borderColor
               }
 
               RowLayout {
@@ -740,7 +742,7 @@ ScrollView {
                   Layout.fillWidth: true
                   Layout.preferredWidth: 0
                   spacing: 2
-                  Text { text: uriWrapper.labelText; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                  Text { text: uriWrapper.labelText; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                   Text {
                     text: uriWrapper.displayUri
                     color: inspectorRoot.foreground
@@ -776,7 +778,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && (inspectorRoot.item.login.totp || inspectorRoot.item.login.has_totp))
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // TOTP Countdown & Verification Code
@@ -796,10 +798,10 @@ ScrollView {
 
                 RowLayout {
                   spacing: 6
-                  Text { text: "TOTP Code"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                  Text { text: "TOTP Code"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                   Text {
                     text: (inspectorRoot.currentTotp.ttl || 30) + "s"
-                    color: (inspectorRoot.currentTotp.ttl > 5) ? Qt.darker(inspectorRoot.foreground, 1.5) : "#f87171"
+                    color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.muted : "#f87171"
                     font.pixelSize: inspectorRoot.keyPixelSize
                   }
                 }
@@ -828,7 +830,7 @@ ScrollView {
               Layout.fillWidth: true
               height: 3
               radius: 2
-              color: Qt.rgba(1, 1, 1, 0.1)
+              color: Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.1)
 
               Rectangle {
                 height: parent.height
@@ -844,7 +846,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.has_passkey)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Passkey Status & Creation Date
@@ -858,7 +860,7 @@ ScrollView {
               Layout.preferredWidth: 0
               spacing: 2
 
-              Text { text: "Passkey"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Passkey"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.passkey_created_at) ? ("Created " + inspectorRoot.formatDateTime(inspectorRoot.item.login.passkey_created_at)) : "Stored in vault"
                 color: inspectorRoot.foreground
@@ -880,7 +882,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: cardColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -900,7 +902,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Cardholder"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Cardholder"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.cardholderName || "") : ""
                 color: inspectorRoot.foreground
@@ -924,7 +926,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.cardholderName && inspectorRoot.item.card.brand)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Card Brand
@@ -937,7 +939,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Brand"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Brand"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.item.card.brand || "") : ""
                 color: inspectorRoot.foreground
@@ -955,7 +957,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.number)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Card Number (Protected)
@@ -968,7 +970,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Card Number"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Card Number"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardNumberRevealed ? inspectorRoot.formatRevealedCardNumber(inspectorRoot.item.card.number) : inspectorRoot.formatMaskedCardNumber(inspectorRoot.item.card.number)) : ""
                 color: inspectorRoot.foreground
@@ -998,7 +1000,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && (inspectorRoot.item.card.expMonth || inspectorRoot.item.card.expYear))
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Expires
@@ -1011,7 +1013,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Expires"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Expires"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.card) ? ((inspectorRoot.item.card.expMonth || "") + " / " + (inspectorRoot.item.card.expYear || "")) : ""
                 color: inspectorRoot.foreground
@@ -1036,7 +1038,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.card && inspectorRoot.item.card.code)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           // Security Code / CVV (Protected)
@@ -1049,7 +1051,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Security Code"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Security Code"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.card) ? (inspectorRoot.showCardCodeRevealed ? (inspectorRoot.item.card.code || "") : "•••") : ""
                 color: inspectorRoot.foreground
@@ -1084,7 +1086,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: identityColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1103,7 +1105,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Full Name"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Full Name"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.title, inspectorRoot.item.identity.firstName, inspectorRoot.item.identity.middleName, inspectorRoot.item.identity.lastName].filter(Boolean).join(" ") : ""
                 color: inspectorRoot.foreground
@@ -1129,7 +1131,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.email)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           RowLayout {
@@ -1141,7 +1143,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Email"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Email"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.email || "") : ""
                 color: inspectorRoot.foreground
@@ -1164,7 +1166,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && inspectorRoot.item.identity.phone)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           RowLayout {
@@ -1176,7 +1178,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Phone"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Phone"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.identity) ? (inspectorRoot.item.identity.phone || "") : ""
                 color: inspectorRoot.foreground
@@ -1199,7 +1201,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           RowLayout {
@@ -1211,7 +1213,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Address"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Address"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
                 color: inspectorRoot.foreground
@@ -1243,7 +1245,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: sshKeyColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1262,7 +1264,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Private Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Private Key"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.showPrivateKeyRevealed ? (inspectorRoot.item.ssh_key.private_key || "") : "••••••••••••••••") : ""
                 color: inspectorRoot.foreground
@@ -1296,7 +1298,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.private_key && (inspectorRoot.item.ssh_key.public_key || inspectorRoot.item.ssh_key.fingerprint))
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           RowLayout {
@@ -1308,7 +1310,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Public Key"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Public Key"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.public_key || "") : ""
                 color: inspectorRoot.foreground
@@ -1332,7 +1334,7 @@ ScrollView {
             visible: Boolean(inspectorRoot.item && inspectorRoot.item.ssh_key && inspectorRoot.item.ssh_key.public_key && inspectorRoot.item.ssh_key.fingerprint)
             Layout.fillWidth: true
             height: 1
-            color: Qt.rgba(255, 255, 255, 0.05)
+            color: inspectorRoot.borderColor
           }
 
           RowLayout {
@@ -1344,7 +1346,7 @@ ScrollView {
               Layout.fillWidth: true
               Layout.preferredWidth: 0
               spacing: 2
-              Text { text: "Fingerprint"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+              Text { text: "Fingerprint"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
                 text: (inspectorRoot.item && inspectorRoot.item.ssh_key) ? (inspectorRoot.item.ssh_key.fingerprint || "") : ""
                 color: inspectorRoot.foreground
@@ -1374,7 +1376,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: notesColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1386,7 +1388,7 @@ ScrollView {
 
           RowLayout {
             Layout.fillWidth: true
-            Text { text: "Notes"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+            Text { text: "Notes"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
             Item { Layout.fillWidth: true }
             GhostIconButton {
               iconText: "\uf0c5"
@@ -1395,7 +1397,7 @@ ScrollView {
             }
           }
 
-          Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(255, 255, 255, 0.05) }
+          Rectangle { Layout.fillWidth: true; height: 1; color: inspectorRoot.borderColor }
 
           Text {
             Layout.fillWidth: true
@@ -1416,7 +1418,7 @@ ScrollView {
         Layout.fillWidth: true
         height: 60
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.15)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1426,12 +1428,12 @@ ScrollView {
           Text {
             text: "\uf0f6"
             font.family: inspectorRoot.fontFamily
-            color: Qt.darker(inspectorRoot.foreground, 1.8)
+            color: inspectorRoot.muted
             font.pixelSize: Style.font.body
           }
           Text {
             text: "This secure note has no text or custom fields."
-            color: Qt.darker(inspectorRoot.foreground, 1.8)
+            color: inspectorRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
         }
@@ -1445,7 +1447,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: customFieldsColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1457,7 +1459,7 @@ ScrollView {
 
           Text {
             text: "Custom Fields"
-            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            color: inspectorRoot.muted
             font.pixelSize: inspectorRoot.keyPixelSize
           }
 
@@ -1476,7 +1478,7 @@ ScrollView {
               Rectangle {
                 Layout.fillWidth: true
                 height: 1
-                color: Qt.rgba(255, 255, 255, 0.05)
+                color: inspectorRoot.borderColor
               }
 
               RowLayout {
@@ -1490,7 +1492,7 @@ ScrollView {
 
                   Text {
                     text: modelData.name || "Field"
-                    color: Qt.darker(inspectorRoot.foreground, 1.6)
+                    color: inspectorRoot.muted
                     font.pixelSize: inspectorRoot.keyPixelSize
                     elide: Text.ElideRight
                     Layout.fillWidth: true
@@ -1543,7 +1545,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: attachmentsColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1555,7 +1557,7 @@ ScrollView {
 
           Text {
             text: "Attachments (" + (inspectorRoot.item ? (inspectorRoot.item.attachments ? inspectorRoot.item.attachments.length : 0) : 0) + ")"
-            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            color: inspectorRoot.muted
             font.pixelSize: inspectorRoot.keyPixelSize
           }
 
@@ -1569,7 +1571,7 @@ ScrollView {
               Rectangle {
                 Layout.fillWidth: true
                 height: 1
-                color: Qt.rgba(255, 255, 255, 0.05)
+                color: inspectorRoot.borderColor
               }
 
               RowLayout {
@@ -1580,7 +1582,7 @@ ScrollView {
                   text: inspectorRoot.getAttachmentIcon(modelData.fileName)
                   font.family: inspectorRoot.fontFamily
                   font.pixelSize: Style.font.title
-                  color: Qt.darker(inspectorRoot.foreground, 1.4)
+                  color: inspectorRoot.muted
                 }
 
                 ColumnLayout {
@@ -1599,7 +1601,7 @@ ScrollView {
                   }
                   Text {
                     text: modelData.sizeName || inspectorRoot.formatFileSize(modelData.size)
-                    color: Qt.darker(inspectorRoot.foreground, 1.8)
+                    color: inspectorRoot.muted
                     font.pixelSize: Style.font.caption
                   }
                 }
@@ -1632,7 +1634,7 @@ ScrollView {
         Layout.fillWidth: true
         implicitHeight: historyColumnLayout.implicitHeight + 20
         radius: 6
-        color: Qt.rgba(0, 0, 0, 0.2)
+        color: Commons.Color.popups.background
         border.color: inspectorRoot.borderColor
         border.width: 1
 
@@ -1644,7 +1646,7 @@ ScrollView {
 
           Text {
             text: "Item history"
-            color: Qt.darker(inspectorRoot.foreground, 1.6)
+            color: inspectorRoot.muted
             font.pixelSize: inspectorRoot.keyPixelSize
           }
 
@@ -1657,7 +1659,7 @@ ScrollView {
             Rectangle {
               Layout.fillWidth: true
               height: 1
-              color: Qt.rgba(255, 255, 255, 0.05)
+              color: inspectorRoot.borderColor
             }
 
             RowLayout {
@@ -1668,7 +1670,7 @@ ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 0
                 spacing: 2
-                Text { text: "Created"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text { text: "Created"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
                   text: (inspectorRoot.item && inspectorRoot.item.created_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.created_at) : ""
                   color: inspectorRoot.foreground
@@ -1692,7 +1694,7 @@ ScrollView {
               visible: Boolean(inspectorRoot.item && inspectorRoot.item.created_at)
               Layout.fillWidth: true
               height: 1
-              color: Qt.rgba(255, 255, 255, 0.05)
+              color: inspectorRoot.borderColor
             }
 
             RowLayout {
@@ -1703,7 +1705,7 @@ ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 0
                 spacing: 2
-                Text { text: "Updated"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text { text: "Updated"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
                   text: (inspectorRoot.item && inspectorRoot.item.updated_at) ? inspectorRoot.formatDateTime(inspectorRoot.item.updated_at) : ""
                   color: inspectorRoot.foreground
@@ -1726,7 +1728,7 @@ ScrollView {
             Rectangle {
               Layout.fillWidth: true
               height: 1
-              color: Qt.rgba(255, 255, 255, 0.05)
+              color: inspectorRoot.borderColor
             }
 
             RowLayout {
@@ -1737,7 +1739,7 @@ ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 0
                 spacing: 2
-                Text { text: "Password History"; color: Qt.darker(inspectorRoot.foreground, 1.6); font.pixelSize: inspectorRoot.keyPixelSize }
+                Text { text: "Password History"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                 Text {
                   text: (inspectorRoot.item && inspectorRoot.item.login && inspectorRoot.item.login.password_history) ? (inspectorRoot.item.login.password_history.length + " previous password(s)") : ""
                   color: inspectorRoot.foreground
