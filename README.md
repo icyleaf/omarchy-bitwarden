@@ -137,9 +137,15 @@ omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 
 ```lua
 -- ~/.config/hypr/bindings.lua
-o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
 
-o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
+-- Option 1: Dedicated hotkey (e.g. SUPER + B)
+o.bind("SUPER + B", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
+
+-- Option 2: Replace Omarchy default password shortcut (1Password)
+-- hl.unbind("SUPER + SHIFT + SLASH")
+-- o.bind("SUPER + SHIFT + SLASH", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
+
+o.window({ class = "org.quickshell", title = "^Bitwarden$" }, {
   float = true,
   center = true,
   size = { 1152, 768 }
