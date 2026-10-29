@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
@@ -335,11 +336,12 @@ Item {
   property string lastVaultItemsRawText: ""
   property var logBuffer: []
 
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
-  readonly property color borderColor: Color.menu.border
-  readonly property color accent: Color.menu.selectedText
-  readonly property color selectedBackground: Color.menu.selectedBackground
+  readonly property color background: Commons.Color.menu.background
+  readonly property color foreground: Commons.Color.menu.text
+  readonly property color borderColor: Commons.Color.menu.border
+  readonly property color accent: Commons.Color.menu.selectedText
+  readonly property color selectedBackground: Commons.Color.menu.selectedBackground
+  readonly property color muted: Commons.Color.muted
   readonly property string fontFamily: Style.font.menuFamily
 
   readonly property var selectedItem: {
@@ -1945,7 +1947,7 @@ Item {
     id: panel
     title: "Bitwarden"
     visible: root.opened
-    color: Color.menu.background
+    color: root.background
     implicitWidth: 880
     implicitHeight: 560
     minimumSize: Qt.size(720, 480)
@@ -2415,6 +2417,7 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
             onLoginPasswordRequested: function(email, pwd, code, prov) { root.doLoginPassword(email, pwd, code, prov) }
@@ -2465,6 +2468,7 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
             onSaveRequested: function(newSettings) { root.saveSettings(newSettings) }
             onCloseRequested: { root.currentView = "auto" }
@@ -2487,6 +2491,7 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
             onRecheckRequested: { root.checkDependencies() }
             onInstallRequested: { root.installMissingDependencies() }

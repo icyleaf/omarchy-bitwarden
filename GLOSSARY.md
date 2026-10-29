@@ -61,8 +61,12 @@ An OpenSSH cryptographic keypair cipher (Type 5) containing private key, public 
 _Avoid_: Keyfile, SSH credential
 
 **Attachment**:
-An encrypted binary or text file associated with a vault cipher.
+The encrypted binary or text file associated with a vault cipher.
 _Avoid_: File, upload, asset
+
+**Icon Cache**:
+The local offline store of website and service favicons, namespaced by origin and domain to preserve network privacy and enable offline UI rendering.
+_Avoid_: Favicon folder, icon directory, image cache
 
 **Organization**:
 A shared administrative entity containing enterprise or team credentials.
@@ -93,3 +97,16 @@ _Avoid_: Command menu, quick actions
 **Inspector**:
 The side panel within the overlay that reveals details, masked secrets, and metadata for the selected cipher.
 _Avoid_: Details pane, info view, sidebar
+
+**Theme Tokens**:
+The reactive, system-wide color primitives provided by the Omarchy shell (`qs.Commons.Color`) that dynamically adapt to the active desktop theme (dark or light).
+_Avoid_: Hardcoded hex codes, custom color schemes, fixed color palettes
+
+**Surface Roles**:
+Semantic UI layer classifications (`popups`, `menu`, `tooltip`, `controls`) defining background, border, text, and selection colors for distinct interface contexts.
+_Avoid_: Component-level color configs, local background overrides
+
+**Muted Color**:
+The theme-provided secondary color token (`Color.muted`) used for subdued labels, captions, and placeholders across both dark and light modes.
+_Avoid_: Darkened foreground, lighter black, gray tint
+
