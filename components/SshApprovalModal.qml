@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 // Confirmation for an SSH agent signature request. The daemon summons the
 // overlay with an `ssh-approval` payload; the prompt fields come from
@@ -12,15 +13,17 @@ Rectangle {
   property bool active: false
   property var prompt: null
   property int remaining: 0
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
   // The card opens by itself, possibly mid-typing: hold off Allow briefly so
   // an Enter meant for another window can't approve.
   property bool armed: false
 
-  readonly property color mutedForeground: Qt.darker(foreground, 1.5)
+  readonly property color mutedForeground: approvalRoot.muted
   readonly property color dangerColor: "#f87171"
 
   signal replyRequested(bool approve)
@@ -77,7 +80,7 @@ Rectangle {
     implicitHeight: content.implicitHeight + 32
     height: implicitHeight
     radius: 8
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: approvalRoot.cardBackground
     border.color: approvalRoot.prompt && approvalRoot.prompt.forwarded ? approvalRoot.dangerColor : approvalRoot.borderColor
     border.width: 1
 
@@ -221,7 +224,7 @@ Rectangle {
           text: approvalRoot.prompt && approvalRoot.prompt.remembered
                 ? "Enter allow · Esc deny · remembered for this program and app until you log out"
                 : "Enter allow · Esc deny"
-          color: Qt.darker(approvalRoot.foreground, 2.0)
+          color: approvalRoot.muted
           font.pixelSize: Style.font.caption
           Layout.fillWidth: true
           elide: Text.ElideRight
@@ -231,13 +234,13 @@ Rectangle {
           implicitHeight: 28
           implicitWidth: 70
           radius: 4
-          color: denyMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+          color: denyMouse.containsMouse ? Qt.rgba(approvalRoot.foreground.r, approvalRoot.foreground.g, approvalRoot.foreground.b, 0.08) : "transparent"
           border.color: approvalRoot.borderColor
           border.width: 1
           Text {
             anchors.centerIn: parent
             text: "Deny"
-            color: denyMouse.containsMouse ? approvalRoot.foreground : Qt.darker(approvalRoot.foreground, 1.3)
+            color: denyMouse.containsMouse ? approvalRoot.foreground : approvalRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
           MouseArea {

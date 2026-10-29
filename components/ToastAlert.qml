@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: toastRoot
@@ -9,8 +10,10 @@ Item {
   property string statusMessage: ""
   property string errorMessage: ""
   property bool isBusy: false
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
   property int maxMessageWidth: 560
 
@@ -23,8 +26,8 @@ Item {
   Rectangle {
     anchors.fill: parent
     radius: 6
-    color: errorMessage ? Qt.rgba(0.85, 0.15, 0.15, 0.95) : Qt.rgba(0.12, 0.14, 0.18, 0.95)
-    border.color: errorMessage ? "#f87171" : (isBusy ? toastRoot.accent : Qt.rgba(1, 1, 1, 0.15))
+    color: errorMessage ? Qt.rgba(0.85, 0.15, 0.15, 0.95) : toastRoot.cardBackground
+    border.color: errorMessage ? "#f87171" : (isBusy ? toastRoot.accent : toastRoot.borderColor)
     border.width: 1
 
     Behavior on opacity {
@@ -40,13 +43,13 @@ Item {
         text: isBusy ? "\uf021" : (errorMessage ? "\uf071" : "\uf129")
         font.family: toastRoot.fontFamily
         font.pixelSize: Style.font.bodySmall
-        color: "#ffffff"
+        color: errorMessage ? "#ffffff" : (isBusy ? toastRoot.accent : toastRoot.foreground)
       }
 
       Text {
         id: messageText
         text: errorMessage || statusMessage || (isBusy ? "Processing..." : "")
-        color: "#ffffff"
+        color: errorMessage ? "#ffffff" : toastRoot.foreground
         font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium
         elide: Text.ElideRight
@@ -68,7 +71,7 @@ Item {
         visible: !isBusy && Boolean(errorMessage || statusMessage)
         text: "\uf00d"
         font.family: toastRoot.fontFamily
-        color: Qt.rgba(1, 1, 1, 0.6)
+        color: errorMessage ? Qt.rgba(1, 1, 1, 0.7) : Qt.rgba(toastRoot.foreground.r, toastRoot.foreground.g, toastRoot.foreground.b, 0.6)
         font.pixelSize: Style.font.caption
         MouseArea {
           anchors.fill: parent
