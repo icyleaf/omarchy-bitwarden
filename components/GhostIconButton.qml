@@ -1,15 +1,17 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: ghostBtnRoot
 
   property string iconText: ""
   property int iconPixelSize: Style.font.body
-  property color foreground: "#ffffff"
-  property color iconColor: mouseArea.containsMouse ? foreground : Qt.darker(foreground, 1.4)
-  property color hoverBackground: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color muted: Commons.Color.muted
+  property color iconColor: mouseArea.containsMouse ? foreground : muted
+  property color hoverBackground: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.08)
   property string tooltip: ""
   property string fontFamily: ""
 
