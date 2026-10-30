@@ -293,7 +293,7 @@ Item {
           // the master password after a soft lock.
           Rectangle {
             Layout.fillWidth: true
-            height: 32
+            Layout.preferredHeight: 32
             radius: 5
             visible: authRoot.quickUnlockAvailable && !authRoot.isBusy
             color: Qt.rgba(1, 1, 1, 0.08)
