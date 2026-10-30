@@ -2,15 +2,18 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: historyModalRoot
 
   property bool active: false
   property var item: null
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
 
   property bool allRevealed: false
@@ -111,7 +114,7 @@ Rectangle {
     width: Math.min(parent.width - 48, 520)
     height: Math.min(parent.height - 48, 440)
     radius: 8
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: historyModalRoot.cardBackground
     border.color: historyModalRoot.borderColor
     border.width: 1
 
@@ -174,7 +177,7 @@ Rectangle {
               Layout.fillWidth: true
               implicitHeight: entryCol.implicitHeight + 16
               radius: 6
-              color: Qt.rgba(0, 0, 0, 0.25)
+              color: Qt.rgba(historyModalRoot.foreground.r, historyModalRoot.foreground.g, historyModalRoot.foreground.b, 0.05)
               border.color: historyModalRoot.borderColor
               border.width: 1
 
@@ -191,7 +194,7 @@ Rectangle {
 
                   Text {
                     text: (modelData.last_used_date ? historyModalRoot.formatDateTime(modelData.last_used_date) : "Unknown date")
-                    color: Qt.darker(historyModalRoot.foreground, 1.5)
+                    color: historyModalRoot.muted
                     font.pixelSize: Style.font.caption
                     font.weight: Font.Medium
                     Layout.fillWidth: true
@@ -199,7 +202,7 @@ Rectangle {
 
                   Text {
                     text: "#" + (historyModalRoot.getHistoryList().length - index)
-                    color: Qt.darker(historyModalRoot.foreground, 2.0)
+                    color: historyModalRoot.muted
                     font.pixelSize: Style.fontPx(0.75)
                   }
                 }
@@ -244,7 +247,7 @@ Rectangle {
           Text {
             visible: historyModalRoot.getHistoryList().length === 0
             text: "No password history available for this item."
-            color: Qt.darker(historyModalRoot.foreground, 1.8)
+            color: historyModalRoot.muted
             font.pixelSize: Style.font.bodySmall
             Layout.alignment: Qt.AlignCenter
           }
@@ -264,7 +267,7 @@ Rectangle {
 
         Text {
           text: historyModalRoot.getHistoryList().length + " past password(s) recorded"
-          color: Qt.darker(historyModalRoot.foreground, 1.8)
+          color: historyModalRoot.muted
           font.pixelSize: Style.font.caption
           Layout.fillWidth: true
         }

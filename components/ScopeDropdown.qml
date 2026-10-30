@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: dropdownRoot
@@ -9,9 +10,10 @@ Item {
   property string title: "Scope"
   property string currentValue: "all"
   property var items: [] // [{ id: string, name: string, icon: string, count: int }]
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
   property bool alignRight: false
   property int maxLabelWidth: 110
@@ -183,7 +185,7 @@ Item {
     }
 
     background: Rectangle {
-      color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+      color: Commons.Color.popups.background
       border.color: dropdownRoot.borderColor
       border.width: 1
       radius: 6
@@ -238,7 +240,7 @@ Item {
         radius: 4
         property bool isSelected: modelData.id === dropdownRoot.currentValue
         property bool isHighlighted: index === popup.highlightedIndex
-        color: isSelected ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.2) : ((itemMouse.containsMouse || isHighlighted) ? Qt.rgba(1, 1, 1, 0.08) : "transparent")
+        color: isSelected ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.2) : ((itemMouse.containsMouse || isHighlighted) ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.08) : "transparent")
 
         RowLayout {
           anchors.fill: parent
@@ -250,7 +252,7 @@ Item {
             text: modelData.icon || "\uf009"
             font.family: dropdownRoot.fontFamily
             font.pixelSize: Style.font.bodySmall
-            color: isSelected ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 1.4)
+            color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
           }
 
           Text {
@@ -266,7 +268,7 @@ Item {
           Text {
             visible: modelData.count !== undefined && modelData.count !== null
             text: String(modelData.count)
-            color: isSelected ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 2.0)
+            color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
             font.pixelSize: Style.font.caption
           }
 

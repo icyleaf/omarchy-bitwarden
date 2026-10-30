@@ -2,15 +2,18 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: genModalRoot
 
   property bool active: false
   property string mode: "password" // "password" | "passphrase"
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
   // Password options
   property int passwordLength: 20
@@ -206,7 +209,7 @@ Rectangle {
     width: Math.min(parent.width - 48, 540)
     height: Math.min(parent.height - 48, 500)
     radius: 10
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: genModalRoot.cardBackground
     border.color: genModalRoot.borderColor
     border.width: 1
 
@@ -247,7 +250,7 @@ Rectangle {
           implicitHeight: 28
           implicitWidth: modeTabsRow.implicitWidth + 8
           radius: 6
-          color: Qt.rgba(0, 0, 0, 0.3)
+          color: Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.05)
           border.color: genModalRoot.borderColor
           border.width: 1
 
@@ -265,7 +268,7 @@ Rectangle {
               Text {
                 anchors.centerIn: parent
                 text: "Password"
-                color: genModalRoot.mode === "password" ? "#ffffff" : Qt.darker(genModalRoot.foreground, 1.4)
+                color: genModalRoot.mode === "password" ? "#ffffff" : genModalRoot.muted
                 font.pixelSize: Style.font.caption
                 font.weight: genModalRoot.mode === "password" ? Font.DemiBold : Font.Normal
               }
@@ -290,7 +293,7 @@ Rectangle {
               Text {
                 anchors.centerIn: parent
                 text: "Passphrase"
-                color: genModalRoot.mode === "passphrase" ? "#ffffff" : Qt.darker(genModalRoot.foreground, 1.4)
+                color: genModalRoot.mode === "passphrase" ? "#ffffff" : genModalRoot.muted
                 font.pixelSize: Style.font.caption
                 font.weight: genModalRoot.mode === "passphrase" ? Font.DemiBold : Font.Normal
               }
@@ -384,7 +387,7 @@ Rectangle {
         Layout.preferredHeight: Math.max(52, genSecretText.contentHeight + 20)
         Behavior on Layout.preferredHeight { NumberAnimation { duration: 120 } }
         radius: 8
-        color: Qt.rgba(0, 0, 0, 0.35)
+        color: Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.05)
         border.color: genModalRoot.borderColor
         border.width: 1
 
@@ -406,7 +409,7 @@ Rectangle {
             wrapMode: TextEdit.WrapAnywhere
             textFormat: TextEdit.RichText
             text: genModalRoot.errorMessage ? "—" : (genModalRoot.generatedPassword ? genModalRoot.formatStyledPassword(genModalRoot.generatedPassword) : "Generating...")
-            color: genModalRoot.errorMessage ? Qt.darker(genModalRoot.foreground, 1.8) : genModalRoot.foreground
+            color: genModalRoot.errorMessage ? genModalRoot.muted : genModalRoot.foreground
             font.pixelSize: (genModalRoot.generatedPassword.length > 32) ? Style.font.bodySmall : Style.font.subtitle
             font.family: "monospace"
             font.weight: Font.Medium
@@ -471,7 +474,7 @@ Rectangle {
           spacing: 5
           Text {
             text: "Strength:"
-            color: Qt.darker(genModalRoot.foreground, 1.6)
+            color: genModalRoot.muted
             font.pixelSize: Style.font.caption
           }
           Text {
@@ -538,7 +541,7 @@ Rectangle {
 
               Text {
                 text: "Use 14 or more characters for a strong password."
-                color: Qt.darker(genModalRoot.foreground, 1.8)
+                color: genModalRoot.muted
                 font.pixelSize: Style.font.caption
               }
             }
@@ -555,7 +558,7 @@ Rectangle {
                 spacing: 8
                 Rectangle {
                   width: 16; height: 16; radius: 3
-                  color: genModalRoot.includeUppercase ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                  color: genModalRoot.includeUppercase ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                   border.color: genModalRoot.borderColor; border.width: 1
                   Text {
                     anchors.centerIn: parent
@@ -579,7 +582,7 @@ Rectangle {
                 spacing: 8
                 Rectangle {
                   width: 16; height: 16; radius: 3
-                  color: genModalRoot.includeLowercase ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                  color: genModalRoot.includeLowercase ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                   border.color: genModalRoot.borderColor; border.width: 1
                   Text {
                     anchors.centerIn: parent
@@ -603,7 +606,7 @@ Rectangle {
                 spacing: 8
                 Rectangle {
                   width: 16; height: 16; radius: 3
-                  color: genModalRoot.includeNumbers ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                  color: genModalRoot.includeNumbers ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                   border.color: genModalRoot.borderColor; border.width: 1
                   Text {
                     anchors.centerIn: parent
@@ -627,7 +630,7 @@ Rectangle {
                 spacing: 8
                 Rectangle {
                   width: 16; height: 16; radius: 3
-                  color: genModalRoot.includeSpecial ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                  color: genModalRoot.includeSpecial ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                   border.color: genModalRoot.borderColor; border.width: 1
                   Text {
                     anchors.centerIn: parent
@@ -652,7 +655,7 @@ Rectangle {
               spacing: 8
               Rectangle {
                 width: 16; height: 16; radius: 3
-                color: genModalRoot.avoidAmbiguous ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                color: genModalRoot.avoidAmbiguous ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                 border.color: genModalRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
@@ -671,7 +674,7 @@ Rectangle {
               ColumnLayout {
                 spacing: 2
                 Text { text: "Avoid Ambiguous Characters"; color: genModalRoot.foreground; font.pixelSize: Style.font.bodySmall }
-                Text { text: "Excludes 0, O, o, 1, l, I, | to prevent visual confusion"; color: Qt.darker(genModalRoot.foreground, 1.6); font.pixelSize: Style.font.caption }
+                Text { text: "Excludes 0, O, o, 1, l, I, | to prevent visual confusion"; color: genModalRoot.muted; font.pixelSize: Style.font.caption }
               }
             }
           }
@@ -745,7 +748,7 @@ Rectangle {
                     implicitHeight: 26
                     implicitWidth: sepText.implicitWidth + 14
                     radius: 4
-                    color: genModalRoot.passphraseSeparator === modelData.val ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                    color: genModalRoot.passphraseSeparator === modelData.val ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                     border.color: genModalRoot.borderColor
                     border.width: 1
 
@@ -753,7 +756,7 @@ Rectangle {
                       id: sepText
                       anchors.centerIn: parent
                       text: modelData.label
-                      color: genModalRoot.passphraseSeparator === modelData.val ? "#ffffff" : Qt.darker(genModalRoot.foreground, 1.4)
+                      color: genModalRoot.passphraseSeparator === modelData.val ? "#ffffff" : genModalRoot.muted
                       font.pixelSize: Style.font.caption
                     }
 
@@ -775,7 +778,7 @@ Rectangle {
               spacing: 8
               Rectangle {
                 width: 16; height: 16; radius: 3
-                color: genModalRoot.passphraseCapitalize ? genModalRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+                color: genModalRoot.passphraseCapitalize ? genModalRoot.accent : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
                 border.color: genModalRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
@@ -814,7 +817,7 @@ Rectangle {
           Text {
             anchors.centerIn: parent
             text: "Close"
-            color: Qt.darker(genModalRoot.foreground, 1.3)
+            color: genModalRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
 

@@ -2559,7 +2559,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onActionSelected: function(actionItem) {
           root.showActionPalette = false
           if (actionItem && typeof actionItem.action === "function") {
@@ -2578,7 +2580,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onCreateRequested: function(payload) { root.handleSshKeyCreate(payload) }
         onImportRequested: function(payload) { root.handleSshKeyImport(payload) }
         onExportRequested: function(payload) { root.handleSshKeyExport(payload) }
@@ -2594,7 +2598,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onReplyRequested: function(approve) { root.replySshApproval(approve) }
       }
 
@@ -2605,7 +2611,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
         onCloseRequested: { root.showPasswordHistoryModal = false }
       }
@@ -2621,7 +2629,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onGenerateRequested: function(opts) { root.generatePasswordOrPassphrase(opts) }
         onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
         onUpgradeRequested: {

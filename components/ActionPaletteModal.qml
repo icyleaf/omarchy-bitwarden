@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: paletteRoot
@@ -10,9 +11,11 @@ Rectangle {
   property var actions: []
   property int selectedIndex: 0
   property string actionFilterQuery: ""
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
 
   signal actionSelected(var actionItem)
@@ -44,7 +47,7 @@ Rectangle {
     width: Math.min(parent.width - 64, 480)
     height: Math.min(parent.height - 64, 360)
     radius: 8
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: paletteRoot.cardBackground
     border.color: paletteRoot.borderColor
     border.width: 1
 
@@ -145,7 +148,7 @@ Rectangle {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: "Type an action name..."
-            color: Qt.darker(paletteRoot.foreground, 1.8)
+            color: paletteRoot.muted
             font.family: "sans-serif"
             font.pixelSize: Style.font.body
             visible: !paletteFilterInput.text
@@ -154,7 +157,7 @@ Rectangle {
 
         Text {
           text: "Esc"
-          color: Qt.darker(paletteRoot.foreground, 1.8)
+          color: paletteRoot.muted
           font.pixelSize: Style.font.caption
         }
       }
@@ -181,7 +184,7 @@ Rectangle {
           width: paletteListView.width
           height: 34
           radius: 5
-          color: isSelected ? Qt.rgba(paletteRoot.accent.r, paletteRoot.accent.g, paletteRoot.accent.b, 0.25) : (actionMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+          color: isSelected ? Qt.rgba(paletteRoot.accent.r, paletteRoot.accent.g, paletteRoot.accent.b, 0.25) : (actionMouse.containsMouse ? Qt.rgba(paletteRoot.foreground.r, paletteRoot.foreground.g, paletteRoot.foreground.b, 0.05) : "transparent")
           border.color: isSelected ? paletteRoot.accent : "transparent"
           border.width: 1
 
@@ -195,12 +198,12 @@ Rectangle {
               text: modelData.icon || "\uf0e7"
               font.family: paletteRoot.fontFamily
               font.pixelSize: Style.font.subtitle
-              color: actionDelegate.isSelected ? "#ffffff" : Qt.darker(paletteRoot.foreground, 1.3)
+              color: actionDelegate.isSelected ? paletteRoot.accent : paletteRoot.muted
             }
 
             Text {
               text: modelData.label || ""
-              color: actionDelegate.isSelected ? "#ffffff" : paletteRoot.foreground
+              color: actionDelegate.isSelected ? paletteRoot.accent : paletteRoot.foreground
               font.pixelSize: Style.font.body
               font.weight: Font.Medium
               elide: Text.ElideRight
@@ -212,7 +215,7 @@ Rectangle {
               implicitHeight: 18
               implicitWidth: scText.implicitWidth + 8
               radius: 3
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: Qt.rgba(paletteRoot.foreground.r, paletteRoot.foreground.g, paletteRoot.foreground.b, 0.08)
               border.color: paletteRoot.borderColor
               border.width: 1
 
@@ -220,7 +223,7 @@ Rectangle {
                 id: scText
                 anchors.centerIn: parent
                 text: modelData.shortcut || ""
-                color: Qt.darker(paletteRoot.foreground, 1.4)
+                color: paletteRoot.muted
                 font.pixelSize: Style.font.caption
               }
             }

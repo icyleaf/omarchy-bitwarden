@@ -41,6 +41,7 @@ STANDALONE_TESTS=(
   "tests/tst_commons_stub.qml"
   "tests/tst_theme_color_adaptation.qml"
   "tests/tst_vault_item_list_theming.qml"
+  "tests/tst_modal_cards_theming.qml"
 )
 
 # The components import qs.Commons from Quickshell; use the stub, and run

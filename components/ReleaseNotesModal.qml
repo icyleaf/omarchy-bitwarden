@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: releaseModalRoot
@@ -14,9 +15,11 @@ Rectangle {
   property string engineSource: "aur"
   property string enginePackage: ""
   property bool isDownloadingCli: false
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
 
   signal closeRequested()
@@ -145,7 +148,7 @@ Rectangle {
     width: Math.min(parent.width - 48, 560)
     height: Math.min(parent.height - 48, 460)
     radius: 8
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: releaseModalRoot.cardBackground
     border.color: releaseModalRoot.borderColor
     border.width: 1
 
@@ -252,7 +255,7 @@ Rectangle {
           implicitHeight: 26
           implicitWidth: extBtnRow.implicitWidth + 14
           radius: 4
-          color: extMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.2)
+          color: extMouse.containsMouse ? Qt.rgba(releaseModalRoot.foreground.r, releaseModalRoot.foreground.g, releaseModalRoot.foreground.b, 0.08) : Qt.rgba(releaseModalRoot.foreground.r, releaseModalRoot.foreground.g, releaseModalRoot.foreground.b, 0.04)
           border.color: releaseModalRoot.borderColor
           border.width: 1
 
@@ -264,7 +267,7 @@ Rectangle {
             Text {
               text: "\uf08e"
               font.family: releaseModalRoot.fontFamily
-              color: Qt.darker(releaseModalRoot.foreground, 1.4)
+              color: releaseModalRoot.muted
               font.pixelSize: Style.font.caption
             }
 
