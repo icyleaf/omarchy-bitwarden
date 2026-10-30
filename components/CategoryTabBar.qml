@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 RowLayout {
   id: tabRoot
@@ -9,9 +10,10 @@ RowLayout {
   property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
   property var rawVaultItems: []
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color borderColor: Commons.Color.menu.border
 
   signal categorySelected(string category)
 
@@ -70,7 +72,7 @@ RowLayout {
       implicitHeight: 24
       implicitWidth: tabRow.implicitWidth + 14
       radius: 4
-      color: isSelected ? Qt.rgba(tabRoot.accent.r, tabRoot.accent.g, tabRoot.accent.b, 0.2) : (tabMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+      color: isSelected ? Qt.rgba(tabRoot.accent.r, tabRoot.accent.g, tabRoot.accent.b, 0.2) : (tabMouse.containsMouse ? Qt.rgba(tabRoot.foreground.r, tabRoot.foreground.g, tabRoot.foreground.b, 0.08) : "transparent")
       border.color: isSelected ? tabRoot.accent : "transparent"
       border.width: 1
 
@@ -81,7 +83,7 @@ RowLayout {
 
         Text {
           text: tabRoot.getCategoryLabel(cat)
-          color: isSelected ? tabRoot.accent : (tabMouse.containsMouse ? tabRoot.foreground : Qt.darker(tabRoot.foreground, 1.3))
+          color: isSelected ? tabRoot.accent : (tabMouse.containsMouse ? tabRoot.foreground : tabRoot.muted)
           font.pixelSize: Style.font.bodySmall
           font.weight: isSelected ? Font.DemiBold : Font.Normal
         }
@@ -90,7 +92,7 @@ RowLayout {
           property int count: tabRoot.getCategoryCount(cat)
           visible: count > 0
           text: count
-          color: isSelected ? tabRoot.accent : Qt.darker(tabRoot.foreground, 1.8)
+          color: isSelected ? tabRoot.accent : tabRoot.muted
           font.pixelSize: Style.font.caption
         }
       }
