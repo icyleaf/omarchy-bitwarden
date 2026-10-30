@@ -280,7 +280,7 @@ ScrollView {
           implicitHeight: 24
           implicitWidth: backBtnRow.implicitWidth + 10
           radius: 4
-          color: backMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
+          color: backMouse.containsMouse ? Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.1) : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.05)
           border.color: inspectorRoot.borderColor
           border.width: 1
 

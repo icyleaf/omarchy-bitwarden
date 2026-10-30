@@ -19,6 +19,8 @@ Rectangle {
   property bool isBusy: false
   property string errorMessage: ""
 
+  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
+
   // Form states
   property string itemName: ""
   property string algorithm: "ed25519"
@@ -196,7 +198,7 @@ Rectangle {
           implicitWidth: 22
           implicitHeight: 22
           radius: 4
-          color: closeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+          color: closeMouse.containsMouse ? Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.1) : "transparent"
 
           Text {
             anchors.centerIn: parent
@@ -478,7 +480,7 @@ Rectangle {
                 implicitWidth: 16
                 implicitHeight: 16
                 radius: 3
-                color: modalRoot.exportToLocal ? modalRoot.accent : Qt.rgba(0, 0, 0, 0.3)
+                color: modalRoot.exportToLocal ? modalRoot.accent : Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: modalRoot.exportToLocal ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -487,7 +489,7 @@ Rectangle {
                   text: "\uf00c"
                   font.family: modalRoot.fontFamily
                   font.pixelSize: Style.fontPx(0.75)
-                  color: "#ffffff"
+                  color: modalRoot.textOnAccent
                   visible: modalRoot.exportToLocal
                 }
 
@@ -946,12 +948,12 @@ Rectangle {
               text: "\uf110"
               font.family: modalRoot.fontFamily
               font.pixelSize: Style.font.bodySmall
-              color: "#ffffff"
+              color: modalRoot.textOnAccent
             }
 
             Text {
               text: modalRoot.isBusy ? "Processing..." : (modalRoot.mode === "create" ? "Generate" : (modalRoot.mode === "import" ? "Import" : "Export"))
-              color: "#ffffff"
+              color: modalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold
             }

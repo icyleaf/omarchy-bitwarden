@@ -15,6 +15,8 @@ Rectangle {
   property color cardBackground: Commons.Color.popups.background
   property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
+
+  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
   // Password options
   property int passwordLength: 20
   property bool includeUppercase: true
@@ -268,7 +270,7 @@ Rectangle {
               Text {
                 anchors.centerIn: parent
                 text: "Password"
-                color: genModalRoot.mode === "password" ? "#ffffff" : genModalRoot.muted
+                color: genModalRoot.mode === "password" ? genModalRoot.textOnAccent : genModalRoot.muted
                 font.pixelSize: Style.font.caption
                 font.weight: genModalRoot.mode === "password" ? Font.DemiBold : Font.Normal
               }
@@ -293,7 +295,7 @@ Rectangle {
               Text {
                 anchors.centerIn: parent
                 text: "Passphrase"
-                color: genModalRoot.mode === "passphrase" ? "#ffffff" : genModalRoot.muted
+                color: genModalRoot.mode === "passphrase" ? genModalRoot.textOnAccent : genModalRoot.muted
                 font.pixelSize: Style.font.caption
                 font.weight: genModalRoot.mode === "passphrase" ? Font.DemiBold : Font.Normal
               }
@@ -360,13 +362,13 @@ Rectangle {
                 text: "\uf019"
                 font.family: genModalRoot.fontFamily
                 font.pixelSize: Style.font.caption
-                color: "#ffffff"
+                color: genModalRoot.textOnAccent
               }
               Text {
                 text: "Upgrade"
                 font.pixelSize: Style.font.caption
                 font.weight: Font.DemiBold
-                color: "#ffffff"
+                color: genModalRoot.textOnAccent
               }
             }
 
@@ -423,7 +425,7 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             radius: 6
             opacity: genModalRoot.isEngineOutdated ? 0.4 : 1.0
-            color: regenHover.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : Qt.rgba(1, 1, 1, 0.05)
+            color: regenHover.containsMouse ? Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.15) : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.05)
             border.color: genModalRoot.borderColor
             border.width: 1
 
@@ -465,7 +467,7 @@ Rectangle {
               implicitWidth: 26
               implicitHeight: 4
               radius: 2
-              color: (index < genModalRoot.strengthLevel) ? genModalRoot.strengthColor : Qt.rgba(1, 1, 1, 0.12)
+              color: (index < genModalRoot.strengthLevel) ? genModalRoot.strengthColor : Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.12)
             }
           }
         }
@@ -564,7 +566,7 @@ Rectangle {
                     anchors.centerIn: parent
                     visible: genModalRoot.includeUppercase
                     text: "\uf00c"; font.family: genModalRoot.fontFamily
-                    color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                    color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                   }
                   MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -588,7 +590,7 @@ Rectangle {
                     anchors.centerIn: parent
                     visible: genModalRoot.includeLowercase
                     text: "\uf00c"; font.family: genModalRoot.fontFamily
-                    color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                    color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                   }
                   MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -612,7 +614,7 @@ Rectangle {
                     anchors.centerIn: parent
                     visible: genModalRoot.includeNumbers
                     text: "\uf00c"; font.family: genModalRoot.fontFamily
-                    color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                    color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                   }
                   MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -636,7 +638,7 @@ Rectangle {
                     anchors.centerIn: parent
                     visible: genModalRoot.includeSpecial
                     text: "\uf00c"; font.family: genModalRoot.fontFamily
-                    color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                    color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                   }
                   MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -661,7 +663,7 @@ Rectangle {
                   anchors.centerIn: parent
                   visible: genModalRoot.avoidAmbiguous
                   text: "\uf00c"; font.family: genModalRoot.fontFamily
-                  color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                  color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea {
                   anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -756,7 +758,7 @@ Rectangle {
                       id: sepText
                       anchors.centerIn: parent
                       text: modelData.label
-                      color: genModalRoot.passphraseSeparator === modelData.val ? "#ffffff" : genModalRoot.muted
+                      color: genModalRoot.passphraseSeparator === modelData.val ? genModalRoot.textOnAccent : genModalRoot.muted
                       font.pixelSize: Style.font.caption
                     }
 
@@ -784,7 +786,7 @@ Rectangle {
                   anchors.centerIn: parent
                   visible: genModalRoot.passphraseCapitalize
                   text: "\uf00c"; font.family: genModalRoot.fontFamily
-                  color: "#ffffff"; font.pixelSize: Style.fontPx(0.75)
+                  color: genModalRoot.textOnAccent; font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea {
                   anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -810,7 +812,7 @@ Rectangle {
           Layout.preferredHeight: 34
           Layout.preferredWidth: 80
           radius: 6
-          color: Qt.rgba(1, 1, 1, 0.08)
+          color: Qt.rgba(genModalRoot.foreground.r, genModalRoot.foreground.g, genModalRoot.foreground.b, 0.08)
           border.color: genModalRoot.borderColor
           border.width: 1
 
@@ -847,12 +849,12 @@ Rectangle {
             Text {
               text: "\uf0c5"
               font.family: genModalRoot.fontFamily
-              color: "#ffffff"
+              color: genModalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               text: "Copy to Clipboard (↵)"
-              color: "#ffffff"
+              color: genModalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold
             }

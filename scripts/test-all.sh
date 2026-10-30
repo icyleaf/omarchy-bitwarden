@@ -16,6 +16,9 @@ echo "=== Running Cargo Test Suite ==="
 echo "=== Running Python Workflow Tests ==="
 python3 "${ROOT_DIR}/tests/test_workflow_action_pinning.py"
 
+echo "=== Running Static Theme Compliance Gate ==="
+python3 "${ROOT_DIR}/scripts/check-hardcoded-colors.py"
+
 if command -v qmllint >/dev/null 2>&1; then
   echo "=== Running QML Lint ==="
   (cd "${ROOT_DIR}" && qmllint OmarchyBitwarden.qml components/*.qml)

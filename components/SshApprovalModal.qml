@@ -25,6 +25,7 @@ Rectangle {
 
   readonly property color mutedForeground: approvalRoot.muted
   readonly property color dangerColor: "#f87171"
+  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
 
   signal replyRequested(bool approve)
 
@@ -261,7 +262,7 @@ Rectangle {
           Text {
             anchors.centerIn: parent
             text: "Allow"
-            color: "#ffffff"
+            color: approvalRoot.textOnAccent
             font.pixelSize: Style.font.bodySmall
             font.weight: Font.DemiBold
           }
