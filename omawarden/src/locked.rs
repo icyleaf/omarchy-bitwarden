@@ -25,6 +25,17 @@ pub fn page_size() -> usize {
 }
 
 static MLOCK_WARNED: AtomicBool = AtomicBool::new(false);
+/// Set once any mlock call has failed in this process: the "never leaves
+/// mlocked memory" guarantee is degraded to unlocked-memory best effort.
+static MLOCK_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+/// True when at least one mlock failed in this process, i.e. secret pages
+/// are only protected by best effort, not by physical-RAM locking. Exposed
+/// over the daemon's ping payload so the degradation stays discoverable
+/// (the daemonized process's stderr goes to /dev/null).
+pub fn mlock_fallback_active() -> bool {
+    MLOCK_FALLBACK.load(Ordering::Relaxed)
+}
 
 /// Page-aligned, mlocked memory container for sensitive cryptographic secrets.
 ///
@@ -68,13 +79,21 @@ impl<const N: usize> LockedMemory<N> {
             let ret = unsafe { libc::mlock(ptr.as_ptr() as *const libc::c_void, page) };
             if ret == 0 {
                 is_locked = true;
-            } else if !MLOCK_WARNED.swap(true, Ordering::Relaxed) {
-                let err = std::io::Error::last_os_error();
-                crate::log_warn!(
-                    "omawarden:locked",
-                    "mlock failed ({}); operating in unlocked memory fallback mode",
-                    err
-                );
+            } else {
+                MLOCK_FALLBACK.store(true, Ordering::Relaxed);
+                if !MLOCK_WARNED.swap(true, Ordering::Relaxed) {
+                    let err = std::io::Error::last_os_error();
+                    // Error-grade on purpose: the default log level is
+                    // "error", so a warn line would be dropped exactly when
+                    // it matters. The daemon also reports this state over
+                    // ping (`memory_locked: false`), where it survives the
+                    // daemonized process's null stderr.
+                    crate::log_error!(
+                        "omawarden:locked",
+                        "mlock failed ({}); SECRET MEMORY IS NOT LOCKED: operating in unlocked-memory fallback mode (check ulimit -l / memlock rlimit)",
+                        err
+                    );
+                }
             }
         }
 

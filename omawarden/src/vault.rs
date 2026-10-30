@@ -277,6 +277,13 @@ pub struct VaultManager {
     /// before decrypting and aborts if a wipe landed mid-restore, so a hard
     /// lock racing a restore can never be overridden.
     pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
+    /// The epoch check alone leaves a window: a wipe could land between the
+    /// final re-check and the four unlocked-state writes, and the restore
+    /// would overwrite it (vault left unlocked, ceiling disarmed). Held by
+    /// `wipe_quick_unlock` for its whole body and by the restore's final
+    /// commit section (which re-checks the epoch under the guard), making
+    /// wipe-vs-restore mutually exclusive at the commit point.
+    pub restore_guard: std::sync::Mutex<()>,
 }
 
 impl VaultManager {
@@ -325,6 +332,7 @@ impl VaultManager {
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
             quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
+            restore_guard: std::sync::Mutex::new(()),
         }
     }
 
@@ -397,6 +405,12 @@ impl VaultManager {
     }
 
     pub fn wipe_quick_unlock(&self) {
+        // restore_guard makes this wipe mutually exclusive with the
+        // restore's final commit section (see quick_unlock_restore).
+        let _restore = match self.restore_guard.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         self.quick_unlock_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut slot) = self.quick_unlock_key.write() {
@@ -407,8 +421,10 @@ impl VaultManager {
 
     /// Re-unlock from the retained key (ADR-0025): same decryption path as
     /// unlock(), minus the master-password KDF. The slot keeps its key
-    /// untouched; a wipe landing mid-restore aborts via the epoch guard
-    /// instead of being silently overridden.
+    /// untouched; a wipe landing mid-restore aborts via the epoch guard and
+    /// the restore_guard mutex (the final commit re-checks the epoch under
+    /// the same guard wipe_quick_unlock holds) instead of being silently
+    /// overridden.
     pub fn quick_unlock_restore(&self) -> Result<usize, String> {
         let epoch_before = self
             .quick_unlock_epoch
@@ -501,7 +517,10 @@ impl VaultManager {
 
         // A hard lock (suspend drift, 12h ceiling, explicit lock/logout)
         // landing during the decryption above must win: abort instead of
-        // writing unlocked state over a fresh wipe.
+        // writing unlocked state over a fresh wipe. The cheap epoch check
+        // first, then the commit runs under restore_guard with the epoch
+        // re-checked inside — wipe_quick_unlock holds the same guard, so a
+        // wipe can no longer interleave between this check and the writes.
         if self
             .quick_unlock_epoch
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -514,21 +533,39 @@ impl VaultManager {
             return Err("The vault was locked during unlock. Try again.".to_string());
         }
 
-        if let Ok(mut dec_items) = self.decrypted_items.write() {
-            *dec_items = items;
+        {
+            let _restore = match self.restore_guard.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if self
+                .quick_unlock_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != epoch_before
+            {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault was locked during quick unlock; aborting restore"
+                );
+                return Err("The vault was locked during unlock. Try again.".to_string());
+            }
+
+            if let Ok(mut dec_items) = self.decrypted_items.write() {
+                *dec_items = items;
+            }
+            if let Ok(mut key_slot) = self.user_key.write() {
+                *key_slot = Some(key);
+            }
+            if let Ok(mut unl) = self.is_unlocked.write() {
+                *unl = true;
+            }
+            if let Ok(mut st) = self.storage.write() {
+                *st = fresh_storage;
+            }
+            // The retained slot is intentionally left untouched: it still
+            // holds the same key, and rewriting it would resurrect a key a
+            // concurrent wipe just destroyed.
         }
-        if let Ok(mut key_slot) = self.user_key.write() {
-            *key_slot = Some(key);
-        }
-        if let Ok(mut unl) = self.is_unlocked.write() {
-            *unl = true;
-        }
-        if let Ok(mut st) = self.storage.write() {
-            *st = fresh_storage;
-        }
-        // The retained slot is intentionally left untouched: it still holds
-        // the same key, and rewriting it would resurrect a key a concurrent
-        // wipe just destroyed.
 
         crate::log_info!(
             "omawarden:vault",
@@ -1893,6 +1930,45 @@ pub(crate) mod tests {
             !vault.quick_unlock_available(),
             "a stale retained key must be wiped, not re-primed"
         );
+    }
+
+    #[test]
+    fn test_wipe_is_serialized_with_restore_commit() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // Regression for the restore TOCTOU: the wipe must share the mutex
+        // the restore's commit section holds, so a hard lock landing while a
+        // restore is committing cannot be overwritten. Hold the guard (as the
+        // commit section does) and prove wipe_quick_unlock waits on it.
+        let epoch_before = vault.quick_unlock_epoch.load(Ordering::SeqCst);
+        let guard = vault.restore_guard.lock().unwrap();
+        std::thread::scope(|s| {
+            let wiper = s.spawn(|| vault.wipe_quick_unlock());
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                vault.quick_unlock_epoch.load(Ordering::SeqCst),
+                epoch_before,
+                "a wipe must not bypass the restore commit guard"
+            );
+            assert!(
+                vault.quick_unlock_available(),
+                "the slot must survive while the commit section holds the guard"
+            );
+            drop(guard);
+            wiper.join().unwrap();
+        });
+        assert_ne!(
+            vault.quick_unlock_epoch.load(Ordering::SeqCst),
+            epoch_before
+        );
+        assert!(!vault.quick_unlock_available());
     }
 
     #[test]

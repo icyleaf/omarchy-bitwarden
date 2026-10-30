@@ -529,8 +529,16 @@ fn read_auth_payload() -> (String, Option<String>, Option<i32>, Option<String>) 
 }
 
 fn main() -> ExitCode {
-    // Disable process tracing (ptrace) and core dump generation for memory defense
-    let _ = omawarden::locked::disable_dumpable();
+    // Disable process tracing (ptrace) and core dump generation for memory
+    // defense. Fail-open is accepted (a desktop helper should not refuse to
+    // run over prctl), but never silently: without this the whole process
+    // stays ptraceable and core-dumpable.
+    if let Err(e) = omawarden::locked::disable_dumpable() {
+        omawarden::log_error!(
+            "omawarden:locked",
+            "Could not disable ptrace/core dumps (prctl PR_SET_DUMPABLE: {e}); tracing protections are INACTIVE for this process"
+        );
+    }
 
     let cli = Cli::parse();
     let config_mgr = ConfigManager::new(cli.config.as_deref());
@@ -1128,6 +1136,11 @@ fn main() -> ExitCode {
                 }
                 AuthAction::Logout => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));
+                    // ADR-0025 decision 4: logout must zeroize the retained
+                    // quick-unlock key. The daemon's lock handler already
+                    // hard-locks; the explicit wipe keeps that guarantee
+                    // independent of how the lock handler is implemented.
+                    let _ = send_daemon_request(&json!({ "action": "wipe_quick_unlock" }));
                     let res = auth_mgr.logout();
                     print_json_redacting_session(&res);
                     ExitCode::SUCCESS

@@ -295,6 +295,13 @@ impl ConfigManager {
             keyring_mgr.clear_all();
             keyring_mgr.clear_session(&cfg.server_url);
 
+            // ADR-0025 decision 4: a server/account change must zeroize the
+            // retained quick-unlock key. Send the explicit wipe before the
+            // daemon stop (whose own lock also wipes): the request is the
+            // contract the ADR names, independent of the stop handler.
+            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                "action": "wipe_quick_unlock"
+            }));
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
             crate::attachment::clear_preview_attachments(None);
 
@@ -670,6 +677,105 @@ esac
                 .get_api_secret("https://vault.bitwarden.com", "user.test-api-key-id")
                 .is_none(),
             "API secret in keyring must be cleared when server changes"
+        );
+    }
+
+    #[test]
+    fn test_server_url_change_sends_wipe_quick_unlock_before_stop() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::{Arc, Mutex};
+
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        // Mock daemon socket: records the actions the purge flow sends. The
+        // real daemon exits on "stop", so the mock stops serving after it.
+        let sock_path = crate::daemon::get_socket_path();
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind mock daemon socket");
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = recorded.clone();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .is_ok()
+                    && !line.trim().is_empty()
+                {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(action) = v.get("action").and_then(|a| a.as_str()) {
+                            rec.lock().unwrap().push(action.to_string());
+                            let _ = writeln!(stream, "{}", serde_json::json!({ "ok": true }));
+                            if action == "stop" {
+                                break; // the real daemon exits here
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let config_path = dir.path().join("config.json");
+        let storage_path = dir.path().join("data.json");
+        let mock_script = create_mock_secret_tool(dir.path());
+
+        let config_mgr = ConfigManager::new(Some(&config_path));
+        let storage_mgr = crate::storage::StorageManager::new(storage_path.clone());
+        let keyring_mgr = crate::keyring::KeyringManager::new(&mock_script);
+
+        let initial_cfg = Config {
+            server_url: "https://vault.bitwarden.com".to_string(),
+            email: "user@example.com".to_string(),
+            ..Default::default()
+        };
+        config_mgr.save(&initial_cfg).unwrap();
+
+        let initial_storage = crate::storage::VaultStorage {
+            server_url: "https://vault.bitwarden.com".to_string(),
+            user_email: "user@example.com".to_string(),
+            ..Default::default()
+        };
+        storage_mgr.save(&initial_storage).unwrap();
+
+        // The purge flow must ask the daemon to zeroize the retained
+        // quick-unlock key (ADR-0025 decision 4) before stopping it.
+        let (updated_cfg, server_changed) = config_mgr
+            .update_config(
+                ConfigUpdateOptions {
+                    server_url: Some("https://vaultwarden.custom.corp".to_string()),
+                    ..Default::default()
+                },
+                &storage_mgr,
+                &keyring_mgr,
+            )
+            .unwrap();
+        assert!(server_changed, "server change must be detected");
+        assert_eq!(
+            updated_cfg.server_url, "https://vaultwarden.custom.corp",
+            "purge test must actually switch servers"
+        );
+
+        let _ = server.join();
+        let actions = recorded.lock().unwrap().clone();
+        assert_eq!(
+            actions,
+            vec!["wipe_quick_unlock".to_string(), "stop".to_string()],
+            "server/account change must wipe the retained key, then stop the daemon"
+        );
+
+        let _ = std::fs::remove_file(&sock_path);
+        old_runtime.map_or_else(
+            || std::env::remove_var("XDG_RUNTIME_DIR"),
+            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
     }
 
