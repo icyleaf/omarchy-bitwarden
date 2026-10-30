@@ -35,7 +35,7 @@ ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "crypto", "a
 ssh-encoding = { version = "0.2", features = ["alloc"] }
 signature = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
-rand = "0.8"
+rand = "0.10"
 rpassword = "7.3"
 
 [dev-dependencies]
