@@ -73,8 +73,8 @@ Item {
     implicitHeight: 24
     implicitWidth: capsuleRow.implicitWidth + (dropdownRoot.isFiltered ? 18 : 12)
     radius: 4
-    color: dropdownRoot.isFiltered ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.18) : (capsuleMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.04))
-    border.color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.2) : dropdownRoot.borderColor)
+    color: dropdownRoot.isFiltered ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.18) : (capsuleMouse.containsMouse ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.08) : Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.04))
+    border.color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.2) : dropdownRoot.borderColor)
     border.width: 1
 
     MouseArea {
@@ -98,7 +98,7 @@ Item {
         text: dropdownRoot.currentItem ? (dropdownRoot.currentItem.icon || "\uf009") : "\uf009"
         font.family: dropdownRoot.fontFamily
         font.pixelSize: Style.font.bodySmall
-        color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : Qt.darker(dropdownRoot.foreground, 1.4))
+        color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : dropdownRoot.muted)
       }
 
       Text {
@@ -106,7 +106,7 @@ Item {
         font.family: "sans-serif"
         font.pixelSize: Style.font.bodySmall
         font.weight: dropdownRoot.isFiltered ? Font.DemiBold : Font.Normal
-        color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : Qt.darker(dropdownRoot.foreground, 1.2))
+        color: dropdownRoot.isFiltered ? dropdownRoot.accent : (capsuleMouse.containsMouse ? dropdownRoot.foreground : dropdownRoot.muted)
         elide: Text.ElideRight
         Layout.maximumWidth: dropdownRoot.maxLabelWidth
       }
@@ -116,7 +116,7 @@ Item {
         text: "\uf0d7"
         font.family: dropdownRoot.fontFamily
         font.pixelSize: Style.fontPx(0.75)
-        color: dropdownRoot.isFiltered ? dropdownRoot.accent : Qt.darker(dropdownRoot.foreground, 1.6)
+        color: dropdownRoot.isFiltered ? dropdownRoot.accent : dropdownRoot.muted
       }
 
       // Inline Reset Button (When Filtered)
@@ -125,7 +125,7 @@ Item {
         implicitWidth: 14
         implicitHeight: 14
         radius: 7
-        color: resetMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.2) : "transparent"
+        color: resetMouse.containsMouse ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.2) : "transparent"
 
         Text {
           anchors.centerIn: parent

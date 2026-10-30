@@ -286,7 +286,7 @@ Rectangle {
           implicitHeight: 26
           implicitWidth: closeBtnText.implicitWidth + 16
           radius: 4
-          color: Qt.rgba(1, 1, 1, 0.08)
+          color: Qt.rgba(historyModalRoot.foreground.r, historyModalRoot.foreground.g, historyModalRoot.foreground.b, 0.08)
           border.color: historyModalRoot.borderColor
           border.width: 1
 

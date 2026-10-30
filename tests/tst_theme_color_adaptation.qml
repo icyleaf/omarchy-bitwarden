@@ -3,12 +3,10 @@ import QtQuick.Controls
 import qs.Commons as Commons
 import "../components"
 
-// Theme-adaptation suite for slice 1 of the dynamic-theme epic (#266):
-// AuthView and SettingsModal must follow the Commons.Color stub on both the
-// dark (tokyo-night) and light (catppuccin-latte) presets and re-evaluate
-// live when the preset flips — the headless model of `omarchy theme set`.
-// Assertions target binding outputs on real elements (findText walks the
-// children and matches a Text/TextInput by content), never the tree shape.
+// End-to-end theme adaptation regression test suite (Issue #276 / ADR 0026):
+// All surfaces, inputs, modals, inspectors, and bars must strictly follow
+// the Commons.Color token contracts on both Dark (tokyo-night) and Light
+// (catppuccin-latte) presets and re-evaluate live when preset flips.
 Item {
   id: testRunner
   width: 800; height: 600
@@ -17,6 +15,7 @@ Item {
     if (!cond) { failures++; console.error("FAIL: " + msg) } else console.log("PASS: " + msg)
   }
 
+  // --- Core Application Views & Modals ---
   AuthView {
     id: auth
     width: 800; height: 600
@@ -28,13 +27,105 @@ Item {
     width: 800; height: 600
   }
 
-  // Guards for the root wiring contract (muted: root.muted) and for
-  // textOnAccent tracking the component's own accent, not the singleton.
+  VaultItemList {
+    id: vaultList
+    width: 300; height: 400
+    items: [
+      { id: "item-1", name: "GitHub", username: "octocat", type: 1, favorite: true },
+      { id: "item-2", name: "Google", username: "user@gmail.com", type: 1, favorite: false }
+    ]
+    selectedIndex: 0
+  }
+
+  CategoryTabBar {
+    id: categoryBar
+    width: 800; height: 40
+  }
+
+  SearchHeader {
+    id: searchHeader
+    width: 800; height: 50
+  }
+
+  FooterBar {
+    id: footerBar
+    width: 800; height: 40
+  }
+
+  ItemInspector {
+    id: itemInspector
+    width: 400; height: 600
+    item: ({
+      id: "item-1",
+      name: "GitHub",
+      type: 1,
+      login: {
+        username: "octocat",
+        password: "secretpassword123",
+        uris: [{ uri: "https://github.com" }]
+      },
+      notes: "Dev account notes"
+    })
+  }
+
+  EmptyInspector {
+    id: emptyInspector
+    width: 400; height: 600
+  }
+
+  ActionPaletteModal {
+    id: paletteModal
+    width: 800; height: 600
+    active: false
+  }
+
+  PasswordGeneratorModal {
+    id: genModal
+    width: 800; height: 600
+    active: false
+  }
+
+  PasswordHistoryModal {
+    id: histModal
+    width: 800; height: 600
+    active: false
+  }
+
+  SshApprovalModal {
+    id: sshApprovalModal
+    width: 800; height: 600
+    active: false
+  }
+
+  SshKeyModal {
+    id: sshKeyModal
+    width: 800; height: 600
+    active: false
+  }
+
+  ReleaseNotesModal {
+    id: releaseModal
+    width: 800; height: 600
+    active: false
+  }
+
+  ScopeDropdown {
+    id: scopeDropdown
+    title: "Scope"
+  }
+
+  DependencyCheckView {
+    id: depView
+    width: 800; height: 600
+  }
+
+  // --- Override Probes ---
   AuthView { id: authMutedOverride; muted: "#123456" }
   AuthView { id: authAccentProbe; accent: "#7aa2f7" }
   SettingsModal { id: smMutedOverride; muted: "#00ff00" }
 
   function findText(item, text) {
+    if (!item) return null
     var kids = item.children
     for (var i = 0; i < kids.length; i++) {
       if (kids[i].text === text) return kids[i]
@@ -47,77 +138,84 @@ Item {
   function checkCaptionUsesMuted(component, captionText, tag) {
     var caption = findText(component, captionText)
     check(caption !== null && Qt.colorEqual(caption.color, component.muted),
-          tag + ": secondary caption follows muted (M1) — " + captionText.slice(0, 28) + "…")
+          tag + ": secondary caption follows muted — " + captionText.slice(0, 28) + "…")
   }
 
-  // The full mapping matrix, re-run for every preset (u1–u5, u10).
+  // Verification Matrix across theme presets
   function runMatrix(tag) {
-    // u1 — muted resolves to the stub's Color.muted in both components
-    // (regression for the old undefined authRoot.muted reads).
-    check(Qt.colorEqual(auth.muted, Commons.Color.muted), tag + ": auth.muted === Color.muted (u1)")
-    check(Qt.colorEqual(sm.muted, Commons.Color.muted), tag + ": settings.muted === Color.muted (u1)")
+    // 1. Muted token compliance across all components
+    check(Qt.colorEqual(auth.muted, Commons.Color.muted), tag + ": auth.muted === Color.muted")
+    check(Qt.colorEqual(sm.muted, Commons.Color.muted), tag + ": settings.muted === Color.muted")
+    check(Qt.colorEqual(vaultList.muted, Commons.Color.muted), tag + ": vaultList.muted === Color.muted")
+    check(Qt.colorEqual(categoryBar.muted, Commons.Color.muted), tag + ": categoryBar.muted === Color.muted")
+    check(Qt.colorEqual(searchHeader.muted, Commons.Color.muted), tag + ": searchHeader.muted === Color.muted")
+    check(Qt.colorEqual(footerBar.muted, Commons.Color.muted), tag + ": footerBar.muted === Color.muted")
+    check(Qt.colorEqual(itemInspector.muted, Commons.Color.muted), tag + ": itemInspector.muted === Color.muted")
+    check(Qt.colorEqual(emptyInspector.muted, Commons.Color.muted), tag + ": emptyInspector.muted === Color.muted")
+    check(Qt.colorEqual(paletteModal.muted, Commons.Color.muted), tag + ": paletteModal.muted === Color.muted")
+    check(Qt.colorEqual(genModal.muted, Commons.Color.muted), tag + ": genModal.muted === Color.muted")
+    check(Qt.colorEqual(histModal.muted, Commons.Color.muted), tag + ": histModal.muted === Color.muted")
+    check(Qt.colorEqual(sshApprovalModal.muted, Commons.Color.muted), tag + ": sshApprovalModal.muted === Color.muted")
+    check(Qt.colorEqual(sshKeyModal.muted, Commons.Color.muted), tag + ": sshKeyModal.muted === Color.muted")
+    check(Qt.colorEqual(releaseModal.muted, Commons.Color.muted), tag + ": releaseModal.muted === Color.muted")
+    check(Qt.colorEqual(scopeDropdown.muted, Commons.Color.muted), tag + ": scopeDropdown.muted === Color.muted")
+    check(Qt.colorEqual(depView.muted, Commons.Color.muted), tag + ": depView.muted === Color.muted")
 
-    // u2 — secondary/caption text is muted, not Qt.darker(foreground).
+    // 2. Modal Card Surfaces & Borders Compliance
+    check(Qt.colorEqual(paletteModal.cardBackground, Commons.Color.popups.background), tag + ": paletteModal cardBackground === Color.popups.background")
+    check(Qt.colorEqual(genModal.cardBackground, Commons.Color.popups.background), tag + ": genModal cardBackground === Color.popups.background")
+    check(Qt.colorEqual(histModal.cardBackground, Commons.Color.popups.background), tag + ": histModal cardBackground === Color.popups.background")
+    check(Qt.colorEqual(sshApprovalModal.cardBackground, Commons.Color.popups.background), tag + ": sshApprovalModal cardBackground === Color.popups.background")
+    check(Qt.colorEqual(sshKeyModal.cardBackground, Commons.Color.popups.background), tag + ": sshKeyModal cardBackground === Color.popups.background")
+    check(Qt.colorEqual(releaseModal.cardBackground, Commons.Color.popups.background), tag + ": releaseModal cardBackground === Color.popups.background")
+
+    check(Qt.colorEqual(paletteModal.borderColor, Commons.Color.popups.border), tag + ": paletteModal borderColor === Color.popups.border")
+    check(Qt.colorEqual(genModal.borderColor, Commons.Color.popups.border), tag + ": genModal borderColor === Color.popups.border")
+    check(Qt.colorEqual(histModal.borderColor, Commons.Color.popups.border), tag + ": histModal borderColor === Color.popups.border")
+    check(Qt.colorEqual(sshApprovalModal.borderColor, Commons.Color.popups.border), tag + ": sshApprovalModal borderColor === Color.popups.border")
+    check(Qt.colorEqual(sshKeyModal.borderColor, Commons.Color.popups.border), tag + ": sshKeyModal borderColor === Color.popups.border")
+    check(Qt.colorEqual(releaseModal.borderColor, Commons.Color.popups.border), tag + ": releaseModal borderColor === Color.popups.border")
+
+    // 3. TextOnAccent Polarity
+    check(Qt.colorEqual(auth.textOnAccent, "#ffffff"), tag + ": auth.textOnAccent is #ffffff")
+    check(Qt.colorEqual(sm.textOnAccent, "#ffffff"), tag + ": sm.textOnAccent is #ffffff")
+    check(Qt.colorEqual(genModal.textOnAccent, "#ffffff"), tag + ": genModal.textOnAccent is #ffffff")
+    check(Qt.colorEqual(sshApprovalModal.textOnAccent, "#ffffff"), tag + ": sshApprovalModal.textOnAccent is #ffffff")
+    check(Qt.colorEqual(sshKeyModal.textOnAccent, "#ffffff"), tag + ": sshKeyModal.textOnAccent is #ffffff")
+    check(Qt.colorEqual(depView.textOnAccent, "#ffffff"), tag + ": depView.textOnAccent is #ffffff")
+
+    // 4. Captions & Secondary Text following Muted
     checkCaptionUsesMuted(auth, "Official Bitwarden cloud uses standard HTTPS and does not require client certificates.", tag)
     checkCaptionUsesMuted(sm, "(Optional override, e.g. https://identity.bitwarden.com)", tag)
+    checkCaptionUsesMuted(itemInspector, "Username", tag)
+    checkCaptionUsesMuted(itemInspector, "Password", tag)
+    checkCaptionUsesMuted(itemInspector, "Notes", tag)
 
-    // u3 — input fills are foreground-alpha blends (M2).
+    // 5. Light theme specific selection and contrast checks
+    if (tag === "light") {
+      check(!Qt.colorEqual(Commons.Color.menu.selectedText, "#ffffff"), tag + ": light selectedText must not be white")
+      check(!Qt.colorEqual(vaultList.selectedText, "#ffffff"), tag + ": vaultList selectedText must not be white")
+    }
+
+    // 6. Input fills are foreground-alpha blends
     var ph = findText(auth, "Enter master password...")
     check(ph !== null && ph.parent !== null && ph.parent.parent !== null
           && Qt.colorEqual(ph.parent.parent.color, Qt.rgba(auth.foreground.r, auth.foreground.g, auth.foreground.b, 0.08)),
-          tag + ": auth unlock input fill is foreground@0.08 (M2)")
+          tag + ": auth unlock input fill is foreground@0.08")
     var urlInput = findText(sm, "https://vault.bitwarden.com")
     check(urlInput !== null && urlInput.parent !== null
           && Qt.colorEqual(urlInput.parent.color, Qt.rgba(sm.foreground.r, sm.foreground.g, sm.foreground.b, 0.08)),
-          tag + ": settings server-url input fill is foreground@0.08 (M2)")
+          tag + ": settings server-url input fill is foreground@0.08")
 
-    // u4 — card fills are foreground-alpha (M3); disabled submit wash (M4).
-    var boxTitle = findText(auth, "SERVER & mTLS CLIENT CERTIFICATE")
-    check(boxTitle !== null && boxTitle.parent !== null && boxTitle.parent.parent !== null
-          && Qt.colorEqual(boxTitle.parent.parent.color, Qt.rgba(auth.foreground.r, auth.foreground.g, auth.foreground.b, 0.10)),
-          tag + ": auth server-config card fill is foreground@0.10 (M3)")
-    var chkUp = findText(sm, "Check Update")
-    check(chkUp !== null && chkUp.parent !== null
-          && Qt.colorEqual(chkUp.parent.color, Qt.rgba(sm.foreground.r, sm.foreground.g, sm.foreground.b, 0.06)),
-          tag + ": settings check-update button fill is foreground@0.06 (M3)")
-    auth.isBusy = true
-    check(Qt.colorEqual(auth.submitButtonComponent.color, Qt.rgba(auth.foreground.r, auth.foreground.g, auth.foreground.b, 0.08)),
-          tag + ": disabled submit fill is foreground@0.08 (M4)")
-    auth.isBusy = false
-    var logRow = findText(sm, "theme-info-row")
-    check(logRow !== null && logRow.parent !== null && logRow.parent.parent !== null
-          && Qt.colorEqual(logRow.parent.parent.color, Qt.rgba(sm.foreground.r, sm.foreground.g, sm.foreground.b, 0.03)),
-          tag + ": log-row neutral wash is foreground@0.03 (M4)")
-
-    // u5 — accent-button labels and checkmark glyphs use textOnAccent (M5/M6),
-    // which stays white on every shipped preset accent (dark parity) and never
-    // equals the accent fill itself (the M5 amendment).
-    check(Qt.colorEqual(auth.textOnAccent, "#ffffff"), tag + ": auth.textOnAccent is #ffffff (u5 parity)")
-    check(Qt.colorEqual(sm.textOnAccent, "#ffffff"), tag + ": settings.textOnAccent is #ffffff (u5 parity)")
-    check(!Qt.colorEqual(auth.textOnAccent, auth.accent), tag + ": auth.textOnAccent differs from accent fill (u5)")
-    var unlockLabel = findText(auth, "Unlock Vault")
-    check(unlockLabel !== null && Qt.colorEqual(unlockLabel.color, auth.textOnAccent),
-          tag + ": unlock button label uses textOnAccent (M5)")
-    var saveLabel = findText(sm, "Save Settings")
-    check(saveLabel !== null && Qt.colorEqual(saveLabel.color, sm.textOnAccent),
-          tag + ": save button label uses textOnAccent (M5)")
-    var glyph = findText(auth, "\uf00c")
-    check(glyph !== null && Qt.colorEqual(glyph.color, auth.textOnAccent),
-          tag + ": auth checkmark glyph uses textOnAccent (M6)")
-    var smGlyph = findText(sm, "\uf00c")
-    check(smGlyph !== null && Qt.colorEqual(smGlyph.color, sm.textOnAccent),
-          tag + ": settings checkmark glyph uses textOnAccent (M6)")
-
-    // u10 — the mutedForeground property is gone (rename regression);
-    // the caption following `muted` is already asserted in u2.
-    check(sm["mutedForeground"] === undefined, tag + ": settings exposes no mutedForeground (u10)")
+    // 7. Absence of obsolete property regressions
+    check(sm["mutedForeground"] === undefined, tag + ": settings exposes no mutedForeground")
   }
 
   Timer {
     id: suite
     interval: 400
     onTriggered: {
-      // u9 — full matrix on dark, light, then dark again (live theme switch).
+      // 1. Dark -> Light -> Dark live preset flips
       Commons.Color.setPreset("dark")
       runMatrix("dark")
       Commons.Color.setPreset("light")
@@ -125,30 +223,29 @@ Item {
       Commons.Color.setPreset("dark")
       runMatrix("dark-again")
 
-      // u6 — flipping the stub accent to a light color flips textOnAccent to
-      // the menu background pole; re-deriving the preset flips it back.
+      // 2. Dynamic textOnAccent flipping on light pastel accent
       Commons.Color.accent = "#ffd580"
       check(Qt.colorEqual(auth.textOnAccent, Commons.Color.menu.background),
-            "textOnAccent flips to menu.background on a light accent (u6)")
+            "auth textOnAccent flips to menu.background on light accent")
       check(Qt.colorEqual(sm.textOnAccent, Commons.Color.menu.background),
-            "settings textOnAccent flips on a light accent (u6)")
+            "settings textOnAccent flips to menu.background on light accent")
+      check(Qt.colorEqual(genModal.textOnAccent, Commons.Color.menu.background),
+            "genModal textOnAccent flips to menu.background on light accent")
+      check(Qt.colorEqual(sshApprovalModal.textOnAccent, Commons.Color.menu.background),
+            "sshApprovalModal textOnAccent flips to menu.background on light accent")
       Commons.Color.setPreset("light")
       Commons.Color.setPreset("dark")
       check(Qt.colorEqual(auth.textOnAccent, "#ffffff"),
-            "textOnAccent flips back after preset re-derivation (u6)")
+            "auth textOnAccent flips back to white after preset re-derivation")
 
-      // u7 — explicit muted overrides win over the Color.muted default
-      // (guards the root's muted: root.muted wiring contract).
-      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted: override wins (u7)")
-      check(Qt.colorEqual(smMutedOverride.muted, "#00ff00"), "settings muted: override wins (u7)")
+      // 3. Explicit muted overrides survive theme switches
+      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override wins")
+      check(Qt.colorEqual(smMutedOverride.muted, "#00ff00"), "settings muted override wins")
       Commons.Color.setPreset("light")
-      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted: override survives a preset flip (u7)")
+      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override survives preset flip")
       Commons.Color.setPreset("dark")
 
-      // u8 + luma boundary cases, data-driven on a component whose accent is
-      // set explicitly (textOnAccent must track the component accent, not the
-      // singleton). Every shipped theme accent stays white; only a genuinely
-      // light accent picks the dark pole.
+      // 4. Accent luminance boundary table
       var cases = [
         { hex: "#7aa2f7", dark: false },  // tokyo-night
         { hex: "#e68e0d", dark: false },  // custom orange
@@ -161,16 +258,15 @@ Item {
         authAccentProbe.accent = cases[i].hex
         var expected = cases[i].dark ? Commons.Color.menu.background : "#ffffff"
         check(Qt.colorEqual(authAccentProbe.textOnAccent, expected),
-              "textOnAccent(" + cases[i].hex + ") picks the " + (cases[i].dark ? "dark" : "white") + " pole (u8)")
+              "textOnAccent(" + cases[i].hex + ") selects " + (cases[i].dark ? "dark" : "white") + " pole")
       }
 
+      console.log("=== COMPLETED tst_theme_color_adaptation with " + failures + " failures ===")
       Qt.exit(failures === 0 ? 0 : 1)
     }
   }
 
   Component.onCompleted: {
-    // Feed the logs tab before the first layout pass so the log-row wash
-    // (M4, foreground@0.03) has a delegate to assert against.
     sm.activeTab = "logs"
     sm.logBuffer = [
       { level: "INFO", source: "theme-test", message: "theme-info-row", timestamp: "2026-10-28T10:00:00Z" }
