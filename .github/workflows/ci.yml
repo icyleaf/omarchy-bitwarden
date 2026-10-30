@@ -83,7 +83,8 @@ jobs:
             qml6-module-qtquick-layouts \
             qml6-module-qtquick-templates \
             qml6-module-qtquick-window \
-            qml6-module-qtqml
+            qml6-module-qtqml \
+            qml6-module-qtqml-workerscript
           QMLLINT_BIN=$(find /usr -name qmllint -type f -executable 2>/dev/null | head -n 1)
           if [ -n "$QMLLINT_BIN" ]; then
             sudo ln -sf "$QMLLINT_BIN" /usr/local/bin/qmllint
