@@ -28,15 +28,22 @@ echo "=== 3. Running Standalone QML Test Suites ==="
 export QML_IMPORT_PATH="${ROOT_DIR}/tests/stubs${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 
+QML_EXEC=""
 if command -v qml6 >/dev/null 2>&1; then
+  QML_EXEC="qml6"
+elif command -v qml >/dev/null 2>&1; then
+  QML_EXEC="qml"
+fi
+
+if [ -n "$QML_EXEC" ]; then
   for test_file in tests/tst_*.qml; do
     if [ -f "$test_file" ]; then
       echo "Running $test_file..."
-      qml6 "$test_file"
+      "$QML_EXEC" "$test_file"
     fi
   done
 else
-  echo "qml6 not found, skipping standalone QML tests."
+  echo "Neither qml6 nor qml runner found, skipping standalone QML tests."
 fi
 
 echo "=== QML Test Suite Passed Successfully ==="
