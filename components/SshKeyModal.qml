@@ -19,7 +19,7 @@ Rectangle {
   property bool isBusy: false
   property string errorMessage: ""
 
-  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
 
   // Form states
   property string itemName: ""
