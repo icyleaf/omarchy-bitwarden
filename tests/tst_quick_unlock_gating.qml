@@ -128,6 +128,11 @@ Item {
           "AuthView is wired to root.quickUnlockReady")
     check(wiring.indexOf("onQuickUnlockRequested: root.doQuickUnlock()") !== -1,
           "quickUnlockRequested is wired to root.doQuickUnlock()")
+    // The 3s auth-status poll must not spawn a second helper while unlocked:
+    // readiness is only meaningful on the locked view, and the lock
+    // transition refreshes it from the auth-status handler instead.
+    check(src.indexOf('root.authState.status !== "unlocked"') !== -1,
+          "readiness polling is skipped while the vault is unlocked")
 
     // --- Readiness parsing mirror (auth quick-unlock-check output).
     // 4. Engine without the feature (older binary, exit != 0) fails closed.

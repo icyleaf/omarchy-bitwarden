@@ -634,7 +634,13 @@ Item {
       root.helperPath
     ]
     authStatusProc.running = true
-    root.refreshQuickUnlockAvailability()
+    // Readiness only matters on the locked view. The lockSyncTimer polls auth
+    // status every 3s while the vault is unlocked, and a second helper spawn
+    // per tick would be pure noise; the transition back to locked refreshes
+    // readiness from the auth-status handler instead.
+    if (!root.authState || root.authState.status !== "unlocked") {
+      root.refreshQuickUnlockAvailability()
+    }
   }
 
   function syncVault(isBackground, force) {
@@ -3099,6 +3105,12 @@ Item {
               }
             } else {
               root.clearSensitiveState()
+              // A lock just landed (screen lock, idle timeout, suspend or the
+              // 12h ceiling). The polling path above skips readiness while
+              // unlocked and lockSyncTimer stops once locked, so this is the
+              // only place that can show or hide the quick unlock button on
+              // the transition.
+              root.refreshQuickUnlockAvailability()
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
