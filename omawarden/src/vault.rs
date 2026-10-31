@@ -270,6 +270,20 @@ pub struct VaultManager {
     pub decrypted_items: RwLock<Vec<VaultItem>>,
     pub user_key: RwLock<Option<SymmetricCryptoKey>>,
     pub is_unlocked: RwLock<bool>,
+    /// ADR-0025: user key retained across soft locks so a polkit check can
+    /// re-unlock without the master password. Never leaves mlocked memory.
+    pub quick_unlock_key: RwLock<Option<SymmetricCryptoKey>>,
+    /// Bumped on every quick-unlock wipe. quick_unlock_restore samples it
+    /// before decrypting and aborts if a wipe landed mid-restore, so a hard
+    /// lock racing a restore can never be overridden.
+    pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
+    /// The epoch check alone leaves a window: a wipe could land between the
+    /// final re-check and the four unlocked-state writes, and the restore
+    /// would overwrite it (vault left unlocked, ceiling disarmed). Held by
+    /// `wipe_quick_unlock` for its whole body and by the restore's final
+    /// commit section (which re-checks the epoch under the guard), making
+    /// wipe-vs-restore mutually exclusive at the commit point.
+    pub restore_guard: std::sync::Mutex<()>,
 }
 
 impl VaultManager {
@@ -316,6 +330,9 @@ impl VaultManager {
             decrypted_items: RwLock::new(Vec::new()),
             user_key: RwLock::new(None),
             is_unlocked: RwLock::new(false),
+            quick_unlock_key: RwLock::new(None),
+            quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
+            restore_guard: std::sync::Mutex::new(()),
         }
     }
 
@@ -323,7 +340,7 @@ impl VaultManager {
         self.is_unlocked.read().map(|g| *g).unwrap_or(false)
     }
 
-    pub fn lock(&self) {
+    fn purge_decrypted_state(&self) {
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = false;
         }
@@ -334,6 +351,263 @@ impl VaultManager {
             *key = None;
         }
         crate::attachment::clear_preview_attachments(None);
+    }
+
+    /// Full lock: purges decrypted state AND the quick-unlock slot. This is
+    /// the fail-safe default — retention happens only through soft_lock().
+    pub fn lock(&self) {
+        // Order matters. wipe_quick_unlock takes restore_guard and bumps the
+        // epoch, which is what makes an in-flight quick_unlock_restore abort
+        // instead of committing. Purging first would leave a window where a
+        // restore commit lands between the purge and the wipe: the vault
+        // would end up unlocked with the decrypted items and user key back,
+        // and the wipe (which only clears the slot) would not undo it. The
+        // hard lock must therefore invalidate restores before it purges.
+        self.wipe_quick_unlock();
+        self.purge_decrypted_state();
+    }
+
+    /// Soft lock (ADR-0025): purge everything a hard lock purges, except the
+    /// user key, which moves to the quick-unlock slot so a later polkit check
+    /// can restore the session. Reports whether a key was retained.
+    pub fn soft_lock(&self) -> bool {
+        // restore_guard makes retention mutually exclusive with the quick
+        // unlock restore commit in both directions: without it, the key move
+        // and purge below could interleave with the restore's writes and
+        // leave the vault flagged unlocked with no items and no user key
+        // (recoverable only by locking again). Same lock as
+        // wipe_quick_unlock; see quick_unlock_restore for the commit side.
+        let _restore = match self.restore_guard.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let retained = match self.user_key.write() {
+            Ok(mut src) => {
+                let taken = src.take();
+                let had = taken.is_some();
+                if let Ok(mut slot) = self.quick_unlock_key.write() {
+                    // Keep a previously retained key if this call had nothing
+                    // to move (called on an already-locked vault): dropping
+                    // retention would be a surprising side effect.
+                    if had || slot.is_none() {
+                        *slot = taken;
+                    }
+                }
+                had
+            }
+            Err(_) => false,
+        };
+        self.purge_decrypted_state();
+        if retained {
+            crate::log_info!(
+                "omawarden:vault",
+                "Soft-locked vault; user key retained for quick unlock."
+            );
+        }
+        retained
+    }
+
+    /// Hard lock: everything lock() does (explicit alias for readability at
+    /// ADR-0025 call sites: suspend, max session lifetime, explicit lock,
+    /// three failed polkit checks, server/account change).
+    pub fn hard_lock(&self) {
+        self.lock();
+    }
+
+    pub fn quick_unlock_available(&self) -> bool {
+        self.quick_unlock_key
+            .read()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn wipe_quick_unlock(&self) {
+        // restore_guard makes this wipe mutually exclusive with the
+        // restore's final commit section (see quick_unlock_restore).
+        let _restore = match self.restore_guard.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.quick_unlock_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut slot) = self.quick_unlock_key.write() {
+            // Dropping the LockedMemory-backed key zeroizes its page.
+            *slot = None;
+        }
+    }
+
+    /// Re-unlock from the retained key (ADR-0025): same decryption path as
+    /// unlock(), minus the master-password KDF. The slot keeps its key
+    /// untouched; a wipe landing mid-restore aborts via the epoch guard and
+    /// the restore_guard mutex (the final commit re-checks the epoch under
+    /// the same guard wipe_quick_unlock holds) instead of being silently
+    /// overridden.
+    pub fn quick_unlock_restore(&self) -> Result<usize, String> {
+        let epoch_before = self
+            .quick_unlock_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let key = {
+            let slot = self
+                .quick_unlock_key
+                .read()
+                .map_err(|_| "Quick unlock slot unavailable".to_string())?;
+            slot.clone()
+        }
+        .ok_or_else(|| "No key retained for quick unlock".to_string())?;
+
+        let fresh_storage = self.storage_mgr.load();
+        if fresh_storage.enc_user_key.is_none() {
+            return Err("Account not logged in or missing encryption keys.".to_string());
+        }
+
+        let items = decrypt_sync_ciphers_with_context(
+            &fresh_storage.ciphers,
+            &fresh_storage.folders,
+            &fresh_storage.organizations,
+            &key,
+            fresh_storage.enc_private_key.as_deref(),
+        );
+        let count = items.len();
+
+        // Fail closed on a stale key (server-side rotation, password change
+        // elsewhere, account switch while soft-locked): decryption failures
+        // fall back to "Untitled" names, so the vault would otherwise look
+        // unlocked with garbage content. Validation, strongest first:
+        // 1. enc_private_key is wrapped under the user key (type 0..=2) and
+        //    must decrypt;
+        // 2. otherwise (absent, unparseable or asymmetric), at least one
+        //    personal cipher must expose a field that decrypts under the
+        //    user key: its own item key or its name (both EncStrings under
+        //    the user key; the item key decrypts to raw bytes, not UTF-8).
+        //    Personal ciphers that all carry item keys still validate; only
+        //    org wrappers are skipped.
+        let mut validated_by_private_key = false;
+        if let Some(enc_priv) = fresh_storage.enc_private_key.as_deref() {
+            if let Ok(parsed) = crate::crypto::EncString::parse(enc_priv) {
+                if parsed.enc_type <= 2 {
+                    validated_by_private_key = true;
+                    if parsed.decrypt(&key).is_err() {
+                        crate::log_warn!(
+                            "omawarden:vault",
+                            "Retained key fails to decrypt the private key; wiping quick unlock"
+                        );
+                        self.wipe_quick_unlock();
+                        return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+                    }
+                }
+            }
+        }
+        if !validated_by_private_key {
+            let mut candidates = 0usize;
+            let mut decrypted_any = false;
+            for c in &fresh_storage.ciphers {
+                let deleted = c
+                    .get("deletedDate")
+                    .or_else(|| c.get("DeletedDate"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                if deleted
+                    || c.get("organizationId")
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                // Probe every EncString the cipher exposes under the user
+                // key: its own item key first, then its name. A real item
+                // key decrypts to a raw 64-byte key blob, so the probe uses
+                // decrypt() (raw bytes) rather than decrypt_string(); a name
+                // is UTF-8 text but decrypt() accepts it identically. Trying
+                // both fields keeps one corrupt value (an unparseable or
+                // foreign item key) from vetoing an otherwise valid name. A
+                // cipher exposing neither field proves nothing either way and
+                // is skipped rather than counted as a failure.
+                let key_field = c.get("key").and_then(|v| v.as_str());
+                let name_field = c.get("name").and_then(|v| v.as_str());
+                if key_field.is_none() && name_field.is_none() {
+                    continue;
+                }
+                candidates += 1;
+                for field in [key_field, name_field].into_iter().flatten() {
+                    if let Ok(parsed_field) = crate::crypto::EncString::parse(field) {
+                        if parsed_field.decrypt(&key).is_ok() {
+                            decrypted_any = true;
+                            break;
+                        }
+                    }
+                }
+                if decrypted_any {
+                    break;
+                }
+            }
+            if candidates > 0 && !decrypted_any {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Retained key fails to decrypt any personal cipher; wiping quick unlock"
+                );
+                self.wipe_quick_unlock();
+                return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+            }
+        }
+
+        // A hard lock (suspend drift, 12h ceiling, explicit lock/logout)
+        // landing during the decryption above must win: abort instead of
+        // writing unlocked state over a fresh wipe. The cheap epoch check
+        // first, then the commit runs under restore_guard with the epoch
+        // re-checked inside — wipe_quick_unlock holds the same guard, so a
+        // wipe can no longer interleave between this check and the writes.
+        if self
+            .quick_unlock_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != epoch_before
+        {
+            crate::log_warn!(
+                "omawarden:vault",
+                "Vault was locked during quick unlock; aborting restore"
+            );
+            return Err("The vault was locked during unlock. Try again.".to_string());
+        }
+
+        {
+            let _restore = match self.restore_guard.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if self
+                .quick_unlock_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != epoch_before
+            {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault was locked during quick unlock; aborting restore"
+                );
+                return Err("The vault was locked during unlock. Try again.".to_string());
+            }
+
+            if let Ok(mut dec_items) = self.decrypted_items.write() {
+                *dec_items = items;
+            }
+            if let Ok(mut key_slot) = self.user_key.write() {
+                *key_slot = Some(key);
+            }
+            if let Ok(mut unl) = self.is_unlocked.write() {
+                *unl = true;
+            }
+            if let Ok(mut st) = self.storage.write() {
+                *st = fresh_storage;
+            }
+            // The retained slot is intentionally left untouched: it still
+            // holds the same key, and rewriting it would resurrect a key a
+            // concurrent wipe just destroyed.
+        }
+
+        crate::log_info!(
+            "omawarden:vault",
+            "Quick-unlocked vault; {} items restored.",
+            count
+        );
+        Ok(count)
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -367,7 +641,14 @@ impl VaultManager {
             *dec_items = items;
         }
         if let Ok(mut key) = self.user_key.write() {
-            *key = Some(user_key);
+            *key = Some(user_key.clone());
+        }
+        // If a soft lock retained a key earlier, keep that copy current with
+        // the key now in use (e.g. after a server-side key rotation).
+        if let Ok(mut slot) = self.quick_unlock_key.write() {
+            if slot.is_some() {
+                *slot = Some(user_key);
+            }
         }
         if let Ok(mut unl) = self.is_unlocked.write() {
             *unl = true;
@@ -1531,9 +1812,373 @@ impl VaultManager {
 }
 
 #[cfg(test)]
-mod tests {
+// pub(crate): daemon tests reuse the seeded vault fixture for the IPC
+// quick-unlock flow.
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Builds a VaultManager whose data.json carries a real login: a type-2
+    /// EncString wrapping the raw 64-byte user key under the master key, so
+    /// unlock(password) exercises the production key-unwrapping path.
+    pub(crate) fn seeded_vault(dir: &std::path::Path, password: &str) -> VaultManager {
+        use crate::crypto::{derive_master_key, KdfType, SymmetricCryptoKey, BASE64};
+        use base64::Engine as _;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use hmac::Mac;
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+        type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+        let email = "quick@unlock.test";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 600_000, None, None)
+                .expect("master key");
+        let master_sym = SymmetricCryptoKey::from_master_key(master_key.as_slice());
+        let raw = [42u8; 64];
+
+        let iv = [9u8; 16];
+        let enc = Aes256CbcEnc::new_from_slices(&master_sym.enc_key, &iv).expect("cipher");
+        let mut buf = vec![0u8; raw.len() + 16];
+        let ct = enc
+            .encrypt_padded_b2b_mut::<cbc::cipher::block_padding::Pkcs7>(&raw, &mut buf)
+            .expect("encrypt");
+        let mut mac = HmacSha256::new_from_slice(master_sym.mac_key.as_ref().expect("mac key"))
+            .expect("hmac");
+        mac.update(&iv);
+        mac.update(ct);
+        let mac = mac.finalize().into_bytes();
+        let enc_user_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let storage = VaultStorage {
+            server_url: "https://vault.example.com".to_string(),
+            user_email: email.to_string(),
+            kdf: Some(0),
+            kdf_iterations: Some(600_000),
+            enc_user_key: Some(enc_user_key),
+            ..Default::default()
+        };
+        let storage_mgr = StorageManager::new(dir.join("data.json"));
+        storage_mgr.save(&storage).expect("save storage");
+        VaultManager::new("", Some(storage_mgr), None)
+    }
+
+    #[test]
+    fn test_soft_lock_retains_key_and_quick_unlock_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        assert!(!vault.quick_unlock_available());
+
+        assert_eq!(vault.unlock("master-pw").unwrap(), 0);
+        assert!(vault.is_unlocked());
+
+        assert!(vault.soft_lock(), "an unlocked vault must retain its key");
+        assert!(!vault.is_unlocked());
+        assert!(vault.decrypted_items.read().unwrap().is_empty());
+        assert!(vault.user_key.read().unwrap().is_none());
+        assert!(vault.quick_unlock_available());
+
+        assert_eq!(vault.quick_unlock_restore().unwrap(), 0);
+        assert!(vault.is_unlocked());
+        assert!(vault.user_key.read().unwrap().is_some());
+        assert!(vault.quick_unlock_available(), "slot stays primed");
+
+        // A second soft lock keeps retention working.
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_restore().is_ok());
+
+        // Hard lock wipes the slot; restore now fails.
+        vault.hard_lock();
+        assert!(!vault.quick_unlock_available());
+        assert!(vault.quick_unlock_restore().is_err());
+    }
+
+    #[test]
+    fn test_plain_lock_wipes_quick_unlock_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // lock() is the fail-safe path: any caller that has not opted into
+        // retention must not leave the slot behind.
+        vault.unlock("master-pw").unwrap();
+        vault.lock();
+        assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_soft_lock_without_unlock_retains_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        assert!(!vault.soft_lock());
+        assert!(!vault.quick_unlock_available());
+        assert!(vault.quick_unlock_restore().is_err());
+    }
+
+    #[test]
+    fn test_unlock_refreshes_stale_retained_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        // A fresh password unlock replaces the retained copy with the key now
+        // in use, so a later restore cannot resurrect an old key.
+        vault.unlock("master-pw").unwrap();
+        vault.lock();
+        assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_fails_closed_on_stale_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // Simulate a vault whose ciphers were re-encrypted under a different
+        // key (rotation / account switch): the retained key decrypts none of
+        // them, which previously surfaced as an "unlocked" empty vault.
+        let mut stale = vault.storage_mgr.load();
+        stale.ciphers = vec![serde_json::json!({
+            "id": "cipher-1",
+            "type": 1,
+            "name": "2.not-a-valid-encstring",
+            "login": null,
+        })];
+        vault.storage_mgr.save(&stale).unwrap();
+
+        let err = vault.quick_unlock_restore().unwrap_err();
+        assert!(err.contains("no longer matches"), "got: {err}");
+        assert!(
+            !vault.is_unlocked(),
+            "restore must not leave the vault unlocked"
+        );
+        assert!(
+            !vault.quick_unlock_available(),
+            "a stale retained key must be wiped, not re-primed"
+        );
+    }
+
+    #[test]
+    fn test_hard_lock_takes_the_restore_guard_before_purging() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+
+        // Regression for the purge-before-wipe ordering: the restore commit
+        // section holds restore_guard, so a hard lock that purged first could
+        // be overwritten by a commit landing in the gap and leave the vault
+        // unlocked after a suspend, the 12h ceiling or an explicit lock. Hold
+        // the guard (as the commit section does) and prove the hard lock has
+        // not purged anything, nor bumped the epoch, before it gets the guard.
+        let epoch_before = vault.quick_unlock_epoch.load(Ordering::SeqCst);
+        let guard = vault.restore_guard.lock().unwrap();
+        std::thread::scope(|s| {
+            let locker = s.spawn(|| vault.lock());
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                vault.is_unlocked(),
+                "a hard lock must wait for the restore commit guard before purging"
+            );
+            assert!(
+                vault.user_key.read().unwrap().is_some(),
+                "the user key must survive until the wipe has the guard"
+            );
+            assert_eq!(
+                vault.quick_unlock_epoch.load(Ordering::SeqCst),
+                epoch_before,
+                "the epoch bump that aborts an in-flight restore must come before the purge"
+            );
+            drop(guard);
+            locker.join().unwrap();
+        });
+        assert!(
+            !vault.is_unlocked(),
+            "the hard lock must land once the guard is free"
+        );
+        assert!(!vault.quick_unlock_available());
+        assert_ne!(
+            vault.quick_unlock_epoch.load(Ordering::SeqCst),
+            epoch_before
+        );
+    }
+
+    #[test]
+    fn test_wipe_is_serialized_with_restore_commit() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // Regression for the restore TOCTOU: the wipe must share the mutex
+        // the restore's commit section holds, so a hard lock landing while a
+        // restore is committing cannot be overwritten. Hold the guard (as the
+        // commit section does) and prove wipe_quick_unlock waits on it.
+        let epoch_before = vault.quick_unlock_epoch.load(Ordering::SeqCst);
+        let guard = vault.restore_guard.lock().unwrap();
+        std::thread::scope(|s| {
+            let wiper = s.spawn(|| vault.wipe_quick_unlock());
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                vault.quick_unlock_epoch.load(Ordering::SeqCst),
+                epoch_before,
+                "a wipe must not bypass the restore commit guard"
+            );
+            assert!(
+                vault.quick_unlock_available(),
+                "the slot must survive while the commit section holds the guard"
+            );
+            drop(guard);
+            wiper.join().unwrap();
+        });
+        assert_ne!(
+            vault.quick_unlock_epoch.load(Ordering::SeqCst),
+            epoch_before
+        );
+        assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_soft_lock_on_locked_vault_keeps_existing_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        // Calling soft_lock again (nothing to move) must not drop retention.
+        assert!(!vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_soft_lock_is_serialized_with_restore_commit() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+
+        // Soft lock must share the restore commit guard: while the commit
+        // section holds it, the key move and purge cannot run, so the vault
+        // stays fully unlocked instead of ending up flagged locked with the
+        // key half-moved.
+        let guard = vault.restore_guard.lock().unwrap();
+        std::thread::scope(|s| {
+            let locker = s.spawn(|| vault.soft_lock());
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                vault.is_unlocked(),
+                "soft lock must not bypass the restore commit guard"
+            );
+            assert!(
+                vault.user_key.read().unwrap().is_some(),
+                "the user key must stay in the session while the guard is held"
+            );
+            drop(guard);
+            assert!(locker.join().unwrap());
+        });
+        assert!(!vault.is_unlocked());
+        assert!(vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_wipes_on_stale_keyed_ciphers() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // Every personal cipher carries its own item key that does not
+        // decrypt under the retained key. This vault shape used to leave
+        // candidates == 0 (keyed ciphers were skipped) and fail open with
+        // "Untitled" items; the key itself must now feed the probe.
+        let mut stale = vault.storage_mgr.load();
+        stale.ciphers = vec![serde_json::json!({
+            "id": "cipher-keyed",
+            "type": 1,
+            "key": "2.not-a-valid-encstring",
+            "name": "2.another-invalid-encstring",
+            "login": null,
+        })];
+        vault.storage_mgr.save(&stale).unwrap();
+
+        let err = vault.quick_unlock_restore().unwrap_err();
+        assert!(err.contains("no longer matches"), "got: {err}");
+        assert!(!vault.is_unlocked());
+        assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_accepts_keyed_ciphers_with_valid_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        // Capture the key before soft_lock moves it to the retained slot.
+        let user_key = vault.user_key.read().unwrap().clone().unwrap();
+        // A REAL item key: a 64-byte symmetric key blob, not UTF-8 text. The
+        // probe must accept it via raw decrypt(); a decrypt_string() probe
+        // would reject the valid blob and wipe a perfectly good key.
+        let item_key_blob = [42u8; 64];
+        let item_key_enc = user_key.encrypt(&item_key_blob).unwrap();
+        assert!(vault.soft_lock());
+
+        // A keyed cipher whose item key decrypts under the retained key
+        // validates the restore: carrying an item key must not count as a
+        // failure (the probe prefers the key over the name).
+        let mut fresh = vault.storage_mgr.load();
+        fresh.ciphers = vec![serde_json::json!({
+            "id": "cipher-keyed-ok",
+            "type": 1,
+            "key": item_key_enc,
+            "name": "2.undecryptable-name-is-irrelevant",
+            "login": null,
+        })];
+        vault.storage_mgr.save(&fresh).unwrap();
+
+        vault.quick_unlock_restore().unwrap();
+        assert!(vault.is_unlocked());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_falls_back_to_name_when_key_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        let user_key = vault.user_key.read().unwrap().clone().unwrap();
+        let valid_name_enc = user_key.encrypt_string("GitHub").unwrap();
+        assert!(vault.soft_lock());
+
+        // An unparseable item key (corrupt sync, server quirk) must not veto
+        // the cipher's valid encrypted name: the probe tries both fields.
+        let mut fresh = vault.storage_mgr.load();
+        fresh.ciphers = vec![serde_json::json!({
+            "id": "cipher-corrupt-key",
+            "type": 1,
+            "key": "2.corrupt-item-key",
+            "name": valid_name_enc,
+            "login": null,
+        })];
+        vault.storage_mgr.save(&fresh).unwrap();
+
+        vault.quick_unlock_restore().unwrap();
+        assert!(vault.is_unlocked());
+        assert!(vault.quick_unlock_available(), "no spurious wipe");
+    }
 
     #[test]
     fn test_fuzzy_match() {

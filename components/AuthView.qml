@@ -24,6 +24,9 @@ Item {
   property int emailSentCount: 0
   property bool isSendingEmail: false
   property bool isInstalling: false
+  // ADR-0025: true when the engine reports quick unlock is enabled and a
+  // soft-locked key is retained; shows the system-authentication button.
+  property bool quickUnlockAvailable: false
   property bool showServerConfig: false
   property bool enableMtlsChecked: false
   property color foreground: Commons.Color.menu.text
@@ -56,6 +59,7 @@ Item {
   }
 
   signal unlockRequested(string password)
+  signal quickUnlockRequested()
   signal loginPasswordRequested(string email, string password, string code, var provider)
   signal loginApiKeyRequested(string clientId, string clientSecret)
   signal logoutRequested()
@@ -282,6 +286,48 @@ Item {
                   visible: !unlockPasswordField.text
                 }
               }
+            }
+          }
+
+          // Quick Unlock Button (ADR-0025): system authentication instead of
+          // the master password after a soft lock.
+          Rectangle {
+            id: quickUnlockButton
+            Layout.fillWidth: true
+            Layout.preferredHeight: 32
+            radius: 5
+            visible: authRoot.quickUnlockAvailable && !authRoot.isBusy
+            color: quickUnlockMouse.pressed
+              ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.16)
+              : (quickUnlockMouse.containsMouse
+                 ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.12)
+                 : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08))
+            border.width: quickUnlockButton.activeFocus ? 1 : 0
+            border.color: authRoot.accent
+
+            // Keyboard reachable alongside the master password field:
+            // Tab reaches the card, Return/Space triggers the prompt.
+            activeFocusOnTab: visible
+            Keys.onPressed: (event) => {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                event.accepted = true
+                authRoot.quickUnlockRequested()
+              }
+            }
+
+            Text {
+              anchors.centerIn: parent
+              text: "Unlock with System Authentication"
+              color: authRoot.foreground
+              font.pixelSize: Style.font.body
+            }
+
+            MouseArea {
+              id: quickUnlockMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: authRoot.quickUnlockRequested()
             }
           }
 

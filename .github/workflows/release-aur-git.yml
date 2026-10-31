@@ -6,6 +6,7 @@ on:
       - develop
     paths:
       - 'omawarden/**'
+      - 'packaging/**'
       - '.github/workflows/release-aur-git.yml'
   workflow_dispatch:
 
@@ -39,8 +40,9 @@ jobs:
           provides=('omawarden' 'omawarden-bin')
           conflicts=('omawarden' 'omawarden-bin')
           options=('!lto')
-          source=("omarchy-bitwarden::git+https://github.com/${{ github.repository }}.git#branch=develop")
-          sha256sums=('SKIP')
+          install='omawarden-policy.install'
+          source=("omarchy-bitwarden::git+https://github.com/${{ github.repository }}.git#branch=develop" "omawarden-policy.install")
+          sha256sums=('SKIP' 'SKIP')
 
           pkgver() {
               cd "${srcdir}/omarchy-bitwarden"
@@ -59,9 +61,11 @@ jobs:
               cd "${srcdir}/omarchy-bitwarden"
               install -Dm755 omawarden/target/release/omawarden "${pkgdir}/usr/bin/omawarden"
               install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+              install -Dm644 packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "${pkgdir}/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy"
           }
           EOF
           sed -i 's/^          //' dist/aur-git/PKGBUILD
+          cp packaging/omawarden-policy.install dist/aur-git/
 
       - name: Validate PKGBUILD syntax
         run: |
@@ -76,6 +80,7 @@ jobs:
         with:
           pkgname: omawarden-git
           pkgbuild: ./dist/aur-git/PKGBUILD
+          assets: dist/aur-git/omawarden-policy.install
           commit_username: ${{ secrets.AUR_USERNAME }}
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_KEY }}

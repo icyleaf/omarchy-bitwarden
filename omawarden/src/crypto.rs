@@ -221,6 +221,13 @@ impl SymmetricCryptoKey {
     }
 
     pub fn encrypt_string(&self, plaintext: &str) -> Result<String, CryptoError> {
+        self.encrypt(plaintext.as_bytes())
+    }
+
+    /// Raw-bytes counterpart of [Self::encrypt_string]. Bitwarden item keys
+    /// are 64-byte key blobs, not UTF-8 text, so anything that must round-trip
+    /// them needs this entry point.
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<String, CryptoError> {
         use cbc::cipher::{BlockEncryptMut, KeyIvInit};
         use rand_core::RngCore;
         type Aes256CbcEnc = cbc::Encryptor<Aes256>;
@@ -232,7 +239,7 @@ impl SymmetricCryptoKey {
             .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid key/iv: {}", e)))?;
         let mut buf = vec![0u8; plaintext.len() + 32];
         let ct_len = enc
-            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext.as_bytes(), &mut buf)
+            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf)
             .map_err(|e| CryptoError::DecryptionFailed(format!("Encryption failed: {}", e)))?
             .len();
         let ct = &buf[..ct_len];

@@ -611,6 +611,20 @@ Item {
     healthProc.running = true
   }
 
+  // ADR-0025: the engine advertises quick-unlock readiness on its ping when
+  // enabled in settings and a key is retained by a soft lock.
+  property bool quickUnlockReady: false
+
+  function refreshQuickUnlockAvailability() {
+    if (!root.helperPath) {
+      root.quickUnlockReady = false
+      return
+    }
+    if (quickUnlockCheckProc.running) return
+    quickUnlockCheckProc.command = [root.helperPath, "auth", "quick-unlock-check"]
+    quickUnlockCheckProc.running = true
+  }
+
   function refreshAuthStatus() {
     if (authStatusProc.running) return
     authStatusProc.command = [
@@ -620,6 +634,13 @@ Item {
       root.helperPath
     ]
     authStatusProc.running = true
+    // Readiness only matters on the locked view. The lockSyncTimer polls auth
+    // status every 3s while the vault is unlocked, and a second helper spawn
+    // per tick would be pure noise; the transition back to locked refreshes
+    // readiness from the auth-status handler instead.
+    if (!root.authState || root.authState.status !== "unlocked") {
+      root.refreshQuickUnlockAvailability()
+    }
   }
 
   function syncVault(isBackground, force) {
@@ -1711,6 +1732,7 @@ Item {
     if (settings.max_attachment_size_mb !== undefined) cmd.push("--max-attachment-size", String(settings.max_attachment_size_mb))
     if (settings.ssh_agent_enabled !== undefined) cmd.push("--ssh-agent", String(settings.ssh_agent_enabled))
     if (settings.ssh_agent_confirm !== undefined) cmd.push("--ssh-agent-confirm", settings.ssh_agent_confirm)
+    if (settings.quick_unlock !== undefined) cmd.push("--quick-unlock", String(settings.quick_unlock))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1773,6 +1795,16 @@ Item {
     root.statusMessage = "Unlocking vault..."
     authUnlockProc.secret = password
     authUnlockProc.command = [root.helperPath, "auth", "unlock"]
+    authUnlockProc.running = true
+  }
+
+  function doQuickUnlock() {
+    root.logInfo("omarchy:auth", "Submitting quick unlock request...")
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Waiting for system authentication..."
+    authUnlockProc.secret = ""
+    authUnlockProc.command = [root.helperPath, "auth", "quick-unlock"]
     authUnlockProc.running = true
   }
 
@@ -2424,6 +2456,8 @@ Item {
             accent: root.accent
             muted: root.muted
             borderColor: root.borderColor
+            quickUnlockAvailable: root.quickUnlockReady
+            onQuickUnlockRequested: root.doQuickUnlock()
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
             onLoginPasswordRequested: function(email, pwd, code, prov) { root.doLoginPassword(email, pwd, code, prov) }
             onTwoFactorProviderSelected: function(prov) {
@@ -3032,6 +3066,26 @@ Item {
   }
 
   Process {
+    id: quickUnlockCheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse((text || "").trim())
+          root.quickUnlockReady = Boolean(data && data.available)
+        } catch (e) {
+          // Older engines have no quick-unlock subcommand: fail closed.
+          root.quickUnlockReady = false
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) root.quickUnlockReady = false
+    }
+  }
+
+  Process {
     id: authStatusProc
     command: []
     stdout: StdioCollector {
@@ -3051,6 +3105,12 @@ Item {
               }
             } else {
               root.clearSensitiveState()
+              // A lock just landed (screen lock, idle timeout, suspend or the
+              // 12h ceiling). The polling path above skips readiness while
+              // unlocked and lockSyncTimer stops once locked, so this is the
+              // only place that can show or hide the quick unlock button on
+              // the transition.
+              root.refreshQuickUnlockAvailability()
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
@@ -3122,6 +3182,8 @@ Item {
           } else {
             root.errorMessage = data.error || "Unlock failed."
             root.logWarn("omarchy:auth", root.errorMessage)
+            // Denied quick unlocks may have wiped the retained key.
+            root.refreshQuickUnlockAvailability()
           }
         } catch (e) {
           root.errorMessage = "Failed to parse unlock response."
