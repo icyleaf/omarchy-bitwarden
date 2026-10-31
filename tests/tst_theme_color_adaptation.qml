@@ -124,6 +124,15 @@ Item {
   AuthView { id: authAccentProbe; accent: "#7aa2f7" }
   SettingsModal { id: smMutedOverride; muted: "#00ff00" }
 
+  ToastAlert {
+    id: toastError
+    errorMessage: "theme contrast error"
+    foreground: Commons.Color.foreground
+    accent: Commons.Color.menu.selectedText
+    cardBackground: Commons.Color.popups.background
+    borderColor: Commons.Color.popups.border
+  }
+
   function findText(item, text) {
     if (!item) return null
     var kids = item.children
@@ -139,6 +148,81 @@ Item {
     var caption = findText(component, captionText)
     check(caption !== null && Qt.colorEqual(caption.color, component.muted),
           tag + ": secondary caption follows muted — " + captionText.slice(0, 28) + "…")
+  }
+
+  // --- WCAG contrast helpers (Spec #291, issue #295) ---
+  function channelLuminance(value) {
+    return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4)
+  }
+  function relativeLuminance(colorValue) {
+    var c = Qt.color(colorValue)
+    return 0.2126 * channelLuminance(c.r) + 0.7152 * channelLuminance(c.g) + 0.0722 * channelLuminance(c.b)
+  }
+  function contrastRatio(first, second) {
+    var a = relativeLuminance(first)
+    var b = relativeLuminance(second)
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+  }
+  function compositeOver(fill, alpha, base) {
+    var f = Qt.color(fill)
+    var b = Qt.color(base)
+    return Qt.rgba(f.r * alpha + b.r * (1 - alpha),
+                   f.g * alpha + b.g * (1 - alpha),
+                   f.b * alpha + b.b * (1 - alpha), 1)
+  }
+  function checkContrast(tag, label, textColor, fillColor) {
+    var ratio = contrastRatio(textColor, fillColor)
+    check(ratio >= 3, tag + ": " + label + " contrast " + ratio.toFixed(2) + ":1 >= 3:1")
+  }
+
+  // Contrast matrix for the elements that previously failed on light themes:
+  // the update tag, log-level badges, log filter chips, error count badge,
+  // error toast and the copy-confirmation button.
+  function runContrastMatrix(tag) {
+    var card = Commons.Color.popups.background
+
+    // Update (AUR) tag: 15% update wash over the card.
+    checkContrast(tag, "update tag",
+                  StatusPalette.textOnTint(StatusPalette.update, 0.15, card),
+                  compositeOver(StatusPalette.update, 0.15, card))
+
+    // Log-level badges: solid role fill with the palette-chosen pole.
+    var levels = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"]
+    for (var i = 0; i < levels.length; i++) {
+      var levelColor = StatusPalette.levelColor(levels[i])
+      checkContrast(tag, "log badge " + levels[i],
+                    StatusPalette.textOnTint(levelColor, 1, card), levelColor)
+    }
+
+    // Log filter chips: 20% role wash, label keeps the hue when it can.
+    var chips = [
+      { name: "filter chip error", role: StatusPalette.error },
+      { name: "filter chip warn", role: StatusPalette.warn },
+      { name: "filter chip info", role: StatusPalette.info },
+      { name: "filter chip debug", role: StatusPalette.debug }
+    ]
+    for (var c = 0; c < chips.length; c++) {
+      checkContrast(tag, chips[c].name,
+                    StatusPalette.labelOnTint(chips[c].role, 0.2, card),
+                    compositeOver(chips[c].role, 0.2, card))
+    }
+
+    // Error count badge and error toast (danger fill).
+    checkContrast(tag, "error count badge",
+                  StatusPalette.textOnTint(StatusPalette.danger, 1, card),
+                  StatusPalette.danger)
+
+    var toastFill = compositeOver(StatusPalette.danger, 0.95, card)
+    var toastLabel = findText(toastError, "theme contrast error")
+    check(toastLabel !== null, tag + ": error toast label resolves")
+    if (toastLabel !== null) {
+      checkContrast(tag, "error toast label", toastLabel.color, toastFill)
+    }
+
+    // Copy-confirmation button (solid success fill).
+    checkContrast(tag, "copy confirmation",
+                  StatusPalette.textOnTint(StatusPalette.success, 1, card),
+                  StatusPalette.success)
   }
 
   // Verification Matrix across theme presets
@@ -209,6 +293,9 @@ Item {
 
     // 7. Absence of obsolete property regressions
     check(sm["mutedForeground"] === undefined, tag + ": settings exposes no mutedForeground")
+
+    // 8. WCAG contrast on colored fills and translucent washes
+    runContrastMatrix(tag)
   }
 
   Timer {

@@ -22,9 +22,14 @@ When switching Omarchy to light themes such as `catppuccin-latte` or `flexoki-li
 3. **Strict Ban on `Qt.darker(foreground, ...)` for Muted Text**:
    - Secondary labels, captions, and placeholders must bind to `Color.muted`.
    - Child components requiring secondary text must declare `property color muted: Color.muted` and inherit it from the root overlay.
-4. **Dual-Mode Testing & CI Guardrails**:
+4. **Single Home for Semantic Status Colors**:
+   - Every non-theme color (health, log level, packaging source, password strength, badges, modal scrim) MUST be defined in `components/StatusPalette.qml`. It is the only file allowed to contain a color literal.
+   - Labels drawn on a colored fill MUST derive their color from the palette instead of picking white or black by hand: `StatusPalette.textOn(fill)` for opaque fills, `StatusPalette.textOnTint(role, alpha, base)` for translucent washes, and `StatusPalette.labelOnTint(role, alpha, base)` when the role hue may be kept.
+   - Those helpers choose the pole with the higher WCAG contrast ratio, so the same binding stays readable in both dark and light presets.
+5. **Dual-Mode Testing & CI Guardrails**:
    - Add `Color.qml` to `tests/stubs/qs/Commons/` providing both Dark (Tokyo Night) and Light (Catppuccin Latte) presets for headless `qml6` execution.
-   - Enforce static color checks in `scripts/test-all.sh` to fail CI if unapproved bare hex colors are introduced in `components/`.
+   - Enforce static color checks in `scripts/test-all.sh` to fail CI if unapproved bare hex colors are introduced in `components/`. The gate (`scripts/check-hardcoded-colors.py`) is strict by default: any bare hex or numeric-RGB `Qt.rgba` outside `StatusPalette.qml` fails the build.
+   - `tests/tst_theme_color_adaptation.qml` asserts WCAG contrast (at least 3:1) for colored badges, chips, the error toast and confirmation buttons on both presets, so a color that is technically token-derived but unreadable still fails CI.
 
 ## Alternatives Considered
 - **Keep Dark Identity Exclusively**: Preserving a fixed dark look regardless of desktop theme. Rejected because Omarchy is an integrated desktop environment where cohesive theming across bar, menus, and plugins is a foundational design principle.

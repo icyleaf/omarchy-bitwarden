@@ -67,38 +67,8 @@ Technical entropy metrics (such as Shannon entropy bits, raw bitmasks, or algori
 
 ## 5. Omarchy Theme & Surface Color Contract
 
-To maintain visual harmony and full dynamic accessibility across all official and user-defined Omarchy themes (both dark themes like `tokyo-night` and light themes like `catppuccin-latte`), all frontend QML components **MUST strictly comply** with the following theming invariants:
+All surface, text, selection, and status color rules live in one place: [ADR 0026: Theme Color Tokens and Zero-Hardcoded Palettes](../adr/0026-theme-color-tokens-and-zero-hardcoded-palettes.md). Read that decision before touching colors.
 
-### Rule 1: Zero Hardcoded Palettes (Strict Ban on Bare Hex and Fixed Dark Alphas)
-Components **MUST NOT** define hardcoded hex colors (`#ffffff`, `#1f242e`, `#111827`, etc.) or static dark fills (e.g. `Qt.rgba(0.12, 0.14, 0.18, 0.98)` or `Qt.rgba(0, 0, 0, 0.25)`) for surfaces, text, or interactive borders:
-- **Main Overlay**: Window background and chrome MUST derive from `Color.menu.background` and `Color.menu.border`.
-- **Modal Dialog Cards & Dropdowns**: Floating modal cards (Action Palette, Password Generator, SSH Approval, Settings, Release Notes, etc.) and dropdown popups MUST bind card background to `Color.popups.background` and borders to `Color.popups.border`.
-- **Component Inputs**: Text fields and input boxes MUST use `Style.controlFill` or alpha-blended `foreground` values rather than fixed black/white tints.
-
-### Rule 2: Strict Ban on `Qt.darker(foreground, ...)` for Secondary / Muted Text
-Never derive secondary or muted text colors via `Qt.darker(foreground, <factor>)`. In light themes (such as `catppuccin-latte`), `foreground` is already dark (`#4c4f69`), causing `Qt.darker()` to produce high-contrast, near-pitch-black text, inverting the visual hierarchy.
-- **Muted Text & Captions**: Always bind to `Color.muted` (or pass `muted: root.muted`).
-- **Child Component Declarations**: Any component rendering secondary labels, placeholders, or disabled buttons MUST declare `property color muted: Color.muted` and inherit it from the root overlay.
-
-### Rule 3: Dynamic Selection State Contract
-When styling selected or highlighted items in item lists, tab bars, or action palettes:
-- **Selection Background**: MUST bind to `Color.menu.selectedBackground` (or `Color.controls.selectedFill`).
-- **Selection Text**: MUST bind to `Color.menu.selectedText` (or theme `accent`).
-- **White-Text Prohibition**: NEVER hardcode `itemDelegate.isSelected ? "#ffffff" : foreground`. In light themes where selection background is an 8% light gray wash, `#ffffff` text becomes completely invisible.
-
-### Rule 4: Component Palette Inheritance & Transparency Fallbacks
-When decomposing UI into separate QML component files:
-- All child components that render text, borders, or fills MUST expose standard color properties:
-  ```qml
-  property color foreground: Color.menu.text
-  property color accent: Color.menu.selectedText
-  property color muted: Color.muted
-  property color borderColor: Color.menu.border
-  property color background: Color.popups.background
-  ```
-- Use `Qt.rgba(foreground.r, foreground.g, foreground.b, <alpha>)` for subtle hover washes and divider fills, preserving visual proportion across light and dark backgrounds alike.
-
-### Rule 5: Testing & Automated CI Guardrails
-- **Dual-Mode Testing**: Component tests under `tests/` MUST verify rendering against both a dark preset (`#1a1b26` bg / `#a9b1d6` fg) and a light preset (`#eff1f5` bg / `#4c4f69` fg) using `tests/stubs/qs/Commons/Color.qml`.
-- **Static Linting**: `scripts/test-all.sh` executes automated scans on `components/*.qml` and `OmarchyBitwarden.qml` to reject unapproved raw hex codes and prevent color regressions.
-
+- Semantic status colors exist only in `components/StatusPalette.qml`; labels on colored fills come from `StatusPalette.textOn` / `textOnTint` / `labelOnTint` instead of hand-picked white or black.
+- `scripts/check-hardcoded-colors.py` enforces the zero-hardcode rule and fails CI on any hex literal or numeric-RGB `Qt.rgba` outside that file.
+- `tests/tst_theme_color_adaptation.qml` covers both presets and asserts WCAG contrast for colored badges, chips, toasts and confirmation buttons.

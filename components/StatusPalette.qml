@@ -85,11 +85,16 @@ QtObject {
 
   // Calculates relative luminance to return the high-contrast text pole
   // for any colored background fill (light fill -> dark text, dark fill -> white).
+  // Dark text pole for light fills. This is deliberately a fixed ink instead
+  // of Commons.Color.menu.background: that token is itself light in light
+  // themes, which used to produce light text on light status fills.
+  readonly property color ink: "#1a1b26"
+
   function textOn(fill) {
     if (!fill) return "#ffffff"
     var c = Qt.color(fill)
     var luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-    return luma > 0.7 ? Commons.Color.menu.background : "#ffffff"
+    return luma > 0.7 ? palette.ink : "#ffffff"
   }
 
   // Derives a translucent wash from a semantic color role safely.
@@ -131,8 +136,7 @@ QtObject {
   }
 
   function _bestPoleBackground(background) {
-    var dark = Commons.Color.menu.background
-    return _contrast(dark, background) >= _contrast("#ffffff", background) ? dark : "#ffffff"
+    return _contrast(palette.ink, background) >= _contrast("#ffffff", background) ? palette.ink : "#ffffff"
   }
 
   function textOnTint(colorVal, alpha, base) {
