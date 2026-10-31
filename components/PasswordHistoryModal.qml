@@ -23,7 +23,7 @@ Rectangle {
   signal closeRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.65)
+  color: StatusPalette.scrim(0.65)
   visible: active
   z: 110
 

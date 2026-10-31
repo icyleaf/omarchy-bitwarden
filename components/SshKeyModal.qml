@@ -44,7 +44,7 @@ Rectangle {
   signal closeRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.65)
+  color: StatusPalette.scrim(0.65)
   visible: active
 
   function resetForm() {
@@ -232,8 +232,8 @@ Rectangle {
         Layout.fillWidth: true
         implicitHeight: errText.implicitHeight + 12
         radius: 4
-        color: Qt.rgba(0.94, 0.27, 0.27, 0.15)
-        border.color: "#ef4444"
+        color: StatusPalette.tint(StatusPalette.error, 0.15)
+        border.color: StatusPalette.error
         border.width: 1
 
         RowLayout {
@@ -245,13 +245,13 @@ Rectangle {
             text: "\uf06a"
             font.family: modalRoot.fontFamily
             font.pixelSize: Style.font.bodySmall
-            color: "#f87171"
+            color: StatusPalette.danger
           }
 
           Text {
             id: errText
             text: modalRoot.errorMessage
-            color: "#fca5a5"
+            color: StatusPalette.invalidInput
             font.pixelSize: Style.font.bodySmall
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -511,7 +511,7 @@ Rectangle {
                 height: 26
                 radius: 4
                 enabled: modalRoot.exportToLocal
-                color: modalRoot.exportToLocal ? Qt.rgba(0, 0, 0, 0.3) : Qt.rgba(0, 0, 0, 0.1)
+                color: StatusPalette.tint(StatusPalette.scrimBase, modalRoot.exportToLocal ? 0.3 : 0.1)
                 border.color: outDirInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -731,7 +731,7 @@ Rectangle {
               Layout.fillWidth: true
               implicitHeight: itemSummaryCol.implicitHeight + 16
               radius: 4
-              color: Qt.rgba(0, 0, 0, 0.25)
+              color: StatusPalette.tint(StatusPalette.scrimBase, 0.25)
               border.color: modalRoot.borderColor
               border.width: 1
 

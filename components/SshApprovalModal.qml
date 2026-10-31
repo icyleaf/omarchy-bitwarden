@@ -24,13 +24,13 @@ Rectangle {
   property bool armed: false
 
   readonly property color mutedForeground: approvalRoot.muted
-  readonly property color dangerColor: "#f87171"
+  readonly property color dangerColor: StatusPalette.danger
   readonly property color textOnAccent: StatusPalette.textOn(accent)
 
   signal replyRequested(bool approve)
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.65)
+  color: StatusPalette.scrim(0.65)
   visible: active && prompt !== null
   z: 120
 
@@ -138,8 +138,8 @@ Rectangle {
         Layout.fillWidth: true
         implicitHeight: forwardedText.implicitHeight + 12
         radius: 4
-        color: Qt.rgba(0.97, 0.44, 0.44, 0.12)
-        border.color: Qt.rgba(0.97, 0.44, 0.44, 0.4)
+        color: StatusPalette.tint(StatusPalette.danger, 0.12)
+        border.color: StatusPalette.tint(StatusPalette.danger, 0.4)
         border.width: 1
 
         Text {

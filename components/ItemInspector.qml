@@ -565,8 +565,8 @@ ScrollView {
               implicitHeight: 18
               implicitWidth: orgText.implicitWidth + 8
               radius: 3
-              color: Qt.rgba(0.9, 0.6, 0.2, 0.2)
-              border.color: Qt.rgba(0.9, 0.6, 0.2, 0.5)
+              color: StatusPalette.tint(StatusPalette.organization, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
               border.width: 1
 
               Text {
@@ -574,7 +574,7 @@ ScrollView {
                 anchors.centerIn: parent
                 text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
                 font.family: inspectorRoot.fontFamily
-                color: "#fbbf24"
+                color: StatusPalette.organization
                 font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
               }
@@ -586,8 +586,8 @@ ScrollView {
               implicitHeight: 18
               implicitWidth: folderText.implicitWidth + 8
               radius: 3
-              color: Qt.rgba(0.4, 0.7, 1.0, 0.2)
-              border.color: Qt.rgba(0.4, 0.7, 1.0, 0.5)
+              color: StatusPalette.tint(StatusPalette.folder, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.folder, 0.5)
               border.width: 1
 
               Text {
@@ -595,7 +595,7 @@ ScrollView {
                 anchors.centerIn: parent
                 text: "\uf07b " + (inspectorRoot.item ? (inspectorRoot.item.folder_name || "") : "")
                 font.family: inspectorRoot.fontFamily
-                color: "#60a5fa"
+                color: StatusPalette.folder
                 font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
               }
@@ -801,7 +801,7 @@ ScrollView {
                   Text { text: "TOTP Code"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
                   Text {
                     text: (inspectorRoot.currentTotp.ttl || 30) + "s"
-                    color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.muted : "#f87171"
+                    color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.muted : StatusPalette.danger
                     font.pixelSize: inspectorRoot.keyPixelSize
                   }
                 }
@@ -836,7 +836,7 @@ ScrollView {
                 height: parent.height
                 radius: 2
                 width: parent.width * ((inspectorRoot.currentTotp.ttl || 30) / (inspectorRoot.currentTotp.period || 30))
-                color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.accent : "#f87171"
+                color: (inspectorRoot.currentTotp.ttl > 5) ? inspectorRoot.accent : StatusPalette.danger
               }
             }
           }

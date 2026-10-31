@@ -337,8 +337,8 @@ Rectangle {
         implicitHeight: 18
         implicitWidth: dlBadgeRow.implicitWidth + 10
         radius: 4
-        color: Qt.rgba(0.9, 0.2, 0.2, 0.15)
-        border.color: "#f87171"
+        color: StatusPalette.tint(StatusPalette.danger, 0.15)
+        border.color: StatusPalette.danger
         border.width: 1
 
         RowLayout {
@@ -348,12 +348,12 @@ Rectangle {
           Text {
             text: "\uf019"
             font.family: footerRoot.fontFamily
-            color: "#f87171"
+            color: StatusPalette.danger
             font.pixelSize: Style.fontPx(0.75)
           }
           Text {
             text: "Install Engine"
-            color: "#f87171"
+            color: StatusPalette.danger
             font.pixelSize: Style.font.caption
             font.weight: Font.DemiBold
           }
@@ -373,7 +373,7 @@ Rectangle {
         implicitHeight: 18
         implicitWidth: updateBadgeRow.implicitWidth + 10
         radius: 4
-        color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
+        color: StatusPalette.tint(StatusPalette.update, 0.15)
         border.width: 0
 
         RowLayout {
@@ -383,12 +383,12 @@ Rectangle {
           Text {
             text: "Omawarden"
             font.family: footerRoot.fontFamily
-            color: "#4ade80"
+            color: StatusPalette.update
             font.pixelSize: Style.fontPx(0.75)
           }
           Text {
             text: "\uf005 " + footerRoot.latestVersion + " Available"
-            color: "#4ade80"
+            color: StatusPalette.update
             font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }

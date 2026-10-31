@@ -224,8 +224,8 @@ Item {
               implicitHeight: 16
               implicitWidth: Math.min(110, orgText.implicitWidth + 8)
               radius: 3
-              color: Qt.rgba(0.9, 0.6, 0.2, 0.2)
-              border.color: Qt.rgba(0.9, 0.6, 0.2, 0.5)
+              color: StatusPalette.tint(StatusPalette.organization, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
               border.width: 1
 
               Text {
@@ -234,7 +234,7 @@ Item {
                 width: Math.min(102, implicitWidth)
                 text: "\uf1ad " + (modelData.organization_name || "")
                 font.family: itemListRoot.fontFamily
-                color: "#fbbf24"
+                color: StatusPalette.organization
                 font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Medium
                 elide: Text.ElideRight
@@ -247,8 +247,8 @@ Item {
               implicitHeight: 16
               implicitWidth: Math.min(100, folderText.implicitWidth + 8)
               radius: 3
-              color: Qt.rgba(0.4, 0.7, 1.0, 0.2)
-              border.color: Qt.rgba(0.4, 0.7, 1.0, 0.5)
+              color: StatusPalette.tint(StatusPalette.folder, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.folder, 0.5)
               border.width: 1
 
               Text {
@@ -257,7 +257,7 @@ Item {
                 width: Math.min(92, implicitWidth)
                 text: "\uf07b " + (modelData.folder_name || "")
                 font.family: itemListRoot.fontFamily
-                color: "#60a5fa"
+                color: StatusPalette.folder
                 font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Medium
                 elide: Text.ElideRight
