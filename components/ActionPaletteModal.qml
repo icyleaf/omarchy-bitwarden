@@ -22,7 +22,7 @@ Rectangle {
   signal closeRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.6)
+  color: StatusPalette.scrim(0.6)
   visible: active
 
   function getFilteredActions() {

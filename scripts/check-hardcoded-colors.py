@@ -8,8 +8,9 @@ Enforces zero-hardcoded palettes across components/*.qml and OmarchyBitwarden.qm
 2. Ban on `Qt.darker(foreground, ...)`: Secondary and muted text must bind to Color.muted.
 
 Exit codes:
-- In strict mode (--strict or STRICT_COLOR_GATE=1): returns 1 on any violation.
-- In report-only mode (default during Slice 1-2): prints violations and returns 0.
+- Strict is the default: any violation returns 1 so CI blocks new hardcoded colors.
+- In report-only mode (--report-only, or STRICT_COLOR_GATE=0): prints violations
+  and returns 0. Use it for local triage only.
 """
 
 import argparse
@@ -153,14 +154,15 @@ def run_self_tests() -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Static Zero-Hardcode CI Gate")
-    parser.add_argument("--strict", action="store_true", help="Exit non-zero on violations (strict mode)")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero on violations (default; kept for compatibility)")
+    parser.add_argument("--report-only", action="store_true", help="Print violations but exit 0 (local triage only)")
     parser.add_argument("--self-test", action="store_true", help="Run fixture test suite")
     args = parser.parse_args()
 
     if args.self_test:
         return 0 if run_self_tests() else 1
 
-    strict_mode = args.strict or (os.environ.get("STRICT_COLOR_GATE", "0") == "1")
+    strict_mode = not args.report_only and os.environ.get("STRICT_COLOR_GATE", "1") != "0"
 
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_files = [os.path.join(root_dir, "OmarchyBitwarden.qml")]
@@ -190,7 +192,7 @@ def main() -> int:
             return 1
         else:
             print(f"[REPORT-ONLY] {len(total_violations)} violation(s) reported.")
-            print("Note: Running in report-only mode for Slice 1. Slices 2 & 3 will migrate components and enable strict mode.")
+            print("Note: report-only mode never fails; it exists for local triage, not for CI.")
             return 0
 
     print(f"PASSED: {scanned_count} QML files scanned cleanly. Zero theme violations found.")

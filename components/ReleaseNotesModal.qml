@@ -26,7 +26,7 @@ Rectangle {
   signal updateRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.6)
+  color: StatusPalette.scrim(0.6)
   visible: active
   z: 100
 
@@ -324,13 +324,13 @@ Rectangle {
           implicitHeight: 26
           implicitWidth: upBtnText.implicitWidth + 16
           radius: 4
-          color: "#22c55e"
+          color: StatusPalette.update
 
           Text {
             id: upBtnText
             anchors.centerIn: parent
             text: releaseModalRoot.isDownloadingCli ? "Updating..." : "Update via AUR"
-            color: "#ffffff"
+            color: StatusPalette.textOnTint(StatusPalette.update, 1, Commons.Color.popups.background)
             font.pixelSize: Style.font.caption
             font.weight: Font.Medium
           }

@@ -61,15 +61,7 @@ Rectangle {
     }
   }
 
-  readonly property color strengthColor: {
-    switch (strengthLevel) {
-      case 5: return "#4ade80" // Green
-      case 4: return "#34d399" // Emerald
-      case 3: return "#60a5fa" // Blue
-      case 2: return "#fbbf24" // Yellow
-      default: return "#f87171" // Red
-    }
-  }
+  readonly property color strengthColor: StatusPalette.strengthColor(strengthLevel)
 
   Timer {
     id: debounceTimer
@@ -84,7 +76,7 @@ Rectangle {
   signal closeRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.65)
+  color: StatusPalette.scrim(0.65)
   visible: active
   z: 110
 
@@ -320,8 +312,8 @@ Rectangle {
         Layout.fillWidth: true
         implicitHeight: errRow.implicitHeight + 12
         radius: 6
-        color: Qt.rgba(0.94, 0.27, 0.27, 0.15)
-        border.color: "#ef4444"
+        color: StatusPalette.tint(StatusPalette.error, 0.15)
+        border.color: StatusPalette.error
         border.width: 1
 
         RowLayout {
@@ -334,13 +326,13 @@ Rectangle {
             text: "\uf06a"
             font.family: genModalRoot.fontFamily
             font.pixelSize: Style.font.bodySmall
-            color: "#f87171"
+            color: StatusPalette.danger
           }
 
           Text {
             id: errText
             text: genModalRoot.errorMessage
-            color: "#fca5a5"
+            color: StatusPalette.invalidInput
             font.pixelSize: Style.font.bodySmall
             Layout.fillWidth: true
             wrapMode: Text.Wrap

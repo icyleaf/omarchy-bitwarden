@@ -71,8 +71,18 @@ QtObject {
   // --- 6. Item Classification & Badges ---
   readonly property color favorite: "#fbbf24"
   readonly property color typeLogin: "#60a5fa"
+  readonly property color organization: "#fbbf24"
+  readonly property color folder: "#60a5fa"
 
-  // --- 7. Label Contrast & Tint Helpers ---
+  // --- 7. Overlay & Label Contrast Helpers ---
+  // Base scrim behind modal cards. Kept here so no component needs a black
+  // literal for its own overlay.
+  readonly property color scrimBase: "#000000"
+
+  function scrim(alpha) {
+    return tint(scrimBase, alpha)
+  }
+
   // Calculates relative luminance to return the high-contrast text pole
   // for any colored background fill (light fill -> dark text, dark fill -> white).
   function textOn(fill) {

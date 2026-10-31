@@ -265,13 +265,13 @@ Item {
             implicitHeight: cardLayout.implicitHeight + 20
             radius: 8
             color: {
-              if (model.status === "installed") return Qt.rgba(0.18, 0.45, 0.32, 0.2)
-              if (model.status === "missing") return Qt.rgba(0.55, 0.2, 0.25, 0.2)
+              if (model.status === "installed") return StatusPalette.tint(StatusPalette.installed, 0.2)
+              if (model.status === "missing") return StatusPalette.tint(StatusPalette.missing, 0.2)
               return depViewRoot.cardBackground
             }
             border.color: {
-              if (model.status === "installed") return Qt.rgba(0.2, 0.7, 0.4, 0.4)
-              if (model.status === "missing") return Qt.rgba(0.9, 0.3, 0.4, 0.4)
+              if (model.status === "installed") return StatusPalette.tint(StatusPalette.installed, 0.4)
+              if (model.status === "missing") return StatusPalette.tint(StatusPalette.missing, 0.4)
               return depViewRoot.borderColor
             }
             border.width: 1
@@ -288,9 +288,9 @@ Item {
                 height: 10
                 radius: 5
                 color: {
-                  if (model.status === "installed") return "#a6e3a1"
-                  if (model.status === "missing") return "#f38ba8"
-                  if (model.status === "checking") return "#f9e2af"
+                  if (model.status === "installed") return StatusPalette.installed
+                  if (model.status === "missing") return StatusPalette.missing
+                  if (model.status === "checking") return StatusPalette.checking
                   return depViewRoot.muted
                 }
               }
@@ -338,7 +338,7 @@ Item {
 
                   Text {
                     text: model.version ? ("v" + model.version) : ""
-                    color: "#a6e3a1"
+                    color: StatusPalette.installed
                     font.pixelSize: Style.font.bodySmall
                     font.bold: true
                     visible: model.status === "installed" && Boolean(model.version)
@@ -367,15 +367,15 @@ Item {
                 implicitHeight: 24
                 radius: 12
                 color: {
-                  if (model.status === "installed") return Qt.rgba(0.18, 0.45, 0.32, 0.5)
-                  if (model.status === "missing") return Qt.rgba(0.55, 0.2, 0.25, 0.5)
-                  if (model.status === "checking") return Qt.rgba(0.5, 0.4, 0.1, 0.5)
+                  if (model.status === "installed") return StatusPalette.tint(StatusPalette.installed, 0.5)
+                  if (model.status === "missing") return StatusPalette.tint(StatusPalette.missing, 0.5)
+                  if (model.status === "checking") return StatusPalette.tint(StatusPalette.checking, 0.5)
                   return Qt.rgba(depViewRoot.foreground.r, depViewRoot.foreground.g, depViewRoot.foreground.b, 0.08)
                 }
                 border.color: {
-                  if (model.status === "installed") return "#a6e3a1"
-                  if (model.status === "missing") return "#f38ba8"
-                  if (model.status === "checking") return "#f9e2af"
+                  if (model.status === "installed") return StatusPalette.installed
+                  if (model.status === "missing") return StatusPalette.missing
+                  if (model.status === "checking") return StatusPalette.checking
                   return depViewRoot.borderColor
                 }
                 border.width: 1
@@ -395,14 +395,14 @@ Item {
                     return "Pending"
                   }
                   color: {
-                    if (model.status === "installed") return "#a6e3a1"
+                    if (model.status === "installed") return StatusPalette.installed
                     if (model.status === "missing") {
                       if (model.pkgName === "omawarden" && Boolean(model.version) && !depViewRoot.isEngineVersionSatisfied(model.version)) {
-                        return "#f9e2af"
+                        return StatusPalette.checking
                       }
-                      return "#f38ba8"
+                      return StatusPalette.missing
                     }
-                    if (model.status === "checking") return "#f9e2af"
+                    if (model.status === "checking") return StatusPalette.checking
                     return depViewRoot.foreground
                   }
                   font.pixelSize: Style.font.bodySmall
@@ -471,7 +471,7 @@ Item {
               return "✓ All Dependencies Installed"
             }
             color: {
-              if (!installBtn.hasMissing && !depViewRoot.isChecking && !depViewRoot.isInstalling) return "#a6e3a1"
+              if (!installBtn.hasMissing && !depViewRoot.isChecking && !depViewRoot.isInstalling) return StatusPalette.installed
               if (depViewRoot.isChecking || depViewRoot.isInstalling) return depViewRoot.muted
               return depViewRoot.textOnAccent
             }
