@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Commons as Commons
 import "../components"
+import "lib"
 
 // End-to-end theme adaptation regression test suite (Issue #276 / ADR 0026):
 // All surfaces, inputs, modals, inspectors, and bars must strictly follow
@@ -10,11 +11,6 @@ import "../components"
 Item {
   id: testRunner
   width: 800; height: 600
-  property int failures: 0
-  function check(cond, msg) {
-    if (!cond) { failures++; console.error("FAIL: " + msg) } else console.log("PASS: " + msg)
-  }
-
   // --- Core Application Views & Modals ---
   AuthView {
     id: auth
@@ -132,49 +128,13 @@ Item {
     cardBackground: Commons.Color.popups.background
     borderColor: Commons.Color.popups.border
   }
-
-  function findText(item, text) {
-    if (!item) return null
-    var kids = item.children
-    for (var i = 0; i < kids.length; i++) {
-      if (kids[i].text === text) return kids[i]
-      var found = findText(kids[i], text)
-      if (found) return found
-    }
-    return null
-  }
-
   function checkCaptionUsesMuted(component, captionText, tag) {
-    var caption = findText(component, captionText)
-    check(caption !== null && Qt.colorEqual(caption.color, component.muted),
+    var caption = Assert.findText(component, captionText)
+    Assert.check(caption !== null && Qt.colorEqual(caption.color, component.muted),
           tag + ": secondary caption follows muted — " + captionText.slice(0, 28) + "…")
   }
 
   // --- WCAG contrast helpers (Spec #291, issue #295) ---
-  function channelLuminance(value) {
-    return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4)
-  }
-  function relativeLuminance(colorValue) {
-    var c = Qt.color(colorValue)
-    return 0.2126 * channelLuminance(c.r) + 0.7152 * channelLuminance(c.g) + 0.0722 * channelLuminance(c.b)
-  }
-  function contrastRatio(first, second) {
-    var a = relativeLuminance(first)
-    var b = relativeLuminance(second)
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
-  }
-  function compositeOver(fill, alpha, base) {
-    var f = Qt.color(fill)
-    var b = Qt.color(base)
-    return Qt.rgba(f.r * alpha + b.r * (1 - alpha),
-                   f.g * alpha + b.g * (1 - alpha),
-                   f.b * alpha + b.b * (1 - alpha), 1)
-  }
-  function checkContrast(tag, label, textColor, fillColor) {
-    var ratio = contrastRatio(textColor, fillColor)
-    check(ratio >= 3, tag + ": " + label + " contrast " + ratio.toFixed(2) + ":1 >= 3:1")
-  }
-
   // Contrast matrix for the elements that previously failed on light themes:
   // the update tag, log-level badges, log filter chips, error count badge,
   // error toast and the copy-confirmation button.
@@ -182,15 +142,15 @@ Item {
     var card = Commons.Color.popups.background
 
     // Update (AUR) tag: 15% update wash over the card.
-    checkContrast(tag, "update tag",
+    Assert.checkContrast(tag, "update tag",
                   StatusPalette.textOnTint(StatusPalette.update, 0.15, card),
-                  compositeOver(StatusPalette.update, 0.15, card))
+                  Assert.compositeOver(StatusPalette.update, 0.15, card))
 
     // Log-level badges: solid role fill with the palette-chosen pole.
     var levels = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"]
     for (var i = 0; i < levels.length; i++) {
       var levelColor = StatusPalette.levelColor(levels[i])
-      checkContrast(tag, "log badge " + levels[i],
+      Assert.checkContrast(tag, "log badge " + levels[i],
                     StatusPalette.textOnTint(levelColor, 1, card), levelColor)
     }
 
@@ -202,25 +162,25 @@ Item {
       { name: "filter chip debug", role: StatusPalette.debug }
     ]
     for (var c = 0; c < chips.length; c++) {
-      checkContrast(tag, chips[c].name,
+      Assert.checkContrast(tag, chips[c].name,
                     StatusPalette.labelOnTint(chips[c].role, 0.2, card),
-                    compositeOver(chips[c].role, 0.2, card))
+                    Assert.compositeOver(chips[c].role, 0.2, card))
     }
 
     // Error count badge and error toast (danger fill).
-    checkContrast(tag, "error count badge",
+    Assert.checkContrast(tag, "error count badge",
                   StatusPalette.textOnTint(StatusPalette.danger, 1, card),
                   StatusPalette.danger)
 
-    var toastFill = compositeOver(StatusPalette.danger, 0.95, card)
-    var toastLabel = findText(toastError, "theme contrast error")
-    check(toastLabel !== null, tag + ": error toast label resolves")
+    var toastFill = Assert.compositeOver(StatusPalette.danger, 0.95, card)
+    var toastLabel = Assert.findText(toastError, "theme contrast error")
+    Assert.check(toastLabel !== null, tag + ": error toast label resolves")
     if (toastLabel !== null) {
-      checkContrast(tag, "error toast label", toastLabel.color, toastFill)
+      Assert.checkContrast(tag, "error toast label", toastLabel.color, toastFill)
     }
 
     // Copy-confirmation button (solid success fill).
-    checkContrast(tag, "copy confirmation",
+    Assert.checkContrast(tag, "copy confirmation",
                   StatusPalette.textOnTint(StatusPalette.success, 1, card),
                   StatusPalette.success)
   }
@@ -228,45 +188,45 @@ Item {
   // Verification Matrix across theme presets
   function runMatrix(tag) {
     // 1. Muted token compliance across all components
-    check(Qt.colorEqual(auth.muted, Commons.Color.muted), tag + ": auth.muted === Color.muted")
-    check(Qt.colorEqual(sm.muted, Commons.Color.muted), tag + ": settings.muted === Color.muted")
-    check(Qt.colorEqual(vaultList.muted, Commons.Color.muted), tag + ": vaultList.muted === Color.muted")
-    check(Qt.colorEqual(categoryBar.muted, Commons.Color.muted), tag + ": categoryBar.muted === Color.muted")
-    check(Qt.colorEqual(searchHeader.muted, Commons.Color.muted), tag + ": searchHeader.muted === Color.muted")
-    check(Qt.colorEqual(footerBar.muted, Commons.Color.muted), tag + ": footerBar.muted === Color.muted")
-    check(Qt.colorEqual(itemInspector.muted, Commons.Color.muted), tag + ": itemInspector.muted === Color.muted")
-    check(Qt.colorEqual(emptyInspector.muted, Commons.Color.muted), tag + ": emptyInspector.muted === Color.muted")
-    check(Qt.colorEqual(paletteModal.muted, Commons.Color.muted), tag + ": paletteModal.muted === Color.muted")
-    check(Qt.colorEqual(genModal.muted, Commons.Color.muted), tag + ": genModal.muted === Color.muted")
-    check(Qt.colorEqual(histModal.muted, Commons.Color.muted), tag + ": histModal.muted === Color.muted")
-    check(Qt.colorEqual(sshApprovalModal.muted, Commons.Color.muted), tag + ": sshApprovalModal.muted === Color.muted")
-    check(Qt.colorEqual(sshKeyModal.muted, Commons.Color.muted), tag + ": sshKeyModal.muted === Color.muted")
-    check(Qt.colorEqual(releaseModal.muted, Commons.Color.muted), tag + ": releaseModal.muted === Color.muted")
-    check(Qt.colorEqual(scopeDropdown.muted, Commons.Color.muted), tag + ": scopeDropdown.muted === Color.muted")
-    check(Qt.colorEqual(depView.muted, Commons.Color.muted), tag + ": depView.muted === Color.muted")
+    Assert.check(Qt.colorEqual(auth.muted, Commons.Color.muted), tag + ": auth.muted === Color.muted")
+    Assert.check(Qt.colorEqual(sm.muted, Commons.Color.muted), tag + ": settings.muted === Color.muted")
+    Assert.check(Qt.colorEqual(vaultList.muted, Commons.Color.muted), tag + ": vaultList.muted === Color.muted")
+    Assert.check(Qt.colorEqual(categoryBar.muted, Commons.Color.muted), tag + ": categoryBar.muted === Color.muted")
+    Assert.check(Qt.colorEqual(searchHeader.muted, Commons.Color.muted), tag + ": searchHeader.muted === Color.muted")
+    Assert.check(Qt.colorEqual(footerBar.muted, Commons.Color.muted), tag + ": footerBar.muted === Color.muted")
+    Assert.check(Qt.colorEqual(itemInspector.muted, Commons.Color.muted), tag + ": itemInspector.muted === Color.muted")
+    Assert.check(Qt.colorEqual(emptyInspector.muted, Commons.Color.muted), tag + ": emptyInspector.muted === Color.muted")
+    Assert.check(Qt.colorEqual(paletteModal.muted, Commons.Color.muted), tag + ": paletteModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(genModal.muted, Commons.Color.muted), tag + ": genModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(histModal.muted, Commons.Color.muted), tag + ": histModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(sshApprovalModal.muted, Commons.Color.muted), tag + ": sshApprovalModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(sshKeyModal.muted, Commons.Color.muted), tag + ": sshKeyModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(releaseModal.muted, Commons.Color.muted), tag + ": releaseModal.muted === Color.muted")
+    Assert.check(Qt.colorEqual(scopeDropdown.muted, Commons.Color.muted), tag + ": scopeDropdown.muted === Color.muted")
+    Assert.check(Qt.colorEqual(depView.muted, Commons.Color.muted), tag + ": depView.muted === Color.muted")
 
     // 2. Modal Card Surfaces & Borders Compliance
-    check(Qt.colorEqual(paletteModal.cardBackground, Commons.Color.popups.background), tag + ": paletteModal cardBackground === Color.popups.background")
-    check(Qt.colorEqual(genModal.cardBackground, Commons.Color.popups.background), tag + ": genModal cardBackground === Color.popups.background")
-    check(Qt.colorEqual(histModal.cardBackground, Commons.Color.popups.background), tag + ": histModal cardBackground === Color.popups.background")
-    check(Qt.colorEqual(sshApprovalModal.cardBackground, Commons.Color.popups.background), tag + ": sshApprovalModal cardBackground === Color.popups.background")
-    check(Qt.colorEqual(sshKeyModal.cardBackground, Commons.Color.popups.background), tag + ": sshKeyModal cardBackground === Color.popups.background")
-    check(Qt.colorEqual(releaseModal.cardBackground, Commons.Color.popups.background), tag + ": releaseModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(paletteModal.cardBackground, Commons.Color.popups.background), tag + ": paletteModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(genModal.cardBackground, Commons.Color.popups.background), tag + ": genModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(histModal.cardBackground, Commons.Color.popups.background), tag + ": histModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(sshApprovalModal.cardBackground, Commons.Color.popups.background), tag + ": sshApprovalModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(sshKeyModal.cardBackground, Commons.Color.popups.background), tag + ": sshKeyModal cardBackground === Color.popups.background")
+    Assert.check(Qt.colorEqual(releaseModal.cardBackground, Commons.Color.popups.background), tag + ": releaseModal cardBackground === Color.popups.background")
 
-    check(Qt.colorEqual(paletteModal.borderColor, Commons.Color.popups.border), tag + ": paletteModal borderColor === Color.popups.border")
-    check(Qt.colorEqual(genModal.borderColor, Commons.Color.popups.border), tag + ": genModal borderColor === Color.popups.border")
-    check(Qt.colorEqual(histModal.borderColor, Commons.Color.popups.border), tag + ": histModal borderColor === Color.popups.border")
-    check(Qt.colorEqual(sshApprovalModal.borderColor, Commons.Color.popups.border), tag + ": sshApprovalModal borderColor === Color.popups.border")
-    check(Qt.colorEqual(sshKeyModal.borderColor, Commons.Color.popups.border), tag + ": sshKeyModal borderColor === Color.popups.border")
-    check(Qt.colorEqual(releaseModal.borderColor, Commons.Color.popups.border), tag + ": releaseModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(paletteModal.borderColor, Commons.Color.popups.border), tag + ": paletteModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(genModal.borderColor, Commons.Color.popups.border), tag + ": genModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(histModal.borderColor, Commons.Color.popups.border), tag + ": histModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(sshApprovalModal.borderColor, Commons.Color.popups.border), tag + ": sshApprovalModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(sshKeyModal.borderColor, Commons.Color.popups.border), tag + ": sshKeyModal borderColor === Color.popups.border")
+    Assert.check(Qt.colorEqual(releaseModal.borderColor, Commons.Color.popups.border), tag + ": releaseModal borderColor === Color.popups.border")
 
     // 3. TextOnAccent Polarity
-    check(Qt.colorEqual(auth.textOnAccent, "#ffffff"), tag + ": auth.textOnAccent is #ffffff")
-    check(Qt.colorEqual(sm.textOnAccent, "#ffffff"), tag + ": sm.textOnAccent is #ffffff")
-    check(Qt.colorEqual(genModal.textOnAccent, "#ffffff"), tag + ": genModal.textOnAccent is #ffffff")
-    check(Qt.colorEqual(sshApprovalModal.textOnAccent, "#ffffff"), tag + ": sshApprovalModal.textOnAccent is #ffffff")
-    check(Qt.colorEqual(sshKeyModal.textOnAccent, "#ffffff"), tag + ": sshKeyModal.textOnAccent is #ffffff")
-    check(Qt.colorEqual(depView.textOnAccent, "#ffffff"), tag + ": depView.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(auth.textOnAccent, "#ffffff"), tag + ": auth.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(sm.textOnAccent, "#ffffff"), tag + ": sm.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(genModal.textOnAccent, "#ffffff"), tag + ": genModal.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(sshApprovalModal.textOnAccent, "#ffffff"), tag + ": sshApprovalModal.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(sshKeyModal.textOnAccent, "#ffffff"), tag + ": sshKeyModal.textOnAccent is #ffffff")
+    Assert.check(Qt.colorEqual(depView.textOnAccent, "#ffffff"), tag + ": depView.textOnAccent is #ffffff")
 
     // 4. Captions & Secondary Text following Muted
     checkCaptionUsesMuted(auth, "Official Bitwarden cloud uses standard HTTPS and does not require client certificates.", tag)
@@ -277,22 +237,22 @@ Item {
 
     // 5. Light theme specific selection and contrast checks
     if (tag === "light") {
-      check(!Qt.colorEqual(Commons.Color.menu.selectedText, "#ffffff"), tag + ": light selectedText must not be white")
-      check(!Qt.colorEqual(vaultList.selectedText, "#ffffff"), tag + ": vaultList selectedText must not be white")
+      Assert.check(!Qt.colorEqual(Commons.Color.menu.selectedText, "#ffffff"), tag + ": light selectedText must not be white")
+      Assert.check(!Qt.colorEqual(vaultList.selectedText, "#ffffff"), tag + ": vaultList selectedText must not be white")
     }
 
     // 6. Input fills are foreground-alpha blends
-    var ph = findText(auth, "Enter master password...")
-    check(ph !== null && ph.parent !== null && ph.parent.parent !== null
+    var ph = Assert.findText(auth, "Enter master password...")
+    Assert.check(ph !== null && ph.parent !== null && ph.parent.parent !== null
           && Qt.colorEqual(ph.parent.parent.color, Qt.rgba(auth.foreground.r, auth.foreground.g, auth.foreground.b, 0.08)),
           tag + ": auth unlock input fill is foreground@0.08")
-    var urlInput = findText(sm, "https://vault.bitwarden.com")
-    check(urlInput !== null && urlInput.parent !== null
+    var urlInput = Assert.findText(sm, "https://vault.bitwarden.com")
+    Assert.check(urlInput !== null && urlInput.parent !== null
           && Qt.colorEqual(urlInput.parent.color, Qt.rgba(sm.foreground.r, sm.foreground.g, sm.foreground.b, 0.08)),
           tag + ": settings server-url input fill is foreground@0.08")
 
     // 7. Absence of obsolete property regressions
-    check(sm["mutedForeground"] === undefined, tag + ": settings exposes no mutedForeground")
+    Assert.check(sm["mutedForeground"] === undefined, tag + ": settings exposes no mutedForeground")
 
     // 8. WCAG contrast on colored fills and translucent washes
     runContrastMatrix(tag)
@@ -312,24 +272,24 @@ Item {
 
       // 2. Dynamic textOnAccent flipping on light pastel accent
       Commons.Color.accent = "#ffd580"
-      check(Qt.colorEqual(auth.textOnAccent, Commons.Color.menu.background),
+      Assert.check(Qt.colorEqual(auth.textOnAccent, Commons.Color.menu.background),
             "auth textOnAccent flips to menu.background on light accent")
-      check(Qt.colorEqual(sm.textOnAccent, Commons.Color.menu.background),
+      Assert.check(Qt.colorEqual(sm.textOnAccent, Commons.Color.menu.background),
             "settings textOnAccent flips to menu.background on light accent")
-      check(Qt.colorEqual(genModal.textOnAccent, Commons.Color.menu.background),
+      Assert.check(Qt.colorEqual(genModal.textOnAccent, Commons.Color.menu.background),
             "genModal textOnAccent flips to menu.background on light accent")
-      check(Qt.colorEqual(sshApprovalModal.textOnAccent, Commons.Color.menu.background),
+      Assert.check(Qt.colorEqual(sshApprovalModal.textOnAccent, Commons.Color.menu.background),
             "sshApprovalModal textOnAccent flips to menu.background on light accent")
       Commons.Color.setPreset("light")
       Commons.Color.setPreset("dark")
-      check(Qt.colorEqual(auth.textOnAccent, "#ffffff"),
+      Assert.check(Qt.colorEqual(auth.textOnAccent, "#ffffff"),
             "auth textOnAccent flips back to white after preset re-derivation")
 
       // 3. Explicit muted overrides survive theme switches
-      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override wins")
-      check(Qt.colorEqual(smMutedOverride.muted, "#00ff00"), "settings muted override wins")
+      Assert.check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override wins")
+      Assert.check(Qt.colorEqual(smMutedOverride.muted, "#00ff00"), "settings muted override wins")
       Commons.Color.setPreset("light")
-      check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override survives preset flip")
+      Assert.check(Qt.colorEqual(authMutedOverride.muted, "#123456"), "auth muted override survives preset flip")
       Commons.Color.setPreset("dark")
 
       // 4. Accent luminance boundary table
@@ -344,12 +304,12 @@ Item {
       for (var i = 0; i < cases.length; i++) {
         authAccentProbe.accent = cases[i].hex
         var expected = cases[i].dark ? Commons.Color.menu.background : "#ffffff"
-        check(Qt.colorEqual(authAccentProbe.textOnAccent, expected),
+        Assert.check(Qt.colorEqual(authAccentProbe.textOnAccent, expected),
               "textOnAccent(" + cases[i].hex + ") selects " + (cases[i].dark ? "dark" : "white") + " pole")
       }
 
-      console.log("=== COMPLETED tst_theme_color_adaptation with " + failures + " failures ===")
-      Qt.exit(failures === 0 ? 0 : 1)
+      console.log("=== COMPLETED tst_theme_color_adaptation with " + Assert.failures + " Assert.failures ===")
+      Qt.exit(Assert.exitCode())
     }
   }
 
