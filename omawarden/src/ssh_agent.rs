@@ -47,6 +47,12 @@ const RSA_SHA2_512: u32 = 4;
 const MAX_MESSAGE: usize = 256 * 1024;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const UNLOCK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Polkit prompt budget for the SSH path (ADR-0025): `perform_quick_unlock`
+/// is synchronous on the per-connection thread, so the overlay's full
+/// DEFAULT_CHECK_TIMEOUT (120s) would leave an unattended `git fetch` in a
+/// loop sitting silent for two minutes. Fifteen seconds gives a present
+/// user time to answer, then the connection falls back to the overlay flow.
+const SSH_QUICK_UNLOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn socket_path() -> PathBuf {
     crate::daemon::get_runtime_dir().join("omawarden-ssh-agent.sock")
@@ -401,7 +407,8 @@ impl Host for DaemonState {
         summon_overlay(payload)
     }
     fn try_quick_unlock(&self) -> bool {
-        self.perform_quick_unlock().is_ok()
+        self.perform_quick_unlock_with_timeout(SSH_QUICK_UNLOCK_TIMEOUT)
+            .is_ok()
     }
 }
 
