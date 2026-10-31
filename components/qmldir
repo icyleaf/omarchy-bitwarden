@@ -1,1 +1,19 @@
 singleton StatusPalette 1.0 StatusPalette.qml
+ActionPaletteModal 1.0 ActionPaletteModal.qml
+AuthView 1.0 AuthView.qml
+CategoryTabBar 1.0 CategoryTabBar.qml
+DependencyCheckView 1.0 DependencyCheckView.qml
+EmptyInspector 1.0 EmptyInspector.qml
+FooterBar 1.0 FooterBar.qml
+GhostIconButton 1.0 GhostIconButton.qml
+ItemInspector 1.0 ItemInspector.qml
+PasswordGeneratorModal 1.0 PasswordGeneratorModal.qml
+PasswordHistoryModal 1.0 PasswordHistoryModal.qml
+ReleaseNotesModal 1.0 ReleaseNotesModal.qml
+ScopeDropdown 1.0 ScopeDropdown.qml
+SearchHeader 1.0 SearchHeader.qml
+SettingsModal 1.0 SettingsModal.qml
+SshApprovalModal 1.0 SshApprovalModal.qml
+SshKeyModal 1.0 SshKeyModal.qml
+ToastAlert 1.0 ToastAlert.qml
+VaultItemList 1.0 VaultItemList.qml
