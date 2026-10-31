@@ -27,20 +27,14 @@ pub fn policy_filename(action_id: &str) -> String {
 /// pkcheck binary alone does not mean the action exists: with the policy
 /// missing, pkcheck exits 127 ("action is not registered") and the feature
 /// can only ever fail, so readiness must require registration too.
-pub fn policy_registered_in(action_id: &str, dirs: &[std::path::PathBuf]) -> bool {
+pub fn policy_registered_in<T: AsRef<Path>>(action_id: &str, dirs: &[T]) -> bool {
     let name = policy_filename(action_id);
-    dirs.iter().any(|d| d.join(&name).is_file())
+    dirs.iter().any(|d| d.as_ref().join(&name).is_file())
 }
 
 /// [policy_registered_in] against the real system directories.
 pub fn policy_registered(action_id: &str) -> bool {
-    policy_registered_in(
-        action_id,
-        &POLKIT_ACTION_DIRS
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>(),
-    )
+    policy_registered_in(action_id, POLKIT_ACTION_DIRS)
 }
 
 #[derive(Debug, PartialEq, Eq)]
