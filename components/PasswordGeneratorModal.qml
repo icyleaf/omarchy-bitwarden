@@ -16,7 +16,7 @@ Rectangle {
   property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
 
-  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
   // Password options
   property int passwordLength: 20
   property bool includeUppercase: true

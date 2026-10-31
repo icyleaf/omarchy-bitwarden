@@ -34,7 +34,7 @@ Item {
   // be light or dark per theme, so pick the contrasting pole by luminance —
   // Commons.Color.menu.selectedText cannot be used here because it is what
   // fills those controls (root maps accent := Color.menu.selectedText).
-  readonly property color textOnAccent: (0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7 ? Commons.Color.menu.background : "#ffffff"
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
   property string fontFamily: ""
 
   readonly property string curServerUrl: (authServerUrlInput && authServerUrlInput.text.trim()) ? authServerUrlInput.text.trim() : ((config && config.server_url) ? config.server_url : "")

@@ -20,7 +20,7 @@ Item {
   property color cardBackground: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.25)
   property string fontFamily: ""
 
-  readonly property color textOnAccent: ((0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b) > 0.7) ? Commons.Color.menu.background : "#ffffff"
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
 
   readonly property string minimumEngineVersion: "0.8.1"
 
