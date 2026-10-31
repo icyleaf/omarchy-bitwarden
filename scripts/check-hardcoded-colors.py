@@ -156,6 +156,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Static Zero-Hardcode CI Gate")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero on violations (default; kept for compatibility)")
     parser.add_argument("--report-only", action="store_true", help="Print violations but exit 0 (local triage only)")
+    parser.add_argument("--summary", action="store_true", help="Print per-file violation counts instead of every hit")
     parser.add_argument("--self-test", action="store_true", help="Run fixture test suite")
     args = parser.parse_args()
 
@@ -184,8 +185,18 @@ def main() -> int:
 
     if total_violations:
         print(f"Found {len(total_violations)} theme compliance violation(s):\n")
+        if not args.summary:
+            for v in total_violations:
+                print(f"  ✗ {v}\n")
+
+        counts = {}
         for v in total_violations:
-            print(f"  ✗ {v}\n")
+            path = v.split(":", 1)[0]
+            counts[path] = counts.get(path, 0) + 1
+        print("Violations per file:")
+        for path, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            print(f"  {os.path.relpath(path, root_dir)}: {count}")
+        print()
 
         if strict_mode:
             print(f"FAILED (Strict Mode): {len(total_violations)} violation(s) must be resolved.")

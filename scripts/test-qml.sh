@@ -12,14 +12,33 @@ python3 "${ROOT_DIR}/scripts/check-hardcoded-colors.py" --self-test
 
 if command -v qmllint >/dev/null 2>&1; then
   echo "=== 2. Running QML Lint ==="
-  qmllint -I components OmarchyBitwarden.qml components/*.qml > qmllint_output.log 2>&1 || true
-  cat qmllint_output.log
-  if grep -i -E "(\bError:|\berror:|\bfatal:)" qmllint_output.log; then
-    echo "qmllint detected syntax or parser errors!"
-    rm -f qmllint_output.log
+  # A non-zero exit is not by itself a failure: the Qt 6.4 qmllint on CI exits
+  # non-zero for pre-existing Warning and Info diagnostics. Lint one file at a
+  # time so a parse failure stays attributable: legacy qmllint exits non-zero
+  # and prints nothing for a file it cannot parse, and linting the whole tree
+  # in one call hides that silence behind the warnings of every other file.
+  lint_failures=0
+  for qml_file in OmarchyBitwarden.qml components/*.qml; do
+    file_status=0
+    file_output=$(qmllint -I components "${qml_file}" 2>&1) || file_status=$?
+    if [ -n "${file_output}" ]; then
+      printf '%s\n' "${file_output}"
+    fi
+    if [ "${file_status}" -ne 0 ]; then
+      if [ -z "${file_output}" ]; then
+        echo "qmllint could not parse ${qml_file} (exit ${file_status}, no diagnostic)!"
+        lint_failures=$((lint_failures + 1))
+      elif printf '%s' "${file_output}" | grep -qiE "(^|[[:space:]])error:"; then
+        echo "qmllint reported errors in ${qml_file} (exit ${file_status})!"
+        lint_failures=$((lint_failures + 1))
+      fi
+    fi
+  done
+  if [ "${lint_failures}" -ne 0 ]; then
+    echo "qmllint failed on ${lint_failures} file(s)."
     exit 1
   fi
-  rm -f qmllint_output.log
+  echo "qmllint passed (warnings and Info diagnostics are reported, not fatal)."
 else
   echo "=== 2. QML Lint (skipped, qmllint not found) ==="
 fi
@@ -27,6 +46,9 @@ fi
 echo "=== 3. Running Standalone QML Test Suites ==="
 export QML_IMPORT_PATH="${ROOT_DIR}/tests/stubs${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+# Qt drops QML console output when stderr is not a TTY (pipes, CI logs, agent
+# tooling), leaving a failing suite with an exit code and no diagnostic.
+export QT_ASSUME_STDERR_HAS_CONSOLE=1
 
 QML_EXEC=""
 if command -v qml6 >/dev/null 2>&1; then

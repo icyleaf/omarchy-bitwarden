@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import "lib"
 
 Item {
   id: testRunner
@@ -117,16 +118,6 @@ Item {
     testRunner.currentTotp = JSON.parse(rawJsonText)
   }
 
-  function assert(condition, message) {
-    if (!condition) {
-      console.error("ASSERTION FAILED: " + message)
-      Qt.quit()
-      throw new Error("Assertion failed: " + message)
-    } else {
-      console.log("PASS: " + message)
-    }
-  }
-
   Component.onCompleted: {
     console.log("Running Frontend Lock Cleanup and Async Guard Tests...")
 
@@ -171,62 +162,63 @@ Item {
     }
     loadingAttachmentId = "att-123"
 
-    assert(rawVaultItems.length === 1, "Initial vault items populated")
-    assert(activePasswordHistoryItem !== null, "Initial password history item populated")
-    assert(activeAttachmentPreview !== null, "Initial attachment preview populated")
-    assert(sshKeyModalItem !== null, "Initial SSH key item populated")
-    assert(currentAvailableActions.length === 1, "Initial action closures populated")
+    Assert.check(rawVaultItems.length === 1, "Initial vault items populated")
+    Assert.check(activePasswordHistoryItem !== null, "Initial password history item populated")
+    Assert.check(activeAttachmentPreview !== null, "Initial attachment preview populated")
+    Assert.check(sshKeyModalItem !== null, "Initial SSH key item populated")
+    Assert.check(currentAvailableActions.length === 1, "Initial action closures populated")
 
     // 2. Perform doLock()
     doLock()
 
     // 3. Verify all secrets, closures, modals, and reveal flags are thoroughly wiped
-    assert(authState.status === "locked", "Auth state transitioned to locked")
-    assert(authState.has_session === true, "Session flag preserved for unlock view")
-    assert(rawVaultItems.length === 0, "rawVaultItems wiped on lock")
-    assert(filteredItems.length === 0, "filteredItems wiped on lock")
-    assert(lastVaultItemsRawText === "", "lastVaultItemsRawText wiped on lock")
-    assert(searchQuery === "", "searchQuery reset on lock")
+    Assert.check(authState.status === "locked", "Auth state transitioned to locked")
+    Assert.check(authState.has_session === true, "Session flag preserved for unlock view")
+    Assert.check(rawVaultItems.length === 0, "rawVaultItems wiped on lock")
+    Assert.check(filteredItems.length === 0, "filteredItems wiped on lock")
+    Assert.check(lastVaultItemsRawText === "", "lastVaultItemsRawText wiped on lock")
+    Assert.check(searchQuery === "", "searchQuery reset on lock")
 
-    assert(showPasswordRevealed === false, "showPasswordRevealed reset to false")
-    assert(showPrivateKeyRevealed === false, "showPrivateKeyRevealed reset to false")
-    assert(showCardNumberRevealed === false, "showCardNumberRevealed reset to false")
-    assert(showCardCodeRevealed === false, "showCardCodeRevealed reset to false")
-    assert(showCustomHiddenRevealed === false, "showCustomHiddenRevealed reset to false")
-    assert(currentTotp.code === "", "currentTotp code wiped")
+    Assert.check(showPasswordRevealed === false, "showPasswordRevealed reset to false")
+    Assert.check(showPrivateKeyRevealed === false, "showPrivateKeyRevealed reset to false")
+    Assert.check(showCardNumberRevealed === false, "showCardNumberRevealed reset to false")
+    Assert.check(showCardCodeRevealed === false, "showCardCodeRevealed reset to false")
+    Assert.check(showCustomHiddenRevealed === false, "showCustomHiddenRevealed reset to false")
+    Assert.check(currentTotp.code === "", "currentTotp code wiped")
 
-    assert(showActionPalette === false, "Action palette closed on lock")
-    assert(actionPaletteIndex === 0, "Action palette index reset on lock")
-    assert(currentAvailableActions.length === 0, "Action closures wiped on lock")
+    Assert.check(showActionPalette === false, "Action palette closed on lock")
+    Assert.check(actionPaletteIndex === 0, "Action palette index reset on lock")
+    Assert.check(currentAvailableActions.length === 0, "Action closures wiped on lock")
 
-    assert(showPasswordHistoryModal === false, "Password history modal closed on lock")
-    assert(activePasswordHistoryItem === null, "activePasswordHistoryItem nulled on lock")
+    Assert.check(showPasswordHistoryModal === false, "Password history modal closed on lock")
+    Assert.check(activePasswordHistoryItem === null, "activePasswordHistoryItem nulled on lock")
 
-    assert(showPasswordGeneratorModal === false, "Password generator modal closed on lock")
+    Assert.check(showPasswordGeneratorModal === false, "Password generator modal closed on lock")
 
-    assert(showSshKeyModal === false, "SSH key modal closed on lock")
-    assert(sshKeyModalItem === null, "sshKeyModalItem nulled on lock")
+    Assert.check(showSshKeyModal === false, "SSH key modal closed on lock")
+    Assert.check(sshKeyModalItem === null, "sshKeyModalItem nulled on lock")
 
-    assert(activeAttachmentPreview === null, "activeAttachmentPreview nulled on lock")
-    assert(loadingAttachmentId === "", "loadingAttachmentId reset on lock")
+    Assert.check(activeAttachmentPreview === null, "activeAttachmentPreview nulled on lock")
+    Assert.check(loadingAttachmentId === "", "loadingAttachmentId reset on lock")
 
     // 4. Test Late Asynchronous Repopulation Protection:
     // A late vault list response arrives while vault is locked
     var lateVaultJson = JSON.stringify([{ id: "item-2", name: "Late Leaked Item" }])
     simulateVaultListFinished(lateVaultJson)
-    assert(rawVaultItems.length === 0, "Late vault list response rejected when locked")
+    Assert.check(rawVaultItems.length === 0, "Late vault list response rejected when locked")
 
     // A late attachment response arrives while vault is locked
     var lateAttachmentJson = JSON.stringify({ action: "preview", text: "Late Leaked Attachment" })
     simulateAttachmentFinished(lateAttachmentJson)
-    assert(activeAttachmentPreview === null, "Late attachment response rejected when locked")
+    Assert.check(activeAttachmentPreview === null, "Late attachment response rejected when locked")
 
     // A late TOTP response arrives while vault is locked
     var lateTotpJson = JSON.stringify({ code: "654321", ttl: 30, period: 30 })
     simulateTotpFinished(lateTotpJson)
-    assert(currentTotp.code === "", "Late TOTP response rejected when locked")
+    Assert.check(currentTotp.code === "", "Late TOTP response rejected when locked")
 
-    console.log("All Lock Cleanup and Async Guard tests passed successfully!")
-    Qt.quit()
+    if (Assert.failures === 0)
+      console.log("All Lock Cleanup and Async Guard tests passed successfully!")
+    Qt.exit(Assert.exitCode())
   }
 }
