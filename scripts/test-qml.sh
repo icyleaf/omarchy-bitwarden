@@ -6,9 +6,11 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
-echo "=== 1. Checking Static Hardcoded Colors Gate ==="
+echo "=== 1. Checking Static Gates (colors, module manifest) ==="
 python3 "${ROOT_DIR}/scripts/check-hardcoded-colors.py"
 python3 "${ROOT_DIR}/scripts/check-hardcoded-colors.py" --self-test
+python3 "${ROOT_DIR}/scripts/check-qml-module.py"
+python3 "${ROOT_DIR}/scripts/check-qml-module.py" --self-test
 
 if command -v qmllint >/dev/null 2>&1; then
   echo "=== 2. Running QML Lint ==="
