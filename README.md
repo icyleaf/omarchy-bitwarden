@@ -409,7 +409,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Hard locks wipe the retained key: suspend, maximum session lifetime, explicit lock/logout, daemon exit, three denied prompts, server/account change
 - [x] SSH agent: a locked key request triggers the system authentication prompt natively
 - [x] Opt-in `quick_unlock` setting (`omawarden config set --quick-unlock true|false`) with an overlay toggle and honest trade-off disclosure
-- [x] Packaged polkit policy (`/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy`); master password always remains as fallback
+- [x] Packaged polkit policy (`/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`); master password always remains as fallback
 
 ### Phase 4: Planned (Vault Item Creation)
 

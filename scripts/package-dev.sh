@@ -31,7 +31,8 @@ mkdir -p "${BUILD_DIR}"
 
 cp "${ROOT_DIR}/omawarden/target/release/omawarden" "${BUILD_DIR}/"
 cp "${ROOT_DIR}/LICENSE" "${BUILD_DIR}/"
-cp "${ROOT_DIR}/packaging/org.omarchy.bitwarden.policy" "${BUILD_DIR}/"
+cp "${ROOT_DIR}/packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy" "${BUILD_DIR}/"
+cp "${ROOT_DIR}/packaging/omawarden-policy.install" "${BUILD_DIR}/"
 
 cat << PKG_EOF > "${BUILD_DIR}/PKGBUILD"
 # Maintainer: icyleaf <icyleaf.cn at gmail dot com>
@@ -47,13 +48,14 @@ depends=('libsecret' 'wl-clipboard')
 optdepends=('libfido2: WebAuthn / Passkey / FIDO2 security key support')
 provides=('omawarden')
 conflicts=('omawarden')
-source=("omawarden" "LICENSE" "org.omarchy.bitwarden.policy")
-sha256sums=('SKIP' 'SKIP' 'SKIP')
+install='omawarden-policy.install'
+source=("omawarden" "LICENSE" "org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy" "omawarden-policy.install")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
     install -Dm755 "\${srcdir}/omawarden" "\${pkgdir}/usr/bin/omawarden"
     install -Dm644 "\${srcdir}/LICENSE" "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
-    install -Dm644 "\${srcdir}/org.omarchy.bitwarden.policy" "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy"
+    install -Dm644 "\${srcdir}/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy" "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy"
 }
 PKG_EOF
 

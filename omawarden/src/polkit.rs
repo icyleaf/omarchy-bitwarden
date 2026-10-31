@@ -3,10 +3,45 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// polkit action registered by the packaged policy file. Keep in sync with
-/// `packaging/org.omarchy.bitwarden.policy`.
-pub const POLKIT_ACTION_ID: &str = "org.omarchy.bitwarden.unlock";
+/// `packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`; the id
+/// lives under the plugin's own namespace so it never reads as shipped by
+/// Omarchy itself.
+pub const POLKIT_ACTION_ID: &str = "org.omarchy.plugin.icyleaf.omarchy-bitwarden.unlock";
+/// Directories polkit scans for action definitions (see polkit(8)); /etc
+/// holds local copies or overrides of the packaged /usr/share file.
+pub const POLKIT_ACTION_DIRS: &[&str] = &["/usr/share/polkit-1/actions", "/etc/polkit-1/actions"];
 /// Interactive checks wait for the user to answer the agent's dialog.
 pub const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The policy file name polkit(8) expects for an action id: the namespace
+/// (everything before the final component) plus `.policy`, with the file
+/// installed under [POLKIT_ACTION_DIRS].
+pub fn policy_filename(action_id: &str) -> String {
+    match action_id.rsplit_once('.') {
+        Some((namespace, _)) => format!("{namespace}.policy"),
+        None => format!("{action_id}.policy"),
+    }
+}
+
+/// Whether the policy file for `action_id` is present in `dirs`. A resolved
+/// pkcheck binary alone does not mean the action exists: with the policy
+/// missing, pkcheck exits 127 ("action is not registered") and the feature
+/// can only ever fail, so readiness must require registration too.
+pub fn policy_registered_in(action_id: &str, dirs: &[std::path::PathBuf]) -> bool {
+    let name = policy_filename(action_id);
+    dirs.iter().any(|d| d.join(&name).is_file())
+}
+
+/// [policy_registered_in] against the real system directories.
+pub fn policy_registered(action_id: &str) -> bool {
+    policy_registered_in(
+        action_id,
+        &POLKIT_ACTION_DIRS
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>(),
+    )
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PolkitOutcome {
@@ -98,8 +133,10 @@ pub fn check(action_id: &str, binary: &Path, timeout: Duration) -> PolkitOutcome
                     // pkcheck exit codes: 1 = not authorized (negative answer),
                     // 3 = the user dismissed the authentication dialog. Both
                     // are user denials and both count toward the 3-strike
-                    // wipe; everything else (2 = no agent / polkit error, ...)
-                    // is treated as polkit being unavailable.
+                    // wipe; everything else is treated as polkit being
+                    // unavailable. (Exit 2 is "authentication required but
+                    // -u wasn't passed"; it cannot fire here because
+                    // --allow-user-interaction is always passed.)
                     PolkitOutcome::Denied
                 } else {
                     PolkitOutcome::Unavailable(format!("pkcheck exited with {status}"))
@@ -153,12 +190,39 @@ exit {exit_code}
             PolkitOutcome::Authorized
         );
         let args = fs::read_to_string(dir.path().join("args.log")).unwrap();
+        // Built from the constant so the rename can never drift from the
+        // assertion.
         assert!(
-            args.contains("--action-id org.omarchy.bitwarden.unlock"),
+            args.contains(&format!("--action-id {}", POLKIT_ACTION_ID)),
             "{args}"
         );
         assert!(args.contains("--allow-user-interaction"), "{args}");
         assert!(args.contains("--process"), "{args}");
+    }
+
+    #[test]
+    fn test_policy_filename_derives_namespace() {
+        assert_eq!(
+            policy_filename(POLKIT_ACTION_ID),
+            "org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy"
+        );
+        assert_eq!(policy_filename("a.b"), "a.policy");
+    }
+
+    #[test]
+    fn test_policy_registered_in_scans_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(
+            !policy_registered_in(POLKIT_ACTION_ID, &dirs),
+            "an empty dir must not count as registered"
+        );
+        fs::write(
+            dir.path().join(policy_filename(POLKIT_ACTION_ID)),
+            "<policyconfig/>",
+        )
+        .unwrap();
+        assert!(policy_registered_in(POLKIT_ACTION_ID, &dirs));
     }
 
     #[test]

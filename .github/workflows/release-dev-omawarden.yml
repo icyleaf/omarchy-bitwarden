@@ -63,7 +63,7 @@ jobs:
           cp LICENSE README.md "${DIST_DIR}/"
           # Same payload as the release workflow: quick unlock needs the
           # polkit policy shipped alongside the binary, dev builds included.
-          cp packaging/org.omarchy.bitwarden.policy "${DIST_DIR}/"
+          cp packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "${DIST_DIR}/"
 
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"

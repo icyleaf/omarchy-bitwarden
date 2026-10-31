@@ -79,7 +79,7 @@ jobs:
           mkdir -p "${DIST_DIR}"
           cp "omawarden/target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
           cp LICENSE README.md "${DIST_DIR}/"
-          cp packaging/org.omarchy.bitwarden.policy "${DIST_DIR}/"
+          cp packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "${DIST_DIR}/"
 
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
@@ -181,6 +181,7 @@ jobs:
           echo "SHA256 aarch64: ${SHA_AARCH64}"
 
           mkdir -p dist/aur
+          cp packaging/omawarden-policy.install dist/aur/
           sed -e 's/^          //' << EOF > dist/aur/PKGBUILD
           # Maintainer: icyleaf <icyleaf.cn at gmail dot com>
 
@@ -195,15 +196,18 @@ jobs:
           optdepends=('libfido2: WebAuthn / Passkey / FIDO2 security key support')
           provides=('omawarden')
           conflicts=('omawarden')
+          install='omawarden-policy.install'
           source_x86_64=("\${pkgname}-\${pkgver}-x86_64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${RAW_TAG}/omawarden-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")
           sha256sums_x86_64=('${SHA_X86}')
           source_aarch64=("\${pkgname}-\${pkgver}-aarch64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${RAW_TAG}/omawarden-${VERSION}-aarch64-unknown-linux-gnu.tar.gz")
           sha256sums_aarch64=('${SHA_AARCH64}')
+          source=("omawarden-policy.install")
+          sha256sums=('SKIP')
 
           package() {
               install -Dm755 "\${srcdir}"/omawarden-*/omawarden "\${pkgdir}/usr/bin/omawarden"
               install -Dm644 "\${srcdir}"/omawarden-*/LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
-              install -Dm644 "\${srcdir}"/omawarden-*/org.omarchy.bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy"
+              install -Dm644 "\${srcdir}"/omawarden-*/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy"
           }
           EOF
 
@@ -219,6 +223,7 @@ jobs:
         with:
           pkgname: omawarden-bin
           pkgbuild: ./dist/aur/PKGBUILD
+          other_files: dist/aur/omawarden-policy.install
           commit_username: ${{ secrets.AUR_USERNAME }}
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_KEY }}

@@ -33,6 +33,8 @@ BUILD_DIR="${ROOT_DIR}/dist/pkg-git"
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"
 
+cp "${ROOT_DIR}/packaging/omawarden-policy.install" "${BUILD_DIR}/"
+
 GIT_REPO_URL="https://github.com/icyleaf/omarchy-bitwarden.git"
 if [ "${USE_LOCAL}" = true ]; then
   echo "==> Using local repository for git source..."
@@ -55,8 +57,9 @@ optdepends=('libfido2: WebAuthn / Passkey / FIDO2 security key support')
 provides=('omawarden' 'omawarden-bin')
 conflicts=('omawarden' 'omawarden-bin')
 options=('!lto')
-source=("omarchy-bitwarden::git+${GIT_REPO_URL}#branch=develop")
-sha256sums=('SKIP')
+install='omawarden-policy.install'
+source=("omarchy-bitwarden::git+${GIT_REPO_URL}#branch=develop" "omawarden-policy.install")
+sha256sums=('SKIP' 'SKIP')
 
 pkgver() {
     cd "\${srcdir}/omarchy-bitwarden"
@@ -75,7 +78,7 @@ package() {
     cd "\${srcdir}/omarchy-bitwarden"
     install -Dm755 omawarden/target/release/omawarden "\${pkgdir}/usr/bin/omawarden"
     install -Dm644 LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
-    install -Dm644 packaging/org.omarchy.bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.bitwarden.policy"
+    install -Dm644 packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "\${pkgdir}/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy"
 }
 PKG_EOF
 

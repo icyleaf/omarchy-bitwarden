@@ -6,7 +6,7 @@
   <!-- ADR-0025: quick unlock re-opens the vault after a soft lock once the
        user authenticates with the system (password or fingerprint). The
        daemon's own process is the polkit subject. -->
-  <action id="org.omarchy.bitwarden.unlock">
+  <action id="org.omarchy.plugin.icyleaf.omarchy-bitwarden.unlock">
     <description>Unlock the Omarchy Bitwarden vault</description>
     <message>Authentication is required to unlock the Bitwarden vault</message>
     <defaults>
