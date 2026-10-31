@@ -292,11 +292,28 @@ Item {
           // Quick Unlock Button (ADR-0025): system authentication instead of
           // the master password after a soft lock.
           Rectangle {
+            id: quickUnlockButton
             Layout.fillWidth: true
             Layout.preferredHeight: 32
             radius: 5
             visible: authRoot.quickUnlockAvailable && !authRoot.isBusy
-            color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
+            color: quickUnlockMouse.pressed
+              ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.16)
+              : (quickUnlockMouse.containsMouse
+                 ? Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.12)
+                 : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08))
+            border.width: quickUnlockButton.activeFocus ? 1 : 0
+            border.color: authRoot.accent
+
+            // Keyboard reachable alongside the master password field:
+            // Tab reaches the card, Return/Space triggers the prompt.
+            activeFocusOnTab: visible
+            Keys.onPressed: (event) => {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                event.accepted = true
+                authRoot.quickUnlockRequested()
+              }
+            }
 
             Text {
               anchors.centerIn: parent
@@ -306,7 +323,9 @@ Item {
             }
 
             MouseArea {
+              id: quickUnlockMouse
               anchors.fill: parent
+              hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: authRoot.quickUnlockRequested()
             }
