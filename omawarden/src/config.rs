@@ -249,6 +249,7 @@ impl ConfigManager {
         keyring_mgr: &crate::keyring::KeyringManager,
     ) -> std::io::Result<(Config, bool)> {
         let mut cfg = self.load();
+        let mut quick_unlock_flip: Option<bool> = None;
 
         if let Some(ref v) = options.server_url {
             Self::validate_url_scheme_security(v, "server_url")?;
@@ -355,18 +356,10 @@ impl ConfigManager {
         }
         if let Some(v) = options.quick_unlock {
             cfg.quick_unlock = v;
-            // Refresh the daemon's cached setting on every change (the daemon
-            // no longer re-reads config.json on its hot paths), then, when
-            // turning the feature off, drop any retained key.
-            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-                "action": "set_quick_unlock",
-                "enabled": v,
-            }));
-            if !v {
-                crate::daemon::send_daemon_request(&serde_json::json!({
-                    "action": "wipe_quick_unlock"
-                }));
-            }
+            // Deferred to after save() below: the daemon refresh must land
+            // only once the new value is on disk, so a daemon restart in
+            // between cannot resurrect the old setting from the file.
+            quick_unlock_flip = Some(v);
         }
         if let Some(v) = options.max_attachment_size_mb {
             cfg.max_attachment_size_mb = v;
@@ -408,6 +401,15 @@ impl ConfigManager {
         }
 
         self.save(&cfg)?;
+        if let Some(v) = quick_unlock_flip {
+            // Refresh the daemon's cached setting (it no longer re-reads
+            // config.json on its hot paths). The daemon owns the wipe that a
+            // disable requires, so one IPC covers the whole flip.
+            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                "action": "set_quick_unlock",
+                "enabled": v,
+            }));
+        }
         Ok((cfg, server_changed))
     }
 }

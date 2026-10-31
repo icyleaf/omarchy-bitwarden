@@ -1128,23 +1128,23 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::QuickUnlockCheck => {
-                    // Single source: when the daemon is up, both fields come
-                    // from its ping (the cached setting and the readiness it
-                    // gates); the config file is only a fallback for a daemon
-                    // that is not running, so the two can no longer disagree.
+                    // Prefer the daemon as the single source: its ping carries
+                    // both the cached setting and the readiness it gates, so
+                    // the two can no longer come from disagreeing files. The
+                    // fields degrade independently: a daemon older than this
+                    // feature reports readiness (quick_unlock) but not the
+                    // cached setting (quick_unlock_enabled), which then falls
+                    // back to the config file; no daemon at all means no
+                    // readiness and a config-file setting.
                     let ping = send_daemon_request(&json!({ "action": "ping" }));
-                    let enabled = ping
-                        .as_ref()
-                        .and_then(|r| r.get("quick_unlock_enabled"))
-                        .and_then(Value::as_bool);
-                    let available = ping
-                        .as_ref()
-                        .and_then(|r| r.get("quick_unlock"))
-                        .and_then(Value::as_bool);
-                    let (enabled, available) = match (enabled, available) {
-                        (Some(e), Some(a)) => (e, a),
-                        _ => (ConfigManager::default().load().quick_unlock, false),
+                    let field = |name: &str| {
+                        ping.as_ref()
+                            .and_then(|r| r.get(name))
+                            .and_then(Value::as_bool)
                     };
+                    let available = field("quick_unlock").unwrap_or(false);
+                    let enabled = field("quick_unlock_enabled")
+                        .unwrap_or_else(|| ConfigManager::default().load().quick_unlock);
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&json!({
