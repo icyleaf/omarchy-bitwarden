@@ -269,12 +269,12 @@ Item {
               implicitHeight: 14
               implicitWidth: Math.max(14, errBadgeText.implicitWidth + 6)
               radius: 7
-              color: "#ef4444"
+              color: StatusPalette.danger
               Text {
                 id: errBadgeText
                 anchors.centerIn: parent
                 text: String(settingsRoot.errorCount)
-                color: "#ffffff"
+                color: StatusPalette.textOn(StatusPalette.danger)
                 font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Bold
               }
@@ -330,7 +330,7 @@ Item {
                 id: chkUpText
                 anchors.centerIn: parent
                 text: settingsRoot.isCheckingUpdate ? "Checking..." : (settingsRoot.justCheckedLatest ? "Latest" : "Check Update")
-                color: settingsRoot.justCheckedLatest ? "#4ade80" : settingsRoot.accent
+                color: settingsRoot.justCheckedLatest ? StatusPalette.ok : settingsRoot.accent
                 font.pixelSize: Style.font.caption
               }
               MouseArea {
@@ -381,7 +381,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: engineBadgeBox.isInstalled ? "#4ade80" : "#f87171"
+                  color: engineBadgeBox.isInstalled ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -396,8 +396,8 @@ Item {
                   implicitHeight: 16
                   implicitWidth: engineSourceText.implicitWidth + 10
                   radius: 3
-                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.2, 0.5, 0.8, 0.2) : Qt.rgba(0.8, 0.6, 0.2, 0.2)
-                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.4, 0.7, 1.0, 0.4) : Qt.rgba(0.8, 0.6, 0.2, 0.4)
+                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.tint(StatusPalette.aur, 0.2) : StatusPalette.tint(StatusPalette.system, 0.2)
+                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.tint(StatusPalette.aur, 0.4) : StatusPalette.tint(StatusPalette.system, 0.4)
                   border.width: 1
 
                   Text {
@@ -409,7 +409,7 @@ Item {
                       }
                       return settingsRoot.engineSource ? (settingsRoot.engineSource.charAt(0).toUpperCase() + settingsRoot.engineSource.slice(1)) : "System"
                     }
-                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
+                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.aur : StatusPalette.system
                     font.pixelSize: Style.fontPx(0.75)
                     font.weight: Font.DemiBold
                   }
@@ -421,7 +421,7 @@ Item {
                   implicitHeight: 16
                   implicitWidth: updateTagRow.implicitWidth + 8
                   radius: 3
-                  color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
+                  color: StatusPalette.tint(StatusPalette.update, 0.15)
 
                   RowLayout {
                     id: updateTagRow
@@ -430,13 +430,13 @@ Item {
                     Text {
                       text: "\uf062"
                       font.family: settingsRoot.fontFamily
-                      color: "#ffffff"
+                      color: StatusPalette.textOnTint(StatusPalette.update, 0.15, Commons.Color.popups.background)
                       font.pixelSize: Style.fontPx(0.667)
                     }
                     Text {
                       id: updateTagLabel
                       text: "Update (AUR)"
-                      color: "#ffffff"
+                      color: StatusPalette.textOnTint(StatusPalette.update, 0.15, Commons.Color.popups.background)
                       font.pixelSize: Style.fontPx(0.75)
                       font.weight: Font.DemiBold
                     }
@@ -496,7 +496,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                  color: settingsRoot.cliHealth.keyring_available ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -525,7 +525,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                  color: settingsRoot.cliHealth.clipboard_available ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -1128,8 +1128,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fErrRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.9, 0.2, 0.2, 0.2) : (fErrMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
-          border.color: isSelected ? "#ef4444" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.error, 0.2) : (fErrMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.error : "transparent"
           border.width: 1
           RowLayout {
             id: fErrRow
@@ -1137,13 +1137,13 @@ Item {
             spacing: 4
             Text {
               text: "Errors"
-              color: fErrItem.isSelected ? "#ef4444" : (fErrMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
+              color: fErrItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.error, 0.2, Commons.Color.popups.background) : (fErrMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fErrItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.errorCount
-              color: fErrItem.isSelected ? "#ef4444" : settingsRoot.muted
+              color: fErrItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.error, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1163,8 +1163,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fWarnRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.9, 0.6, 0.1, 0.2) : (fWarnMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
-          border.color: isSelected ? "#f59e0b" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.warn, 0.2) : (fWarnMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.warn : "transparent"
           border.width: 1
           RowLayout {
             id: fWarnRow
@@ -1172,13 +1172,13 @@ Item {
             spacing: 4
             Text {
               text: "Warnings"
-              color: fWarnItem.isSelected ? "#f59e0b" : (fWarnMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
+              color: fWarnItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.warn, 0.2, Commons.Color.popups.background) : (fWarnMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fWarnItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.warnCount
-              color: fWarnItem.isSelected ? "#f59e0b" : settingsRoot.muted
+              color: fWarnItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.warn, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1198,8 +1198,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fInfoRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.2, 0.5, 1.0, 0.2) : (fInfoMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
-          border.color: isSelected ? "#3b82f6" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.info, 0.2) : (fInfoMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.info : "transparent"
           border.width: 1
           RowLayout {
             id: fInfoRow
@@ -1207,13 +1207,13 @@ Item {
             spacing: 4
             Text {
               text: "Info"
-              color: fInfoItem.isSelected ? "#3b82f6" : (fInfoMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
+              color: fInfoItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.info, 0.2, Commons.Color.popups.background) : (fInfoMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fInfoItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.infoCount
-              color: fInfoItem.isSelected ? "#3b82f6" : settingsRoot.muted
+              color: fInfoItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.info, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1233,8 +1233,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fDebugRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.6, 0.4, 0.9, 0.2) : (fDebugMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
-          border.color: isSelected ? "#a855f7" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.debug, 0.2) : (fDebugMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.debug : "transparent"
           border.width: 1
           RowLayout {
             id: fDebugRow
@@ -1242,13 +1242,13 @@ Item {
             spacing: 4
             Text {
               text: "Debug"
-              color: fDebugItem.isSelected ? "#a855f7" : (fDebugMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
+              color: fDebugItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.debug, 0.2, Commons.Color.popups.background) : (fDebugMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fDebugItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.debugCount
-              color: fDebugItem.isSelected ? "#a855f7" : settingsRoot.muted
+              color: fDebugItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.debug, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1352,7 +1352,7 @@ Item {
             width: logListView.width - 8
             implicitHeight: Math.max(26, logMsgText.implicitHeight + 12)
             radius: 3
-            color: (modelData.level === "ERROR") ? Qt.rgba(0.9, 0.2, 0.2, 0.12) : ((modelData.level === "WARN") ? Qt.rgba(0.9, 0.6, 0.1, 0.08) : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.03))
+            color: (modelData.level === "ERROR") ? StatusPalette.tint(StatusPalette.error, 0.12) : ((modelData.level === "WARN") ? StatusPalette.tint(StatusPalette.warn, 0.08) : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.03))
 
             Row {
               anchors.left: parent.left
@@ -1375,11 +1375,11 @@ Item {
                 width: 44
                 height: 16
                 radius: 2
-                color: (modelData.level === "ERROR") ? "#ef4444" : ((modelData.level === "WARN") ? "#f59e0b" : ((modelData.level === "INFO") ? "#3b82f6" : "#6b7280"))
+                color: StatusPalette.levelColor(modelData.level)
                 Text {
                   anchors.centerIn: parent
                   text: modelData.level
-                  color: "#ffffff"
+                  color: StatusPalette.textOnTint(StatusPalette.levelColor(modelData.level), 1, Commons.Color.popups.background)
                   font.family: "monospace"
                   font.pixelSize: Style.fontPx(0.667)
                   font.weight: Font.Bold
