@@ -827,7 +827,7 @@ Item {
                 implicitHeight: authRoot.fido2Status === "tool_not_found" ? 88 : 58
                 radius: 5
                 color: Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.08)
-                border.color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
+                border.color: authRoot.fido2Status === "tool_not_found" ? StatusPalette.warn : authRoot.accent
                 border.width: 1
 
                 RowLayout {
@@ -841,7 +841,7 @@ Item {
                       : (authRoot.fido2Status === "tool_not_found" ? "\uf071" : "\uf287")
                     font.family: authRoot.fontFamily
                     font.pixelSize: Style.fontPx(1.667)
-                    color: authRoot.fido2Status === "tool_not_found" ? "#f59e0b" : authRoot.accent
+                    color: authRoot.fido2Status === "tool_not_found" ? StatusPalette.warn : authRoot.accent
                     Layout.alignment: Qt.AlignTop
                   }
 
@@ -966,12 +966,12 @@ Item {
                           implicitWidth: copyTimer.running ? 46 : 38
                           implicitHeight: 18
                           radius: 2
-                          color: copyTimer.running ? "#10b981" : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.15)
+                          color: copyTimer.running ? StatusPalette.success : Qt.rgba(authRoot.foreground.r, authRoot.foreground.g, authRoot.foreground.b, 0.15)
 
                           Text {
                             anchors.centerIn: parent
                             text: copyTimer.running ? "Copied" : "Copy"
-                            color: copyTimer.running ? "#ffffff" : authRoot.foreground
+                            color: copyTimer.running ? StatusPalette.textOnTint(StatusPalette.success, 1, Commons.Color.popups.background) : authRoot.foreground
                             font.pixelSize: Style.fontPx(0.75)
                             font.weight: Font.Medium
                           }
