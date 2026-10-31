@@ -244,6 +244,18 @@ pub struct DaemonState {
     pub quick_unlock_busy: Mutex<()>,
     /// Injectable for tests; defaults to `pkcheck` resolved from PATH.
     pub polkit_binary: PathBuf,
+    /// Cached `quick_unlock` setting, read once at startup and refreshed via
+    /// the `set_quick_unlock` IPC that `config set --quick-unlock` sends.
+    /// Reading the file per call put a disk read + parse on the ping path
+    /// (the overlay polls every 3s), on every watchdog tick and inside
+    /// check_auto_lock, and a transient read failure silently meant
+    /// "disabled", turning a soft lock into a hard lock mid-session.
+    pub quick_unlock_setting: Mutex<bool>,
+    /// Whether the packaged policy file for POLKIT_ACTION_ID exists in the
+    /// polkit action directories, resolved once at startup. Without the
+    /// policy, pkcheck exits 127 and quick unlock can only ever fail, so
+    /// readiness must not advertise it.
+    pub polkit_policy_registered: bool,
     /// Rule 9 / ADR-0025: when the current session's last master-password
     /// unlock happened. Survives soft locks so the 12h ceiling bounds the
     /// retained key too; cleared by every hard lock.
@@ -297,6 +309,9 @@ impl DaemonState {
     pub fn new(storage_mgr: StorageManager, auto_lock_minutes: u64) -> Self {
         let vault_mgr = Arc::new(VaultManager::new("", Some(storage_mgr), None));
         let polkit_binary = resolve_pkcheck().unwrap_or_default();
+        let quick_unlock_setting = crate::config::ConfigManager::default().load().quick_unlock;
+        let polkit_policy_registered =
+            crate::polkit::policy_registered(crate::polkit::POLKIT_ACTION_ID);
         Self {
             vault_mgr,
             last_activity: Mutex::new(Instant::now()),
@@ -307,6 +322,8 @@ impl DaemonState {
             quick_unlock_failures: Mutex::new(0),
             quick_unlock_busy: Mutex::new(()),
             polkit_binary,
+            quick_unlock_setting: Mutex::new(quick_unlock_setting),
+            polkit_policy_registered,
             session_anchor: Mutex::new(None),
             last_boot_delta_secs: Mutex::new(None),
         }
@@ -379,18 +396,35 @@ impl DaemonState {
     }
 
     fn quick_unlock_enabled(&self) -> bool {
-        crate::config::ConfigManager::default().load().quick_unlock
+        self.quick_unlock_setting
+            .lock()
+            .ok()
+            .map(|g| *g)
+            .unwrap_or(false)
+    }
+
+    /// `config set --quick-unlock` refreshes the cached setting through this
+    /// IPC so the daemon never re-reads config.json on its hot paths.
+    /// Editing the file by hand while the daemon runs still needs a restart
+    /// (or a `config set`) to be picked up.
+    pub fn set_quick_unlock_enabled(&self, enabled: bool) {
+        if let Ok(mut setting) = self.quick_unlock_setting.lock() {
+            *setting = enabled;
+        }
     }
 
     /// Quick unlock availability as advertised over IPC: enabled in settings
-    /// AND a polkit binary resolvable at daemon startup AND a key currently
-    /// retained by a soft lock. Including the binary keeps the button honest
-    /// on systems without polkit: it stays hidden instead of erroring on
-    /// click. (Resolution is cached at startup; installing polkit later is
-    /// picked up at the next daemon start.)
+    /// AND a polkit binary resolvable at daemon startup AND the packaged
+    /// policy actually registered AND a key currently retained by a soft
+    /// lock. Including the binary and the policy keeps the button honest on
+    /// systems without polkit or with the policy missing (older package, dev
+    /// tarball predating this feature): it stays hidden instead of
+    /// erroring on click. (Resolution is cached at startup; installing
+    /// polkit or the policy later is picked up at the next daemon start.)
     pub fn quick_unlock_ready(&self) -> bool {
         self.quick_unlock_enabled()
             && !self.polkit_binary.as_os_str().is_empty()
+            && self.polkit_policy_registered
             && self.vault_mgr.quick_unlock_available()
     }
 
@@ -398,6 +432,17 @@ impl DaemonState {
     /// check instead of the master password. Fail-closed on every rejection;
     /// three consecutive denials wipe the retained key.
     pub fn perform_quick_unlock(&self) -> Result<usize, &'static str> {
+        self.perform_quick_unlock_with_timeout(crate::polkit::DEFAULT_CHECK_TIMEOUT)
+    }
+
+    /// Same check with a caller-chosen prompt timeout. The SSH agent path
+    /// uses a shorter one: an unattended `git fetch` must not sit silent for
+    /// the full two minutes the overlay can afford (the user is looking at
+    /// its dialog).
+    pub fn perform_quick_unlock_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<usize, &'static str> {
         if !self.quick_unlock_enabled() {
             return Err("Quick unlock is disabled in settings.");
         }
@@ -431,7 +476,7 @@ impl DaemonState {
         match crate::polkit::check(
             crate::polkit::POLKIT_ACTION_ID,
             &self.polkit_binary,
-            crate::polkit::DEFAULT_CHECK_TIMEOUT,
+            timeout,
         ) {
             crate::polkit::PolkitOutcome::Authorized => {}
             crate::polkit::PolkitOutcome::Denied => {
@@ -1000,6 +1045,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
             "quick_unlock": state.quick_unlock_ready(),
+            // The daemon's cached setting, so `auth quick-unlock-check` can
+            // report enabled/available from one source instead of the CLI
+            // re-reading config.json (two sources that can disagree).
+            "quick_unlock_enabled": state.quick_unlock_enabled(),
             // False means mlock failed at least once: the retained key sits
             // in unlocked memory (degraded, must be discoverable).
             "memory_locked": !crate::locked::mlock_fallback_active(),
@@ -1058,6 +1107,17 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         "wipe_quick_unlock" => {
             state.vault_mgr.wipe_quick_unlock();
             json!({ "ok": true })
+        }
+        // Refresh the daemon's cached quick_unlock setting; sent by
+        // `config set --quick-unlock` on every change so the hot paths never
+        // re-read config.json (see DaemonState::quick_unlock_setting).
+        "set_quick_unlock" => {
+            let enabled = req
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            state.set_quick_unlock_enabled(enabled);
+            json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
             state.lock();
@@ -1887,10 +1947,14 @@ mod tests {
         let pk = dir.path().join("mock-pkcheck");
         crate::write_test_executable(&pk, "#!/bin/sh\nexit 0\n");
         daemon_state.polkit_binary = pk;
+        daemon_state.polkit_policy_registered = true;
         let state = Arc::new(daemon_state);
 
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = true;
+        // The CLI refreshes the daemon's cached setting via the
+        // set_quick_unlock IPC after writing config.json; mirror that here.
+        state.set_quick_unlock_enabled(true);
         fs::write(
             dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
             serde_json::to_string(&cfg).unwrap(),
@@ -2022,6 +2086,7 @@ mod tests {
         // Screen lock with quick unlock enabled: key must survive in the slot.
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = true;
+        state.set_quick_unlock_enabled(true);
         fs::write(
             dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
             serde_json::to_string(&cfg).unwrap(),
@@ -2090,6 +2155,8 @@ mod tests {
         // Enabled but nothing retained (hard-locked vault) must fail closed.
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = true;
+        // Mirror the set_quick_unlock IPC the CLI sends after this write.
+        state.set_quick_unlock_enabled(true);
         fs::write(
             dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
             serde_json::to_string(&cfg).unwrap(),
@@ -2101,6 +2168,62 @@ mod tests {
             res["error"].as_str().unwrap().contains("unavailable"),
             "got: {res}"
         );
+
+        old_runtime.map_or_else(
+            || std::env::remove_var("XDG_RUNTIME_DIR"),
+            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
+        );
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
+    fn test_set_quick_unlock_ipc_refreshes_cache_and_ping_reports_enabled() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let mut daemon_state =
+            DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
+        daemon_state.polkit_binary = std::path::PathBuf::new();
+        let state = Arc::new(daemon_state);
+
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            client.write_all(format!("{}\n", req).as_bytes()).unwrap();
+            client.flush().unwrap();
+            let mut line = String::new();
+            BufReader::new(client).read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // Default cached at startup from config.json: off.
+        let ping = send_req(json!({ "action": "ping" }));
+        assert_eq!(ping["quick_unlock_enabled"], false);
+
+        // `config set --quick-unlock` writes the file, then sends this IPC;
+        // the daemon must never re-read config.json on its hot paths.
+        let res = send_req(json!({ "action": "set_quick_unlock", "enabled": true }));
+        assert_eq!(res["ok"], true);
+        let ping = send_req(json!({ "action": "ping" }));
+        assert_eq!(ping["quick_unlock_enabled"], true);
+        assert_eq!(
+            ping["quick_unlock"], false,
+            "enabled alone is not readiness (nothing retained here)"
+        );
+
+        send_req(json!({ "action": "set_quick_unlock", "enabled": false }));
+        let ping = send_req(json!({ "action": "ping" }));
+        assert_eq!(ping["quick_unlock_enabled"], false);
 
         old_runtime.map_or_else(
             || std::env::remove_var("XDG_RUNTIME_DIR"),
@@ -2139,10 +2262,13 @@ exit $(cat {})
             ),
         );
         daemon_state.polkit_binary = pk.clone();
+        daemon_state.polkit_policy_registered = true;
         let state = Arc::new(daemon_state);
 
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = true;
+        // Mirror the set_quick_unlock IPC the CLI sends after this write.
+        state.set_quick_unlock_enabled(true);
         fs::write(
             dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
             serde_json::to_string(&cfg).unwrap(),
@@ -2337,6 +2463,8 @@ exit $(cat {})
 
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = true;
+        // Mirror the set_quick_unlock IPC the CLI sends after this write.
+        daemon_state.set_quick_unlock_enabled(true);
         fs::write(
             dir.path().join(crate::config::DEFAULT_CONFIG_FILENAME),
             serde_json::to_string(&cfg).unwrap(),
@@ -2387,6 +2515,7 @@ exit $(cat {})
         // must not advertise a prompt that can only fail). Forced empty so
         // the test does not depend on the host having pkcheck.
         daemon_state.polkit_binary = std::path::PathBuf::new();
+        daemon_state.polkit_policy_registered = true;
         let state = Arc::new(daemon_state);
         // Disabled by default and nothing retained.
         assert!(!state.quick_unlock_ready());
@@ -2416,6 +2545,26 @@ exit $(cat {})
             15,
         );
         daemon_state.polkit_binary = dir.path().join("pkcheck");
+        // Retention + enabled setting are not enough: an unregistered
+        // policy (missing package file) must keep readiness false.
+        daemon_state.polkit_policy_registered = false;
+        daemon_state.set_quick_unlock_enabled(true);
+        let state = Arc::new(daemon_state);
+        *state.vault_mgr.quick_unlock_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[9u8; 64]).unwrap());
+        assert!(
+            !state.quick_unlock_ready(),
+            "an unregistered policy must keep readiness false"
+        );
+        drop(state);
+
+        daemon_state = DaemonState::new(
+            StorageManager::new(dir.path().join("daemon3_data.json")),
+            15,
+        );
+        daemon_state.polkit_binary = dir.path().join("pkcheck");
+        daemon_state.polkit_policy_registered = true;
+        daemon_state.set_quick_unlock_enabled(true);
         let state = Arc::new(daemon_state);
         *state.vault_mgr.quick_unlock_key.write().unwrap() =
             Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[9u8; 64]).unwrap());

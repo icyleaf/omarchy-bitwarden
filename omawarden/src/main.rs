@@ -22,6 +22,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// Strict boolean for CLI flags: anything outside true/false/1/0/yes/no is a
+/// parse error instead of silently becoming `false`. `--quick-unlock ture`
+/// used to report success, persist `quick_unlock: false` and immediately
+/// wipe the retained key.
+fn parse_cli_bool(v: &str) -> Result<bool, String> {
+    match v.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => Err(format!(
+            "invalid boolean '{other}': expected one of true|false|1|0|yes|no"
+        )),
+    }
+}
+
 /// Auth output can carry a raw access token in `session`. Piped callers (the
 /// QML helper) depend on it; an interactive terminal would only leave it
 /// behind in scrollback, so redact it there.
@@ -279,15 +293,20 @@ enum ConfigAction {
         client_cert: Option<String>,
         #[arg(long, help = "Path to separate client private key PEM file for mTLS")]
         client_key: Option<String>,
-        #[arg(long, help = "Serve vault SSH keys as an SSH agent (true/false)")]
-        ssh_agent: Option<String>,
+        #[arg(
+            long,
+            value_parser = parse_cli_bool,
+            help = "Serve vault SSH keys as an SSH agent (true/false)"
+        )]
+        ssh_agent: Option<bool>,
         #[arg(long, help = "Confirm SSH signatures: always, first-use or never")]
         ssh_agent_confirm: Option<String>,
         #[arg(
             long,
+            value_parser = parse_cli_bool,
             help = "Unlock via system authentication after a soft lock (true/false; ADR-0025)"
         )]
-        quick_unlock: Option<String>,
+        quick_unlock: Option<bool>,
     },
 }
 
@@ -735,13 +754,9 @@ fn main() -> ExitCode {
                     max_attachment_size_mb: max_attachment_size,
                     client_cert_path: client_cert,
                     client_key_path: client_key,
-                    ssh_agent_enabled: ssh_agent
-                        .as_ref()
-                        .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes")),
+                    ssh_agent_enabled: ssh_agent,
                     ssh_agent_confirm: ssh_agent_confirm.clone(),
-                    quick_unlock: quick_unlock
-                        .as_ref()
-                        .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes")),
+                    quick_unlock,
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -1113,16 +1128,29 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::QuickUnlockCheck => {
-                    let ready = send_daemon_request(&json!({ "action": "ping" }))
-                        .and_then(|resp| resp.get("quick_unlock").and_then(Value::as_bool))
-                        .unwrap_or(false);
-                    let enabled = ConfigManager::default().load().quick_unlock;
+                    // Single source: when the daemon is up, both fields come
+                    // from its ping (the cached setting and the readiness it
+                    // gates); the config file is only a fallback for a daemon
+                    // that is not running, so the two can no longer disagree.
+                    let ping = send_daemon_request(&json!({ "action": "ping" }));
+                    let enabled = ping
+                        .as_ref()
+                        .and_then(|r| r.get("quick_unlock_enabled"))
+                        .and_then(Value::as_bool);
+                    let available = ping
+                        .as_ref()
+                        .and_then(|r| r.get("quick_unlock"))
+                        .and_then(Value::as_bool);
+                    let (enabled, available) = match (enabled, available) {
+                        (Some(e), Some(a)) => (e, a),
+                        _ => (ConfigManager::default().load().quick_unlock, false),
+                    };
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&json!({
                             "ok": true,
                             "enabled": enabled,
-                            "available": ready,
+                            "available": available,
                         }))
                         .unwrap()
                     );
@@ -2425,6 +2453,25 @@ fn ensure_unlocked_user_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_cli_bool_accepts_known_values() {
+        for v in ["true", "TRUE", "1", "yes", " Yes "] {
+            assert!(matches!(parse_cli_bool(v), Ok(true)), "{v}");
+        }
+        for v in ["false", "0", "NO", " no "] {
+            assert!(matches!(parse_cli_bool(v), Ok(false)), "{v}");
+        }
+    }
+
+    #[test]
+    fn test_parse_cli_bool_rejects_typos() {
+        // "ture" must be a hard error: coerced to false it would persist a
+        // disabled setting and wipe the retained quick-unlock key.
+        for v in ["ture", "flase", "on", "off", ""] {
+            assert!(parse_cli_bool(v).is_err(), "{v} should not parse");
+        }
+    }
 
     #[test]
     fn test_parse_auth_payload_plain() {

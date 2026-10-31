@@ -355,8 +355,14 @@ impl ConfigManager {
         }
         if let Some(v) = options.quick_unlock {
             cfg.quick_unlock = v;
+            // Refresh the daemon's cached setting on every change (the daemon
+            // no longer re-reads config.json on its hot paths), then, when
+            // turning the feature off, drop any retained key.
+            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                "action": "set_quick_unlock",
+                "enabled": v,
+            }));
             if !v {
-                // Turning the feature off must not leave a retained key behind.
                 crate::daemon::send_daemon_request(&serde_json::json!({
                     "action": "wipe_quick_unlock"
                 }));
