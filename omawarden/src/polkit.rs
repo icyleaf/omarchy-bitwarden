@@ -7,9 +7,18 @@ use std::time::{Duration, Instant};
 /// lives under the plugin's own namespace so it never reads as shipped by
 /// Omarchy itself.
 pub const POLKIT_ACTION_ID: &str = "org.omarchy.plugin.icyleaf.omarchy-bitwarden.unlock";
-/// Directories polkit scans for action definitions (see polkit(8)); /etc
-/// holds local copies or overrides of the packaged /usr/share file.
-pub const POLKIT_ACTION_DIRS: &[&str] = &["/usr/share/polkit-1/actions", "/etc/polkit-1/actions"];
+/// Directories polkitd scans for action definitions. This mirrors the list
+/// compiled into polkitd, not just the packaged path: /usr/local is where a
+/// manual install of the shipped policy lands, /etc holds local copies or
+/// overrides, and /run carries transient actions. Leaving any of them out
+/// would report "policy not registered" for a policy polkitd happily loads,
+/// hiding the quick-unlock button for a feature that works.
+pub const POLKIT_ACTION_DIRS: &[&str] = &[
+    "/usr/share/polkit-1/actions",
+    "/usr/local/share/polkit-1/actions",
+    "/etc/polkit-1/actions",
+    "/run/polkit-1/actions",
+];
 /// Interactive checks wait for the user to answer the agent's dialog.
 pub const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(120);
 
