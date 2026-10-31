@@ -416,19 +416,25 @@ impl DaemonState {
         }
     }
 
-    /// Quick unlock availability as advertised over IPC: enabled in settings
-    /// AND a polkit binary resolvable at daemon startup AND the packaged
-    /// policy actually registered AND a key currently retained by a soft
-    /// lock. Including the binary and the policy keeps the button honest on
-    /// systems without polkit or with the policy missing (older package, dev
-    /// tarball predating this feature): it stays hidden instead of
-    /// erroring on click. (Resolution is cached at startup; installing
-    /// polkit or the policy later is picked up at the next daemon start.)
-    pub fn quick_unlock_ready(&self) -> bool {
+    /// Whether the feature can work at all right now: enabled in settings, a
+    /// polkit binary resolved at daemon startup, and the packaged policy
+    /// registered. Retention is gated on this too (see `soft_lock`): holding
+    /// the key for a prompt that can only fail would be pure exposure with no
+    /// way to spend it. (Resolution is cached at startup; installing polkit
+    /// or the policy later is picked up at the next daemon start.)
+    pub fn quick_unlock_usable(&self) -> bool {
         self.quick_unlock_enabled()
             && !self.polkit_binary.as_os_str().is_empty()
             && self.polkit_policy_registered
-            && self.vault_mgr.quick_unlock_available()
+    }
+
+    /// Quick unlock availability as advertised over IPC: usable AND a key
+    /// currently retained by a soft lock. Including the binary and the policy
+    /// keeps the button honest on systems without polkit or with the policy
+    /// missing (older package, dev tarball predating this feature): it stays
+    /// hidden instead of erroring on click.
+    pub fn quick_unlock_ready(&self) -> bool {
+        self.quick_unlock_usable() && self.vault_mgr.quick_unlock_available()
     }
 
     /// ADR-0025: re-unlock the vault behind a polkit system-authentication
@@ -700,7 +706,10 @@ impl DaemonState {
         if let Ok(mut ua) = self.unlocked_at.lock() {
             *ua = None;
         }
-        if self.quick_unlock_enabled() {
+        // Retention requires the feature to actually be usable: with the
+        // policy missing or no polkit binary the polkit check can only fail,
+        // so keeping the key would add exposure without a way to spend it.
+        if self.quick_unlock_usable() {
             self.vault_mgr.soft_lock();
         } else {
             self.vault_mgr.hard_lock();
@@ -2069,15 +2078,58 @@ mod tests {
     }
 
     #[test]
+    fn test_soft_lock_hard_locks_when_quick_unlock_is_unusable() {
+        // ADR-0025: retention is only worth its exposure when the polkit
+        // check can actually run. Enabled-but-unusable (policy missing, no
+        // pkcheck) must hard-lock, exactly like disabled: the retained key
+        // could never be spent and would just sit in memory.
+        let _lock = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+
+        let mut daemon_state =
+            DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
+        daemon_state.set_quick_unlock_enabled(true);
+        // No resolvable pkcheck, no registered policy.
+        daemon_state.polkit_binary = std::path::PathBuf::new();
+        daemon_state.polkit_policy_registered = false;
+        let state = Arc::new(daemon_state);
+        assert!(state.quick_unlock_enabled());
+        assert!(!state.quick_unlock_usable());
+
+        *state.vault_mgr.user_key.write().unwrap() =
+            Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap());
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+
+        state.soft_lock();
+
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(
+            !state.vault_mgr.quick_unlock_available(),
+            "an unusable feature must not retain a key nobody can spend"
+        );
+        assert!(!state.quick_unlock_ready());
+
+        old_config.map_or_else(
+            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
+            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+        );
+    }
+
+    #[test]
     fn test_sleep_signal_hard_locks_and_screen_signal_soft_locks() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
         let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
         std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
-        let state = Arc::new(DaemonState::new(
-            StorageManager::new(dir.path().join("daemon_data.json")),
-            15,
-        ));
+        let mut daemon_state =
+            DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
+        // Retention requires a usable feature, not just the setting: pin the
+        // startup-resolved binary and policy so the host cannot decide this.
+        daemon_state.polkit_binary = dir.path().join("pkcheck");
+        daemon_state.polkit_policy_registered = true;
+        let state = Arc::new(daemon_state);
         let key = crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap();
 
         // Screen lock with quick unlock enabled: key must survive in the slot.
