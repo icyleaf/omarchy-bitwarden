@@ -43,13 +43,13 @@ Item {
         text: isBusy ? "\uf021" : (errorMessage ? "\uf071" : "\uf129")
         font.family: toastRoot.fontFamily
         font.pixelSize: Style.font.bodySmall
-        color: errorMessage ? StatusPalette.textOn(StatusPalette.danger) : (isBusy ? toastRoot.accent : toastRoot.foreground)
+        color: errorMessage ? StatusPalette.textOnTint(StatusPalette.danger, 0.95, toastRoot.cardBackground) : (isBusy ? toastRoot.accent : toastRoot.foreground)
       }
 
       Text {
         id: messageText
         text: errorMessage || statusMessage || (isBusy ? "Processing..." : "")
-        color: errorMessage ? StatusPalette.textOn(StatusPalette.danger) : toastRoot.foreground
+        color: errorMessage ? StatusPalette.textOnTint(StatusPalette.danger, 0.95, toastRoot.cardBackground) : toastRoot.foreground
         font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium
         elide: Text.ElideRight
@@ -71,7 +71,7 @@ Item {
         visible: !isBusy && Boolean(errorMessage || statusMessage)
         text: "\uf00d"
         font.family: toastRoot.fontFamily
-        color: errorMessage ? StatusPalette.tint(StatusPalette.textOn(StatusPalette.danger), 0.7) : Qt.rgba(toastRoot.foreground.r, toastRoot.foreground.g, toastRoot.foreground.b, 0.6)
+        color: errorMessage ? StatusPalette.tint(StatusPalette.textOnTint(StatusPalette.danger, 0.95, toastRoot.cardBackground), 0.7) : Qt.rgba(toastRoot.foreground.r, toastRoot.foreground.g, toastRoot.foreground.b, 0.6)
         font.pixelSize: Style.font.caption
         MouseArea {
           anchors.fill: parent

@@ -274,7 +274,7 @@ Item {
                 id: errBadgeText
                 anchors.centerIn: parent
                 text: String(settingsRoot.errorCount)
-                color: StatusPalette.textOn(StatusPalette.danger)
+                color: StatusPalette.textOnTint(StatusPalette.danger, 1, Commons.Color.popups.background)
                 font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Bold
               }
