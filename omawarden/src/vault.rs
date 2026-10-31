@@ -470,9 +470,10 @@ impl VaultManager {
         //    must decrypt;
         // 2. otherwise (absent, unparseable or asymmetric), at least one
         //    personal cipher must expose a field that decrypts under the
-        //    user key: its own item key when present (also an EncString
-        //    under the user key), else its name. Personal ciphers that all
-        //    carry item keys still validate; only org wrappers are skipped.
+        //    user key: its own item key or its name (both EncStrings under
+        //    the user key; the item key decrypts to raw bytes, not UTF-8).
+        //    Personal ciphers that all carry item keys still validate; only
+        //    org wrappers are skipped.
         let mut validated_by_private_key = false;
         if let Some(enc_priv) = fresh_storage.enc_private_key.as_deref() {
             if let Ok(parsed) = crate::crypto::EncString::parse(enc_priv) {
@@ -505,25 +506,31 @@ impl VaultManager {
                 {
                     continue;
                 }
-                // Probe the cipher's own item key when present, else its
-                // name: both are EncStrings under the user key, so either
-                // proves the retained key still decrypts this vault. A
-                // cipher exposing neither (no key and no parseable name)
-                // proves nothing either way and is skipped rather than
-                // counted as a failure.
-                let probe = c
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| c.get("name").and_then(|v| v.as_str()));
-                let Some(field) = probe else {
+                // Probe every EncString the cipher exposes under the user
+                // key: its own item key first, then its name. A real item
+                // key decrypts to a raw 64-byte key blob, so the probe uses
+                // decrypt() (raw bytes) rather than decrypt_string(); a name
+                // is UTF-8 text but decrypt() accepts it identically. Trying
+                // both fields keeps one corrupt value (an unparseable or
+                // foreign item key) from vetoing an otherwise valid name. A
+                // cipher exposing neither field proves nothing either way and
+                // is skipped rather than counted as a failure.
+                let key_field = c.get("key").and_then(|v| v.as_str());
+                let name_field = c.get("name").and_then(|v| v.as_str());
+                if key_field.is_none() && name_field.is_none() {
                     continue;
-                };
+                }
                 candidates += 1;
-                if let Ok(parsed_field) = crate::crypto::EncString::parse(field) {
-                    if parsed_field.decrypt_string(&key).is_ok() {
-                        decrypted_any = true;
-                        break;
+                for field in [key_field, name_field].into_iter().flatten() {
+                    if let Ok(parsed_field) = crate::crypto::EncString::parse(field) {
+                        if parsed_field.decrypt(&key).is_ok() {
+                            decrypted_any = true;
+                            break;
+                        }
                     }
+                }
+                if decrypted_any {
+                    break;
                 }
             }
             if candidates > 0 && !decrypted_any {
@@ -2069,7 +2076,11 @@ pub(crate) mod tests {
         vault.unlock("master-pw").unwrap();
         // Capture the key before soft_lock moves it to the retained slot.
         let user_key = vault.user_key.read().unwrap().clone().unwrap();
-        let valid_enc = user_key.encrypt_string("probe").unwrap();
+        // A REAL item key: a 64-byte symmetric key blob, not UTF-8 text. The
+        // probe must accept it via raw decrypt(); a decrypt_string() probe
+        // would reject the valid blob and wipe a perfectly good key.
+        let item_key_blob = [42u8; 64];
+        let item_key_enc = user_key.encrypt(&item_key_blob).unwrap();
         assert!(vault.soft_lock());
 
         // A keyed cipher whose item key decrypts under the retained key
@@ -2079,7 +2090,7 @@ pub(crate) mod tests {
         fresh.ciphers = vec![serde_json::json!({
             "id": "cipher-keyed-ok",
             "type": 1,
-            "key": valid_enc,
+            "key": item_key_enc,
             "name": "2.undecryptable-name-is-irrelevant",
             "login": null,
         })];
@@ -2087,6 +2098,32 @@ pub(crate) mod tests {
 
         vault.quick_unlock_restore().unwrap();
         assert!(vault.is_unlocked());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_falls_back_to_name_when_key_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        let user_key = vault.user_key.read().unwrap().clone().unwrap();
+        let valid_name_enc = user_key.encrypt_string("GitHub").unwrap();
+        assert!(vault.soft_lock());
+
+        // An unparseable item key (corrupt sync, server quirk) must not veto
+        // the cipher's valid encrypted name: the probe tries both fields.
+        let mut fresh = vault.storage_mgr.load();
+        fresh.ciphers = vec![serde_json::json!({
+            "id": "cipher-corrupt-key",
+            "type": 1,
+            "key": "2.corrupt-item-key",
+            "name": valid_name_enc,
+            "login": null,
+        })];
+        vault.storage_mgr.save(&fresh).unwrap();
+
+        vault.quick_unlock_restore().unwrap();
+        assert!(vault.is_unlocked());
+        assert!(vault.quick_unlock_available(), "no spurious wipe");
     }
 
     #[test]
