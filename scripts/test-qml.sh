@@ -51,6 +51,9 @@ export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 # Qt drops QML console output when stderr is not a TTY (pipes, CI logs, agent
 # tooling), leaving a failing suite with an exit code and no diagnostic.
 export QT_ASSUME_STDERR_HAS_CONSOLE=1
+# Suites that grep component sources (root wiring checks) read the repo files
+# through XHR; without this Qt refuses file:// reads from QML.
+export QML_XHR_ALLOW_FILE_READ=1
 
 QML_EXEC=""
 if command -v qml6 >/dev/null 2>&1; then
