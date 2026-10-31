@@ -356,8 +356,15 @@ impl VaultManager {
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
     /// the fail-safe default — retention happens only through soft_lock().
     pub fn lock(&self) {
-        self.purge_decrypted_state();
+        // Order matters. wipe_quick_unlock takes restore_guard and bumps the
+        // epoch, which is what makes an in-flight quick_unlock_restore abort
+        // instead of committing. Purging first would leave a window where a
+        // restore commit lands between the purge and the wipe: the vault
+        // would end up unlocked with the decrypted items and user key back,
+        // and the wipe (which only clears the slot) would not undo it. The
+        // hard lock must therefore invalidate restores before it purges.
         self.wipe_quick_unlock();
+        self.purge_decrypted_state();
     }
 
     /// Soft lock (ADR-0025): purge everything a hard lock purges, except the
@@ -1957,6 +1964,53 @@ pub(crate) mod tests {
         assert!(
             !vault.quick_unlock_available(),
             "a stale retained key must be wiped, not re-primed"
+        );
+    }
+
+    #[test]
+    fn test_hard_lock_takes_the_restore_guard_before_purging() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+
+        // Regression for the purge-before-wipe ordering: the restore commit
+        // section holds restore_guard, so a hard lock that purged first could
+        // be overwritten by a commit landing in the gap and leave the vault
+        // unlocked after a suspend, the 12h ceiling or an explicit lock. Hold
+        // the guard (as the commit section does) and prove the hard lock has
+        // not purged anything, nor bumped the epoch, before it gets the guard.
+        let epoch_before = vault.quick_unlock_epoch.load(Ordering::SeqCst);
+        let guard = vault.restore_guard.lock().unwrap();
+        std::thread::scope(|s| {
+            let locker = s.spawn(|| vault.lock());
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                vault.is_unlocked(),
+                "a hard lock must wait for the restore commit guard before purging"
+            );
+            assert!(
+                vault.user_key.read().unwrap().is_some(),
+                "the user key must survive until the wipe has the guard"
+            );
+            assert_eq!(
+                vault.quick_unlock_epoch.load(Ordering::SeqCst),
+                epoch_before,
+                "the epoch bump that aborts an in-flight restore must come before the purge"
+            );
+            drop(guard);
+            locker.join().unwrap();
+        });
+        assert!(
+            !vault.is_unlocked(),
+            "the hard lock must land once the guard is free"
+        );
+        assert!(!vault.quick_unlock_available());
+        assert_ne!(
+            vault.quick_unlock_epoch.load(Ordering::SeqCst),
+            epoch_before
         );
     }
 
