@@ -277,6 +277,12 @@ pub struct VaultManager {
     /// before decrypting and aborts if a wipe landed mid-restore, so a hard
     /// lock racing a restore can never be overridden.
     pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
+    /// `enc_user_key` as it was when the key was retained. That wrapping is
+    /// unique per account *and* per master password, so comparing it on
+    /// restore proves the retained key still belongs to this vault even when
+    /// there is nothing to decrypt-test (an empty vault with no wrapped
+    /// private key). Ciphertext, not a secret; cleared with the slot.
+    pub quick_unlock_user_key_wrap: RwLock<Option<String>>,
     /// The epoch check alone leaves a window: a wipe could land between the
     /// final re-check and the four unlocked-state writes, and the restore
     /// would overwrite it (vault left unlocked, ceiling disarmed). Held by
@@ -332,6 +338,7 @@ impl VaultManager {
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
             quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
+            quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
         }
     }
@@ -381,6 +388,13 @@ impl VaultManager {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // Read the binding before taking the key lock, so the lock order is
+        // always user_key -> slot -> wrap (see wipe_quick_unlock).
+        let account_wrap = self
+            .storage
+            .read()
+            .ok()
+            .and_then(|s| s.enc_user_key.clone());
         let retained = match self.user_key.write() {
             Ok(mut src) => {
                 let taken = src.take();
@@ -391,6 +405,10 @@ impl VaultManager {
                     // retention would be a surprising side effect.
                     if had || slot.is_none() {
                         *slot = taken;
+                        let has_key = slot.is_some();
+                        if let Ok(mut wrap) = self.quick_unlock_user_key_wrap.write() {
+                            *wrap = if has_key { account_wrap } else { None };
+                        }
                     }
                 }
                 had
@@ -433,6 +451,9 @@ impl VaultManager {
         if let Ok(mut slot) = self.quick_unlock_key.write() {
             // Dropping the LockedMemory-backed key zeroizes its page.
             *slot = None;
+            if let Ok(mut wrap) = self.quick_unlock_user_key_wrap.write() {
+                *wrap = None;
+            }
         }
     }
 
@@ -548,6 +569,34 @@ impl VaultManager {
                 self.wipe_quick_unlock();
                 return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
             }
+            if candidates == 0 {
+                // Nothing to decrypt-test: no personal cipher and no usable
+                // wrapped private key. An empty vault cannot prove the key on
+                // its own, so fall back to the account binding recorded at
+                // retention time. An identical wrapping means the same
+                // account, the same master password and therefore the same
+                // user key; a different one means the key is stale, and
+                // committing would let the user write items under a key the
+                // next master-password unlock cannot read.
+                let recorded = self
+                    .quick_unlock_user_key_wrap
+                    .read()
+                    .ok()
+                    .and_then(|wrap| wrap.clone());
+                let matches = match (recorded.as_deref(), fresh_storage.enc_user_key.as_deref()) {
+                    (Some(recorded), Some(current)) => recorded == current,
+                    // Either side missing: nothing proves the key, fail closed.
+                    _ => false,
+                };
+                if !matches {
+                    crate::log_warn!(
+                        "omawarden:vault",
+                        "Retained key cannot be verified against this vault; wiping quick unlock"
+                    );
+                    self.wipe_quick_unlock();
+                    return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
+                }
+            }
         }
 
         // A hard lock (suspend drift, 12h ceiling, explicit lock/logout)
@@ -644,10 +693,15 @@ impl VaultManager {
             *key = Some(user_key.clone());
         }
         // If a soft lock retained a key earlier, keep that copy current with
-        // the key now in use (e.g. after a server-side key rotation).
+        // the key now in use (e.g. after a server-side key rotation) and
+        // rebind it to the wrapping that came with this unlock.
+        let account_wrap = fresh_storage.enc_user_key.clone();
         if let Ok(mut slot) = self.quick_unlock_key.write() {
             if slot.is_some() {
                 *slot = Some(user_key);
+                if let Ok(mut wrap) = self.quick_unlock_user_key_wrap.write() {
+                    *wrap = account_wrap;
+                }
             }
         }
         if let Ok(mut unl) = self.is_unlocked.write() {
@@ -2093,6 +2147,83 @@ pub(crate) mod tests {
         });
         assert!(!vault.is_unlocked());
         assert!(vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_fails_closed_on_empty_vault_with_changed_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+        assert!(vault.quick_unlock_available());
+
+        // An empty vault (no ciphers, no wrapped private key) has nothing to
+        // decrypt-test, so the only honest check is the account binding
+        // recorded at retention. Here the user key is now wrapped under a
+        // different master password: the retained key is stale and would
+        // otherwise "unlock" an empty vault, letting the user create items
+        // under a key the next real unlock cannot read.
+        let mut rotated = vault.storage_mgr.load();
+        rotated.ciphers = Vec::new();
+        rotated.enc_private_key = None;
+        rotated.enc_user_key = Some("2.rotated-by-a-password-change".to_string());
+        vault.storage_mgr.save(&rotated).unwrap();
+
+        let err = vault.quick_unlock_restore().unwrap_err();
+        assert!(err.contains("no longer matches"), "got: {err}");
+        assert!(!vault.is_unlocked());
+        assert!(
+            !vault.quick_unlock_available(),
+            "an unverifiable retained key must be wiped, not left in the slot"
+        );
+        assert!(
+            vault.quick_unlock_user_key_wrap.read().unwrap().is_none(),
+            "the account binding must be wiped with the key"
+        );
+    }
+
+    #[test]
+    fn test_quick_unlock_restore_allows_an_unchanged_empty_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        // Same account, same wrapping: the binding still matches, so an empty
+        // vault must not be forced back to the master password.
+        let mut same_account = vault.storage_mgr.load();
+        same_account.ciphers = Vec::new();
+        same_account.enc_private_key = None;
+        vault.storage_mgr.save(&same_account).unwrap();
+
+        assert_eq!(vault.quick_unlock_restore().unwrap(), 0);
+        assert!(vault.is_unlocked());
+    }
+
+    #[test]
+    fn test_unlock_rebinds_the_retained_key_so_an_empty_vault_stays_restorable() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        // A real unlock while a key is retained replaces the slot copy (and
+        // its binding) with the key now in use. If the binding were dropped,
+        // the empty-vault fallback below would fail closed for no reason.
+        vault.unlock("master-pw").unwrap();
+        let storage_wrap = vault
+            .storage_mgr
+            .load()
+            .enc_user_key
+            .expect("storage keeps the user key wrapping");
+        assert_eq!(
+            vault.quick_unlock_user_key_wrap.read().unwrap().as_deref(),
+            Some(storage_wrap.as_str())
+        );
+
+        assert!(vault.soft_lock());
+        assert_eq!(vault.quick_unlock_restore().unwrap(), 0);
+        assert!(vault.is_unlocked());
     }
 
     #[test]
