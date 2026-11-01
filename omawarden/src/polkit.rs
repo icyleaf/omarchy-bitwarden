@@ -155,7 +155,16 @@ pub fn check(action_id: &str, binary: &Path, timeout: Duration) -> PolkitOutcome
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return PolkitOutcome::Unavailable(format!("pkcheck wait failed: {e}")),
+            Err(e) => {
+                // The handle is dropped on return, so without this the child
+                // would never be reaped and would sit as a zombie until the
+                // daemon exits. kill() may itself fail with ESRCH if the
+                // process already died (which is exactly the race try_wait
+                // hit); wait() then collects it either way.
+                let _ = child.kill();
+                let _ = child.wait();
+                return PolkitOutcome::Unavailable(format!("pkcheck wait failed: {e}"));
+            }
         }
     }
 }
