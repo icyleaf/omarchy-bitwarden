@@ -122,10 +122,12 @@ pub struct SshAgent {
     running: std::sync::atomic::AtomicBool,
     /// An unlock prompt is already on screen.
     unlock_prompted: std::sync::atomic::AtomicBool,
-    /// The "Vault locked" notification was posted since the vault last
-    /// unlocked. Clients that retry while the person is away would otherwise
-    /// stack up one every `unlock_timeout`.
-    unlock_notified: std::sync::atomic::AtomicBool,
+    /// Lock generation the "Vault locked" notification was last posted for.
+    /// Clients that retry while the person is away would otherwise stack up
+    /// one every `unlock_timeout`. Compared against `Host::lock_generation`,
+    /// so a lock cycle with no SSH request while unlocked still earns a fresh
+    /// notification.
+    last_notified_generation: std::sync::atomic::AtomicU64,
     prompt_timeout: Duration,
     unlock_timeout: Duration,
 }
@@ -139,7 +141,7 @@ impl Default for SshAgent {
             approvals: Mutex::new(HashSet::new()),
             running: std::sync::atomic::AtomicBool::new(false),
             unlock_prompted: std::sync::atomic::AtomicBool::new(false),
-            unlock_notified: std::sync::atomic::AtomicBool::new(false),
+            last_notified_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
             prompt_timeout: PROMPT_TIMEOUT,
             unlock_timeout: UNLOCK_TIMEOUT,
         }
@@ -352,6 +354,9 @@ fn summon_overlay(payload: &serde_json::Value) -> bool {
 trait Host: Send + Sync + 'static {
     fn agent(&self) -> &Arc<SshAgent>;
     fn is_unlocked(&self) -> bool;
+    /// Changes each time an unlocked vault locks; see
+    /// `VaultManager::lock_generation`.
+    fn lock_generation(&self) -> u64;
     fn keys(&self) -> Vec<AgentKey>;
     fn policy(&self) -> Confirm;
     /// A signature was made (keeps the vault from idle-locking).
@@ -381,6 +386,9 @@ impl Host for DaemonState {
     }
     fn is_unlocked(&self) -> bool {
         self.vault_mgr.is_unlocked()
+    }
+    fn lock_generation(&self) -> u64 {
+        self.vault_mgr.lock_generation()
     }
     fn keys(&self) -> Vec<AgentKey> {
         vault_keys(self)
@@ -629,7 +637,6 @@ fn vault_keys(state: &DaemonState) -> Vec<AgentKey> {
 fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
     let agent = host.agent();
     if host.is_unlocked() {
-        agent.unlock_notified.store(false, Ordering::SeqCst);
         return true;
     }
     // One unlock prompt at a time, however many ssh processes are waiting.
@@ -643,8 +650,9 @@ fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
             host.summon_overlay(&serde_json::json!({}));
             // The notification is posted once per lock: a client retrying
             // while the person is away must not stack a new one every minute.
+            let generation = host.lock_generation();
             let h = host.clone();
-            let spawned = agent.unlock_notified.load(Ordering::SeqCst)
+            let spawned = agent.last_notified_generation.load(Ordering::SeqCst) == generation
                 || host.notify(
                     "Vault locked",
                     "An SSH key was requested. Unlock your vault to continue.",
@@ -658,7 +666,9 @@ fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
                     }),
                 );
             if spawned {
-                agent.unlock_notified.store(true, Ordering::SeqCst);
+                agent
+                    .last_notified_generation
+                    .store(generation, Ordering::SeqCst);
             } else {
                 agent.unlock_prompted.store(false, Ordering::SeqCst);
             }
@@ -669,7 +679,6 @@ fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
         std::thread::sleep(Duration::from_millis(50));
         if host.is_unlocked() {
             agent.unlock_prompted.store(false, Ordering::SeqCst);
-            agent.unlock_notified.store(false, Ordering::SeqCst);
             return true;
         }
     }
@@ -1451,6 +1460,7 @@ mod tests {
     struct FakeHost {
         agent: Arc<SshAgent>,
         unlocked: std::sync::atomic::AtomicBool,
+        generation: AtomicU64,
         keys: Vec<(String, PrivateKey)>,
         policy: Mutex<Confirm>,
         card: Mutex<Card>,
@@ -1479,6 +1489,7 @@ mod tests {
                     ..SshAgent::default()
                 }),
                 unlocked: true.into(),
+                generation: AtomicU64::new(0),
                 keys: vec![(
                     "Work".into(),
                     PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap(),
@@ -1494,6 +1505,14 @@ mod tests {
                 keys_gone: false.into(),
                 stored_key: Mutex::new(None),
             })
+        }
+        /// Lock or unlock the way the vault does: locking an unlocked vault
+        /// starts a new lock generation.
+        fn set_unlocked(&self, unlocked: bool) {
+            let was = self.unlocked.swap(unlocked, Ordering::SeqCst);
+            if was && !unlocked {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
         }
         fn notifications(&self) -> Vec<String> {
             self.notifications.lock().unwrap().clone()
@@ -1519,6 +1538,9 @@ mod tests {
         }
         fn is_unlocked(&self) -> bool {
             self.unlocked.load(Ordering::SeqCst)
+        }
+        fn lock_generation(&self) -> u64 {
+            self.generation.load(Ordering::SeqCst)
         }
         fn keys(&self) -> Vec<AgentKey> {
             let stored = self.stored_key.lock().unwrap().clone();
@@ -2307,10 +2329,17 @@ mod tests {
         );
         assert_eq!(host.overlays().len(), 3, "the overlay still opens");
 
-        // Unlocking and locking again earns a fresh notification.
-        host.unlocked.store(true, Ordering::SeqCst);
-        assert_eq!(Client::connect(&host, SSH, TERMINAL).identities().len(), 1);
-        host.unlocked.store(false, Ordering::SeqCst);
+        // Unlocking and locking again earns a fresh notification, even when
+        // no SSH request was made while the vault was unlocked.
+        host.set_unlocked(true);
+        host.set_unlocked(false);
+        assert!(Client::connect(&host, SSH, TERMINAL)
+            .identities()
+            .is_empty());
+        assert_eq!(host.notifications().len(), 2);
+
+        // Locking a vault that is already locked does not.
+        host.set_unlocked(false);
         assert!(Client::connect(&host, SSH, TERMINAL)
             .identities()
             .is_empty());
