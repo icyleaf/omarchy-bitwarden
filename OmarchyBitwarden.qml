@@ -3,10 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
-import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
 import "./components/CardFormatter.js" as CardFormatter
@@ -294,6 +292,28 @@ Item {
   property string activeVaultScope: "all"
   property string activeFolderScope: "all"
   property int selectedIndex: 0
+  property string rememberedItemId: ""
+  property double selectionExpiresAt: 0
+  property bool verifyingSelection: false
+  property int vaultRevision: 0
+
+  Timer {
+    id: selectionExpiry
+    interval: 30000
+    onTriggered: root.forgetSelection()
+  }
+
+  function forgetSelection() {
+    selectionExpiry.stop()
+    root.rememberedItemId = ""
+    root.selectionExpiresAt = 0
+  }
+
+  function recentItemId() {
+    // A suspended event loop may not have delivered the timer yet.
+    if (root.rememberedItemId && Date.now() >= root.selectionExpiresAt) root.forgetSelection()
+    return root.rememberedItemId
+  }
 
   // Details Inspector State
   property bool showPasswordRevealed: false
@@ -376,10 +396,17 @@ Item {
     })
   }
 
-  function clearSensitiveState() {
+  function invalidateVaultList() {
+    ++root.vaultRevision
     root.rawVaultItems = []
     root.filteredItems = []
     root.lastVaultItemsRawText = ""
+  }
+
+  function clearSensitiveState() {
+    root.forgetSelection()
+    root.verifyingSelection = false
+    root.invalidateVaultList()
     root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
@@ -437,8 +464,13 @@ Item {
       root.sshApprovalOnly = true
       root.refreshSshApprovals()
     }
+    if (!root.opened && !root.sshApprovalOnly && root.recentItemId()) {
+      // Recheck the session and read the current local vault before enabling
+      // field actions. The vault may have locked or changed while hidden.
+      root.verifyingSelection = true
+      root.invalidateVaultList()
+    }
     root.sshDenyingOnClose = false
-    root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
@@ -475,6 +507,7 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
+    root.opened = true
     root.checkDependencies()
     if (!root.dependenciesMissing) {
       root.refreshHealth()
@@ -510,6 +543,12 @@ Item {
   }
 
   function close() {
+    // dismiss() and shell.hide() may both call close for one dismissal.
+    if (root.opened && !root.sshApprovalOnly && root.effectiveView === "search" && root.selectedItem && root.authState.lock_generation) {
+      root.rememberedItemId = root.selectedItem.id
+      root.selectionExpiresAt = Date.now() + selectionExpiry.interval
+      selectionExpiry.restart()
+    }
     // Closing the window without answering counts as Deny.
     if (root.sshApprovalPrompt) {
       root.sshDenyingOnClose = true
@@ -549,6 +588,11 @@ Item {
   function toggle() {
     if (root.opened) root.dismiss()
     else root.open("{}")
+  }
+
+  function applyConfig(data) {
+    if (root.config && root.config.server_url !== data.server_url) root.clearSensitiveState()
+    root.config = data
   }
 
   function refreshConfig() {
@@ -627,6 +671,7 @@ Item {
 
   function refreshAuthStatus() {
     if (authStatusProc.running) return
+    authStatusProc.revision = root.vaultRevision
     authStatusProc.command = [
       "sh", "-c",
       "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" auth status; else exit 127; fi",
@@ -694,6 +739,8 @@ Item {
   }
 
   function loadVaultItems() {
+    if (root.verifyingSelection || vaultListProc.running || root.authState.status !== "unlocked" || !root.authState.has_session) return
+    vaultListProc.revision = root.vaultRevision
     root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
@@ -833,8 +880,8 @@ Item {
     return false
   }
 
-  function filterVaultItems(resetSelection) {
-    var currentId = (root.selectedItem && !resetSelection) ? root.selectedItem.id : null
+  function filterVaultItems(resetSelection, preferredId) {
+    var currentId = preferredId || ((root.selectedItem && !resetSelection) ? root.selectedItem.id : null)
     var q = (root.searchQuery || "").trim().toLowerCase()
     var cat = root.activeCategory
     var vs = root.activeVaultScope || "all"
@@ -922,8 +969,6 @@ Item {
       out.push(res[j].item)
     }
 
-    root.filteredItems = out
-
     var targetIndex = 0
     if (currentId && out.length > 0) {
       for (var k = 0; k < out.length; k++) {
@@ -933,6 +978,9 @@ Item {
         }
       }
     }
+    // On restore the model is empty. Set the index before exposing any fields.
+    if (preferredId) root.selectedIndex = targetIndex
+    root.filteredItems = out
     root.selectedIndex = targetIndex
     root.handleSelectedItemChanged()
   }
@@ -1017,6 +1065,7 @@ Item {
   onSelectedIndexChanged: root.handleSelectedItemChanged()
 
   function handleSelectedItemChanged() {
+    if (!root.opened) return
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1954,7 +2003,7 @@ Item {
   Timer {
     id: lockSyncTimer
     interval: 3000
-    running: Boolean(root.opened && root.authState && root.authState.status === "unlocked")
+    running: Boolean((root.opened || root.rememberedItemId) && root.authState && root.authState.status === "unlocked")
     repeat: true
     onTriggered: root.refreshAuthStatus()
   }
@@ -2898,7 +2947,7 @@ Item {
           var cleanText = (text || "").trim()
           if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
-          root.config = data
+          root.applyConfig(data)
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
@@ -2932,7 +2981,7 @@ Item {
           var cleanSetText = (text || "").trim()
           if (cleanSetText.length === 0) return
           var data = JSON.parse(cleanSetText)
-          root.config = data
+          root.applyConfig(data)
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
@@ -3086,21 +3135,31 @@ Item {
 
   Process {
     id: authStatusProc
+    property int revision: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (authStatusProc.revision !== root.vaultRevision) return
         try {
           var cleanText = (text || "").trim()
-          if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
           if (data && data.status) {
             var wasNotUnlocked = (root.authState.status !== "unlocked")
+            var checkingHiddenSelection = !root.opened && Boolean(root.rememberedItemId)
+            if (root.authState.server_url !== data.server_url
+                || (root.authState.lock_generation && root.authState.lock_generation !== data.lock_generation)
+                || (root.authState.user_id && root.authState.user_id !== data.user_id)
+                || (root.authState.user_email && root.authState.user_email !== data.user_email)) {
+              root.clearSensitiveState()
+            }
+            var restoring = root.verifyingSelection
+            root.verifyingSelection = false
             root.authState = data
-            if (data.status === "unlocked") {
-              if (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0) {
+            if (data.status === "unlocked" && data.has_session) {
+              if (!checkingHiddenSelection && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
                 root.loadVaultItems()
-                root.syncVault(true, false)
+                if (!restoring) root.syncVault(true, false)
               }
             } else {
               root.clearSensitiveState()
@@ -3119,6 +3178,8 @@ Item {
                 }
               }
             })
+          } else {
+            throw new Error("Missing auth status")
           }
         } catch (e) {
           root.clearSensitiveState()
@@ -3129,6 +3190,9 @@ Item {
             has_session: false
           })
           root.logError("omarchy:auth", "Failed to parse auth status: " + e)
+        } finally {
+          // This reply may itself have invalidated the vault on a lock or server change.
+          authStatusProc.revision = root.vaultRevision
         }
       }
     }
@@ -3137,6 +3201,10 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
+      if (authStatusProc.revision !== root.vaultRevision) {
+        if (root.opened || root.rememberedItemId) Qt.callLater(root.refreshAuthStatus)
+        return
+      }
       if (code !== 0) {
         root.clearSensitiveState()
         root.authState = ({
@@ -3511,12 +3579,18 @@ Item {
 
   Process {
     id: vaultListProc
+    property int revision: 0
     command: []
+    onExited: {
+      if (vaultListProc.revision !== root.vaultRevision && root.opened && !root.verifyingSelection
+          && root.effectiveView === "search" && !root.rawVaultItems.length) Qt.callLater(root.loadVaultItems)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           root.isLoadingVault = false
+          if (vaultListProc.revision !== root.vaultRevision || root.verifyingSelection) return
           if (!root.authState || root.authState.status !== "unlocked") {
             root.clearSensitiveState()
             return
@@ -3549,7 +3623,9 @@ Item {
             }
             if (!fFound) root.activeFolderScope = "all"
           }
-          root.filterVaultItems(false)
+          var preferredId = root.opened && !root.sshApprovalOnly ? root.recentItemId() : ""
+          if (preferredId) root.forgetSelection()
+          root.filterVaultItems(false, preferredId)
           Qt.callLater(function() {
             if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
               searchHeader.searchField.forceActiveFocus()
@@ -3603,7 +3679,7 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.authState || root.authState.status !== "unlocked") {
+        if (!root.opened || !root.authState || root.authState.status !== "unlocked") {
           root.currentTotp = ({ code: "", ttl: 30, period: 30 })
           return
         }

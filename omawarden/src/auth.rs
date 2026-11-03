@@ -120,6 +120,9 @@ pub fn is_jwt_expired(token: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthStatus {
     pub status: String,
+    /// Opaque lock cycle for the unlocked account. Older daemons omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_generation: Option<String>,
     pub server_url: Option<String>,
     pub last_sync: Option<String>,
     pub user_email: Option<String>,
@@ -265,6 +268,7 @@ impl AuthManager {
             || (storage.user_email.is_empty() && storage.client_id.is_none())
         {
             return AuthStatus {
+                lock_generation: None,
                 status: "unauthenticated".to_string(),
                 server_url: if storage.server_url.is_empty() {
                     Some(self.server_url.clone())
@@ -295,6 +299,7 @@ impl AuthManager {
                     );
 
                     return AuthStatus {
+                        lock_generation: None,
                         status: "unauthenticated".to_string(),
                         server_url: if storage.server_url.is_empty() {
                             Some(self.server_url.clone())
@@ -332,6 +337,11 @@ impl AuthManager {
             };
 
             return AuthStatus {
+                lock_generation: if is_unlocked_same_user {
+                    daemon_resp["lock_generation"].as_str().map(str::to_owned)
+                } else {
+                    None
+                },
                 status: status_str,
                 server_url: if storage.server_url.is_empty() {
                     Some(self.server_url.clone())
@@ -349,6 +359,7 @@ impl AuthManager {
         }
 
         AuthStatus {
+            lock_generation: None,
             status: "locked".to_string(),
             server_url: if storage.server_url.is_empty() {
                 Some(self.server_url.clone())
@@ -1330,6 +1341,7 @@ mod tests {
 
         let st = auth_mgr.get_status(false);
         assert_eq!(st.status, "locked");
+        assert_eq!(st.lock_generation, None);
         assert_eq!(st.user_email.as_deref(), Some("apikey-user@example.com"));
         assert_eq!(st.user_id.as_deref(), Some("user-uuid-123"));
         assert!(st.has_session);

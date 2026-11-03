@@ -76,6 +76,8 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 
 ## Keyboard Shortcuts
 
+To copy another field from the same item, reopen the overlay within 30 seconds. It reselects the item by ID if it still appears in the results. Locking the vault, signing out, or changing servers clears the remembered ID. This requires an engine that reports the vault’s lock generation.
+
 | Shortcut                               | Description                                                               |
 | :------------------------------------- | :------------------------------------------------------------------------ |
 | <kbd>Enter</kbd>                       | Copy primary credential (Password / Card Number / Public Key)             |
