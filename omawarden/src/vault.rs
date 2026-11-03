@@ -277,6 +277,9 @@ pub struct VaultManager {
     /// before decrypting and aborts if a wipe landed mid-restore, so a hard
     /// lock racing a restore can never be overridden.
     pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
+    /// Bumped each time an unlocked vault locks (hard or soft), so a caller
+    /// can tell lock cycles apart without having watched the transitions.
+    lock_generation: std::sync::atomic::AtomicU64,
     /// `enc_user_key` as it was when the key was retained. That wrapping is
     /// unique per account *and* per master password, so comparing it on
     /// restore proves the retained key still belongs to this vault even when
@@ -338,6 +341,7 @@ impl VaultManager {
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
             quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
+            lock_generation: std::sync::atomic::AtomicU64::new(0),
             quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
         }
@@ -347,8 +351,19 @@ impl VaultManager {
         self.is_unlocked.read().map(|g| *g).unwrap_or(false)
     }
 
+    /// Which lock cycle the vault is in. Changes only when an unlocked vault
+    /// locks; locking an already locked vault leaves it alone.
+    pub fn lock_generation(&self) -> u64 {
+        self.lock_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn purge_decrypted_state(&self) {
         if let Ok(mut unl) = self.is_unlocked.write() {
+            if *unl {
+                self.lock_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             *unl = false;
         }
         if let Ok(mut items) = self.decrypted_items.write() {
@@ -2105,6 +2120,26 @@ pub(crate) mod tests {
             epoch_before
         );
         assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn test_lock_generation_changes_only_when_an_unlocked_vault_locks() {
+        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
+        let start = vault_mgr.lock_generation();
+
+        // Locking an already locked vault is not a new lock cycle.
+        vault_mgr.hard_lock();
+        vault_mgr.soft_lock();
+        assert_eq!(vault_mgr.lock_generation(), start);
+
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+        assert_eq!(vault_mgr.lock_generation(), start, "unlocking keeps it");
+        vault_mgr.soft_lock();
+        assert_eq!(vault_mgr.lock_generation(), start + 1);
+
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+        vault_mgr.hard_lock();
+        assert_eq!(vault_mgr.lock_generation(), start + 2);
     }
 
     #[test]
