@@ -695,9 +695,7 @@ impl DaemonState {
             *n = 0;
         }
         self.vault_mgr.hard_lock();
-        let _ = crate::clipboard::ClipboardManager::default()
-            .without_detached_worker()
-            .clear();
+        let _ = crate::clipboard::ClipboardManager::default().clear();
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -714,9 +712,7 @@ impl DaemonState {
         } else {
             self.vault_mgr.hard_lock();
         }
-        let _ = crate::clipboard::ClipboardManager::default()
-            .without_detached_worker()
-            .clear();
+        let _ = crate::clipboard::ClipboardManager::default().clear();
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -1287,7 +1283,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let timeout = req.get("timeout").and_then(|v| v.as_i64()).unwrap_or(30);
-            let clip_mgr = crate::clipboard::ClipboardManager::default().without_detached_worker();
+            let clip_mgr = crate::clipboard::ClipboardManager::default();
             if clip_mgr.copy(text, sensitive, timeout) {
                 json!({ "ok": true })
             } else {

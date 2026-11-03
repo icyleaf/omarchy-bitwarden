@@ -1109,7 +1109,8 @@ Item {
   }
 
   function copyToClipboard(text, isSensitive, label) {
-    if (!text) return
+    if (!text || clipCopyProc.running) return
+    root.statusMessage = ""
     if (root.cliHealth && root.cliHealth.clipboard_available === false) {
       root.errorMessage = "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
       root.logWarn("omarchy:clipboard", root.errorMessage)
@@ -1120,14 +1121,12 @@ Item {
     if (isSensitive) {
       cmd.push("--sensitive")
     }
-    var ttl = (root.config && root.config.clipboard_clear_seconds) || 30
-    if (ttl) {
-      cmd.push("--timeout", String(ttl))
-    }
+    var ttl = root.config && root.config.clipboard_clear_seconds != null ? root.config.clipboard_clear_seconds : 30
+    cmd.push("--timeout", String(ttl))
+    clipCopyProc.successMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive && ttl > 0 ? (" (clears in " + ttl + "s)") : "") + "."
     clipCopyProc.secret = JSON.stringify({ text: String(text) })
     clipCopyProc.command = cmd
     clipCopyProc.running = true
-    root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? (" (clears in " + ttl + "s)") : "") + "."
   }
 
   function executePrimaryAction(item) {
@@ -3570,6 +3569,12 @@ Item {
   Process {
     id: clipCopyProc
     property string secret: ""
+    property string successMessage: ""
+    onExited: function(code, exitStatus) {
+      secret = ""
+      root.statusMessage = code === 0 && exitStatus === 0 ? successMessage : "Failed to copy to clipboard."
+      successMessage = ""
+    }
     stdinEnabled: true
     onStarted: {
       if (secret) {
