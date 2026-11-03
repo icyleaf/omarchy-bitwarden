@@ -14,7 +14,15 @@ QtObject {
     readonly property int caption: root.fontPx(0.833)
     readonly property int bodySmall: root.fontPx(0.917)
     readonly property int body: root.fontPx(1)
-    readonly property int subtitle: root.fontPx(1.167)
-    readonly property int title: root.fontPx(1.333)
+    readonly property int subtitle: root.fontPx(1.083)
+    readonly property int title: root.fontPx(1.167)
+    readonly property int heading: root.fontPx(1.333)
+    readonly property int display: root.fontPx(2.0)
+    readonly property int displayLarge: root.fontPx(2.333)
+
+    readonly property int iconSmall: bodySmall
+    readonly property int icon: title
+    readonly property int iconLarge: root.fontPx(1.5)
   }
+  readonly property int cornerRadius: 8
 }

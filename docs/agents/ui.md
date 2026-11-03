@@ -62,3 +62,13 @@ Technical entropy metrics (such as Shannon entropy bits, raw bitmasks, or algori
 - Modal headers must remain focused on titles and primary mode selectors.
 - If a modal provides bottom action buttons (e.g. a dedicated "Close" button in the footer) and supports standard `Escape` key dismissal or overlay backdrop clicking, **avoid redundant top-right 'X' close buttons** that clutter the header layout.
 - Maintain consistent keyboard escape semantics across all modals via `root.hasActiveModal` focus restoration traps.
+
+---
+
+## 5. Omarchy Theme & Surface Color Contract
+
+All surface, text, selection, and status color rules live in one place: [ADR 0026: Theme Color Tokens and Zero-Hardcoded Palettes](../adr/0026-theme-color-tokens-and-zero-hardcoded-palettes.md). Read that decision before touching colors.
+
+- Semantic status colors exist only in `components/StatusPalette.qml`; labels on colored fills come from `StatusPalette.textOn` / `textOnTint` / `labelOnTint` instead of hand-picked white or black.
+- `scripts/check-hardcoded-colors.py` enforces the zero-hardcode rule and fails CI on any hex literal or numeric-RGB `Qt.rgba` outside that file.
+- `tests/tst_theme_color_adaptation.qml` covers both presets and asserts WCAG contrast for colored badges, chips, toasts and confirmation buttons.

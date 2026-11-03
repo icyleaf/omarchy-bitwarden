@@ -25,6 +25,8 @@
 | **Token 到期处理**   | **仅需主密码解锁，免重复登录**（后台静默续期 Token，无需频繁重输 API Key） | 桌面端支持记住登录，主要依赖主密码解锁 | 2 小时 Token 硬过期报 `Session expired`，需频繁手动重新登录 |
 | **锁屏联动**         | **守护进程原生自动检测（Omarchy 锁屏、Hyprlock、D-Bus/logind 睡眠与挂起）** | 仅依赖应用内闲置超时           | 无（需手动执行锁定）                                         |
 | **SSH Agent**        | **原生 OpenSSH Agent（`SSH_AUTH_SOCK`），带按调用程序作用域审批** | 桌面端内置（吃掉近 1GB 内存） | 无 |
+| **系统快速解锁**     | **原生 Polkit / 生物识别集成**（软锁定后可通过指纹或系统登录密码快速解锁；用户密钥安全留存于 `mlock` 锁定内存，硬锁定/休眠时自动抹除） | 桌面端支持生物识别（需常驻庞大 Electron 应用） | 无（每次解锁均需输入主密码） |
+| **桌面主题与自适应** | **动态主题体系与 StatusPalette 状态调色板**（全面对齐 Omarchy 深色/浅色主题，零硬编码色值，严格遵循 WCAG 对比度标准） | 标准深色/浅色切换 | 无（纯终端输出） |
 | **双向 TLS (mTLS)**  | **原生支持客户端证书认证（PKCS#12 / PEM）**              | 需配置复杂系统反向代理代理 | 无 |
 | **运行时依赖**       | **100% 独立二进制**（零外部运行时依赖）                 | 完整的 Chromium/Node 运行环境  | 需要 Node.js 环境                                            |
 
@@ -53,6 +55,8 @@
 | **条目类型支持深度** | **五大类型一等公民支持**：为登录、银行卡（CVV/卡号）、身份、便签及 SSH 密钥提供专用提取命令与结构化展示 | 主要面向登录密码与 TOTP；查看银行卡/身份等条目需使用 `--raw` 输出原始 JSON 自行提取 |
 | **OpenSSH Agent 能力** | **保险库密钥代理 (`SSH_AUTH_SOCK`) + 密钥对生成**：私钥仅在执行单次签名时在内存中临时解析并立即覆写清零；按需唤起解锁；按程序隔离作用域（`first-use`），带 600ms 防误触延迟的交互式审批卡片 | **Agent 代理**：实现 `SSH_AUTH_SOCK` 协议，仅支持内存签名；不支持本地生成密钥对，不支持签名审批确认与调用程序作用域隔离 |
 | **双向 TLS (mTLS) 反向代理** | **完整支持**：原生支持连接配置了 mTLS 客户端证书验证的自建 Vaultwarden / Bitwarden 实例（支持 PKCS#12 `.p12`/`.pfx` 及 PEM `.crt`/`.key`），证书密码隔离保存在系统密钥环中 | **不支持** |
+| **系统快速解锁** | **Polkit 与生物识别集成**：软锁定期间用户密钥保留在 `mlock` 锁定内存中；解锁时直接通过系统指纹或系统登录密码认证。硬锁定（休眠挂起、会话上限、登出、连续 3 次失败）立即抹除密钥 | **不支持**（每次解锁均需输入主密码） |
+| **自适应桌面主题** | **原生 StatusPalette 与 Token 体系**：完美对齐 Omarchy 动态深浅主题，零硬编码色值，严格满足 WCAG 对比度标准 | **不适用**（纯命令行工具，无图形界面） |
 | **密码与密语生成器** | **双引擎支持（GUI & CLI）**：交互式 `PasswordGeneratorModal.qml` 提供长度/字符集/熵值评级 + Diceware 词数/分隔符配置，CLI 命令 `omawarden generate` 配合 Wayland 剪贴板阅后即焚防泄漏保护 | 仅支持 `rbw gen` 命令行（无图形界面，不支持 Diceware 密语生成） |
 | **加密附件处理** | **原生支持**：支持下载加密 Blob 并解密预览/导出 | **不支持**（参见长期未决 Issue [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
 | **密码历史记录** | **原生支持**：可解密并查看条目历史修改过的旧密码 | **不支持**查看历史密码 |
@@ -100,6 +104,7 @@
 - **omawarden 核心引擎**：高性能 Rust 编写的 Bitwarden 原生 CLI 引擎（可通过 AUR 或 GitHub Releases 获取）
 - **密钥环 / 秘密服务 (Secret Service)**：`secret-tool`（Arch/Debian/Fedora 上的 `libsecret` 软件包）
 - **Wayland 剪贴板管理**：`wl-clipboard`（提供 `wl-copy` / `wl-paste`）
+- **Polkit（快速解锁可选）**：`polkit` / 系统身份验证服务，用于指纹识别或系统登录密码快速解锁（`org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`）
 
 > [!TIP]
 > **一键向导**：首次打开 Omarchy Bitwarden 时若检测到缺少依赖，将自动弹出交互式**依赖检查向导**，点击即可通过 Omarchy 浮动终端弹窗自动安装 `omawarden-bin`、`libsecret` 与 `wl-clipboard`。
@@ -137,9 +142,15 @@ omarchy plugin add https://github.com/icyleaf/omarchy-bitwarden.git --enable
 
 ```lua
 -- ~/.config/hypr/bindings.lua
-o.bind("SUPER + slash", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
 
-o.window({ class = "org.quickshell", title = "(Bitwarden)" }, {
+-- 方案一：使用独立快捷键（如 SUPER + B）
+o.bind("SUPER + B", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
+
+-- 方案二：替换 Omarchy 默认密码管理器快捷键（1Password）
+-- hl.unbind("SUPER + SHIFT + SLASH")
+-- o.bind("SUPER + SHIFT + SLASH", "Omarchy Bitwarden", "omarchy-shell shell toggle icyleaf.bitwarden")
+
+o.window({ class = "org.quickshell", title = "^Bitwarden$" }, {
   float = true,
   center = true,
   size = { 1152, 768 }
@@ -396,6 +407,15 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] 精细化作用域授权（密钥、客户端程序、宿主应用）与 Agent 转发防滥用机制
 - [x] 完备的 CLI 控制命令（`omawarden ssh-agent status|pending|reply`）
 
+### 阶段 3.5：已完成（基于系统身份验证的快速解锁）
+
+- [x] 基于 Polkit 的系统身份验证快速解锁（ADR 0025）：软锁定后，唤起系统认证请求系统密码或指纹，无需每次输入主密码
+- [x] 用户解密密钥仅在软锁定期间暂存于守护进程通过 `mlock` 锁定的非转储物理内存中；绝不落盘或写入系统密钥环
+- [x] 硬锁定彻底擦除暂存密钥：系统休眠挂起、会话最大生命周期上限、主动锁定/登出、守护进程退出、连续 3 次认证被拒、服务器/账号变更时立即抹除
+- [x] SSH Agent 原生唤醒：当受保护的密钥被请求时，原生直接触发系统认证对话框
+- [x] 自选开启的 `quick_unlock` 设置（`omawarden config set --quick-unlock true|false`），覆盖层设置面板带安全说明开关
+- [x] 随包分发 Polkit Policy（`/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`）；主密码始终作为终极安全兜底
+
 ### 阶段四：规划中（密码库条目新建）
 
 - [ ] 覆盖层条目新建模态窗口（支持 Login, Secure Note, Card, Identity 四大核心类型）
@@ -414,7 +434,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 ### 阶段六：远期规划（系统自动化与生物识别）
 
 - [ ] Wayland 自动填充 / 模拟按键输入（例如基于 `ydotool` / `wtype` 集成）
-- [ ] 快速生物识别 / PAM / 指纹系统级解锁（ADR 0025）
+- [x] 快速生物识别 / PAM / 指纹系统级解锁（ADR 0025）— 已在阶段 3.5 通过 polkit 落地
 
 ---
 
@@ -435,7 +455,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
    cargo clippy --all-targets --all-features -- -D warnings
    XDG_RUNTIME_DIR=/tmp cargo test
    ```
-   *(可选)* 如果已安装 [`mise`](https://mise.jdx.dev/)，可直接使用 `mise run build` 或 `mise run dev-deploy` 进行本地联调与部署。
+   *(可选)* 如果已安装 [`mise`](https://mise.jdx.dev/)，可直接使用 `mise run build` 或 `mise run dev-deploy-full` 进行本地联调与部署。
 3. **提交信息规范**：编写符合 Conventional Commits 规范的 Commit（如 `feat(daemon): ...`、`fix(ui): ...`）。
 4. **向 `develop` 提交 PR**：创建 Pull Request 并指定基准分支（base branch）为 `develop`。
 

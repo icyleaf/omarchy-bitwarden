@@ -209,6 +209,83 @@ pub fn find_fido2_device() -> Result<String, String> {
     Err("No FIDO2 security key found. Please insert your security key and try again.".to_string())
 }
 
+/// Runs `fido2-assert -G` against `device_path`, feeding `stdin_payload`.
+/// With `user_presence` false the key answers without waiting for a touch.
+fn run_fido2_assert(
+    device_path: &str,
+    stdin_payload: &str,
+    user_presence: bool,
+) -> Result<std::process::Output, String> {
+    let mut cmd = Command::new("fido2-assert");
+    cmd.arg("-G").arg("-t").arg("pin=false");
+    if !user_presence {
+        cmd.arg("-t").arg("up=false");
+    }
+    let mut child = cmd
+        .arg(device_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string()
+            } else {
+                format!("Failed to execute fido2-assert: {}", e)
+            }
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_payload.as_bytes())
+            .map_err(|e| format!("Failed to write to fido2-assert stdin: {}", e))?;
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for fido2-assert: {}", e))
+}
+
+/// Picks the credential from `allowCredentials` that lives on the connected key.
+///
+/// Accounts often register several keys, but `fido2-assert` accepts a single credential ID,
+/// so each one is probed silently (`up=false`) and the first the key recognises is returned.
+/// If the key cannot answer silent probes, falls back to the first unrejected credential.
+fn select_credential(
+    allow_credentials: &[String],
+    rp_id: &str,
+    device_path: &str,
+) -> Result<String, String> {
+    if allow_credentials.is_empty() {
+        return Err("No credential ID found in WebAuthn challenge".to_string());
+    }
+
+    // Probes are never sent to the server, so any 32-byte client data hash will do.
+    let probe_hash_b64 = BASE64.encode([0u8; 32]);
+    let mut fallback = None;
+
+    for cred_id_raw in allow_credentials {
+        let cred_id_b64 = base64url_to_base64(cred_id_raw);
+        let payload = format!("{}\n{}\n{}\n", probe_hash_b64, rp_id, cred_id_b64);
+        let output = run_fido2_assert(device_path, &payload, false)?;
+        if output.status.success() {
+            return Ok(cred_id_b64);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("FIDO_ERR_NO_CREDENTIALS") && fallback.is_none() {
+            fallback = Some(cred_id_b64);
+        }
+    }
+
+    fallback.ok_or_else(|| {
+        format!(
+            "This security key holds none of the {} credential(s) registered for {}. Try another key or method.",
+            allow_credentials.len(),
+            rp_id
+        )
+    })
+}
+
 /// Executes `fido2-assert -G` to perform a WebAuthn CTAP2 assertion with the physical key.
 pub fn perform_fido2_assertion(
     challenge_data: &WebAuthnChallenge,
@@ -229,11 +306,11 @@ pub fn perform_fido2_assertion(
     let client_data_hash = hasher.finalize();
     let cd_hash_b64 = BASE64.encode(client_data_hash);
 
-    let cred_id_raw = challenge_data
-        .allow_credentials
-        .first()
-        .ok_or_else(|| "No credential ID found in WebAuthn challenge".to_string())?;
-    let cred_id_b64 = base64url_to_base64(cred_id_raw);
+    let cred_id_b64 = select_credential(
+        &challenge_data.allow_credentials,
+        &challenge_data.rp_id,
+        device_path,
+    )?;
 
     let stdin_payload = format!(
         "{}\n{}\n{}\n",
@@ -241,32 +318,7 @@ pub fn perform_fido2_assertion(
     );
 
     crate::log_info!("omawarden:auth", "Waiting for security key touch...");
-    let mut child = Command::new("fido2-assert")
-        .arg("-G")
-        .arg("-t")
-        .arg("pin=false")
-        .arg(device_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string()
-            } else {
-                format!("Failed to execute fido2-assert: {}", e)
-            }
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_payload.as_bytes())
-            .map_err(|e| format!("Failed to write to fido2-assert stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for fido2-assert: {}", e))?;
+    let output = run_fido2_assert(device_path, &stdin_payload, true)?;
 
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);

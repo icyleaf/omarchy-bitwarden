@@ -22,6 +22,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// Strict boolean for CLI flags: anything outside true/false/1/0/yes/no is a
+/// parse error instead of silently becoming `false`. `--quick-unlock ture`
+/// used to report success, persist `quick_unlock: false` and immediately
+/// wipe the retained key.
+fn parse_cli_bool(v: &str) -> Result<bool, String> {
+    match v.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => Err(format!(
+            "invalid boolean '{other}': expected one of true|false|1|0|yes|no"
+        )),
+    }
+}
+
 /// Auth output can carry a raw access token in `session`. Piped callers (the
 /// QML helper) depend on it; an interactive terminal would only leave it
 /// behind in scrollback, so redact it there.
@@ -279,10 +293,20 @@ enum ConfigAction {
         client_cert: Option<String>,
         #[arg(long, help = "Path to separate client private key PEM file for mTLS")]
         client_key: Option<String>,
-        #[arg(long, help = "Serve vault SSH keys as an SSH agent (true/false)")]
-        ssh_agent: Option<String>,
+        #[arg(
+            long,
+            value_parser = parse_cli_bool,
+            help = "Serve vault SSH keys as an SSH agent (true/false)"
+        )]
+        ssh_agent: Option<bool>,
         #[arg(long, help = "Confirm SSH signatures: always, first-use or never")]
         ssh_agent_confirm: Option<String>,
+        #[arg(
+            long,
+            value_parser = parse_cli_bool,
+            help = "Unlock via system authentication after a soft lock (true/false; ADR-0025)"
+        )]
+        quick_unlock: Option<bool>,
     },
 }
 
@@ -318,6 +342,10 @@ enum AuthAction {
     Fido2Status,
     #[command(about = "Unlock vault with master password (password read from stdin)")]
     Unlock,
+    #[command(about = "Unlock vault via system authentication, polkit-backed (ADR-0025)")]
+    QuickUnlock,
+    #[command(about = "Report whether quick unlock is enabled and a retained key is available")]
+    QuickUnlockCheck,
     #[command(about = "Lock vault and clear session")]
     Lock,
     #[command(about = "Logout from Bitwarden account")]
@@ -520,8 +548,16 @@ fn read_auth_payload() -> (String, Option<String>, Option<i32>, Option<String>) 
 }
 
 fn main() -> ExitCode {
-    // Disable process tracing (ptrace) and core dump generation for memory defense
-    let _ = omawarden::locked::disable_dumpable();
+    // Disable process tracing (ptrace) and core dump generation for memory
+    // defense. Fail-open is accepted (a desktop helper should not refuse to
+    // run over prctl), but never silently: without this the whole process
+    // stays ptraceable and core-dumpable.
+    if let Err(e) = omawarden::locked::disable_dumpable() {
+        omawarden::log_error!(
+            "omawarden:locked",
+            "Could not disable ptrace/core dumps (prctl PR_SET_DUMPABLE: {e}); tracing protections are INACTIVE for this process"
+        );
+    }
 
     let cli = Cli::parse();
     let config_mgr = ConfigManager::new(cli.config.as_deref());
@@ -590,6 +626,7 @@ fn main() -> ExitCode {
                             println!("{}", cfg.client_cert_server.as_deref().unwrap_or(""))
                         }
                         "ssh_agent_enabled" | "ssh_agent" => println!("{}", cfg.ssh_agent_enabled),
+                        "quick_unlock" => println!("{}", cfg.quick_unlock),
                         "ssh_agent_confirm" => println!("{}", cfg.ssh_agent_confirm),
                         _ => {
                             eprintln!("Unknown configuration key: {}", k);
@@ -618,6 +655,7 @@ fn main() -> ExitCode {
                 client_key,
                 ssh_agent,
                 ssh_agent_confirm,
+                quick_unlock,
             } => {
                 let storage_mgr = match cli.config.as_deref() {
                     Some(cp) => {
@@ -716,10 +754,9 @@ fn main() -> ExitCode {
                     max_attachment_size_mb: max_attachment_size,
                     client_cert_path: client_cert,
                     client_key_path: client_key,
-                    ssh_agent_enabled: ssh_agent
-                        .as_ref()
-                        .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes")),
+                    ssh_agent_enabled: ssh_agent,
                     ssh_agent_confirm: ssh_agent_confirm.clone(),
+                    quick_unlock,
                 };
 
                 let (updated_cfg, _server_changed) =
@@ -1073,6 +1110,52 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
+                AuthAction::QuickUnlock => {
+                    omawarden::daemon::ensure_daemon_running();
+                    let resp = send_daemon_request(&json!({ "action": "quick_unlock" }))
+                        .unwrap_or_else(|| {
+                            json!({
+                                "ok": false,
+                                "status": "locked",
+                                "error": "omawarden daemon is not running."
+                            })
+                        });
+                    print_json_redacting_session(&resp);
+                    if resp.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
+                AuthAction::QuickUnlockCheck => {
+                    // Prefer the daemon as the single source: its ping carries
+                    // both the cached setting and the readiness it gates, so
+                    // the two can no longer come from disagreeing files. The
+                    // fields degrade independently: a daemon older than this
+                    // feature reports readiness (quick_unlock) but not the
+                    // cached setting (quick_unlock_enabled), which then falls
+                    // back to the config file; no daemon at all means no
+                    // readiness and a config-file setting.
+                    let ping = send_daemon_request(&json!({ "action": "ping" }));
+                    let field = |name: &str| {
+                        ping.as_ref()
+                            .and_then(|r| r.get(name))
+                            .and_then(Value::as_bool)
+                    };
+                    let available = field("quick_unlock").unwrap_or(false);
+                    let enabled = field("quick_unlock_enabled")
+                        .unwrap_or_else(|| ConfigManager::default().load().quick_unlock);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "enabled": enabled,
+                            "available": available,
+                        }))
+                        .unwrap()
+                    );
+                    ExitCode::SUCCESS
+                }
                 AuthAction::Lock => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.lock();
@@ -1081,6 +1164,11 @@ fn main() -> ExitCode {
                 }
                 AuthAction::Logout => {
                     let _ = send_daemon_request(&json!({ "action": "lock" }));
+                    // ADR-0025 decision 4: logout must zeroize the retained
+                    // quick-unlock key. The daemon's lock handler already
+                    // hard-locks; the explicit wipe keeps that guarantee
+                    // independent of how the lock handler is implemented.
+                    let _ = send_daemon_request(&json!({ "action": "wipe_quick_unlock" }));
                     let res = auth_mgr.logout();
                     print_json_redacting_session(&res);
                     ExitCode::SUCCESS
@@ -2365,6 +2453,25 @@ fn ensure_unlocked_user_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_cli_bool_accepts_known_values() {
+        for v in ["true", "TRUE", "1", "yes", " Yes "] {
+            assert!(matches!(parse_cli_bool(v), Ok(true)), "{v}");
+        }
+        for v in ["false", "0", "NO", " no "] {
+            assert!(matches!(parse_cli_bool(v), Ok(false)), "{v}");
+        }
+    }
+
+    #[test]
+    fn test_parse_cli_bool_rejects_typos() {
+        // "ture" must be a hard error: coerced to false it would persist a
+        // disabled setting and wipe the retained quick-unlock key.
+        for v in ["ture", "flase", "on", "off", ""] {
+            assert!(parse_cli_bool(v).is_err(), "{v} should not parse");
+        }
+    }
 
     #[test]
     fn test_parse_auth_payload_plain() {

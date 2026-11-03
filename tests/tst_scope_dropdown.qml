@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import "../components"
+import "lib"
 
 ApplicationWindow {
   id: testRunner
@@ -34,16 +35,6 @@ ApplicationWindow {
     }
   }
 
-  function assert(condition, message) {
-    if (!condition) {
-      console.error("ASSERTION FAILED: " + message)
-      Qt.quit()
-      throw new Error("Assertion failed: " + message)
-    } else {
-      console.log("PASS: " + message)
-    }
-  }
-
   Timer {
     id: testTimer
     interval: 50
@@ -53,49 +44,50 @@ ApplicationWindow {
       console.log("Running ScopeDropdown Automated Tests...")
 
       // 1. Initial State
-      assert(dropdown.isFiltered === false, "Initially isFiltered is false")
-      assert(dropdown.currentItem !== null, "currentItem is not null")
-      assert(dropdown.currentItem.id === "all", "currentItem.id is 'all'")
-      assert(dropdown.isOpen === false, "Dropdown is initially closed")
+      Assert.check(dropdown.isFiltered === false, "Initially isFiltered is false")
+      Assert.check(dropdown.currentItem !== null, "currentItem is not null")
+      Assert.check(dropdown.currentItem.id === "all", "currentItem.id is 'all'")
+      Assert.check(dropdown.isOpen === false, "Dropdown is initially closed")
 
       // 2. Open & Close
       dropdown.open()
-      assert(dropdown.isOpen === true, "dropdown.open() sets isOpen to true")
+      Assert.check(dropdown.isOpen === true, "dropdown.open() sets isOpen to true")
       dropdown.close()
-      assert(dropdown.isOpen === false, "dropdown.close() sets isOpen to false")
-      assert(testRunner.closedEmitted === true, "closed signal was emitted on close")
+      Assert.check(dropdown.isOpen === false, "dropdown.close() sets isOpen to false")
+      Assert.check(testRunner.closedEmitted === true, "closed signal was emitted on close")
 
       // 3. Selection
       dropdown.selected("org-1")
-      assert(testRunner.selectionEmitted === true, "selected signal was emitted")
-      assert(testRunner.selectedScopeId === "org-1", "selectedScopeId is 'org-1'")
+      Assert.check(testRunner.selectionEmitted === true, "selected signal was emitted")
+      Assert.check(testRunner.selectedScopeId === "org-1", "selectedScopeId is 'org-1'")
 
       dropdown.currentValue = "org-1"
-      assert(dropdown.isFiltered === true, "isFiltered is true when currentValue is 'org-1'")
-      assert(dropdown.currentItem.name === "Acme Corp", "currentItem reactive update reflects 'Acme Corp'")
+      Assert.check(dropdown.isFiltered === true, "isFiltered is true when currentValue is 'org-1'")
+      Assert.check(dropdown.currentItem.name === "Acme Corp", "currentItem reactive update reflects 'Acme Corp'")
 
       // 4. Open with active value -> pre-selects correct index (2)
       dropdown.open()
-      assert(dropdown.isOpen === true, "dropdown.open() with active filter")
+      Assert.check(dropdown.isOpen === true, "dropdown.open() with active filter")
       dropdown.close()
 
       // 5. Reset
       dropdown.currentValue = "all"
-      assert(dropdown.isFiltered === false, "isFiltered is false after reset to 'all'")
-      assert(dropdown.currentItem.id === "all", "currentItem is 'all'")
+      Assert.check(dropdown.isFiltered === false, "isFiltered is false after reset to 'all'")
+      Assert.check(dropdown.currentItem.id === "all", "currentItem is 'all'")
 
       // 6. Cycle Next
       dropdown.cycleNext()
-      assert(testRunner.selectedScopeId === "personal", "cycleNext from 'all' selects 'personal'")
+      Assert.check(testRunner.selectedScopeId === "personal", "cycleNext from 'all' selects 'personal'")
       dropdown.currentValue = "personal"
       dropdown.cycleNext()
-      assert(testRunner.selectedScopeId === "org-1", "cycleNext from 'personal' selects 'org-1'")
+      Assert.check(testRunner.selectedScopeId === "org-1", "cycleNext from 'personal' selects 'org-1'")
       dropdown.currentValue = "org-1"
       dropdown.cycleNext()
-      assert(testRunner.selectedScopeId === "all", "cycleNext from 'org-1' cycles back to 'all'")
+      Assert.check(testRunner.selectedScopeId === "all", "cycleNext from 'org-1' cycles back to 'all'")
 
-      console.log("All ScopeDropdown tests passed successfully!")
-      Qt.quit()
+      if (Assert.failures === 0)
+        console.log("All ScopeDropdown tests passed successfully!")
+      Qt.exit(Assert.exitCode())
     }
   }
 }

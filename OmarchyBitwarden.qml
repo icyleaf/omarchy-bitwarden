@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
@@ -335,11 +336,12 @@ Item {
   property string lastVaultItemsRawText: ""
   property var logBuffer: []
 
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
-  readonly property color borderColor: Color.menu.border
-  readonly property color accent: Color.menu.selectedText
-  readonly property color selectedBackground: Color.menu.selectedBackground
+  readonly property color background: Commons.Color.menu.background
+  readonly property color foreground: Commons.Color.menu.text
+  readonly property color borderColor: Commons.Color.menu.border
+  readonly property color accent: Commons.Color.menu.selectedText
+  readonly property color selectedBackground: Commons.Color.menu.selectedBackground
+  readonly property color muted: Commons.Color.muted
   readonly property string fontFamily: Style.font.menuFamily
 
   readonly property var selectedItem: {
@@ -609,6 +611,20 @@ Item {
     healthProc.running = true
   }
 
+  // ADR-0025: the engine advertises quick-unlock readiness on its ping when
+  // enabled in settings and a key is retained by a soft lock.
+  property bool quickUnlockReady: false
+
+  function refreshQuickUnlockAvailability() {
+    if (!root.helperPath) {
+      root.quickUnlockReady = false
+      return
+    }
+    if (quickUnlockCheckProc.running) return
+    quickUnlockCheckProc.command = [root.helperPath, "auth", "quick-unlock-check"]
+    quickUnlockCheckProc.running = true
+  }
+
   function refreshAuthStatus() {
     if (authStatusProc.running) return
     authStatusProc.command = [
@@ -618,6 +634,13 @@ Item {
       root.helperPath
     ]
     authStatusProc.running = true
+    // Readiness only matters on the locked view. The lockSyncTimer polls auth
+    // status every 3s while the vault is unlocked, and a second helper spawn
+    // per tick would be pure noise; the transition back to locked refreshes
+    // readiness from the auth-status handler instead.
+    if (!root.authState || root.authState.status !== "unlocked") {
+      root.refreshQuickUnlockAvailability()
+    }
   }
 
   function syncVault(isBackground, force) {
@@ -1709,6 +1732,7 @@ Item {
     if (settings.max_attachment_size_mb !== undefined) cmd.push("--max-attachment-size", String(settings.max_attachment_size_mb))
     if (settings.ssh_agent_enabled !== undefined) cmd.push("--ssh-agent", String(settings.ssh_agent_enabled))
     if (settings.ssh_agent_confirm !== undefined) cmd.push("--ssh-agent-confirm", settings.ssh_agent_confirm)
+    if (settings.quick_unlock !== undefined) cmd.push("--quick-unlock", String(settings.quick_unlock))
 
     configSetProc.command = cmd
     configSetProc.running = true
@@ -1771,6 +1795,16 @@ Item {
     root.statusMessage = "Unlocking vault..."
     authUnlockProc.secret = password
     authUnlockProc.command = [root.helperPath, "auth", "unlock"]
+    authUnlockProc.running = true
+  }
+
+  function doQuickUnlock() {
+    root.logInfo("omarchy:auth", "Submitting quick unlock request...")
+    root.isBusy = true
+    root.errorMessage = ""
+    root.statusMessage = "Waiting for system authentication..."
+    authUnlockProc.secret = ""
+    authUnlockProc.command = [root.helperPath, "auth", "quick-unlock"]
     authUnlockProc.running = true
   }
 
@@ -1945,7 +1979,7 @@ Item {
     id: panel
     title: "Bitwarden"
     visible: root.opened
-    color: Color.menu.background
+    color: root.background
     implicitWidth: 880
     implicitHeight: 560
     minimumSize: Qt.size(720, 480)
@@ -2253,6 +2287,7 @@ Item {
           background: root.background
           foreground: root.foreground
           accent: root.accent
+          muted: root.muted
           borderColor: root.borderColor
           onSearchQueryChanged: root.searchQuery = searchQuery
           onCategorySelected: function(cat) { root.activeCategory = cat }
@@ -2318,6 +2353,8 @@ Item {
               fontFamily: root.fontFamily
               foreground: root.foreground
               accent: root.accent
+              selectedText: root.accent
+              muted: root.muted
               selectedBackground: root.selectedBackground
               borderColor: root.borderColor
               onItemSelected: function(idx) { root.selectedIndex = idx }
@@ -2357,6 +2394,7 @@ Item {
                 fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
+                muted: root.muted
                 borderColor: root.borderColor
                 onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
@@ -2390,6 +2428,7 @@ Item {
                 fontFamily: root.fontFamily
                 foreground: root.foreground
                 accent: root.accent
+                muted: root.muted
                 borderColor: root.borderColor
               }
             }
@@ -2415,7 +2454,10 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
+            quickUnlockAvailable: root.quickUnlockReady
+            onQuickUnlockRequested: root.doQuickUnlock()
             onUnlockRequested: function(pwd) { root.doUnlock(pwd) }
             onLoginPasswordRequested: function(email, pwd, code, prov) { root.doLoginPassword(email, pwd, code, prov) }
             onTwoFactorProviderSelected: function(prov) {
@@ -2465,6 +2507,7 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
             onSaveRequested: function(newSettings) { root.saveSettings(newSettings) }
             onCloseRequested: { root.currentView = "auto" }
@@ -2487,6 +2530,7 @@ Item {
             fontFamily: root.fontFamily
             foreground: root.foreground
             accent: root.accent
+            muted: root.muted
             borderColor: root.borderColor
             onRecheckRequested: { root.checkDependencies() }
             onInstallRequested: { root.installMissingDependencies() }
@@ -2507,6 +2551,7 @@ Item {
           fontFamily: root.fontFamily
           foreground: root.foreground
           accent: root.accent
+          muted: root.muted
           borderColor: root.borderColor
           onActionPaletteTriggered: {
             root.actionPaletteIndex = 0
@@ -2550,7 +2595,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onActionSelected: function(actionItem) {
           root.showActionPalette = false
           if (actionItem && typeof actionItem.action === "function") {
@@ -2569,7 +2616,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onCreateRequested: function(payload) { root.handleSshKeyCreate(payload) }
         onImportRequested: function(payload) { root.handleSshKeyImport(payload) }
         onExportRequested: function(payload) { root.handleSshKeyExport(payload) }
@@ -2585,7 +2634,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onReplyRequested: function(approve) { root.replySshApproval(approve) }
       }
 
@@ -2596,7 +2647,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
         onCloseRequested: { root.showPasswordHistoryModal = false }
       }
@@ -2612,7 +2665,9 @@ Item {
         fontFamily: root.fontFamily
         foreground: root.foreground
         accent: root.accent
-        borderColor: root.borderColor
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
         onGenerateRequested: function(opts) { root.generatePasswordOrPassphrase(opts) }
         onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
         onUpgradeRequested: {
@@ -3011,6 +3066,26 @@ Item {
   }
 
   Process {
+    id: quickUnlockCheckProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse((text || "").trim())
+          root.quickUnlockReady = Boolean(data && data.available)
+        } catch (e) {
+          // Older engines have no quick-unlock subcommand: fail closed.
+          root.quickUnlockReady = false
+        }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0) root.quickUnlockReady = false
+    }
+  }
+
+  Process {
     id: authStatusProc
     command: []
     stdout: StdioCollector {
@@ -3030,6 +3105,12 @@ Item {
               }
             } else {
               root.clearSensitiveState()
+              // A lock just landed (screen lock, idle timeout, suspend or the
+              // 12h ceiling). The polling path above skips readiness while
+              // unlocked and lockSyncTimer stops once locked, so this is the
+              // only place that can show or hide the quick unlock button on
+              // the transition.
+              root.refreshQuickUnlockAvailability()
             }
             Qt.callLater(function() {
               if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
@@ -3101,6 +3182,8 @@ Item {
           } else {
             root.errorMessage = data.error || "Unlock failed."
             root.logWarn("omarchy:auth", root.errorMessage)
+            // Denied quick unlocks may have wiped the retained key.
+            root.refreshQuickUnlockAvailability()
           }
         } catch (e) {
           root.errorMessage = "Failed to parse unlock response."

@@ -47,6 +47,12 @@ const RSA_SHA2_512: u32 = 4;
 const MAX_MESSAGE: usize = 256 * 1024;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const UNLOCK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Polkit prompt budget for the SSH path (ADR-0025): `perform_quick_unlock`
+/// is synchronous on the per-connection thread, so the overlay's full
+/// DEFAULT_CHECK_TIMEOUT (120s) would leave an unattended `git fetch` in a
+/// loop sitting silent for two minutes. Fifteen seconds gives a present
+/// user time to answer, then the connection falls back to the overlay flow.
+const SSH_QUICK_UNLOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn socket_path() -> PathBuf {
     crate::daemon::get_runtime_dir().join("omawarden-ssh-agent.sock")
@@ -116,6 +122,12 @@ pub struct SshAgent {
     running: std::sync::atomic::AtomicBool,
     /// An unlock prompt is already on screen.
     unlock_prompted: std::sync::atomic::AtomicBool,
+    /// Lock generation the "Vault locked" notification was last posted for.
+    /// Clients that retry while the person is away would otherwise stack up
+    /// one every `unlock_timeout`. Compared against `Host::lock_generation`,
+    /// so a lock cycle with no SSH request while unlocked still earns a fresh
+    /// notification.
+    last_notified_generation: std::sync::atomic::AtomicU64,
     prompt_timeout: Duration,
     unlock_timeout: Duration,
 }
@@ -129,6 +141,7 @@ impl Default for SshAgent {
             approvals: Mutex::new(HashSet::new()),
             running: std::sync::atomic::AtomicBool::new(false),
             unlock_prompted: std::sync::atomic::AtomicBool::new(false),
+            last_notified_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
             prompt_timeout: PROMPT_TIMEOUT,
             unlock_timeout: UNLOCK_TIMEOUT,
         }
@@ -341,6 +354,9 @@ fn summon_overlay(payload: &serde_json::Value) -> bool {
 trait Host: Send + Sync + 'static {
     fn agent(&self) -> &Arc<SshAgent>;
     fn is_unlocked(&self) -> bool;
+    /// Changes each time an unlocked vault locks; see
+    /// `VaultManager::lock_generation`.
+    fn lock_generation(&self) -> u64;
     fn keys(&self) -> Vec<AgentKey>;
     fn policy(&self) -> Confirm;
     /// A signature was made (keeps the vault from idle-locking).
@@ -357,6 +373,11 @@ trait Host: Send + Sync + 'static {
     ) -> bool;
     /// See [`summon_overlay`].
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool;
+    /// ADR-0025: attempt the polkit-backed quick unlock. False means the
+    /// caller should fall back to the overlay summon.
+    fn try_quick_unlock(&self) -> bool {
+        false
+    }
 }
 
 impl Host for DaemonState {
@@ -365,6 +386,9 @@ impl Host for DaemonState {
     }
     fn is_unlocked(&self) -> bool {
         self.vault_mgr.is_unlocked()
+    }
+    fn lock_generation(&self) -> u64 {
+        self.vault_mgr.lock_generation()
     }
     fn keys(&self) -> Vec<AgentKey> {
         vault_keys(self)
@@ -394,6 +418,10 @@ impl Host for DaemonState {
     }
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool {
         summon_overlay(payload)
+    }
+    fn try_quick_unlock(&self) -> bool {
+        self.perform_quick_unlock_with_timeout(SSH_QUICK_UNLOCK_TIMEOUT)
+            .is_ok()
     }
 }
 
@@ -604,29 +632,46 @@ fn vault_keys(state: &DaemonState) -> Vec<AgentKey> {
 }
 
 /// Wait for the vault to be unlocked, opening the overlay so the person can.
+/// With quick unlock enabled (ADR-0025) the first attempt goes through the
+/// system authentication prompt instead.
 fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
+    let agent = host.agent();
     if host.is_unlocked() {
         return true;
     }
-    let agent = host.agent();
     // One unlock prompt at a time, however many ssh processes are waiting.
     if !agent.unlock_prompted.swap(true, Ordering::SeqCst) {
-        host.summon_overlay(&serde_json::json!({}));
-        let h = host.clone();
-        let spawned = host.notify(
-            "Vault locked",
-            "An SSH key was requested. Unlock your vault to continue.",
-            &[("default", "Unlock")],
-            agent.unlock_timeout,
-            Box::new(move |action| {
-                if action == "default" {
-                    h.summon_overlay(&serde_json::json!({}));
-                }
-                h.agent().unlock_prompted.store(false, Ordering::SeqCst);
-            }),
-        );
-        if !spawned {
+        if host.try_quick_unlock() {
             agent.unlock_prompted.store(false, Ordering::SeqCst);
+            if host.is_unlocked() {
+                return true;
+            }
+        } else {
+            host.summon_overlay(&serde_json::json!({}));
+            // The notification is posted once per lock: a client retrying
+            // while the person is away must not stack a new one every minute.
+            let generation = host.lock_generation();
+            let h = host.clone();
+            let spawned = agent.last_notified_generation.load(Ordering::SeqCst) == generation
+                || host.notify(
+                    "Vault locked",
+                    "An SSH key was requested. Unlock your vault to continue.",
+                    &[("default", "Unlock")],
+                    agent.unlock_timeout,
+                    Box::new(move |action| {
+                        if action == "default" {
+                            h.summon_overlay(&serde_json::json!({}));
+                        }
+                        h.agent().unlock_prompted.store(false, Ordering::SeqCst);
+                    }),
+                );
+            if spawned {
+                agent
+                    .last_notified_generation
+                    .store(generation, Ordering::SeqCst);
+            } else {
+                agent.unlock_prompted.store(false, Ordering::SeqCst);
+            }
         }
     }
     let deadline = Instant::now() + agent.unlock_timeout;
@@ -637,6 +682,9 @@ fn wait_for_unlock(host: &Arc<dyn Host>) -> bool {
             return true;
         }
     }
+    // Let the next request open the overlay again, also when no notification
+    // was posted to do it on expiry.
+    agent.unlock_prompted.store(false, Ordering::SeqCst);
     false
 }
 
@@ -1412,6 +1460,7 @@ mod tests {
     struct FakeHost {
         agent: Arc<SshAgent>,
         unlocked: std::sync::atomic::AtomicBool,
+        generation: AtomicU64,
         keys: Vec<(String, PrivateKey)>,
         policy: Mutex<Confirm>,
         card: Mutex<Card>,
@@ -1440,6 +1489,7 @@ mod tests {
                     ..SshAgent::default()
                 }),
                 unlocked: true.into(),
+                generation: AtomicU64::new(0),
                 keys: vec![(
                     "Work".into(),
                     PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap(),
@@ -1455,6 +1505,14 @@ mod tests {
                 keys_gone: false.into(),
                 stored_key: Mutex::new(None),
             })
+        }
+        /// Lock or unlock the way the vault does: locking an unlocked vault
+        /// starts a new lock generation.
+        fn set_unlocked(&self, unlocked: bool) {
+            let was = self.unlocked.swap(unlocked, Ordering::SeqCst);
+            if was && !unlocked {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
         }
         fn notifications(&self) -> Vec<String> {
             self.notifications.lock().unwrap().clone()
@@ -1480,6 +1538,9 @@ mod tests {
         }
         fn is_unlocked(&self) -> bool {
             self.unlocked.load(Ordering::SeqCst)
+        }
+        fn lock_generation(&self) -> u64 {
+            self.generation.load(Ordering::SeqCst)
         }
         fn keys(&self) -> Vec<AgentKey> {
             let stored = self.stored_key.lock().unwrap().clone();
@@ -2239,13 +2300,50 @@ mod tests {
         host.callbacks.lock().unwrap().pop().unwrap()("");
         assert_eq!(host.overlays().len(), 1);
         assert!(!host.agent.unlock_prompted.load(Ordering::SeqCst));
+    }
 
-        // Pressing Unlock opens the overlay again.
+    #[test]
+    fn pressing_unlock_opens_the_overlay_again() {
+        let host = FakeHost::new(Confirm::Never, Card::Ignore);
+        host.unlocked.store(false, Ordering::SeqCst);
         assert!(Client::connect(&host, SSH, TERMINAL)
             .identities()
             .is_empty());
         host.callbacks.lock().unwrap().pop().unwrap()("default");
-        assert_eq!(host.overlays().len(), 3);
+        assert_eq!(host.overlays().len(), 2);
+    }
+
+    #[test]
+    fn retrying_clients_do_not_stack_vault_locked_notifications() {
+        let host = FakeHost::new(Confirm::Never, Card::Ignore);
+        host.unlocked.store(false, Ordering::SeqCst);
+        for _ in 0..3 {
+            assert!(Client::connect(&host, SSH, TERMINAL)
+                .identities()
+                .is_empty());
+        }
+        assert_eq!(
+            host.notifications(),
+            vec!["Vault locked".to_string()],
+            "one notification however many times the key is requested"
+        );
+        assert_eq!(host.overlays().len(), 3, "the overlay still opens");
+
+        // Unlocking and locking again earns a fresh notification, even when
+        // no SSH request was made while the vault was unlocked.
+        host.set_unlocked(true);
+        host.set_unlocked(false);
+        assert!(Client::connect(&host, SSH, TERMINAL)
+            .identities()
+            .is_empty());
+        assert_eq!(host.notifications().len(), 2);
+
+        // Locking a vault that is already locked does not.
+        host.set_unlocked(false);
+        assert!(Client::connect(&host, SSH, TERMINAL)
+            .identities()
+            .is_empty());
+        assert_eq!(host.notifications().len(), 2);
     }
 
     #[test]

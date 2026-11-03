@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: modalRoot
@@ -9,12 +10,16 @@ Rectangle {
   property bool active: false
   property string mode: "create" // "create" | "import" | "export"
   property var item: null
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color cardBackground: Commons.Color.popups.background
+  property color borderColor: Commons.Color.popups.border
   property string fontFamily: ""
   property bool isBusy: false
   property string errorMessage: ""
+
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
 
   // Form states
   property string itemName: ""
@@ -39,7 +44,7 @@ Rectangle {
   signal closeRequested()
 
   anchors.fill: parent
-  color: Qt.rgba(0, 0, 0, 0.65)
+  color: StatusPalette.scrim(0.65)
   visible: active
 
   function resetForm() {
@@ -155,7 +160,7 @@ Rectangle {
     width: Math.min(parent.width - 48, 520)
     height: Math.min(parent.height - 48, 480)
     radius: 8
-    color: Qt.rgba(0.12, 0.14, 0.18, 0.98)
+    color: modalRoot.cardBackground
     border.color: modalRoot.borderColor
     border.width: 1
 
@@ -193,14 +198,14 @@ Rectangle {
           implicitWidth: 22
           implicitHeight: 22
           radius: 4
-          color: closeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+          color: closeMouse.containsMouse ? Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.1) : "transparent"
 
           Text {
             anchors.centerIn: parent
             text: "\uf00d"
             font.family: modalRoot.fontFamily
             font.pixelSize: Style.font.bodySmall
-            color: closeMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.5)
+            color: closeMouse.containsMouse ? modalRoot.foreground : modalRoot.muted
           }
 
           MouseArea {
@@ -227,8 +232,8 @@ Rectangle {
         Layout.fillWidth: true
         implicitHeight: errText.implicitHeight + 12
         radius: 4
-        color: Qt.rgba(0.94, 0.27, 0.27, 0.15)
-        border.color: "#ef4444"
+        color: StatusPalette.tint(StatusPalette.error, 0.15)
+        border.color: StatusPalette.error
         border.width: 1
 
         RowLayout {
@@ -240,13 +245,13 @@ Rectangle {
             text: "\uf06a"
             font.family: modalRoot.fontFamily
             font.pixelSize: Style.font.bodySmall
-            color: "#f87171"
+            color: StatusPalette.danger
           }
 
           Text {
             id: errText
             text: modalRoot.errorMessage
-            color: "#fca5a5"
+            color: StatusPalette.invalidInput
             font.pixelSize: Style.font.bodySmall
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -280,7 +285,7 @@ Rectangle {
 
               Text {
                 text: "Item Name *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -289,7 +294,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: createNameInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -320,7 +325,7 @@ Rectangle {
 
               Text {
                 text: "Algorithm"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -342,7 +347,7 @@ Rectangle {
                     implicitHeight: 26
                     implicitWidth: algoText.implicitWidth + 12
                     radius: 4
-                    color: isSelected ? Qt.rgba(modalRoot.accent.r, modalRoot.accent.g, modalRoot.accent.b, 0.2) : (algoMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.2))
+                    color: isSelected ? Qt.rgba(modalRoot.accent.r, modalRoot.accent.g, modalRoot.accent.b, 0.2) : (algoMouse.containsMouse ? Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08) : Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.04))
                     border.color: isSelected ? modalRoot.accent : modalRoot.borderColor
                     border.width: 1
 
@@ -350,7 +355,7 @@ Rectangle {
                       id: algoText
                       anchors.centerIn: parent
                       text: modelData.label
-                      color: parent.isSelected ? modalRoot.accent : (algoMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.3))
+                      color: parent.isSelected ? modalRoot.accent : (algoMouse.containsMouse ? modalRoot.foreground : modalRoot.muted)
                       font.pixelSize: Style.font.caption
                       font.weight: parent.isSelected ? Font.DemiBold : Font.Normal
                     }
@@ -374,7 +379,7 @@ Rectangle {
 
               Text {
                 text: "Key Comment (optional)"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -383,7 +388,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: commentInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -410,7 +415,7 @@ Rectangle {
                   anchors.leftMargin: 8
                   anchors.verticalCenter: parent.verticalCenter
                   text: "e.g. your_email@example.com"
-                  color: Qt.darker(modalRoot.foreground, 2.0)
+                  color: modalRoot.muted
                   font.pixelSize: Style.font.bodySmall
                   visible: !commentInput.text
                 }
@@ -424,7 +429,7 @@ Rectangle {
 
               Text {
                 text: "Notes (optional)"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -433,7 +438,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 54
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: notesInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -475,7 +480,7 @@ Rectangle {
                 implicitWidth: 16
                 implicitHeight: 16
                 radius: 3
-                color: modalRoot.exportToLocal ? modalRoot.accent : Qt.rgba(0, 0, 0, 0.3)
+                color: modalRoot.exportToLocal ? modalRoot.accent : Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: modalRoot.exportToLocal ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -484,7 +489,7 @@ Rectangle {
                   text: "\uf00c"
                   font.family: modalRoot.fontFamily
                   font.pixelSize: Style.fontPx(0.75)
-                  color: "#ffffff"
+                  color: modalRoot.textOnAccent
                   visible: modalRoot.exportToLocal
                 }
 
@@ -506,7 +511,7 @@ Rectangle {
                 height: 26
                 radius: 4
                 enabled: modalRoot.exportToLocal
-                color: modalRoot.exportToLocal ? Qt.rgba(0, 0, 0, 0.3) : Qt.rgba(0, 0, 0, 0.1)
+                color: StatusPalette.tint(StatusPalette.scrimBase, modalRoot.exportToLocal ? 0.3 : 0.1)
                 border.color: outDirInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -516,7 +521,7 @@ Rectangle {
                   anchors.leftMargin: 6
                   anchors.rightMargin: 6
                   verticalAlignment: Text.AlignVCenter
-                  color: modalRoot.exportToLocal ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 2.0)
+                  color: modalRoot.exportToLocal ? modalRoot.foreground : modalRoot.muted
                   font.pixelSize: Style.font.bodySmall
                   selectByMouse: true
                   clip: true
@@ -545,7 +550,7 @@ Rectangle {
 
               Text {
                 text: "Item Name *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -554,7 +559,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: importNameInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -585,7 +590,7 @@ Rectangle {
 
               Text {
                 text: "Private Key File Path *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -594,7 +599,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: importPrivInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -619,7 +624,7 @@ Rectangle {
 
               Text {
                 text: "Defaults to ~/.ssh/ (e.g. ~/.ssh/id_ed25519 or ~/.ssh/id_rsa)"
-                color: Qt.darker(modalRoot.foreground, 2.0)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.caption
               }
             }
@@ -631,7 +636,7 @@ Rectangle {
 
               Text {
                 text: "Public Key File Path (optional - auto-derived if omitted)"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -640,7 +645,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: importPubInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -670,7 +675,7 @@ Rectangle {
 
               Text {
                 text: "Notes (optional)"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -679,7 +684,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 54
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: importNotesInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -726,7 +731,7 @@ Rectangle {
               Layout.fillWidth: true
               implicitHeight: itemSummaryCol.implicitHeight + 16
               radius: 4
-              color: Qt.rgba(0, 0, 0, 0.25)
+              color: StatusPalette.tint(StatusPalette.scrimBase, 0.25)
               border.color: modalRoot.borderColor
               border.width: 1
 
@@ -755,7 +760,7 @@ Rectangle {
                 Text {
                   visible: Boolean(modalRoot.item && modalRoot.item.ssh_key && modalRoot.item.ssh_key.fingerprint)
                   text: "Fingerprint: " + (modalRoot.item && modalRoot.item.ssh_key ? (modalRoot.item.ssh_key.fingerprint || "") : "")
-                  color: Qt.darker(modalRoot.foreground, 1.5)
+                  color: modalRoot.muted
                   font.pixelSize: Style.font.caption
                   font.family: "monospace"
                   elide: Text.ElideRight
@@ -771,7 +776,7 @@ Rectangle {
 
               Text {
                 text: "Destination Directory *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -780,7 +785,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: exportDirInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -811,7 +816,7 @@ Rectangle {
 
               Text {
                 text: "Private Key Filename *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -820,7 +825,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: exportPrivInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -856,7 +861,7 @@ Rectangle {
 
               Text {
                 text: "Public Key Filename *"
-                color: Qt.darker(modalRoot.foreground, 1.4)
+                color: modalRoot.muted
                 font.pixelSize: Style.font.bodySmall
                 font.weight: Font.Medium
               }
@@ -865,7 +870,7 @@ Rectangle {
                 Layout.fillWidth: true
                 height: 30
                 radius: 4
-                color: Qt.rgba(0, 0, 0, 0.3)
+                color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08)
                 border.color: exportPubInput.activeFocus ? modalRoot.accent : modalRoot.borderColor
                 border.width: 1
 
@@ -904,14 +909,14 @@ Rectangle {
           implicitHeight: 28
           implicitWidth: 70
           radius: 4
-          color: cancelMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+          color: cancelMouse.containsMouse ? Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.08) : "transparent"
           border.color: modalRoot.borderColor
           border.width: 1
 
           Text {
             anchors.centerIn: parent
             text: "Cancel"
-            color: cancelMouse.containsMouse ? modalRoot.foreground : Qt.darker(modalRoot.foreground, 1.3)
+            color: cancelMouse.containsMouse ? modalRoot.foreground : modalRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
 
@@ -943,12 +948,12 @@ Rectangle {
               text: "\uf110"
               font.family: modalRoot.fontFamily
               font.pixelSize: Style.font.bodySmall
-              color: "#ffffff"
+              color: modalRoot.textOnAccent
             }
 
             Text {
               text: modalRoot.isBusy ? "Processing..." : (modalRoot.mode === "create" ? "Generate" : (modalRoot.mode === "import" ? "Import" : "Export"))
-              color: "#ffffff"
+              color: modalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold
             }

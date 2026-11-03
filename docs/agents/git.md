@@ -62,6 +62,14 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
      ## Summary of Changes
      - ..."
      ```
+   - **Stacked PRs**: when a slice builds on work that is not merged yet, branch off that parent branch and set the PR base to it instead of `develop`. Targeting `develop` from a child branch makes the PR diff repeat every parent commit. Once the parent merges, drop its commits and retarget:
+     ```bash
+     git fetch origin develop
+     git rebase --onto origin/develop <parent-branch-tip> <your-branch>
+     git push --force-with-lease origin HEAD
+     gh api -X PATCH "repos/<owner>/<repo>/pulls/<number>" -F base=develop
+     ```
+     Use the REST call above for retargeting: `gh pr edit --base` needs the `read:org` token scope and fails on this repo's token.
 
 5. **Merge PR & Clean Up**:
    - **Crucial Rule**: Agents must **NEVER** proactively merge a Pull Request (`gh pr merge` or `git merge`) without explicit user permission and instruction. PR reviews, approvals, and merges are strictly controlled by the developer/owner.

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import "../components"
+import "lib"
 
 ApplicationWindow {
   id: testRunner
@@ -18,16 +19,6 @@ ApplicationWindow {
 
   EmptyInspector {
     id: emptyInspector
-  }
-
-  function assert(condition, message) {
-    if (!condition) {
-      console.error("ASSERTION FAILED: " + message)
-      Qt.quit()
-      throw new Error("Assertion failed: " + message)
-    } else {
-      console.log("PASS: " + message)
-    }
   }
 
   Timer {
@@ -74,28 +65,29 @@ ApplicationWindow {
       }
 
       // 1. VaultItemList.getSubtitle tests (kept as username / brand / email in list)
-      assert(itemList.getSubtitle(loginItem) === "octocat", "VaultItemList: login item subtitle is username")
-      assert(itemList.getSubtitle(cardItem) === "Visa", "VaultItemList: card item subtitle is card brand")
-      assert(itemList.getSubtitle(identityItem) === "user@example.com", "VaultItemList: identity item subtitle is email")
-      assert(itemList.getSubtitle(noteItem) === "Secure Note", "VaultItemList: note item subtitle is sub_title")
-      assert(itemList.getSubtitle(sshKeyItem) === "ED25519", "VaultItemList: ssh_key item subtitle is key_type")
-      assert(itemList.getSubtitle(customItem) === "Custom Subtitle", "VaultItemList: custom item falls back to sub_title")
-      assert(itemList.getSubtitle(null) === "", "VaultItemList: null item subtitle is empty string")
+      Assert.check(itemList.getSubtitle(loginItem) === "octocat", "VaultItemList: login item subtitle is username")
+      Assert.check(itemList.getSubtitle(cardItem) === "Visa", "VaultItemList: card item subtitle is card brand")
+      Assert.check(itemList.getSubtitle(identityItem) === "user@example.com", "VaultItemList: identity item subtitle is email")
+      Assert.check(itemList.getSubtitle(noteItem) === "Secure Note", "VaultItemList: note item subtitle is sub_title")
+      Assert.check(itemList.getSubtitle(sshKeyItem) === "ED25519", "VaultItemList: ssh_key item subtitle is key_type")
+      Assert.check(itemList.getSubtitle(customItem) === "Custom Subtitle", "VaultItemList: custom item falls back to sub_title")
+      Assert.check(itemList.getSubtitle(null) === "", "VaultItemList: null item subtitle is empty string")
 
       // 2. ItemInspector.getItemCategoryLabel tests (displays category in inspector header)
-      assert(itemInspector.getItemCategoryLabel(loginItem) === "Login", "ItemInspector: login item label is 'Login'")
-      assert(itemInspector.getItemCategoryLabel(cardItem) === "Card", "ItemInspector: card item label is 'Card'")
-      assert(itemInspector.getItemCategoryLabel(identityItem) === "Identity", "ItemInspector: identity item label is 'Identity'")
-      assert(itemInspector.getItemCategoryLabel(noteItem) === "Secure Note", "ItemInspector: note item label is 'Secure Note'")
-      assert(itemInspector.getItemCategoryLabel(sshKeyItem) === "SSH Key", "ItemInspector: ssh_key item label is 'SSH Key'")
-      assert(itemInspector.getItemCategoryLabel(customItem) === "Custom Subtitle", "ItemInspector: custom item falls back to sub_title")
-      assert(itemInspector.getItemCategoryLabel(null) === "", "ItemInspector: null item label is empty string")
+      Assert.check(itemInspector.getItemCategoryLabel(loginItem) === "Login", "ItemInspector: login item label is 'Login'")
+      Assert.check(itemInspector.getItemCategoryLabel(cardItem) === "Card", "ItemInspector: card item label is 'Card'")
+      Assert.check(itemInspector.getItemCategoryLabel(identityItem) === "Identity", "ItemInspector: identity item label is 'Identity'")
+      Assert.check(itemInspector.getItemCategoryLabel(noteItem) === "Secure Note", "ItemInspector: note item label is 'Secure Note'")
+      Assert.check(itemInspector.getItemCategoryLabel(sshKeyItem) === "SSH Key", "ItemInspector: ssh_key item label is 'SSH Key'")
+      Assert.check(itemInspector.getItemCategoryLabel(customItem) === "Custom Subtitle", "ItemInspector: custom item falls back to sub_title")
+      Assert.check(itemInspector.getItemCategoryLabel(null) === "", "ItemInspector: null item label is empty string")
 
       // 3. EmptyInspector instantiation test
-      assert(emptyInspector !== null, "EmptyInspector: instantiated successfully")
+      Assert.check(emptyInspector !== null, "EmptyInspector: instantiated successfully")
 
-      console.log("ALL ITEM CATEGORY SUBTITLE TESTS PASSED!")
-      Qt.quit()
+      if (Assert.failures === 0)
+        console.log("ALL ITEM CATEGORY SUBTITLE TESTS PASSED!")
+      Qt.exit(Assert.exitCode())
     }
   }
 }

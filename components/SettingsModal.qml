@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import "./IconPolicy.js" as IconPolicy
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: settingsRoot
@@ -24,10 +25,15 @@ Item {
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
   property bool justCheckedLatest: false
-  property color foreground: "#ffffff"
-  property color accent: "#3b82f6"
-  property color borderColor: Qt.rgba(1, 1, 1, 0.1)
-  property color mutedForeground: Qt.darker(foreground, 1.8)
+  property color foreground: Commons.Color.menu.text
+  property color accent: Commons.Color.menu.selectedText
+  property color borderColor: Commons.Color.menu.border
+  property color muted: Commons.Color.muted
+  // Label/glyph color for accent-filled controls. The accent fill itself can
+  // be light or dark per theme, so pick the contrasting pole by luminance —
+  // Commons.Color.menu.selectedText cannot be used here because it is what
+  // fills those controls (root maps accent := Color.menu.selectedText).
+  readonly property color textOnAccent: StatusPalette.textOn(accent)
   property string fontFamily: ""
   property bool checkUpdatesChecked: true
   readonly property alias confirmRepeater: confirmRepeater
@@ -78,6 +84,7 @@ Item {
   }
   property bool sshAgentChecked: false
   property string sshAgentConfirm: "first-use"
+  property bool quickUnlockChecked: false
 
   onConfigChanged: {
     if (config) checkUpdatesChecked = (config.check_updates !== false)
@@ -95,6 +102,7 @@ Item {
     }
     if (config) sshAgentChecked = (config.ssh_agent_enabled === true)
     if (config && config.ssh_agent_confirm) sshAgentConfirm = config.ssh_agent_confirm
+    if (config) quickUnlockChecked = (config.quick_unlock === true)
   }
 
   function buildPayload() {
@@ -117,7 +125,8 @@ Item {
       check_updates: settingsRoot.checkUpdatesChecked,
       remember_last_search: settingsRoot.rememberLastSearchChecked,
       ssh_agent_enabled: settingsRoot.sshAgentChecked,
-      ssh_agent_confirm: settingsRoot.sshAgentConfirm
+      ssh_agent_confirm: settingsRoot.sshAgentConfirm,
+      quick_unlock: settingsRoot.quickUnlockChecked
     }
   }
 
@@ -215,7 +224,7 @@ Item {
           implicitHeight: 24
           implicitWidth: genTabText.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (genMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (genMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
           border.color: isSelected ? settingsRoot.accent : "transparent"
           border.width: 1
 
@@ -223,7 +232,7 @@ Item {
             id: genTabText
             anchors.centerIn: parent
             text: "General"
-            color: genTabItem.isSelected ? settingsRoot.accent : (genMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+            color: genTabItem.isSelected ? settingsRoot.accent : (genMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
             font.pixelSize: Style.font.bodySmall
             font.weight: genTabItem.isSelected ? Font.DemiBold : Font.Normal
           }
@@ -243,7 +252,7 @@ Item {
           implicitHeight: 24
           implicitWidth: logsTabRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (logsMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (logsMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
           border.color: isSelected ? settingsRoot.accent : "transparent"
           border.width: 1
 
@@ -253,7 +262,7 @@ Item {
             spacing: 4
             Text {
               text: "Logs & Diagnostics"
-              color: logsTabItem.isSelected ? settingsRoot.accent : (logsMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: logsTabItem.isSelected ? settingsRoot.accent : (logsMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: logsTabItem.isSelected ? Font.DemiBold : Font.Normal
             }
@@ -263,12 +272,12 @@ Item {
               implicitHeight: 14
               implicitWidth: Math.max(14, errBadgeText.implicitWidth + 6)
               radius: 7
-              color: "#ef4444"
+              color: StatusPalette.danger
               Text {
                 id: errBadgeText
                 anchors.centerIn: parent
                 text: String(settingsRoot.errorCount)
-                color: "#ffffff"
+                color: StatusPalette.textOnTint(StatusPalette.danger, 1, Commons.Color.popups.background)
                 font.pixelSize: Style.fontPx(0.75)
                 font.weight: Font.Bold
               }
@@ -308,7 +317,7 @@ Item {
 
           RowLayout {
             Layout.fillWidth: true
-            Text { text: "ENGINE STATUS & HEALTH"; color: Qt.darker(settingsRoot.foreground, 1.8); font.pixelSize: Style.font.caption; font.weight: Font.DemiBold }
+            Text { text: "ENGINE STATUS & HEALTH"; color: settingsRoot.muted; font.pixelSize: Style.font.caption; font.weight: Font.DemiBold }
             Item { Layout.fillWidth: true }
 
             // Check Update Button
@@ -316,7 +325,7 @@ Item {
               implicitHeight: 20
               implicitWidth: chkUpText.implicitWidth + 10
               radius: 3
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
               border.color: settingsRoot.borderColor
               border.width: 1
 
@@ -324,7 +333,7 @@ Item {
                 id: chkUpText
                 anchors.centerIn: parent
                 text: settingsRoot.isCheckingUpdate ? "Checking..." : (settingsRoot.justCheckedLatest ? "Latest" : "Check Update")
-                color: settingsRoot.justCheckedLatest ? "#4ade80" : settingsRoot.accent
+                color: settingsRoot.justCheckedLatest ? StatusPalette.ok : settingsRoot.accent
                 font.pixelSize: Style.font.caption
               }
               MouseArea {
@@ -340,7 +349,7 @@ Item {
               implicitHeight: 20
               implicitWidth: refHText.implicitWidth + 8
               radius: 3
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
               border.color: settingsRoot.borderColor
               border.width: 1
 
@@ -359,7 +368,7 @@ Item {
               implicitHeight: 24
               implicitWidth: cliBadgeRow.implicitWidth + 14
               radius: 4
-              color: engineMouse.containsMouse ? Qt.rgba(0, 0, 0, 0.4) : Qt.rgba(0, 0, 0, 0.2)
+              color: engineMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.12) : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
               border.color: settingsRoot.borderColor
               border.width: 1
 
@@ -375,7 +384,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: engineBadgeBox.isInstalled ? "#4ade80" : "#f87171"
+                  color: engineBadgeBox.isInstalled ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -390,8 +399,8 @@ Item {
                   implicitHeight: 16
                   implicitWidth: engineSourceText.implicitWidth + 10
                   radius: 3
-                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.2, 0.5, 0.8, 0.2) : Qt.rgba(0.8, 0.6, 0.2, 0.2)
-                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? Qt.rgba(0.4, 0.7, 1.0, 0.4) : Qt.rgba(0.8, 0.6, 0.2, 0.4)
+                  color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.tint(StatusPalette.aur, 0.2) : StatusPalette.tint(StatusPalette.system, 0.2)
+                  border.color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.tint(StatusPalette.aur, 0.4) : StatusPalette.tint(StatusPalette.system, 0.4)
                   border.width: 1
 
                   Text {
@@ -403,7 +412,7 @@ Item {
                       }
                       return settingsRoot.engineSource ? (settingsRoot.engineSource.charAt(0).toUpperCase() + settingsRoot.engineSource.slice(1)) : "System"
                     }
-                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? "#89b4fa" : "#f9e2af"
+                    color: (settingsRoot.engineSource.toLowerCase() === "aur") ? StatusPalette.aur : StatusPalette.system
                     font.pixelSize: Style.fontPx(0.75)
                     font.weight: Font.DemiBold
                   }
@@ -415,7 +424,7 @@ Item {
                   implicitHeight: 16
                   implicitWidth: updateTagRow.implicitWidth + 8
                   radius: 3
-                  color: Qt.rgba(0.2, 0.8, 0.4, 0.15)
+                  color: StatusPalette.tint(StatusPalette.update, 0.15)
 
                   RowLayout {
                     id: updateTagRow
@@ -424,13 +433,13 @@ Item {
                     Text {
                       text: "\uf062"
                       font.family: settingsRoot.fontFamily
-                      color: "#ffffff"
+                      color: StatusPalette.textOnTint(StatusPalette.update, 0.15, Commons.Color.popups.background)
                       font.pixelSize: Style.fontPx(0.667)
                     }
                     Text {
                       id: updateTagLabel
                       text: "Update (AUR)"
-                      color: "#ffffff"
+                      color: StatusPalette.textOnTint(StatusPalette.update, 0.15, Commons.Color.popups.background)
                       font.pixelSize: Style.fontPx(0.75)
                       font.weight: Font.DemiBold
                     }
@@ -449,7 +458,7 @@ Item {
                     id: dlTagText
                     anchors.centerIn: parent
                     text: settingsRoot.isInstallingDependencies ? "Installing..." : "Install"
-                    color: "#ffffff"
+                    color: settingsRoot.textOnAccent
                     font.pixelSize: Style.fontPx(0.75)
                     font.weight: Font.Medium
                   }
@@ -477,7 +486,7 @@ Item {
               implicitHeight: 24
               implicitWidth: krBadgeRow.implicitWidth + 14
               radius: 4
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
               border.color: settingsRoot.borderColor
               border.width: 1
 
@@ -490,7 +499,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: settingsRoot.cliHealth.keyring_available ? "#4ade80" : "#f87171"
+                  color: settingsRoot.cliHealth.keyring_available ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -506,7 +515,7 @@ Item {
               implicitHeight: 24
               implicitWidth: clipBadgeRow.implicitWidth + 14
               radius: 4
-              color: Qt.rgba(0, 0, 0, 0.2)
+              color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
               border.color: settingsRoot.borderColor
               border.width: 1
 
@@ -519,7 +528,7 @@ Item {
                   implicitWidth: 6
                   implicitHeight: 6
                   radius: 3
-                  color: settingsRoot.cliHealth.clipboard_available ? "#4ade80" : "#f87171"
+                  color: settingsRoot.cliHealth.clipboard_available ? StatusPalette.ok : StatusPalette.fail
                 }
 
                 Text {
@@ -543,7 +552,7 @@ Item {
             spacing: 3
             Text { text: "Bitwarden / Vaultwarden Server URL:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: sUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: sUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -563,10 +572,10 @@ Item {
             RowLayout {
               spacing: 4
               Text { text: "Identity URL:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
-              Text { text: "(Optional override, e.g. https://identity.bitwarden.com)"; color: settingsRoot.mutedForeground; font.pixelSize: Style.font.caption }
+              Text { text: "(Optional override, e.g. https://identity.bitwarden.com)"; color: settingsRoot.muted; font.pixelSize: Style.font.caption }
             }
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: idUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: idUrlInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: idUrlInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -579,7 +588,7 @@ Item {
               Text {
                 anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
                 text: "Auto (default: identity.bitwarden.com or /identity)"
-                color: settingsRoot.mutedForeground
+                color: settingsRoot.muted
                 font.family: "sans-serif"; font.pixelSize: Style.font.bodySmall
                 visible: idUrlInput.text.length === 0
               }
@@ -592,14 +601,14 @@ Item {
             spacing: 6
             Rectangle {
               width: 14; height: 14; radius: 3
-              color: settingsRoot.enableMtlsChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2)
+              color: settingsRoot.enableMtlsChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10)
               border.color: settingsRoot.borderColor; border.width: 1
               Text {
                 anchors.centerIn: parent
                 visible: settingsRoot.enableMtlsChecked
                 text: "\uf00c"
                 font.family: settingsRoot.fontFamily
-                color: "#ffffff"
+                color: settingsRoot.textOnAccent
                 font.pixelSize: Style.fontPx(0.75)
               }
               MouseArea {
@@ -628,10 +637,10 @@ Item {
             RowLayout {
               spacing: 4
               Text { text: "mTLS Client Certificate Path:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
-              Text { text: "(Optional, for self-hosted instances with mTLS gateway)"; color: settingsRoot.mutedForeground; font.pixelSize: Style.font.caption }
+              Text { text: "(Optional, for self-hosted instances with mTLS gateway)"; color: settingsRoot.muted; font.pixelSize: Style.font.caption }
             }
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clientCertInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: clientCertInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: clientCertInput
                 anchors.left: parent.left; anchors.right: settingsCertBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -644,7 +653,7 @@ Item {
               Text {
                 anchors.left: parent.left; anchors.right: settingsCertBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
                 text: "e.g. /home/user/.certs/client.crt or client.pem"
-                color: settingsRoot.mutedForeground
+                color: settingsRoot.muted
                 font.family: "sans-serif"; font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
                 visible: clientCertInput.text.length === 0
@@ -670,10 +679,10 @@ Item {
             RowLayout {
               spacing: 4
               Text { text: "mTLS Client Private Key Path:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
-              Text { text: "(Optional if merged in PEM, file permissions must be 0600 or 0400)"; color: settingsRoot.mutedForeground; font.pixelSize: Style.font.caption }
+              Text { text: "(Optional if merged in PEM, file permissions must be 0600 or 0400)"; color: settingsRoot.muted; font.pixelSize: Style.font.caption }
             }
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clientKeyInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: clientKeyInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: clientKeyInput
                 anchors.left: parent.left; anchors.right: settingsKeyBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -686,7 +695,7 @@ Item {
               Text {
                 anchors.left: parent.left; anchors.right: settingsKeyBrowseBtn.left; anchors.leftMargin: 10; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
                 text: "e.g. /home/user/.certs/client.key"
-                color: settingsRoot.mutedForeground
+                color: settingsRoot.muted
                 font.family: "sans-serif"; font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
                 visible: clientKeyInput.text.length === 0
@@ -730,7 +739,7 @@ Item {
             spacing: 3
             Text { text: "Attachment Download Directory:"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
             Rectangle {
-              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+              Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: dlDirInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
               TextInput {
                 id: dlDirInput
                 anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -754,7 +763,7 @@ Item {
               spacing: 3
               Text { text: "Auto-lock Timeout (Minutes):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: lockMinInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: lockMinInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -775,7 +784,7 @@ Item {
               spacing: 3
               Text { text: "Clipboard Auto-Clear (Seconds):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: clipSecInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: clipSecInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -796,7 +805,7 @@ Item {
               spacing: 3
               Text { text: "Max Attachment (MB):"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
               Rectangle {
-                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(0, 0, 0, 0.25); border.color: maxAttSizeInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
+                Layout.fillWidth: true; height: 32; radius: 5; color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.08); border.color: maxAttSizeInput.activeFocus ? settingsRoot.accent : settingsRoot.borderColor; border.width: 1
                 TextInput {
                   id: maxAttSizeInput
                   anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter; color: settingsRoot.foreground; font.family: "sans-serif"; font.pixelSize: Style.font.body; selectByMouse: true
@@ -819,13 +828,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.showWebsiteIconsChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: settingsRoot.showWebsiteIconsChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: settingsRoot.showWebsiteIconsChecked
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
+                  color: settingsRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.showWebsiteIconsChecked = !settingsRoot.showWebsiteIconsChecked }
@@ -839,7 +848,7 @@ Item {
               text: isOfficial
                     ? "Fetches icons from icons.bitwarden.net, revealing your saved sites to Bitwarden."
                     : ("Fetches icons directly from your vault server (" + (serverHost || "self-hosted") + ").")
-              color: settingsRoot.mutedForeground
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               Layout.fillWidth: true
               wrapMode: Text.WordWrap
@@ -853,13 +862,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: settingsRoot.checkUpdatesChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: settingsRoot.checkUpdatesChecked
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
+                  color: settingsRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.checkUpdatesChecked = !settingsRoot.checkUpdatesChecked }
@@ -869,7 +878,7 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "Contacts github.com on startup. Turn off if omawarden is managed by a package manager."
-              color: settingsRoot.mutedForeground
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
@@ -882,13 +891,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.rememberLastSearchChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: settingsRoot.rememberLastSearchChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: settingsRoot.rememberLastSearchChecked
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
+                  color: settingsRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.rememberLastSearchChecked = !settingsRoot.rememberLastSearchChecked }
@@ -898,7 +907,7 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "Retains previous search query, category, and selection when reopening while vault is unlocked."
-              color: settingsRoot.mutedForeground
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
@@ -911,13 +920,13 @@ Item {
             RowLayout {
               spacing: 6
               Rectangle {
-                width: 14; height: 14; radius: 3; color: settingsRoot.sshAgentChecked ? settingsRoot.accent : Qt.rgba(0, 0, 0, 0.2); border.color: settingsRoot.borderColor; border.width: 1
+                width: 14; height: 14; radius: 3; color: settingsRoot.sshAgentChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
                 Text {
                   anchors.centerIn: parent
                   visible: settingsRoot.sshAgentChecked
                   text: "\uf00c"
                   font.family: settingsRoot.fontFamily
-                  color: "#ffffff"
+                  color: settingsRoot.textOnAccent
                   font.pixelSize: Style.fontPx(0.75)
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.sshAgentChecked = !settingsRoot.sshAgentChecked }
@@ -927,7 +936,7 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "Serves your vault's SSH keys to ssh and git without writing them to disk. Point SSH_AUTH_SOCK at $XDG_RUNTIME_DIR/omawarden-ssh-agent.sock."
-              color: settingsRoot.mutedForeground
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
@@ -935,7 +944,7 @@ Item {
               visible: settingsRoot.sshAgentChecked
               Layout.topMargin: 2
               spacing: 4
-              Text { text: "Confirm signatures:"; color: settingsRoot.mutedForeground; font.pixelSize: Style.font.caption }
+              Text { text: "Confirm signatures:"; color: settingsRoot.muted; font.pixelSize: Style.font.caption }
               Repeater {
                 id: confirmRepeater
                 model: [["always", "Every time"], ["first-use", "First use"], ["never", "Never"]]
@@ -946,14 +955,14 @@ Item {
                   implicitHeight: 24
                   implicitWidth: confirmLabel.implicitWidth + 14
                   radius: 4
-                  color: chosen ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (confirmMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+                  color: chosen ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (confirmMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
                   border.color: chosen ? settingsRoot.accent : "transparent"
                   border.width: 1
                   Text {
                     id: confirmLabel
                     anchors.centerIn: parent
                     text: modelData[1]
-                    color: confirmItem.chosen ? settingsRoot.accent : (confirmMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+                    color: confirmItem.chosen ? settingsRoot.accent : (confirmMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
                     font.pixelSize: Style.font.bodySmall
                     font.weight: confirmItem.chosen ? Font.DemiBold : Font.Normal
                   }
@@ -966,6 +975,35 @@ Item {
                   }
                 }
               }
+            }
+          }
+
+          // Quick Unlock Toggle (ADR-0025)
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            RowLayout {
+              spacing: 6
+              Rectangle {
+                width: 14; height: 14; radius: 3; color: settingsRoot.quickUnlockChecked ? settingsRoot.accent : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10); border.color: settingsRoot.borderColor; border.width: 1
+                Text {
+                  anchors.centerIn: parent
+                  visible: settingsRoot.quickUnlockChecked
+                  text: "\uf00c"
+                  font.family: settingsRoot.fontFamily
+                  color: settingsRoot.textOnAccent
+                  font.pixelSize: Style.fontPx(0.75)
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: settingsRoot.quickUnlockChecked = !settingsRoot.quickUnlockChecked }
+              }
+              Text { text: "Quick Unlock (System Authentication)"; color: settingsRoot.foreground; font.pixelSize: Style.font.bodySmall }
+            }
+            Text {
+              Layout.fillWidth: true
+              text: "After a screen lock or idle timeout, unlocking asks for your login password or fingerprint (polkit) instead of the master password. The vault key stays in locked memory only: suspend, logout and three denied prompts wipe it. Requires the packaged polkit policy."
+              color: settingsRoot.muted
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
@@ -985,7 +1023,7 @@ Item {
                   implicitHeight: 24
                   implicitWidth: lvlText.implicitWidth + 14
                   radius: 4
-                  color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (lvlMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+                  color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (lvlMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
                   border.color: isSelected ? settingsRoot.accent : "transparent"
                   border.width: 1
 
@@ -993,7 +1031,7 @@ Item {
                     id: lvlText
                     anchors.centerIn: parent
                     text: modelData.toUpperCase()
-                    color: lvlItem.isSelected ? settingsRoot.accent : (lvlMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+                    color: lvlItem.isSelected ? settingsRoot.accent : (lvlMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
                     font.pixelSize: Style.font.bodySmall
                     font.weight: lvlItem.isSelected ? Font.DemiBold : Font.Normal
                   }
@@ -1021,7 +1059,7 @@ Item {
             implicitHeight: 30
             implicitWidth: backBtnText.implicitWidth + 12
             radius: 5
-            color: Qt.rgba(0, 0, 0, 0.2)
+            color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
             border.color: settingsRoot.borderColor
             border.width: 1
 
@@ -1051,7 +1089,7 @@ Item {
               id: saveBtnText
               anchors.centerIn: parent
               text: settingsRoot.isBusy ? "Saving..." : "Save Settings"
-              color: "#ffffff"
+              color: settingsRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.Medium
             }
@@ -1087,7 +1125,7 @@ Item {
           implicitHeight: 24
           implicitWidth: fAllRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (fAllMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+          color: isSelected ? Qt.rgba(settingsRoot.accent.r, settingsRoot.accent.g, settingsRoot.accent.b, 0.2) : (fAllMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
           border.color: isSelected ? settingsRoot.accent : "transparent"
           border.width: 1
           RowLayout {
@@ -1096,13 +1134,13 @@ Item {
             spacing: 4
             Text {
               text: "All"
-              color: fAllItem.isSelected ? settingsRoot.accent : (fAllMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: fAllItem.isSelected ? settingsRoot.accent : (fAllMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fAllItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: (settingsRoot.logBuffer ? settingsRoot.logBuffer.length : 0)
-              color: fAllItem.isSelected ? settingsRoot.accent : Qt.darker(settingsRoot.foreground, 1.8)
+              color: fAllItem.isSelected ? settingsRoot.accent : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1122,8 +1160,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fErrRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.9, 0.2, 0.2, 0.2) : (fErrMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
-          border.color: isSelected ? "#ef4444" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.error, 0.2) : (fErrMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.error : "transparent"
           border.width: 1
           RowLayout {
             id: fErrRow
@@ -1131,13 +1169,13 @@ Item {
             spacing: 4
             Text {
               text: "Errors"
-              color: fErrItem.isSelected ? "#ef4444" : (fErrMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: fErrItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.error, 0.2, Commons.Color.popups.background) : (fErrMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fErrItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.errorCount
-              color: fErrItem.isSelected ? "#ef4444" : Qt.darker(settingsRoot.foreground, 1.8)
+              color: fErrItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.error, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1157,8 +1195,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fWarnRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.9, 0.6, 0.1, 0.2) : (fWarnMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
-          border.color: isSelected ? "#f59e0b" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.warn, 0.2) : (fWarnMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.warn : "transparent"
           border.width: 1
           RowLayout {
             id: fWarnRow
@@ -1166,13 +1204,13 @@ Item {
             spacing: 4
             Text {
               text: "Warnings"
-              color: fWarnItem.isSelected ? "#f59e0b" : (fWarnMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: fWarnItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.warn, 0.2, Commons.Color.popups.background) : (fWarnMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fWarnItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.warnCount
-              color: fWarnItem.isSelected ? "#f59e0b" : Qt.darker(settingsRoot.foreground, 1.8)
+              color: fWarnItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.warn, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1192,8 +1230,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fInfoRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.2, 0.5, 1.0, 0.2) : (fInfoMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
-          border.color: isSelected ? "#3b82f6" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.info, 0.2) : (fInfoMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.info : "transparent"
           border.width: 1
           RowLayout {
             id: fInfoRow
@@ -1201,13 +1239,13 @@ Item {
             spacing: 4
             Text {
               text: "Info"
-              color: fInfoItem.isSelected ? "#3b82f6" : (fInfoMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: fInfoItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.info, 0.2, Commons.Color.popups.background) : (fInfoMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fInfoItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.infoCount
-              color: fInfoItem.isSelected ? "#3b82f6" : Qt.darker(settingsRoot.foreground, 1.8)
+              color: fInfoItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.info, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1227,8 +1265,8 @@ Item {
           implicitHeight: 24
           implicitWidth: fDebugRow.implicitWidth + 14
           radius: 4
-          color: isSelected ? Qt.rgba(0.6, 0.4, 0.9, 0.2) : (fDebugMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
-          border.color: isSelected ? "#a855f7" : "transparent"
+          color: isSelected ? StatusPalette.tint(StatusPalette.debug, 0.2) : (fDebugMouse.containsMouse ? Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.05) : "transparent")
+          border.color: isSelected ? StatusPalette.debug : "transparent"
           border.width: 1
           RowLayout {
             id: fDebugRow
@@ -1236,13 +1274,13 @@ Item {
             spacing: 4
             Text {
               text: "Debug"
-              color: fDebugItem.isSelected ? "#a855f7" : (fDebugMouse.containsMouse ? settingsRoot.foreground : Qt.darker(settingsRoot.foreground, 1.3))
+              color: fDebugItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.debug, 0.2, Commons.Color.popups.background) : (fDebugMouse.containsMouse ? settingsRoot.foreground : settingsRoot.muted)
               font.pixelSize: Style.font.bodySmall
               font.weight: fDebugItem.isSelected ? Font.DemiBold : Font.Normal
             }
             Text {
               text: settingsRoot.debugCount
-              color: fDebugItem.isSelected ? "#a855f7" : Qt.darker(settingsRoot.foreground, 1.8)
+              color: fDebugItem.isSelected ? StatusPalette.labelOnTint(StatusPalette.debug, 0.2, Commons.Color.popups.background) : settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1262,7 +1300,7 @@ Item {
           implicitHeight: 22
           implicitWidth: clrLogText.implicitWidth + 12
           radius: 3
-          color: Qt.rgba(0, 0, 0, 0.2)
+          color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.06)
           border.color: settingsRoot.borderColor
           border.width: 1
           RowLayout {
@@ -1272,12 +1310,12 @@ Item {
             Text {
               text: "\uf1f8"
               font.family: settingsRoot.fontFamily
-              color: Qt.darker(settingsRoot.foreground, 1.5)
+              color: settingsRoot.muted
               font.pixelSize: Style.fontPx(0.75)
             }
             Text {
               text: "Clear"
-              color: Qt.darker(settingsRoot.foreground, 1.5)
+              color: settingsRoot.muted
               font.pixelSize: Style.font.caption
             }
           }
@@ -1327,7 +1365,7 @@ Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
         radius: 4
-        color: Qt.rgba(0, 0, 0, 0.3)
+        color: Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.10)
         border.color: settingsRoot.borderColor
         border.width: 1
 
@@ -1346,7 +1384,7 @@ Item {
             width: logListView.width - 8
             implicitHeight: Math.max(26, logMsgText.implicitHeight + 12)
             radius: 3
-            color: (modelData.level === "ERROR") ? Qt.rgba(0.9, 0.2, 0.2, 0.12) : ((modelData.level === "WARN") ? Qt.rgba(0.9, 0.6, 0.1, 0.08) : Qt.rgba(1, 1, 1, 0.03))
+            color: (modelData.level === "ERROR") ? StatusPalette.tint(StatusPalette.error, 0.12) : ((modelData.level === "WARN") ? StatusPalette.tint(StatusPalette.warn, 0.08) : Qt.rgba(settingsRoot.foreground.r, settingsRoot.foreground.g, settingsRoot.foreground.b, 0.03))
 
             Row {
               anchors.left: parent.left
@@ -1359,7 +1397,7 @@ Item {
               Text {
                 width: 58
                 text: (modelData.timestamp ? (modelData.timestamp.indexOf("T") !== -1 ? modelData.timestamp.split("T")[1].replace("Z", "") : modelData.timestamp) : "")
-                color: Qt.darker(settingsRoot.foreground, 2.0)
+                color: settingsRoot.muted
                 font.family: "monospace"
                 font.pixelSize: Style.fontPx(0.75)
               }
@@ -1369,11 +1407,11 @@ Item {
                 width: 44
                 height: 16
                 radius: 2
-                color: (modelData.level === "ERROR") ? "#ef4444" : ((modelData.level === "WARN") ? "#f59e0b" : ((modelData.level === "INFO") ? "#3b82f6" : "#6b7280"))
+                color: StatusPalette.levelColor(modelData.level)
                 Text {
                   anchors.centerIn: parent
                   text: modelData.level
-                  color: "#ffffff"
+                  color: StatusPalette.textOnTint(StatusPalette.levelColor(modelData.level), 1, Commons.Color.popups.background)
                   font.family: "monospace"
                   font.pixelSize: Style.fontPx(0.667)
                   font.weight: Font.Bold
@@ -1408,7 +1446,7 @@ Item {
             visible: settingsRoot.getFilteredLogs().length === 0
             anchors.centerIn: parent
             text: "No log entries recorded for this filter."
-            color: Qt.darker(settingsRoot.foreground, 2.0)
+            color: settingsRoot.muted
             font.pixelSize: Style.font.bodySmall
           }
         }
