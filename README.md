@@ -25,6 +25,8 @@ Powered by a dedicated pure Rust engine (`omawarden`), `omarchy-bitwarden` deliv
 | **Token Expiry Handling**      | **Master Password Unlock Only** (Keyring renews tokens silently; never forces API Key re-login)      | Desktop app preserves login; prompts for master password          | Hard 2-hr expiry (`Session expired`); forces manual CLI re-login            |
 | **Lock-Screen Sync**           | **Native daemon auto-detection (Omarchy lock, Hyprlock, D-Bus/logind, sleep)** | App idle timeout only              | None (manual lock required)                                                  |
 | **SSH Agent**                  | **Native OpenSSH Agent (`SSH_AUTH_SOCK`) with app-scoped approval cards** | Built into desktop app (eats ~1GB RAM) | None |
+| **System Quick Unlock**         | **Native Polkit / Biometrics integration** (unlock via fingerprint or system password after soft-lock; user key retained in `mlock` memory; wiped on hard lock/suspend) | Desktop biometrics (requires heavy Electron app resident) | None (always prompts for master password) |
+| **Desktop Theming & Palette**   | **Dynamic Adaptive Theming (`Commons.Color` + `StatusPalette`)** (zero hardcoded colors; seamless dark/light switching; WCAG contrast compliant) | Standard Dark/Light toggle         | None (terminal only)                                                         |
 | **Mutual TLS (mTLS)**          | **Native client cert authentication (PKCS#12 / PEM)**                | Requires system proxy configuration | None |
 | **Runtime Dependencies**       | **100% standalone binary** (Zero external deps)                      | Full Chromium/Node runtime         | Node.js environment required                                                 |
 
@@ -53,6 +55,8 @@ The difference between them is not "CLI vs Desktop", but rather **the distinct d
 | **Item Type Support Depth** | **First-Class 5 Types**: Dedicated extraction flags and structured UI inspection for Logins, Cards (CVV/number), Identities, Notes, and SSH Keys | Primarily targets password and TOTP; viewing cards/identities requires dumping unformatted raw JSON (`--raw`) |
 | **OpenSSH Agent Capabilities** | **Vault-Backed Agent (`SSH_AUTH_SOCK`) + Key Generation**: Keys parsed only for single signature and zeroized; on-demand overlay unlock; per-app approval scoping (`first-use`), and interactive confirmation card with 600ms anti-misclick protection | **Agent Proxy**: Implements `SSH_AUTH_SOCK` to sign in-memory; lacks keypair generation, approval confirmation prompts, and per-app authorization scoping |
 | **Mutual TLS (mTLS) Reverse Proxy** | **Native Support**: Authenticates to Vaultwarden/Bitwarden behind mTLS reverse proxies (PKCS#12 `.p12`/`.pfx` and PEM `.crt`/`.key`) with keyring-isolated passphrases | **Not supported** |
+| **System Quick Unlock** | **Polkit & Biometrics Integration**: Soft locks retain the user key in `mlock` memory; unlocks with fingerprint or system login password. Hard locks (suspend, session ceiling, logout, 3 failed attempts) wipe the key | **Not supported** (requires master password on every unlock) |
+| **Adaptive UI Theming** | **Native StatusPalette & Token System**: Seamless dark/light Omarchy theme adaptation with zero hardcoded colors and strict WCAG contrast compliance | **Not applicable** (pure CLI tool without GUI) |
 | **Password & Passphrase Generator** | **Dual Engine (GUI & CLI)**: Interactive `PasswordGeneratorModal.qml` with length/charset/entropy controls + Diceware word count/separators + `omawarden generate` with Wayland clipboard auto-clear guard | `rbw gen` CLI only (no GUI modal or Diceware passphrase support) |
 | **Attachment Decryption** | **Native**: Downloads encrypted blobs and decrypts binary payloads via `AES-256-CBC` for preview/export | **Not supported** (see open feature request [doy/rbw#130](https://github.com/doy/rbw/issues/130)) |
 | **Password Revision History** | **Native**: Decrypts and displays item password revision history | **Not supported** |
@@ -100,6 +104,7 @@ Ensure the following tools are available on your system:
 - **omawarden Engine**: High-performance Rust backend for Bitwarden (distributed via AUR or GitHub Releases)
 - **Keyring / Secret Service**: `secret-tool` (`libsecret` package on Arch/Debian/Fedora)
 - **Wayland Clipboard**: `wl-clipboard` (`wl-copy` / `wl-paste`)
+- **Polkit (Optional for Quick Unlock)**: `polkit` / system authentication daemon for fingerprint or system password quick unlock (`org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`)
 
 > [!TIP]
 > **One-Click Setup**: When opening Omarchy Bitwarden for the first time without prerequisites, an interactive **Dependency Check** view automatically appears, allowing you to install `omawarden-bin`, `libsecret`, and `wl-clipboard` with a single click via an Omarchy floating terminal popup.
@@ -450,7 +455,7 @@ We welcome contributions of all kinds! To ensure smooth collaboration and automa
    cargo clippy --all-targets --all-features -- -D warnings
    XDG_RUNTIME_DIR=/tmp cargo test
    ```
-   *(Optional)* If you use [`mise`](https://mise.jdx.dev/), you can run `mise run build` or `mise run dev-deploy` for local testing.
+   *(Optional)* If you use [`mise`](https://mise.jdx.dev/), you can run `mise run build` or `mise run dev-deploy-full` for local testing.
 3. **Conventional Commits**: Write clear commit messages following Conventional Commits (e.g., `feat(daemon): ...`, `fix(ui): ...`).
 4. **Submit PR against `develop`**: Open your Pull Request targeting the `develop` branch.
 

@@ -63,8 +63,12 @@ mise run build
 # Build release binary and copy to bin/
 mise run build-release
 
-# Deploy to local Omarchy plugins directory and restart shell
-mise run dev-deploy
+# Build, package, and deploy CLI and plugin in development mode (restarts shell)
+mise run dev-deploy-full
+
+# Or deploy components individually
+mise run dev-deploy-cli     # Build local Arch package and install omawarden
+mise run dev-deploy-plugin  # Update plugin files and restart Omarchy shell
 ```
 
 ---
