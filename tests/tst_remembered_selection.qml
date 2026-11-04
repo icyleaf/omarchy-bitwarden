@@ -31,20 +31,145 @@ Item {
     return JSON.parse(copy.lastInput).text
   }
 
-  function closeOnBeta() {
-    overlay.selectedIndex = overlay.filteredItems.findIndex(it => it.id === "beta")
-    check(overlay.selectedItem && overlay.selectedItem.id === "beta", "test setup selected beta")
-    overlay.toggle()
-    overlay.close() // shell.hide() delivers close() again
-    check(overlay.rememberedItemId === "beta", "second close overwrote the remembered ID")
+  function refreshList(items) {
+    overlay.loadVaultItems()
+    check(listProc.running, "missing list request")
+    listProc.reply(items)
   }
 
-  function reopen(items) {
+  function select(id) {
+    overlay.selectedIndex = overlay.filteredItems.findIndex(it => it.id === id)
+    check(overlay.highlightedItem && overlay.highlightedItem.id === id, "fixture cannot select " + id)
+  }
+
+  function closeOnBeta() {
+    select("beta")
     overlay.toggle()
-    check(!overlay.selectedItem, "field actions were available before auth was checked")
+    overlay.close() // shell.hide() can deliver close() again
+  }
+
+  function warmOpen(expectedId) {
+    var cached = overlay.rawVaultItems
+    overlay.toggle()
+    check(overlay.rawVaultItems === cached && overlay.highlightedItem.id === expectedId,
+          "reopen lost its cached rows or highlighted the wrong ID")
+    check(statusProc.running && !listProc.running, "warm reopen should only need the existing status probe")
+  }
+
+  function testImmediateKeys() {
+    overlay.searchQuery = "Same"
+    closeOnBeta()
+    check(overlay.rememberedItemId === "beta" && overlay.searchQuery === "", "short follow-up retained the wrong state")
+    refreshList([c, a, b])
+    warmOpen("beta")
+    overlay.requestFieldCopy("primary")
+    check(overlay.pendingFieldCopy.id === "beta" && !overlay.selectedItem, "early Enter lost its target")
+    refreshList([b, c, a]) // an unrelated sync reorders the rows during verification
+    check(overlay.highlightedItem.id === "beta" && overlay.searchQuery === "", "refresh changed the target or restored the query")
     statusProc.reply(session)
-    check(!overlay.selectedItem, "field actions were available before the local list arrived")
-    listProc.reply(items)
+    check(!listProc.running && copiedText() === "pass-b", "Enter needed a list reload or copied the wrong password")
+
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("totp")
+    statusProc.reply(session)
+    processEnding("totp", "beta").reply({ code: "123456", ttl: 28, period: 30 })
+    check(copiedText() === "123456", "early Ctrl+Enter did not copy the fresh TOTP")
+    overlay.requestFieldCopy("username")
+    check(copiedText() === "user-b", "username shortcut used the wrong item")
+
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("primary")
+    select("alpha")
+    statusProc.reply(session)
+    check(!overlay.pendingFieldCopy && !processEnding("copy", "30").running, "navigation redirected a queued copy")
+
+    closeOnBeta()
+    refreshList([a, c])
+    warmOpen("alpha")
+    statusProc.reply(session)
+    check(!overlay.rememberedItemId, "deleted item kept a pending selection")
+  }
+
+  function testSearchPreference() {
+    refreshList([a, b, c])
+    overlay.applyConfig({ server_url: session.server_url, remember_last_search: true })
+    overlay.searchQuery = "Same"
+    closeOnBeta()
+    check(!overlay.rememberedItemId, "two retention policies ran at once")
+    refreshList([b, c, a])
+    warmOpen("beta")
+    statusProc.reply(session)
+    check(overlay.searchQuery === "Same", "opt-in lost its query")
+    select("alpha")
+    refreshList([a, b, c])
+    check(overlay.selectedItem.id === "alpha", "refresh overrode manual navigation")
+
+    overlay.applyConfig({ server_url: session.server_url, remember_last_search: false })
+    closeOnBeta()
+    overlay.open(JSON.stringify({ view: "ssh-approval" }))
+    overlay.close()
+    check(overlay.rememberedItemId === "beta", "SSH-only open/close changed the selection")
+    statusProc.reply(session)
+    overlay.selectionExpiresAt = Date.now() - 1
+    warmOpen("alpha")
+    statusProc.reply(session)
+    check(!overlay.rememberedItemId, "suspend or delayed timer restored an expired item")
+  }
+
+  function testSessionBoundaries() {
+    // A probe started before hiding cannot validate the next view.
+    overlay.refreshAuthStatus()
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("primary")
+    statusProc.reply(session)
+    check(!overlay.selectedItem && overlay.pendingFieldCopy, "old status validated a new view")
+    overlay.refreshAuthStatus()
+    statusProc.reply(Object.assign({}, session, { lock_generation: "8000000000000000002" }))
+    check(!overlay.pendingFieldCopy && !overlay.highlightedItem && !processEnding("copy", "30").running,
+          "external lock/unlock copied from the old session")
+    listProc.reply([a, b])
+    check(overlay.selectedItem.id === "alpha", "new session restored the old selection")
+
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("username")
+    statusProc.reply({ status: "locked", has_session: true, server_url: session.server_url })
+    check(!overlay.highlightedItem && !overlay.pendingFieldCopy && !processEnding("copy", "30").running, "hidden lock released a credential")
+    overlay.refreshAuthStatus()
+    statusProc.reply(session)
+    listProc.reply([a, b])
+
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("primary")
+    overlay.applyConfig({ server_url: "https://second.example" })
+    statusProc.reply(session)
+    check(!overlay.highlightedItem && !overlay.pendingFieldCopy && !processEnding("copy", "30").running, "server switch kept the old copy")
+    overlay.refreshAuthStatus()
+    statusProc.reply(session)
+    listProc.reply([a, b])
+    closeOnBeta()
+    warmOpen("beta")
+    overlay.requestFieldCopy("primary")
+    overlay.doLock()
+    statusProc.reply(session)
+    check(overlay.authState.status === "locked" && !overlay.pendingFieldCopy && !overlay.highlightedItem, "a stale status undid manual lock")
+
+    var legacy = Object.assign({}, session, { lock_generation: undefined })
+    overlay.refreshAuthStatus()
+    statusProc.reply(legacy)
+    listProc.reply([a, b])
+    closeOnBeta()
+    check(!overlay.rememberedItemId, "older engine allowed an unverified remembered ID")
+    overlay.toggle()
+    check(overlay.selectedItem.id === "alpha", "older engine lost the default reopen behavior")
+    statusProc.reply(session)
+    closeOnBeta()
+    overlay.doLogout()
+    check(!overlay.rememberedItemId && !overlay.highlightedItem, "logout retained the selection")
   }
 
   Timer {
@@ -52,7 +177,8 @@ Item {
     interval: 100
     onTriggered: {
       try {
-        check(overlay.rememberedItemId === "", "the timer did not clear the hidden selection")
+        check(!overlay.rememberedItemId, "the TTL did not expire while hidden")
+        check(!statusProc.running, "a status poll started while hidden")
         console.log("Remembered selection lifecycle passed")
         Qt.exit(0)
       } catch (e) { console.error(e); Qt.exit(1) }
@@ -68,117 +194,18 @@ Item {
       statusProc.reply(session)
       listProc = processEnding("vault", "list")
       listProc.reply([a, b, c])
-      overlay.searchQuery = "Same"
-      closeOnBeta()
-      check(overlay.searchQuery === "", "default search preference retained query text")
-      reopen([c, a, b])
-      check(overlay.selectedIndex === 2 && overlay.selectedItem.id === "beta", "reordered duplicate names restored the wrong item")
-
-      overlay.copyItemUsername(overlay.selectedItem)
-      check(copiedText() === "user-b", "username shortcut used the wrong item")
-      overlay.executePrimaryAction(overlay.selectedItem)
-      check(copiedText() === "pass-b", "password shortcut used the wrong item")
-      processEnding("totp", "beta").reply({ code: "123456", ttl: 28, period: 30 })
-      overlay.copyItemTotp(overlay.selectedItem)
-      check(copiedText() === "123456", "TOTP shortcut did not use the restored item")
-
-      // A status poll and a list refresh from the old view may both finish after reopening.
-      overlay.refreshAuthStatus()
-      overlay.loadVaultItems()
-      closeOnBeta()
-      overlay.toggle()
-      statusProc.reply(session)
-      listProc.reply([b])
-      check(!overlay.selectedItem && overlay.rememberedItemId === "beta", "stale replies exposed an item")
-      overlay.refreshAuthStatus()
-      statusProc.reply(session)
-      listProc.reply([a, b, c])
-
-      overlay.applyConfig({ server_url: session.server_url, remember_last_search: true })
-      overlay.searchQuery = "Same"
-      closeOnBeta()
-      reopen([b, c, a])
-      check(overlay.searchQuery === "Same" && overlay.selectedItem.id === "beta", "remembered search lost its query or item")
-      overlay.selectedIndex = 1 // alpha
-      overlay.loadVaultItems()
-      listProc.reply([a, b, c])
-      check(overlay.selectedItem.id === "alpha", "later refresh overrode manual navigation")
-      closeOnBeta()
-      reopen([a, { id: "beta", name: "Renamed", type_name: "login", login: {} }])
-      check(overlay.selectedItem.id === "alpha" && overlay.filteredItems.length === 1, "restore bypassed the search filter")
-
-      overlay.applyConfig({ server_url: session.server_url, remember_last_search: false })
-      overlay.searchQuery = ""
-      overlay.loadVaultItems()
-      listProc.reply([a, b, c])
-      closeOnBeta()
-      reopen([a, c])
-      check(overlay.selectedItem.id === "alpha" && !overlay.rememberedItemId, "deleted ID did not fall back to the first result")
-      overlay.loadVaultItems()
-      listProc.reply([a, b, c])
-      closeOnBeta()
-      overlay.open(JSON.stringify({ view: "ssh-approval" }))
-      overlay.close()
-      check(overlay.rememberedItemId === "beta", "SSH-only open/close replaced the selection")
-
-      overlay.selectionExpiresAt = Date.now() - 1
-      overlay.toggle()
-      check(!overlay.rememberedItemId && overlay.selectedItem.id === "alpha", "overdue timer restored an expired ID")
-      statusProc.reply(session)
-      closeOnBeta()
-      overlay.toggle()
-      statusProc.reply({ status: "locked", has_session: true, server_url: session.server_url })
-      check(!overlay.rememberedItemId && !overlay.selectedItem, "lock while hidden restored a cached item")
-
-      overlay.refreshAuthStatus()
-      statusProc.reply(session)
-      listProc.reply([a, b])
-      closeOnBeta()
-      overlay.refreshAuthStatus() // the hidden lock timer polls while the ID is live
-      statusProc.reply({ status: "locked", has_session: true, server_url: session.server_url })
-      check(!overlay.opened && !overlay.rememberedItemId && !listProc.running, "hidden lock retained the ID or reloaded the vault")
-      overlay.toggle()
-      statusProc.reply(session)
-      listProc.reply([a, b])
-      closeOnBeta()
-      overlay.toggle()
-      statusProc.reply(Object.assign({}, session, { lock_generation: "8000000000000000002" }))
-      listProc.reply([a, b])
-      check(!overlay.rememberedItemId && overlay.selectedItem.id === "alpha", "missed lock/unlock cycle restored beta")
-      closeOnBeta()
-      overlay.toggle()
-      statusProc.reply(Object.assign({}, session, { lock_generation: undefined }))
-      listProc.reply([a, b])
-      overlay.selectedIndex = 1
-      overlay.toggle()
-      check(!overlay.rememberedItemId, "older engine allowed a restore without a lock generation")
-      overlay.toggle()
-      statusProc.reply(session)
-      closeOnBeta()
-      overlay.applyConfig({ server_url: "https://second.example" })
-      check(!overlay.rememberedItemId && !overlay.selectedItem, "switching servers retained the old selection")
-      overlay.toggle()
-      statusProc.reply(session)
-      listProc.reply([a, b])
-      closeOnBeta()
-      overlay.refreshAuthStatus()
-      overlay.doLock()
-      statusProc.reply(session)
-      check(overlay.authState.status === "locked" && !overlay.rememberedItemId, "stale auth reply undid an explicit lock")
-      overlay.toggle()
-      statusProc.reply(session)
-      listProc.reply([a, b])
-      closeOnBeta()
-      overlay.doLogout()
-      check(!overlay.rememberedItemId && !overlay.selectedItem, "logout retained the old selection")
+      testImmediateKeys()
+      testSearchPreference()
+      testSessionBoundaries()
 
       overlay.toggle()
       statusProc.reply(session)
       listProc.reply([a, b])
       closeOnBeta()
-      for (var j = 0; j < overlay.data.length; ++j) {
-        var timer = overlay.data[j]
-        if (timer.interval === 30000 && timer.running) { timer.interval = 10; timer.restart(); break }
+      for (var i = 0; i < overlay.data.length; i++) {
+        var timer = overlay.data[i]
+        if (timer.interval === 3000 && timer.repeat) check(!timer.running, "lockSyncTimer is polling while hidden")
+        if (timer.interval === 30000 && timer.running) { timer.interval = 10; timer.restart() }
       }
       checkExpiry.start()
     } catch (e) { console.error(e, e.stack); Qt.exit(1) }

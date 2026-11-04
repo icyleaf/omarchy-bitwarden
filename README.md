@@ -76,7 +76,7 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 
 ## Keyboard Shortcuts
 
-To copy another field from the same item, reopen the overlay within 30 seconds. It reselects the item by ID if it still appears in the results. Locking the vault, signing out, or changing servers clears the remembered ID. This requires an engine that reports the vault’s lock generation.
+With **Remember Last Search State** off, the overlay opens with an empty search box. Reopen it within 30 seconds to select the same item by ID and copy another field. This shortcut requires an engine that reports the vault’s lock generation. With the setting on, the overlay keeps the full search and selection while the vault is unlocked. Locking, signing out, or changing servers clears the remembered state.
 
 | Shortcut                               | Description                                                               |
 | :------------------------------------- | :------------------------------------------------------------------------ |
