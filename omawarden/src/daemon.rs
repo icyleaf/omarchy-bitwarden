@@ -182,9 +182,20 @@ pub fn ensure_daemon_running() {
 }
 
 pub fn send_daemon_request(req: &Value) -> Option<Value> {
+    dispatch_daemon_request(req).ok()
+}
+
+#[derive(Debug)]
+pub enum DispatchError {
+    NotSent,
+    Unconfirmed,
+}
+
+/// Preserve the dispatch boundary for callers performing a non-idempotent write.
+pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
     let socket_path = get_socket_path();
     if !socket_path.exists() {
-        return None;
+        return Err(DispatchError::NotSent);
     }
 
     if let Err(e) = validate_socket_path(&socket_path) {
@@ -194,10 +205,10 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
             socket_path.display(),
             e
         );
-        return None;
+        return Err(DispatchError::NotSent);
     }
 
-    let mut stream = UnixStream::connect(&socket_path).ok()?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|_| DispatchError::NotSent)?;
 
     // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
     if let Err(e) = verify_peer_credentials(&stream) {
@@ -206,7 +217,7 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
             "Refusing to send request: server peer UID verification failed: {}",
             e
         );
-        return None;
+        return Err(DispatchError::NotSent);
     }
 
     let mut payload_val = req.clone();
@@ -219,14 +230,18 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
     }
 
     let payload = format!("{}\n", payload_val);
-    stream.write_all(payload.as_bytes()).ok()?;
-    stream.flush().ok()?;
+    stream
+        .write_all(payload.as_bytes())
+        .map_err(|_| DispatchError::Unconfirmed)?;
+    stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line).ok()?;
+    reader
+        .read_line(&mut response_line)
+        .map_err(|_| DispatchError::Unconfirmed)?;
 
-    serde_json::from_str(&response_line).ok()
+    serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
 }
 
 pub struct DaemonState {
@@ -758,6 +773,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "list"
             | "search"
             | "ssh_key_create"
+            | "ssh_key_create_v2"
             | "get_item"
             | "get_ssh_key"
             | "get_attachment_key"
@@ -1001,7 +1017,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     }
 
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
+    let mut line = zeroize::Zeroizing::new(String::new());
     reader.read_line(&mut line)?;
 
     if line.trim().is_empty() {
@@ -1017,6 +1033,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
     };
 
+    drop(line);
+    drop(reader);
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let is_unlocked = state.vault_mgr.is_unlocked();
 
@@ -1028,12 +1046,21 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             | "get_ssh_key"
             | "get_attachment_key"
             | "ssh_key_create"
+            | "ssh_key_create_v2"
             | "sync"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()))
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
 
     if is_privileged && !is_unlocked {
+        if action == "ssh_key_create_v2" {
+            writeln!(
+                stream,
+                "{}",
+                json!({"ok": false, "outcome": "rejected", "error": "Unlock the vault before creating a cipher."})
+            )?;
+            return Ok(());
+        }
         let _ = writeln!(
             stream,
             "{}",
@@ -1055,6 +1082,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         "ping" => json!({
             "ok": true,
             "pong": true,
+            "ssh_write_receipt": true,
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
@@ -1156,43 +1184,15 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             let category = req.get("category").and_then(|v| v.as_str());
             json!(state.vault_mgr.search_items(query, category))
         }
+        // A legacy CLI may repeat the POST locally on any non-success reply.
+        // Never dispatch a remote write for the legacy request.
         "ssh_key_create" => {
-            if let Some(user_key) = state.vault_mgr.get_user_key() {
-                let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let priv_k = req
-                    .get("private_key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let pub_k = req.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
-                let fp = req
-                    .get("fingerprint")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let notes = req.get("notes").and_then(|v| v.as_str());
-                let folder_id = req.get("folder_id").and_then(|v| v.as_str());
-
-                let ssh_data = crate::ssh::GeneratedSshKey {
-                    algorithm_name: String::new(),
-                    private_key: priv_k.to_string(),
-                    public_key: pub_k.to_string(),
-                    fingerprint: fp.to_string(),
-                };
-
-                match state.vault_mgr.create_ssh_key_with_client(
-                    name,
-                    &ssh_data,
-                    notes,
-                    folder_id,
-                    &user_key,
-                    client_context.as_ref(),
-                ) {
-                    Ok(item) => json!({ "ok": true, "item": item }),
-                    Err(e) => json!({ "ok": false, "error": e }),
-                }
-            } else {
-                json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
-            }
+            json!({"ok":false, "outcome":"rejected", "error":"Update the CLI to create SSH keys safely."})
         }
+        "ssh_key_create_v2" => match state.vault_mgr.write_ssh_key(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
         "get_item" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());

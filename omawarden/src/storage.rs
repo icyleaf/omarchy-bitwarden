@@ -41,6 +41,15 @@ pub struct VaultStorage {
     pub ciphers: Vec<Value>,
 }
 
+impl VaultStorage {
+    pub(crate) fn same_account(&self, other: &Self) -> bool {
+        self.server_url == other.server_url
+            && self.user_email == other.user_email
+            && self.user_id == other.user_id
+            && self.enc_user_key == other.enc_user_key
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageManager {
     pub file_path: PathBuf,
@@ -120,6 +129,36 @@ impl StorageManager {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => VaultStorage::default(),
         }
+    }
+
+    /// Serialize credential replacement and revocation across CLI and daemon processes.
+    /// Keep the lock file separate from data.json, whose inode changes on each save.
+    pub(crate) fn account_guard(&self) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent = self
+            .file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if !parent.exists() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        let guard = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.file_path.with_extension("account.lock"))?;
+        guard.lock()?;
+        Ok(guard)
+    }
+
+    /// A writer must distinguish a missing or corrupt cache from an empty vault.
+    pub(crate) fn load_existing(&self) -> std::io::Result<VaultStorage> {
+        Ok(serde_json::from_reader(std::io::BufReader::new(
+            fs::File::open(&self.file_path)?,
+        ))?)
     }
 
     pub fn save(&self, data: &VaultStorage) -> std::io::Result<()> {

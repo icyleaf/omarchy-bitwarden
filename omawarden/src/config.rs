@@ -289,13 +289,6 @@ impl ConfigManager {
                 cfg.identity_url = None;
             }
 
-            if storage_mgr.file_path.exists() {
-                let _ = fs::remove_file(&storage_mgr.file_path);
-            }
-
-            keyring_mgr.clear_all();
-            keyring_mgr.clear_session(&cfg.server_url);
-
             // ADR-0025 decision 4: a server/account change must zeroize the
             // retained quick-unlock key. Send the explicit wipe before the
             // daemon stop (whose own lock also wipes): the request is the
@@ -304,6 +297,16 @@ impl ConfigManager {
                 "action": "wipe_quick_unlock"
             }));
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
+            let _account_guard = storage_mgr.account_guard()?;
+            match fs::remove_file(&storage_mgr.file_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+
+            keyring_mgr.clear_all();
+            keyring_mgr.clear_session(&cfg.server_url);
+
             crate::attachment::clear_preview_attachments(None);
 
             crate::log_info!(

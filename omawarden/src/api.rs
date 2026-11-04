@@ -770,6 +770,17 @@ pub fn build_http_client_for_url_with_config(
     target_url: Option<&str>,
     config_override: Option<&crate::config::Config>,
 ) -> Result<Client, ApiError> {
+    http_client_builder(timeout, client_context, target_url, config_override)?
+        .build()
+        .map_err(ApiError::from)
+}
+
+fn http_client_builder(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+    target_url: Option<&str>,
+    config_override: Option<&crate::config::Config>,
+) -> Result<reqwest::blocking::ClientBuilder, ApiError> {
     let mut default_headers = reqwest::header::HeaderMap::new();
     let ua_str = format_user_agent(client_context);
     let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
@@ -831,9 +842,7 @@ pub fn build_http_client_for_url_with_config(
         }
     }
 
-    builder
-        .build()
-        .map_err(|e| ApiError::Http(format!("Failed to build HTTP client: {}", e)))
+    Ok(builder)
 }
 
 pub struct BitwardenApiClient {
@@ -1346,6 +1355,24 @@ impl BitwardenApiClient {
         }
 
         read_response_json::<SyncResponse>(&mut resp, MAX_SYNC_BODY_SIZE)
+    }
+
+    /// A redirect or transparent transport retry could submit a second create.
+    pub(crate) fn for_cipher_write(
+        server: &str,
+        context: Option<&ClientContext>,
+    ) -> Result<Self, ApiError> {
+        let urls = EnvironmentUrls::resolve(server, None);
+        let client = http_client_builder(Duration::from_secs(30), context, Some(server), None)?
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
+        Ok(Self {
+            server_url: urls.base_url.clone(),
+            urls,
+            client,
+            client_init_error: None,
+        })
     }
 
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {

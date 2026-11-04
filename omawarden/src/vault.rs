@@ -892,6 +892,15 @@ impl VaultManager {
         client_context: Option<&ClientContext>,
     ) -> Result<String, String> {
         let storage = self.storage_mgr.load();
+        self.renew_for_account(&storage, client_context, self.lock_generation())
+    }
+
+    pub(crate) fn renew_for_account(
+        &self,
+        storage: &VaultStorage,
+        client_context: Option<&ClientContext>,
+        generation: u64,
+    ) -> Result<String, String> {
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
         } else {
@@ -922,7 +931,7 @@ impl VaultManager {
             match client.refresh_token_grant(ref_tok) {
                 Ok(tok_resp) => {
                     crate::log_info!("omawarden:vault", "Token refresh grant successful.");
-                    self.persist_renewed_tokens(&tok_resp);
+                    self.persist_renewed_tokens(storage, generation, &tok_resp)?;
                     return Ok(tok_resp.access_token);
                 }
                 Err(ApiError::AuthFailed(msg)) => {
@@ -969,7 +978,7 @@ impl VaultManager {
                             "omawarden:vault",
                             "Silent re-authentication via API key successful."
                         );
-                        self.persist_renewed_tokens(&tok_resp);
+                        self.persist_renewed_tokens(storage, generation, &tok_resp)?;
                         return Ok(tok_resp.access_token);
                     }
                     Err(ApiError::AuthFailed(msg)) => {
@@ -1007,12 +1016,12 @@ impl VaultManager {
         }
 
         if !had_credentials {
-            self.purge_credentials_and_lock();
+            self.purge_credentials_and_lock(storage, generation);
             return Err("Session token missing. Please log in.".to_string());
         }
 
         if auth_failed {
-            self.purge_credentials_and_lock();
+            self.purge_credentials_and_lock(storage, generation);
             return Err(
                 "Session expired or credentials rejected. Please log in again.".to_string(),
             );
@@ -1023,8 +1032,23 @@ impl VaultManager {
         }))
     }
 
-    fn persist_renewed_tokens(&self, tok_resp: &crate::api::TokenResponse) {
-        let mut updated_storage = self.storage_mgr.load();
+    fn persist_renewed_tokens(
+        &self,
+        storage: &VaultStorage,
+        generation: u64,
+        tok_resp: &crate::api::TokenResponse,
+    ) -> Result<(), String> {
+        let _account_guard = self.storage_mgr.account_guard().map_err(|_| {
+            self.lock();
+            "Cannot secure renewed session state"
+        })?;
+        let mut updated_storage = self.storage_mgr.load_existing().map_err(|_| {
+            self.revoke_account(storage, generation);
+            "Vault cache unavailable"
+        })?;
+        if generation != self.lock_generation() || !storage.same_account(&updated_storage) {
+            return Err("Session changed during token renewal".into());
+        }
         let s_url = if !updated_storage.server_url.is_empty() {
             &updated_storage.server_url
         } else {
@@ -1045,10 +1069,16 @@ impl VaultManager {
                 true
             };
             if s1 && s2 {
-                updated_storage.access_token = None;
-                updated_storage.refresh_token = None;
-                let _ = self.storage_mgr.save(&updated_storage);
-                return;
+                if updated_storage.access_token.is_some() || updated_storage.refresh_token.is_some()
+                {
+                    updated_storage.access_token = None;
+                    updated_storage.refresh_token = None;
+                    self.storage_mgr.save(&updated_storage).map_err(|_| {
+                        self.revoke_account(storage, generation);
+                        "Failed to save renewed session state"
+                    })?;
+                }
+                return Ok(());
             }
         }
 
@@ -1056,13 +1086,27 @@ impl VaultManager {
             "omawarden:vault",
             "Keyring not available or failed to store renewed tokens. Locking session."
         );
-        self.purge_credentials_and_lock();
+        self.revoke_account(storage, generation);
+        Err("Failed to store renewed credentials in the keyring".into())
     }
 
-    fn purge_credentials_and_lock(&self) {
-        let mut updated = self.storage_mgr.load();
-        let s_url = if !updated.server_url.is_empty() {
-            &updated.server_url
+    fn purge_credentials_and_lock(&self, expected: &VaultStorage, generation: u64) {
+        match self.storage_mgr.account_guard() {
+            Ok(_guard) => self.revoke_account(expected, generation),
+            Err(_) => self.lock(),
+        }
+    }
+
+    fn revoke_account(&self, expected: &VaultStorage, generation: u64) {
+        let disk = self.storage_mgr.load_existing();
+        if self.lock_generation() != generation
+            || disk.as_ref().is_ok_and(|s| !s.same_account(expected))
+        {
+            return;
+        }
+        self.lock();
+        let s_url = if !expected.server_url.is_empty() {
+            &expected.server_url
         } else {
             &self.server_url
         };
@@ -1071,11 +1115,11 @@ impl VaultManager {
         self.keyring_mgr
             .clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
         self.keyring_mgr.clear_session(s_url);
-        updated.access_token = None;
-        updated.refresh_token = None;
-        let _ = self.storage_mgr.save(&updated);
-        self.lock();
-        crate::attachment::clear_preview_attachments(None);
+        if let Ok(mut updated) = disk {
+            updated.access_token = None;
+            updated.refresh_token = None;
+            let _ = self.storage_mgr.save(&updated);
+        }
     }
 
     pub fn get_items(&self) -> Vec<VaultItem> {
@@ -1233,165 +1277,6 @@ impl VaultManager {
 
     pub fn get_user_key(&self) -> Option<SymmetricCryptoKey> {
         self.user_key.read().ok().and_then(|k| k.clone())
-    }
-
-    pub fn create_ssh_key(
-        &self,
-        name: &str,
-        ssh_key_data: &crate::ssh::GeneratedSshKey,
-        notes: Option<&str>,
-        folder_id: Option<&str>,
-        user_key: &SymmetricCryptoKey,
-    ) -> Result<VaultItem, String> {
-        self.create_ssh_key_with_client(name, ssh_key_data, notes, folder_id, user_key, None)
-    }
-
-    pub fn create_ssh_key_with_client(
-        &self,
-        name: &str,
-        ssh_key_data: &crate::ssh::GeneratedSshKey,
-        notes: Option<&str>,
-        folder_id: Option<&str>,
-        user_key: &SymmetricCryptoKey,
-        client_context: Option<&ClientContext>,
-    ) -> Result<VaultItem, String> {
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let initial_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        let active_token = match initial_token {
-            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
-            Some(_) => {
-                crate::log_info!(
-                    "omawarden:vault",
-                    "Access token is expired for create_ssh_key, attempting renewal..."
-                );
-                self.renew_session_with_client(client_context)?
-            }
-            None => self.renew_session_with_client(client_context)?,
-        };
-
-        let enc_name = user_key
-            .encrypt_string(name)
-            .map_err(|e| format!("Failed to encrypt item name: {:?}", e))?;
-
-        let enc_notes = if let Some(n) = notes.filter(|s| !s.is_empty()) {
-            Some(
-                user_key
-                    .encrypt_string(n)
-                    .map_err(|e| format!("Failed to encrypt notes: {:?}", e))?,
-            )
-        } else {
-            None
-        };
-
-        let enc_private_key = user_key
-            .encrypt_string(&ssh_key_data.private_key)
-            .map_err(|e| format!("Failed to encrypt private key: {:?}", e))?;
-
-        let enc_public_key = user_key
-            .encrypt_string(&ssh_key_data.public_key)
-            .map_err(|e| format!("Failed to encrypt public key: {:?}", e))?;
-
-        let enc_fingerprint = user_key
-            .encrypt_string(&ssh_key_data.fingerprint)
-            .map_err(|e| format!("Failed to encrypt fingerprint: {:?}", e))?;
-
-        let payload = json!({
-            "type": 5,
-            "folderId": folder_id,
-            "organizationId": null,
-            "name": enc_name,
-            "notes": enc_notes,
-            "favorite": false,
-            "reprompt": 0,
-            "sshKey": {
-                "privateKey": enc_private_key,
-                "publicKey": enc_public_key,
-                "keyFingerprint": enc_fingerprint,
-            }
-        });
-
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
-
-        let created_cipher = match client.create_cipher(&active_token, &payload) {
-            Ok(c) => c,
-            Err(ApiError::HttpStatus(code, _))
-                if code == reqwest::StatusCode::UNAUTHORIZED
-                    || code == reqwest::StatusCode::FORBIDDEN =>
-            {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP {} creating SSH key. Attempting session renewal...",
-                    code
-                );
-                let renewed = self.renew_session_with_client(client_context)?;
-                client
-                    .create_cipher(&renewed, &payload)
-                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
-            }
-            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP 401/403 creating SSH key. Attempting session renewal..."
-                );
-                let renewed = self.renew_session_with_client(client_context)?;
-                client
-                    .create_cipher(&renewed, &payload)
-                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
-            }
-            Err(e) => return Err(format!("Failed to create SSH key on server: {:?}", e)),
-        };
-
-        // Update local storage data.json
-        let mut updated_storage = self.storage_mgr.load();
-        updated_storage.ciphers.push(created_cipher.clone());
-        let _ = self.storage_mgr.save(&updated_storage);
-
-        // Decrypt the created item into a VaultItem
-        let decrypted_items = decrypt_sync_ciphers_with_context(
-            &[created_cipher],
-            &updated_storage.folders,
-            &updated_storage.organizations,
-            user_key,
-            updated_storage.enc_private_key.as_deref(),
-        );
-
-        let decrypted_item = decrypted_items
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Failed to decrypt newly created cipher item".to_string())?;
-
-        // Update in-memory items if unlocked
-        if let Ok(mut items) = self.decrypted_items.write() {
-            items.push(decrypted_item.clone());
-        }
-
-        crate::log_info!(
-            "omawarden:vault",
-            "Successfully created and stored SSH key '{}' ({})",
-            decrypted_item.name,
-            decrypted_item.id
-        );
-
-        Ok(decrypted_item)
     }
 
     pub fn find_item(&self, query: &str, category: Option<&str>) -> Option<VaultItem> {

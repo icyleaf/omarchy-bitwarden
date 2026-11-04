@@ -15,6 +15,7 @@ pub mod logging;
 pub mod polkit;
 pub mod ssh;
 pub mod ssh_agent;
+mod ssh_write;
 pub mod storage;
 pub mod totp;
 pub mod vault;
