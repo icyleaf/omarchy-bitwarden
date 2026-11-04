@@ -92,29 +92,28 @@ pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     truncated.trim().to_string()
 }
 
-pub fn is_jwt_expired(token: &str) -> bool {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return false;
-    }
+pub(crate) fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
     use base64::Engine;
-
-    let payload = parts[1];
-    let decoded = URL_SAFE_NO_PAD
+    let mut parts = token.split('.');
+    parts.next()?;
+    let payload = parts.next()?;
+    parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD
         .decode(payload)
         .or_else(|_| URL_SAFE.decode(payload))
-        .or_else(|_| STANDARD.decode(payload));
+        .or_else(|_| STANDARD.decode(payload))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
 
-    if let Ok(bytes) = decoded {
-        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(exp) = val.get("exp").and_then(|v| v.as_i64()) {
-                let now = chrono::Utc::now().timestamp();
-                return now >= exp;
-            }
-        }
-    }
-    false
+pub fn is_jwt_expired(token: &str) -> bool {
+    jwt_claims(token)
+        .and_then(|claims| claims["exp"].as_i64())
+        .is_some_and(|exp| chrono::Utc::now().timestamp() >= exp)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -546,17 +545,6 @@ impl AuthManager {
             }
         };
 
-        let mut storage = self.storage_mgr.load();
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.user_email = email.trim().to_lowercase();
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
-
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
             crate::log_error!("omawarden:auth", "{}", err_msg);
@@ -570,6 +558,33 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        let before_sync = self.storage_mgr.load();
+        let initial_sync = client.sync_vault(&token_resp.access_token);
+
+        let Ok(account_guard) = self.storage_mgr.account_guard() else {
+            return AuthResult {
+                ok: false,
+                error: Some("Cannot secure the account cache".into()),
+                ..Default::default()
+            };
+        };
+        let mut storage = self.storage_mgr.load();
+        if !storage.same_account(&before_sync) {
+            return AuthResult {
+                ok: false,
+                error: Some("Account changed during login. Sign in again.".into()),
+                ..Default::default()
+            };
+        }
+        storage.server_url = self.server_url.clone();
+        storage.identity_url = self.identity_url.clone();
+        storage.user_email = email.trim().to_lowercase();
+        storage.enc_user_key = token_resp.key;
+        storage.enc_private_key = token_resp.private_key;
+        storage.kdf = token_resp.kdf;
+        storage.kdf_iterations = token_resp.kdf_iterations;
+        storage.kdf_memory = token_resp.kdf_memory;
+        storage.kdf_parallelism = token_resp.kdf_parallelism;
 
         if !self.keyring_mgr.store_token(
             &self.server_url,
@@ -614,7 +629,7 @@ impl AuthManager {
         storage.refresh_token = None;
 
         // Pull initial sync
-        if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
+        if let Ok(sync_data) = initial_sync {
             storage.ciphers = sync_data.ciphers;
             storage.folders = sync_data.folders;
             storage.collections = sync_data.collections;
@@ -640,6 +655,7 @@ impl AuthManager {
         }
 
         let _ = self.storage_mgr.save(&storage);
+        drop(account_guard);
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -714,17 +730,6 @@ impl AuthManager {
             }
         };
 
-        let mut storage = self.storage_mgr.load();
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.client_id = Some(client_id.trim().to_string());
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
-
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
             crate::log_error!("omawarden:auth", "{}", err_msg);
@@ -736,6 +741,33 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        let before_sync = self.storage_mgr.load();
+        let initial_sync = client.sync_vault(&token_resp.access_token);
+
+        let Ok(account_guard) = self.storage_mgr.account_guard() else {
+            return AuthResult {
+                ok: false,
+                error: Some("Cannot secure the account cache".into()),
+                ..Default::default()
+            };
+        };
+        let mut storage = self.storage_mgr.load();
+        if !storage.same_account(&before_sync) {
+            return AuthResult {
+                ok: false,
+                error: Some("Account changed during login. Sign in again.".into()),
+                ..Default::default()
+            };
+        }
+        storage.server_url = self.server_url.clone();
+        storage.identity_url = self.identity_url.clone();
+        storage.client_id = Some(client_id.trim().to_string());
+        storage.enc_user_key = token_resp.key;
+        storage.enc_private_key = token_resp.private_key;
+        storage.kdf = token_resp.kdf;
+        storage.kdf_iterations = token_resp.kdf_iterations;
+        storage.kdf_memory = token_resp.kdf_memory;
+        storage.kdf_parallelism = token_resp.kdf_parallelism;
 
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
@@ -797,7 +829,7 @@ impl AuthManager {
         storage.refresh_token = None;
 
         // Pull initial sync
-        if let Ok(sync_data) = client.sync_vault(&token_resp.access_token) {
+        if let Ok(sync_data) = initial_sync {
             storage.ciphers = sync_data.ciphers;
             storage.folders = sync_data.folders;
             storage.collections = sync_data.collections;
@@ -850,6 +882,7 @@ impl AuthManager {
         }
 
         let _ = self.storage_mgr.save(&storage);
+        drop(account_guard);
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -965,12 +998,25 @@ impl AuthManager {
         } else {
             &self.server_url
         };
-        self.keyring_mgr.clear_all();
-        self.keyring_mgr.clear_session(s_url);
-        let _ = self.storage_mgr.save(&VaultStorage::default());
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        let Ok(_account_guard) = self.storage_mgr.account_guard() else {
+            return AuthResult {
+                ok: false,
+                error: Some("Vault locked; could not secure the account cache for logout.".into()),
+                ..Default::default()
+            };
+        };
+        self.keyring_mgr.clear_all();
+        self.keyring_mgr.clear_session(s_url);
+        if self.storage_mgr.save(&VaultStorage::default()).is_err() {
+            return AuthResult {
+                ok: false,
+                error: Some("Vault locked; failed to clear the account cache.".into()),
+                ..Default::default()
+            };
+        }
         crate::attachment::clear_preview_attachments(None);
         crate::log_info!(
             "omawarden:auth",

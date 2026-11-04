@@ -2806,7 +2806,9 @@ Item {
 
         if (jsonRes && jsonRes.ok) {
           root.showSshKeyModal = false
-          if (sshKeyActionProc.actionType === "create") {
+          if (jsonRes.outcome === "saved_needs_sync") {
+            root.statusMessage = "SSH key saved on the server. Sync the vault to refresh the local copy."
+          } else if (sshKeyActionProc.actionType === "create") {
             root.statusMessage = "SSH key '" + sshKeyActionProc.actionName + "' generated successfully."
             root.loadVaultItems()
           } else if (sshKeyActionProc.actionType === "import") {

@@ -1164,7 +1164,11 @@ fn main() -> ExitCode {
                     let _ = send_daemon_request(&json!({ "action": "wipe_quick_unlock" }));
                     let res = auth_mgr.logout();
                     print_json_redacting_session(&res);
-                    ExitCode::SUCCESS
+                    if res.ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }
@@ -1918,7 +1922,7 @@ fn main() -> ExitCode {
                     };
 
                     let daemon_req = json!({
-                        "action": "ssh_key_create",
+                        "action": "ssh_key_create_v2",
                         "name": name,
                         "private_key": keypair.private_key,
                         "public_key": keypair.public_key,
@@ -1927,52 +1931,18 @@ fn main() -> ExitCode {
                         "folder_id": folder,
                     });
 
-                    let daemon_res = send_daemon_request(&daemon_req);
-                    let item_val = if let Some(res) =
-                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
-                    {
-                        res.get("item").cloned()
-                    } else {
-                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
-                            Ok(user_key) => {
-                                match vault_mgr.create_ssh_key_with_client(
-                                    &name,
-                                    &keypair,
-                                    notes.as_deref(),
-                                    folder.as_deref(),
-                                    &user_key,
-                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
-                                ) {
-                                    Ok(item) => Some(json!(item)),
-                                    Err(e) => {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "ok": false,
-                                                "error": e
-                                            }))
-                                            .unwrap()
-                                        );
-                                        return ExitCode::FAILURE;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({
-                                        "ok": false,
-                                        "error": e
-                                    }))
-                                    .unwrap()
-                                );
-                                return ExitCode::FAILURE;
-                            }
+                    let mut receipt = match submit_ssh_cipher(&daemon_req) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            println!("{error}");
+                            return ExitCode::FAILURE;
                         }
                     };
 
                     let mut files_json = json!(null);
-                    if let Some(ref dest_dir) = out_dir {
+                    if let Some(dest_dir) =
+                        out_dir.as_ref().filter(|_| receipt["outcome"] == "saved")
+                    {
                         match write_keypair_files(
                             dest_dir,
                             algorithm.default_filename_prefix(),
@@ -1996,15 +1966,13 @@ fn main() -> ExitCode {
                         }
                     }
 
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "ok": true,
-                            "item": item_val,
-                            "files": files_json,
-                        }))
-                        .unwrap()
-                    );
+                    if out_dir.is_some() && files_json.is_null() {
+                        receipt["warning"] = json!(
+                            "No key files were exported. Sync the vault, then use ssh-key export."
+                        );
+                    }
+                    receipt["files"] = files_json;
+                    println!("{receipt}");
                     ExitCode::SUCCESS
                 }
 
@@ -2062,7 +2030,7 @@ fn main() -> ExitCode {
                     }
 
                     let daemon_req = json!({
-                        "action": "ssh_key_create",
+                        "action": "ssh_key_create_v2",
                         "name": name,
                         "private_key": keypair.private_key,
                         "public_key": keypair.public_key,
@@ -2071,58 +2039,15 @@ fn main() -> ExitCode {
                         "folder_id": folder,
                     });
 
-                    let daemon_res = send_daemon_request(&daemon_req);
-                    let item_val = if let Some(res) =
-                        daemon_res.filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
-                    {
-                        res.get("item").cloned()
-                    } else {
-                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
-                            Ok(user_key) => {
-                                match vault_mgr.create_ssh_key_with_client(
-                                    &name,
-                                    &keypair,
-                                    notes.as_deref(),
-                                    folder.as_deref(),
-                                    &user_key,
-                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
-                                ) {
-                                    Ok(item) => Some(json!(item)),
-                                    Err(e) => {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "ok": false,
-                                                "error": e
-                                            }))
-                                            .unwrap()
-                                        );
-                                        return ExitCode::FAILURE;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({
-                                        "ok": false,
-                                        "error": e
-                                    }))
-                                    .unwrap()
-                                );
-                                return ExitCode::FAILURE;
-                            }
+                    let receipt = match submit_ssh_cipher(&daemon_req) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            println!("{error}");
+                            return ExitCode::FAILURE;
                         }
                     };
 
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "ok": true,
-                            "item": item_val,
-                        }))
-                        .unwrap()
-                    );
+                    println!("{receipt}");
                     ExitCode::SUCCESS
                 }
 
@@ -2393,6 +2318,41 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Unlock before dispatch when a caller provides the master password on stdin.
+/// Once dispatched, a missing reply cannot justify another create.
+fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
+    let reject = |reason: &str| json!({"ok":false, "outcome":"rejected", "error":reason});
+    let ping = send_daemon_request(&json!({"action":"ping"}))
+        .ok_or_else(|| reject("Daemon unavailable."))?;
+    if ping["ssh_write_receipt"] != true {
+        return Err(reject(
+            "Lock the vault and restart the daemon to enable safe cipher writes.",
+        ));
+    }
+    if ping["unlocked"] != true {
+        let (password, ..) = read_auth_payload();
+        if password.is_empty()
+            || !send_daemon_request(&json!({"action":"unlock","password":password}))
+                .is_some_and(|r| r["ok"] == true)
+        {
+            return Err(reject("Unlock the vault before creating a cipher."));
+        }
+    }
+    let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the write. Sync the vault before trying again."});
+    use omawarden::daemon::{dispatch_daemon_request, DispatchError};
+    let reply = dispatch_daemon_request(request).map_err(|e| match e {
+        DispatchError::NotSent => reject("Could not send the request to the daemon."),
+        DispatchError::Unconfirmed => unknown(),
+    })?;
+    if reply["ok"] == false {
+        return Err(reply);
+    }
+    if reply["ok"] != true || reply["item"]["id"].as_str().is_none_or(str::is_empty) {
+        return Err(unknown());
+    }
+    Ok(reply)
 }
 
 fn ensure_unlocked_user_key(
