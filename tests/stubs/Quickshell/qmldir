@@ -1,0 +1,2 @@
+module Quickshell
+FloatingWindow 1.0 FloatingWindow.qml

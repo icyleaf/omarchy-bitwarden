@@ -341,7 +341,8 @@ impl VaultManager {
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
             quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
-            lock_generation: std::sync::atomic::AtomicU64::new(0),
+            // Clients compare generations across daemon restarts as well as soft locks.
+            lock_generation: std::sync::atomic::AtomicU64::new(rand::random::<u64>() >> 1),
             quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
         }
@@ -1447,7 +1448,6 @@ impl VaultManager {
     }
 
     pub fn get_status(&self) -> Value {
-        let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
         let s_url = if !fresh_storage.server_url.is_empty() {
             &fresh_storage.server_url
@@ -1477,6 +1477,12 @@ impl VaultManager {
             has_refresh || has_api_secret
         };
 
+        // A lock increments the generation under this same write lock.
+        let (is_unlocked, generation) = self
+            .is_unlocked
+            .read()
+            .map(|unlocked| (*unlocked, self.lock_generation()))
+            .unwrap_or_default();
         let status = if !has_valid_token {
             "unauthenticated"
         } else if is_unlocked {
@@ -1495,6 +1501,7 @@ impl VaultManager {
             "user_id": fresh_storage.user_id,
             "last_sync": fresh_storage.last_sync,
             "is_unlocked": is_unlocked && has_valid_token,
+            "lock_generation": generation.to_string(),
             "has_session": has_valid_token,
             "items_count": if has_valid_token { self.decrypted_items.read().map(|i| i.len()).unwrap_or(0) } else { 0 },
         })
@@ -2503,7 +2510,11 @@ pub(crate) mod tests {
             "unauthenticated"
         );
 
+        let cycle = st["lock_generation"].as_str().unwrap();
+        assert_eq!(vault_mgr.get_status()["lock_generation"], cycle);
+        *vault_mgr.is_unlocked.write().unwrap() = true;
         vault_mgr.lock();
+        assert_ne!(vault_mgr.get_status()["lock_generation"], cycle);
         assert!(!vault_mgr.is_unlocked());
         let sync_err = vault_mgr.sync();
         assert!(sync_err.is_err());

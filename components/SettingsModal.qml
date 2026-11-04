@@ -906,7 +906,7 @@ Item {
             }
             Text {
               Layout.fillWidth: true
-              text: "Retains previous search query, category, and selection when reopening while vault is unlocked."
+              text: "Keep the search, filters, and selection while unlocked. When off, the search opens empty. Supported engines reselect the last item for up to 30 seconds."
               color: settingsRoot.muted
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap

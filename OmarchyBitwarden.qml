@@ -3,10 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
-import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
 import "./components/CardFormatter.js" as CardFormatter
@@ -294,6 +292,30 @@ Item {
   property string activeVaultScope: "all"
   property string activeFolderScope: "all"
   property int selectedIndex: 0
+  property string rememberedItemId: ""
+  property double selectionExpiresAt: 0
+  property bool checkingCachedSession: false
+  property var pendingFieldCopy: null
+  property bool updatingResults: false
+  property int vaultRevision: 0
+
+  Timer {
+    id: selectionExpiry
+    interval: 30000
+    onTriggered: root.forgetSelection()
+  }
+
+  function forgetSelection() {
+    selectionExpiry.stop()
+    root.rememberedItemId = ""
+    root.selectionExpiresAt = 0
+  }
+
+  function recentItemId() {
+    // A suspended event loop may not have delivered the timer yet.
+    if (root.rememberedItemId && Date.now() >= root.selectionExpiresAt) root.forgetSelection()
+    return root.rememberedItemId
+  }
 
   // Details Inspector State
   property bool showPasswordRevealed: false
@@ -344,12 +366,16 @@ Item {
   readonly property color muted: Commons.Color.muted
   readonly property string fontFamily: Style.font.menuFamily
 
-  readonly property var selectedItem: {
+  readonly property var highlightedItem: {
     if (filteredItems && filteredItems.length > 0 && selectedIndex >= 0 && selectedIndex < filteredItems.length) {
       return filteredItems[selectedIndex]
     }
     return null
   }
+
+  // Keep navigation responsive while the existing status probe validates the
+  // cached session. Credential consumers see a selection only after that check.
+  readonly property var selectedItem: root.checkingCachedSession ? null : root.highlightedItem
 
   readonly property string effectiveView: {
     if (dependenciesMissing && currentView !== "settings") return "dependency_check"
@@ -376,10 +402,18 @@ Item {
     })
   }
 
-  function clearSensitiveState() {
+  function invalidateVaultList() {
+    ++root.vaultRevision
     root.rawVaultItems = []
     root.filteredItems = []
     root.lastVaultItemsRawText = ""
+  }
+
+  function clearSensitiveState() {
+    root.forgetSelection()
+    root.pendingFieldCopy = null
+    root.invalidateVaultList()
+    root.checkingCachedSession = false
     root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
@@ -437,8 +471,12 @@ Item {
       root.sshApprovalOnly = true
       root.refreshSshApprovals()
     }
+    if (!root.opened && !root.sshApprovalOnly && root.rawVaultItems.length && root.authState.lock_generation) {
+      root.checkingCachedSession = true
+      // A probe already in flight predates this reopen; its exit starts a fresh one.
+      if (authStatusProc.running) authStatusProc.revision = -1
+    }
     root.sshDenyingOnClose = false
-    root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
@@ -456,6 +494,11 @@ Item {
       } else {
         root.selectedIndex = 0
       }
+    }
+    if (!canRemember && !root.opened && !root.sshApprovalOnly && root.recentItemId()) {
+      var recentIndex = root.filteredItems.findIndex(item => item.id === root.rememberedItemId)
+      root.selectedIndex = Math.max(0, recentIndex)
+      root.forgetSelection()
     }
     if (!root.authState || root.authState.status !== "unlocked") {
       root.clearSensitiveState()
@@ -475,6 +518,7 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
+    root.opened = true
     root.checkDependencies()
     if (!root.dependenciesMissing) {
       root.refreshHealth()
@@ -510,6 +554,13 @@ Item {
   }
 
   function close() {
+    // dismiss() and shell.hide() may both call close for one dismissal.
+    if (root.opened && !root.sshApprovalOnly && root.effectiveView === "search" && root.selectedItem && root.authState.lock_generation
+        && root.config && root.config.remember_last_search !== true) {
+      root.rememberedItemId = root.selectedItem.id
+      root.selectionExpiresAt = Date.now() + selectionExpiry.interval
+      selectionExpiry.restart()
+    }
     // Closing the window without answering counts as Deny.
     if (root.sshApprovalPrompt) {
       root.sshDenyingOnClose = true
@@ -517,6 +568,9 @@ Item {
     }
     root.sshApprovalOnly = false
     root.opened = false
+    root.pendingFieldCopy = null
+    root.checkingCachedSession = false
+    totpGenProc.itemId = ""
     totpGenProc.running = false
     root.showActionPalette = false
     root.showSshKeyModal = false
@@ -549,6 +603,12 @@ Item {
   function toggle() {
     if (root.opened) root.dismiss()
     else root.open("{}")
+  }
+
+  function applyConfig(data) {
+    if (root.config && root.config.server_url !== data.server_url) root.clearSensitiveState()
+    if (data.remember_last_search === true) root.forgetSelection()
+    root.config = data
   }
 
   function refreshConfig() {
@@ -627,6 +687,7 @@ Item {
 
   function refreshAuthStatus() {
     if (authStatusProc.running) return
+    authStatusProc.revision = root.vaultRevision
     authStatusProc.command = [
       "sh", "-c",
       "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" auth status; else exit 127; fi",
@@ -694,6 +755,8 @@ Item {
   }
 
   function loadVaultItems() {
+    if (vaultListProc.running || root.authState.status !== "unlocked" || !root.authState.has_session) return
+    vaultListProc.revision = root.vaultRevision
     root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
@@ -834,7 +897,7 @@ Item {
   }
 
   function filterVaultItems(resetSelection) {
-    var currentId = (root.selectedItem && !resetSelection) ? root.selectedItem.id : null
+    var currentId = (root.highlightedItem && !resetSelection) ? root.highlightedItem.id : null
     var q = (root.searchQuery || "").trim().toLowerCase()
     var cat = root.activeCategory
     var vs = root.activeVaultScope || "all"
@@ -922,8 +985,6 @@ Item {
       out.push(res[j].item)
     }
 
-    root.filteredItems = out
-
     var targetIndex = 0
     if (currentId && out.length > 0) {
       for (var k = 0; k < out.length; k++) {
@@ -933,7 +994,11 @@ Item {
         }
       }
     }
+    // Publish the rows and their new index together to selection side effects.
+    root.updatingResults = true
+    root.filteredItems = out
     root.selectedIndex = targetIndex
+    root.updatingResults = false
     root.handleSelectedItemChanged()
   }
 
@@ -1017,6 +1082,10 @@ Item {
   onSelectedIndexChanged: root.handleSelectedItemChanged()
 
   function handleSelectedItemChanged() {
+    if (!root.opened || root.updatingResults) return
+    if (root.pendingFieldCopy && (!root.highlightedItem || root.pendingFieldCopy.id !== root.highlightedItem.id)) {
+      root.pendingFieldCopy = null
+    }
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1086,10 +1155,13 @@ Item {
   onSelectedItemChanged: root.handleSelectedItemChanged()
 
   function updateTotpForSelected() {
+    if (!root.opened || root.sshApprovalOnly) return
     var item = root.selectedItem
     if (item && item.login && (item.login.totp || item.login.has_totp)) {
-      totpGenProc.running = false
-      totpGenProc.secret = ""
+      if (totpGenProc.itemId !== item.id) root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+      if (totpGenProc.running) return
+      totpGenProc.itemId = item.id
+      totpGenProc.revision = root.vaultRevision
       totpGenProc.command = [root.helperPath, "totp", item.id]
       totpGenProc.running = true
     } else {
@@ -1127,6 +1199,32 @@ Item {
     clipCopyProc.secret = JSON.stringify({ text: String(text) })
     clipCopyProc.command = cmd
     clipCopyProc.running = true
+  }
+
+  // Capture intent, never field contents. An early keypress is discarded if
+  // the selection or session changes before it can be served.
+  function requestFieldCopy(field) {
+    var row = root.highlightedItem
+    if (!root.opened || root.hasActiveModal || root.effectiveView !== "search" || !row) return
+    if (field === "totp" && !(row.login && (row.login.totp || row.login.has_totp))) return
+    root.pendingFieldCopy = { id: row.id, field: field }
+    root.finishPendingCopy()
+  }
+
+  function finishPendingCopy() {
+    var request = root.pendingFieldCopy
+    if (!request || root.checkingCachedSession) return
+    var item = root.selectedItem
+    if (!item || item.id !== request.id || !root.opened || root.effectiveView !== "search" || root.hasActiveModal) {
+      root.pendingFieldCopy = null
+      return
+    }
+    if (request.field === "totp" && !root.currentTotp.code) return
+    root.pendingFieldCopy = null
+    if (request.field === "totp") {
+      if (root.currentTotp.ttl > 0) root.copyItemTotp(item)
+    } else if (request.field === "username") root.copyItemUsername(item)
+    else root.executePrimaryAction(item)
   }
 
   function executePrimaryAction(item) {
@@ -2023,14 +2121,14 @@ Item {
 
       Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal
-        onActivated: root.copyItemTotp(root.selectedItem)
+        enabled: root.opened && root.effectiveView === "search" && root.highlightedItem !== null && !root.hasActiveModal
+        onActivated: root.requestFieldCopy("totp")
       }
 
       Shortcut {
         sequence: "Ctrl+U"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal
-        onActivated: root.copyItemUsername(root.selectedItem)
+        enabled: root.opened && root.effectiveView === "search" && root.highlightedItem !== null && !root.hasActiveModal
+        onActivated: root.requestFieldCopy("username")
       }
 
       Shortcut {
@@ -2198,8 +2296,8 @@ Item {
           }
           event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-          if (root.effectiveView === "search" && root.selectedItem) {
-            root.executePrimaryAction(root.selectedItem)
+          if (root.effectiveView === "search" && root.highlightedItem) {
+            root.requestFieldCopy((event.modifiers & Qt.ControlModifier) ? "totp" : "primary")
             event.accepted = true
           }
         } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
@@ -2219,11 +2317,8 @@ Item {
           }
           event.accepted = true
         } else if (event.modifiers & Qt.ControlModifier) {
-          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
-            root.copyItemTotp(root.selectedItem)
-            event.accepted = true
-          } else if (event.key === Qt.Key_U && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
-            root.copyItemUsername(root.selectedItem)
+          if (event.key === Qt.Key_U && root.effectiveView === "search" && root.highlightedItem && !root.hasActiveModal) {
+            root.requestFieldCopy("username")
             event.accepted = true
           } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.hasActiveModal) {
             root.actionPaletteIndex = 0
@@ -2298,16 +2393,8 @@ Item {
             root.searchQuery = ""
             root.filterVaultItems()
           }
-          onCopyUsernameRequested: {
-            if (root.selectedItem) {
-              root.copyItemUsername(root.selectedItem)
-            }
-          }
-          onCopyTotpRequested: {
-            if (root.selectedItem) {
-              root.copyItemTotp(root.selectedItem)
-            }
-          }
+          onCopyUsernameRequested: root.requestFieldCopy("username")
+          onCopyTotpRequested: root.requestFieldCopy("totp")
           onOpenUrlRequested: {
             if (root.selectedItem) {
               root.openFirstWebsite(root.selectedItem)
@@ -2359,7 +2446,7 @@ Item {
               onItemSelected: function(idx) { root.selectedIndex = idx }
               onItemTriggered: function(idx) {
                 root.selectedIndex = idx
-                root.executePrimaryAction(root.selectedItem)
+                root.requestFieldCopy("primary")
               }
             }
 
@@ -2898,7 +2985,7 @@ Item {
           var cleanText = (text || "").trim()
           if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
-          root.config = data
+          root.applyConfig(data)
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
@@ -2932,7 +3019,7 @@ Item {
           var cleanSetText = (text || "").trim()
           if (cleanSetText.length === 0) return
           var data = JSON.parse(cleanSetText)
-          root.config = data
+          root.applyConfig(data)
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
@@ -3086,19 +3173,28 @@ Item {
 
   Process {
     id: authStatusProc
+    property int revision: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (authStatusProc.revision !== root.vaultRevision) return
         try {
           var cleanText = (text || "").trim()
-          if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
           if (data && data.status) {
             var wasNotUnlocked = (root.authState.status !== "unlocked")
+            if (root.authState.server_url !== data.server_url
+                || (root.authState.lock_generation && root.authState.lock_generation !== data.lock_generation)
+                || (root.authState.user_id && root.authState.user_id !== data.user_id)
+                || (root.authState.user_email && root.authState.user_email !== data.user_email)) {
+              root.clearSensitiveState()
+            }
             root.authState = data
-            if (data.status === "unlocked") {
-              if (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0) {
+            if (data.status === "unlocked" && data.has_session) {
+              root.checkingCachedSession = false
+              root.finishPendingCopy()
+              if (root.opened && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
                 root.loadVaultItems()
                 root.syncVault(true, false)
               }
@@ -3119,6 +3215,8 @@ Item {
                 }
               }
             })
+          } else {
+            throw new Error("Missing auth status")
           }
         } catch (e) {
           root.clearSensitiveState()
@@ -3129,6 +3227,9 @@ Item {
             has_session: false
           })
           root.logError("omarchy:auth", "Failed to parse auth status: " + e)
+        } finally {
+          // This reply may itself have invalidated the vault on a lock or server change.
+          authStatusProc.revision = root.vaultRevision
         }
       }
     }
@@ -3137,6 +3238,10 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
+      if (authStatusProc.revision !== root.vaultRevision) {
+        Qt.callLater(function() { if (root.opened) root.refreshAuthStatus() })
+        return
+      }
       if (code !== 0) {
         root.clearSensitiveState()
         root.authState = ({
@@ -3511,12 +3616,19 @@ Item {
 
   Process {
     id: vaultListProc
+    property int revision: 0
     command: []
+    onExited: {
+      if (vaultListProc.revision !== root.vaultRevision) Qt.callLater(function() {
+        if (root.opened && root.effectiveView === "search" && !root.rawVaultItems.length) root.loadVaultItems()
+      })
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           root.isLoadingVault = false
+          if (vaultListProc.revision !== root.vaultRevision) return
           if (!root.authState || root.authState.status !== "unlocked") {
             root.clearSensitiveState()
             return
@@ -3591,24 +3703,24 @@ Item {
 
   Process {
     id: totpGenProc
-    property string secret: ""
-    stdinEnabled: true
-    onStarted: {
-      if (secret) {
-        write(secret + "\n")
-        secret = ""
+    property string itemId: ""
+    property int revision: 0
+    onExited: {
+      if (root.selectedItem && (totpGenProc.itemId !== root.selectedItem.id || totpGenProc.revision !== root.vaultRevision)) {
+        if (root.opened) Qt.callLater(root.updateTotpForSelected)
       }
     }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.authState || root.authState.status !== "unlocked") {
-          root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+        if (!root.opened || !root.selectedItem || root.selectedItem.id !== totpGenProc.itemId
+            || totpGenProc.revision !== root.vaultRevision || root.authState.status !== "unlocked") return
+        var cleanText = (text || "").trim()
+        if (!cleanText) {
+          if (root.pendingFieldCopy && root.pendingFieldCopy.field === "totp") root.pendingFieldCopy = null
           return
         }
-        var cleanText = (text || "").trim()
-        if (!cleanText) return
         try {
           var res = JSON.parse(cleanText)
           if (res && res.code) {
@@ -3620,6 +3732,7 @@ Item {
           root.currentTotp = ({ code: "Invalid Secret", ttl: 0, period: 30 })
           root.logError("omarchy:totp", "Failed to parse TOTP response: " + e)
         }
+        root.finishPendingCopy()
       }
     }
     stderr: StdioCollector {
