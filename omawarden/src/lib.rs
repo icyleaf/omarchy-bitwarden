@@ -3,6 +3,7 @@ pub mod attachment;
 pub mod auth;
 pub mod clipboard;
 pub mod config;
+mod credential_slots;
 pub mod crypto;
 pub mod daemon;
 pub mod fs_util;

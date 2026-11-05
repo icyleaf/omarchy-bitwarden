@@ -98,6 +98,7 @@ store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1))
     let cache = dir.join("data.json");
     let mut data = json!({
         "user_id": "user-id", "user_email": email, "server_url": server_url,
+        "credential_id": "11111111111111111111111111111111",
         "enc_user_key": wrap, "kdf": 0, "kdf_iterations": 100_000
     });
     if case == Case::LegacyProfile {

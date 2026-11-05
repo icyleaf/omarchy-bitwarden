@@ -219,11 +219,9 @@ pub fn get_attachment(
         cfg.server_url.trim_end_matches('/')
     };
 
-    let initial_token = session_token.map(|s| s.to_string()).or_else(|| {
-        keyring_mgr
-            .for_storage(&storage, initial_server_url)
-            .access_token()
-    });
+    let initial_token = session_token
+        .map(|s| s.to_string())
+        .or_else(|| keyring_mgr.for_storage(&storage).access_token());
 
     let token_val = match initial_token {
         Some(ref t) if !t.is_empty() && !crate::auth::is_jwt_expired(t) => Some(t.clone()),
@@ -782,14 +780,14 @@ fn attempt_attachment_token_refresh(
     };
     let api_client =
         crate::api::BitwardenApiClient::with_identity_url(server_url, effective_id_url);
-    let keyring = keyring_mgr.for_storage(storage, server_url);
+    let keyring = keyring_mgr.for_storage(storage);
 
     // 1. Try refresh_token
     let refresh_token = keyring.refresh_token();
 
     if let Some(ref ref_tok) = refresh_token {
         if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
-            if persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, storage, &tok_resp) {
+            if persist_attachment_tokens(storage_mgr, keyring_mgr, storage, &tok_resp) {
                 return Some(tok_resp.access_token);
             }
         }
@@ -799,13 +797,7 @@ fn attempt_attachment_token_refresh(
     if let Some(ref cid) = storage.client_id {
         if let Some(sec) = keyring.api_secret() {
             if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
-                if persist_attachment_tokens(
-                    server_url,
-                    storage_mgr,
-                    keyring_mgr,
-                    storage,
-                    &tok_resp,
-                ) {
+                if persist_attachment_tokens(storage_mgr, keyring_mgr, storage, &tok_resp) {
                     return Some(tok_resp.access_token);
                 }
             }
@@ -816,7 +808,6 @@ fn attempt_attachment_token_refresh(
 }
 
 fn persist_attachment_tokens(
-    server_url: &str,
     storage_mgr: &StorageManager,
     keyring_mgr: &KeyringManager,
     expected: &VaultStorage,
@@ -828,11 +819,11 @@ fn persist_attachment_tokens(
     let Ok(mut fresh_st) = storage_mgr.load_existing() else {
         return false;
     };
-    if !fresh_st.same_account(expected) {
+    if !fresh_st.same_active_slot(expected) {
         return false;
     }
     if keyring_mgr.is_available() {
-        let keyring = keyring_mgr.for_storage(&fresh_st, server_url);
+        let keyring = keyring_mgr.for_storage(&fresh_st);
         let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
         let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
             keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
@@ -1066,7 +1057,7 @@ mod tests {
         let manager = StorageManager::new(dir.path().join("data.json"));
         let initial = serde_json::json!({
             "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
-            "access_token":"legacy", "ciphers":[]
+            "access_token":"legacy", "ciphers":[], "credential_id":crate::test_support::CREDENTIAL_ID
         });
         fs::write(&manager.file_path, initial.to_string()).unwrap();
         let expected = manager.load();
@@ -1083,23 +1074,20 @@ mod tests {
             serde_json::from_value(serde_json::json!({"access_token":"new", "expires_in":3600}))
                 .unwrap();
         assert!(persist_attachment_tokens(
-            "https://fixture.invalid",
-            &manager,
-            &keyring,
-            &expected,
-            &response
+            &manager, &keyring, &expected, &response
         ));
         assert_eq!(manager.load().ciphers[0]["id"], "created");
         assert!(manager.load().access_token.is_none());
         let mut other = manager.load();
+        other.credential_id = Some("22222222222222222222222222222222".into());
+        manager.save(&other).unwrap();
+        assert!(!persist_attachment_tokens(
+            &manager, &keyring, &expected, &response
+        ));
         other.user_email = "other@example.invalid".into();
         manager.save(&other).unwrap();
         assert!(!persist_attachment_tokens(
-            "https://fixture.invalid",
-            &manager,
-            &keyring,
-            &expected,
-            &response
+            &manager, &keyring, &expected, &response
         ));
         assert_eq!(manager.load().user_email, "other@example.invalid");
     }

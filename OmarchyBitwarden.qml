@@ -3040,7 +3040,10 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0) root.statusMessage = "Error saving configuration."
+      if (code !== 0) {
+        root.statusMessage = "Error saving configuration."
+        root.refreshAuthStatus()
+      }
     }
   }
 
@@ -3547,6 +3550,10 @@ Item {
           user_email: "",
           has_session: false
         })
+        try {
+          var result = JSON.parse(text)
+          if (result && result.ok === false && result.error) root.errorMessage = String(result.error)
+        } catch (e) {}
         root.refreshAuthStatus()
         root.isBusy = false
       }

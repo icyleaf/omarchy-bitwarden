@@ -44,13 +44,16 @@ pub struct VaultStorage {
 }
 
 impl VaultStorage {
-    /// The active account and the credential slot that was published with it.
     pub(crate) fn same_account(&self, other: &Self) -> bool {
         self.server_url == other.server_url
-            && self.identity_url == other.identity_url
             && self.user_email == other.user_email
             && self.user_id == other.user_id
             && self.enc_user_key == other.enc_user_key
+    }
+
+    pub(crate) fn same_active_slot(&self, other: &Self) -> bool {
+        self.same_account(other)
+            && self.identity_url == other.identity_url
             && self.credential_id == other.credential_id
     }
 
@@ -58,6 +61,7 @@ impl VaultStorage {
         &'a self,
         configured: Option<&'a str>,
     ) -> Option<&'a str> {
+        // The identity endpoint is bound to the credential slot at login.
         if self.credential_id.is_some() {
             self.identity_url.as_deref()
         } else {
@@ -69,6 +73,8 @@ impl VaultStorage {
 #[derive(Debug, Clone)]
 pub struct StorageManager {
     pub file_path: PathBuf,
+    #[cfg(test)]
+    pub(crate) fail_credential_cleanup_sync: bool,
 }
 
 /// Pins the original inode until commit, preventing inode reuse from passing
@@ -174,15 +180,17 @@ pub fn resolve_default_storage_path() -> PathBuf {
 
 impl Default for StorageManager {
     fn default() -> Self {
-        Self {
-            file_path: resolve_default_storage_path(),
-        }
+        Self::new(resolve_default_storage_path())
     }
 }
 
 impl StorageManager {
     pub fn new(path: PathBuf) -> Self {
-        Self { file_path: path }
+        Self {
+            file_path: path,
+            #[cfg(test)]
+            fail_credential_cleanup_sync: false,
+        }
     }
 
     pub fn load(&self) -> VaultStorage {

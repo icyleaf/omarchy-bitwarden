@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 
 use crate::api::BitwardenApiClient;
 use crate::config::ConfigManager;
+use crate::credential_slots::erase_retired;
 use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
 use crate::storage::{CacheSnapshot, StorageManager, VaultStorage};
 
@@ -252,12 +253,17 @@ impl AuthManager {
         // Skip keyring work if initial sync already lost the publication race.
         check_context()?;
         check_cache()?;
-        storage.credential_id = Some(format!("{:032x}", rand::random::<u128>()));
+        let credential_id = format!("{:032x}", rand::random::<u128>());
+        storage.credential_id = Some(credential_id.clone());
         let staged = self
             .storage_mgr
             .stage_durable(storage)
             .map_err(|_| "Cannot stage the account cache")?;
-        let candidate = self.keyring_mgr.for_storage(storage, &self.server_url);
+        let lease = self
+            .storage_mgr
+            .lease_candidate(&credential_id)
+            .map_err(|_| "Cannot track the candidate credentials")?;
+        let candidate = self.keyring_mgr.for_storage(storage);
         let publication = (|| {
             if !candidate.store_token(KIND_ACCESS_TOKEN, access_token) {
                 return Err("Failed to store access token in system keyring.");
@@ -276,6 +282,9 @@ impl AuthManager {
                 .account_guard()
                 .map_err(|_| "Cannot secure the account cache")?;
             check_cache()?;
+            self.storage_mgr
+                .remember_credentials(&base.storage, false)
+                .map_err(|_| "Cannot track the previous credentials")?;
             #[cfg(test)]
             if let Some(hook) = self.before_login_persist {
                 hook(&staged);
@@ -283,69 +292,32 @@ impl AuthManager {
             staged
                 .persist(&self.storage_mgr.file_path)
                 .map_err(|_| "Cannot save the account cache")?;
-            Ok(self.storage_mgr.sync_parent())
+            Ok(self.storage_mgr.retired_credentials(Some(&credential_id)))
         })();
         match publication {
             Err(error) => {
-                candidate.clear_slot();
+                if let Err(cleanup_error) = lease.erase(&self.keyring_mgr) {
+                    crate::log_warn!(
+                        "omawarden:auth",
+                        "Candidate credential cleanup pending. {}",
+                        cleanup_error
+                    );
+                }
                 Err(error)
             }
-            Ok(Ok(())) => {
-                self.keyring_mgr
-                    .for_storage(&base.storage, &self.server_url)
-                    .clear_slot();
+            Ok(retired) => {
+                if let Err(error) =
+                    retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr))
+                {
+                    crate::log_warn!(
+                        "omawarden:auth",
+                        "Account cache published. Previous credential cleanup pending. {}",
+                        error
+                    );
+                }
                 Ok(())
             }
-            Ok(Err(error)) => {
-                crate::log_warn!(
-                    "omawarden:auth",
-                    "Account cache published but directory sync failed. Retaining previous credentials: {}",
-                    error
-                );
-                Ok(())
-            }
         }
-    }
-
-    // Reload under the cross-process guard: status polling must never write
-    // back the cipher snapshot it read before a slow secret-tool invocation.
-    fn migrate_legacy_tokens(&self, expected: &VaultStorage) -> Option<VaultStorage> {
-        let _account = self.storage_mgr.account_guard().ok()?;
-        let mut storage = self.storage_mgr.load_existing().ok()?;
-        if storage.credential_id.is_some()
-            || !storage.same_account(expected)
-            || !self.keyring_mgr.is_available()
-        {
-            return None;
-        }
-        let server = if storage.server_url.is_empty() {
-            &self.server_url
-        } else {
-            &storage.server_url
-        };
-        let mut scrubbed = false;
-        if let Some(token) = &storage.access_token {
-            if self
-                .keyring_mgr
-                .store_token(server, KIND_ACCESS_TOKEN, token)
-            {
-                storage.access_token = None;
-                scrubbed = true;
-            }
-        }
-        if let Some(token) = &storage.refresh_token {
-            if self
-                .keyring_mgr
-                .store_token(server, KIND_REFRESH_TOKEN, token)
-            {
-                storage.refresh_token = None;
-                scrubbed = true;
-            }
-        }
-        if scrubbed {
-            self.storage_mgr.save(&storage).ok()?;
-        }
-        Some(storage)
     }
 
     fn invalidate_expired_session(&self, expected: &VaultStorage, token: &str) -> bool {
@@ -355,10 +327,10 @@ impl AuthManager {
         let Ok(mut storage) = self.storage_mgr.load_existing() else {
             return false;
         };
-        if !storage.same_account(expected) {
+        if !storage.same_active_slot(expected) {
             return false;
         }
-        let keyring = self.keyring_mgr.for_storage(&storage, &self.server_url);
+        let keyring = self.keyring_mgr.for_storage(&storage);
         let current = keyring.access_token();
         if current.as_deref() != Some(token)
             || keyring.refresh_token().is_some()
@@ -374,20 +346,14 @@ impl AuthManager {
     }
 
     pub fn get_status(&self, _verify: bool) -> AuthStatus {
-        let mut storage = self.storage_mgr.load();
-
-        if storage.access_token.is_some() || storage.refresh_token.is_some() {
-            if let Some(migrated) = self.migrate_legacy_tokens(&storage) {
-                storage = migrated;
-            }
-        }
-
-        let keyring = self.keyring_mgr.for_storage(&storage, &self.server_url);
+        let storage = self.storage_mgr.load();
+        let keyring = self.keyring_mgr.for_storage(&storage);
         let active_token = keyring.access_token();
         let has_refresh = keyring.refresh_token().is_some();
         let has_api_secret = keyring.api_secret().is_some();
 
-        if (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
+        if storage.credential_id.is_none()
+            || (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
             || (storage.user_email.is_empty() && storage.client_id.is_none())
         {
             return AuthStatus {
@@ -1022,22 +988,6 @@ impl AuthManager {
             .unlock_user_key(&password_zeroizing, &storage)
         {
             Ok(_user_key) => {
-                let s_url = if !storage.server_url.is_empty() {
-                    &storage.server_url
-                } else {
-                    &self.server_url
-                };
-
-                if storage.credential_id.is_none() {
-                    let keyring = self.keyring_mgr.for_storage(&storage, s_url);
-                    if let Some(token) = keyring
-                        .access_token()
-                        .filter(|token| token != "session_unlocked" && !token.is_empty())
-                    {
-                        keyring.store_token(KIND_ACCESS_TOKEN, &token);
-                    }
-                }
-
                 // Auto-unlock daemon with decrypted items in memory
                 crate::daemon::ensure_daemon_running();
                 let _ = crate::daemon::send_daemon_request(&serde_json::json!({
@@ -1073,7 +1023,7 @@ impl AuthManager {
             "action": "lock"
         }));
         self.keyring_mgr
-            .for_storage(&storage, &self.server_url)
+            .for_storage(&storage)
             .clear_token(KIND_ACCESS_TOKEN);
         crate::attachment::clear_preview_attachments(None);
         crate::log_info!("omawarden:auth", "Vault locked.");
@@ -1089,29 +1039,39 @@ impl AuthManager {
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
-        let Ok(_account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault locked; could not secure the account cache for logout.".into()),
-                ..Default::default()
-            };
+        let cleared = (|| {
+            let _account = self.storage_mgr.account_guard()?;
+            let current = self.storage_mgr.cache_snapshot()?;
+            self.storage_mgr
+                .remember_credentials(&current.storage, true)?;
+            self.storage_mgr
+                .stage_durable(&VaultStorage::default())?
+                .persist(&self.storage_mgr.file_path)
+                .map_err(|error| error.error)?;
+            Ok::<_, std::io::Error>(self.storage_mgr.retired_credentials(None))
+        })();
+        let retired = match cleared {
+            Ok(retired) => retired,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(format!(
+                        "Vault locked. Could not clear the account cache. {error}"
+                    )),
+                    ..Default::default()
+                }
+            }
         };
-        let storage = self.storage_mgr.load();
-        let cleared = self.storage_mgr.stage_durable(&VaultStorage::default());
-        if !cleared.is_ok_and(|file| file.persist(&self.storage_mgr.file_path).is_ok()) {
+        crate::attachment::clear_preview_attachments(None);
+        if let Err(error) = retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr)) {
+            let message =
+                format!("Signed out locally. Keyring cleanup is pending. Retry logout. {error}");
+            crate::log_warn!("omawarden:auth", "{}", message);
             return AuthResult {
-                ok: false,
-                error: Some("Vault locked; failed to clear the account cache.".into()),
+                status: Some("unauthenticated".into()),
+                error: Some(message),
                 ..Default::default()
             };
         }
-        if self.storage_mgr.sync_parent().is_ok() {
-            self.keyring_mgr
-                .for_storage(&storage, &self.server_url)
-                .clear_slot();
-            self.keyring_mgr.clear_all();
-        }
-        crate::attachment::clear_preview_attachments(None);
         crate::log_info!("omawarden:auth", "Account logged out.");
         AuthResult {
             ok: true,
@@ -1138,27 +1098,130 @@ mod tests {
         KeyringManager::new(script_path.to_str().unwrap())
     }
 
+    fn fixture_access_keyring(dir: &std::path::Path, token: &str) -> KeyringManager {
+        let saved = dir.join("access");
+        fs::write(&saved, token).unwrap();
+        let script = dir.join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) /bin/cat '{}' 2>/dev/null;;\nclear*'kind access_token'*) /bin/rm '{}' ;;\n*) exit 1;;\nesac\n",
+                saved.display(),
+                saved.display(),
+            ),
+        );
+        KeyringManager::new(script.to_str().unwrap())
+    }
+
     #[test]
-    fn status_token_migration_preserves_ciphers_added_after_its_initial_read() {
+    fn legacy_credentials_require_sign_in_without_reading_or_migrating_tokens() {
         let dir = tempdir().unwrap();
-        let manager = StorageManager::new(dir.path().join("data.json"));
-        let initial = serde_json::json!({
-            "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
-            "access_token":"legacy", "ciphers":[]
-        });
-        fs::write(&manager.file_path, initial.to_string()).unwrap();
-        let expected = manager.load();
-        let mut latest = initial;
-        latest["ciphers"] = serde_json::json!([{"id":"created"}]);
-        fs::write(&manager.file_path, latest.to_string()).unwrap();
+        let storage = StorageManager::new(dir.path().join("data.json"));
+        let trace = dir.path().join("keyring-called");
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                "#!/bin/sh\n: > '{}'\necho another-account-token\n",
+                trace.display()
+            ),
+        );
         let auth = AuthManager::new(
             "https://fixture.invalid",
-            Some(manager.clone()),
-            Some(create_test_mock_keyring(dir.path())),
+            Some(storage.clone()),
+            Some(KeyringManager::new(script.to_str().unwrap())),
         );
-        auth.migrate_legacy_tokens(&expected).unwrap();
-        assert_eq!(manager.load().ciphers[0]["id"], "created");
-        assert!(manager.load().access_token.is_none());
+        for inline in [None, Some("another-account-token")] {
+            let before = serde_json::json!({
+                "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
+                "access_token":inline, "refresh_token":inline,
+                "enc_user_key":"2.dummy_iv|dummy_ct|dummy_mac",
+                "ciphers":[{"id":"existing"}]
+            })
+            .to_string();
+            fs::write(&storage.file_path, &before).unwrap();
+            let status = auth.get_status(false);
+            assert_eq!(status.status, "unauthenticated");
+            assert!(!status.has_session);
+            assert!(!trace.exists());
+            assert_eq!(fs::read_to_string(&storage.file_path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn logout_retains_cleanup_records_through_sync_and_keyring_failures() {
+        let _environment = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(dir.path().join("data.json"));
+        let server = "https://fixture.invalid";
+        storage_mgr
+            .save(&VaultStorage {
+                server_url: server.into(),
+                user_email: "fixture@example.invalid".into(),
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let scoped = dir.path().join("scoped");
+        let legacy = dir.path().join("legacy");
+        let trace = dir.path().join("keyring-called");
+        let locked = dir.path().join("keyring-locked");
+        for path in [&scoped, &legacy, &locked] {
+            fs::write(path, []).unwrap();
+        }
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                r#"#!/bin/sh
+command=$1
+shift
+if [ "$1" = --all ]; then shift; fi
+: > '{}'
+case "$2" in
+    omarchy-bitwarden-v2) record='{}';;
+    omarchy-bitwarden) record='{}';;
+    *) exit 1;;
+esac
+case "$command" in
+    clear)
+        if [ -e '{}' ]; then exit 1; fi
+        /bin/rm "$record"
+        ;;
+    search)
+        if [ -e "$record" ]; then echo present; fi
+        ;;
+    *) exit 1;;
+esac
+"#,
+                trace.display(),
+                scoped.display(),
+                legacy.display(),
+                locked.display(),
+            ),
+        );
+        let keyring = KeyringManager::new(script.to_str().unwrap());
+        let mut failed_sync = storage_mgr.clone();
+        failed_sync.fail_credential_cleanup_sync = true;
+        let auth = AuthManager::new(server, Some(failed_sync), Some(keyring.clone()));
+        let result = auth.logout();
+        assert!(!result.ok);
+        assert_eq!(result.status.as_deref(), Some("unauthenticated"));
+        assert!(result.error.unwrap().contains("directory sync failure"));
+        assert!(storage_mgr.load().credential_id.is_none());
+        assert!(!trace.exists());
+        assert!(scoped.exists() && legacy.exists());
+
+        let auth = AuthManager::new(server, Some(storage_mgr), Some(keyring));
+        let result = auth.logout();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Keyring cleanup is pending"));
+        assert!(trace.exists());
+        assert!(scoped.exists() && legacy.exists());
+
+        fs::remove_file(locked).unwrap();
+        assert!(auth.logout().ok);
+        assert!(!scoped.exists() && !legacy.exists());
     }
 
     #[test]
@@ -1167,7 +1230,7 @@ mod tests {
         let manager = StorageManager::new(dir.path().join("data.json"));
         let initial = serde_json::json!({
             "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
-            "access_token":"legacy", "ciphers":[]
+            "access_token":"legacy", "ciphers":[], "credential_id":crate::test_support::CREDENTIAL_ID
         });
         fs::write(&manager.file_path, initial.to_string()).unwrap();
         let expected = manager.load();
@@ -1177,7 +1240,7 @@ mod tests {
         let auth = AuthManager::new(
             "https://fixture.invalid",
             Some(manager.clone()),
-            Some(KeyringManager::new("/nonexistent-keyring")),
+            Some(fixture_access_keyring(dir.path(), "legacy")),
         );
         assert!(auth.invalidate_expired_session(&expected, "legacy"));
         assert_eq!(manager.load().ciphers[0]["id"], "created");
@@ -1272,7 +1335,7 @@ mod tests {
         let storage_path = dir.path().join("test_auth_data.json");
         let storage_mgr = StorageManager::new(storage_path);
 
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let mock_keyring = create_test_mock_keyring(dir.path());
         let auth_mgr = AuthManager::new(
             "https://vault.example.com",
             Some(storage_mgr.clone()),
@@ -1285,6 +1348,7 @@ mod tests {
 
         // Simulate stored account
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             user_email: "test@example.com".to_string(),
             enc_user_key: Some("2.dummy_iv|dummy_ct|dummy_mac".to_string()),
             ..Default::default()
@@ -1493,40 +1557,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_status_with_apikey_session() {
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_apikey_status.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
-        // Simulate legacy storage after API key authentication (pre-0.5.0 format with access_token on disk)
-        let legacy_json = serde_json::json!({
-            "user_email": "apikey-user@example.com",
-            "user_id": "user-uuid-123",
-            "access_token": "fake_access_token_abc",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        std::fs::write(
-            &storage_path,
-            serde_json::to_string_pretty(&legacy_json).unwrap(),
-        )
-        .unwrap();
-
-        let st = auth_mgr.get_status(false);
-        assert_eq!(st.status, "locked");
-        assert_eq!(st.lock_generation, None);
-        assert_eq!(st.user_email.as_deref(), Some("apikey-user@example.com"));
-        assert_eq!(st.user_id.as_deref(), Some("user-uuid-123"));
-        assert!(st.has_session);
-    }
-
-    #[test]
     fn test_jwt_expiration_detection() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
@@ -1555,19 +1585,19 @@ mod tests {
         let storage_path = dir.path().join("test_expired_status.json");
         let storage_mgr = StorageManager::new(storage_path.clone());
 
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 100 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
 
+        let auth_mgr = AuthManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr.clone()),
+            Some(fixture_access_keyring(dir.path(), &expired_token)),
+        );
         let legacy_json = serde_json::json!({
+            "server_url":"https://vault.example.com",
+            "credential_id":crate::test_support::CREDENTIAL_ID,
             "user_email": "expired-user@example.com",
             "user_id": "user-uuid-999",
             "access_token": expired_token,
@@ -1667,19 +1697,8 @@ esac
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(
-            "https://vault.example.com",
-            "user.test-client-id",
-            "secret_xyz_123"
-        ));
-        assert!(mock_keyring.store_token(
-            "https://vault.example.com",
-            KIND_ACCESS_TOKEN,
-            &expired_token
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: "https://vault.example.com".to_string(),
             user_email: "apikey-user@example.com".to_string(),
             user_id: Some("user-uuid-999".to_string()),
@@ -1690,159 +1709,14 @@ esac
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(KIND_API_SECRET, "secret_xyz_123"));
+        assert!(keys.store_token(KIND_ACCESS_TOKEN, &expired_token));
 
         let st = auth_mgr.get_status(false);
         // Because client_secret exists in keyring, has_session remains true
         assert!(st.has_session);
         assert_eq!(st.status, "locked");
-    }
-
-    #[test]
-    fn test_auth_status_token_auto_migration() {
-        use std::fs;
-
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_migration.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let store_dir = dir.path().join("store");
-        fs::create_dir_all(&store_dir).unwrap();
-        let script_path = dir.path().join("mock-secret-tool");
-
-        let script = format!(
-            r#"#!/bin/sh
-STORE_DIR="{}"
-cmd="$1"
-shift
-case "$1" in
-    --label=*)
-        shift
-        ;;
-esac
-
-key=""
-while [ $# -gt 0 ]; do
-    k="$1"
-    v="$2"
-    safe_v=$(printf '%s' "$v" | tr '/:' '_')
-    key="${{key}}__${{k}}=${{safe_v}}"
-    shift 2 2>/dev/null || shift 1
-done
-
-case "$cmd" in
-    store)
-        cat > "${{STORE_DIR}}/${{key}}"
-        exit 0
-        ;;
-    lookup)
-        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
-            cat "${{STORE_DIR}}/${{key}}"
-            exit 0
-        else
-            exit 1
-        fi
-        ;;
-    clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
-            rm -f "${{STORE_DIR}}"/*
-        else
-            rm -f "${{STORE_DIR}}/${{key}}"*
-        fi
-        exit 0
-        ;;
-    *)
-        exit 1
-        ;;
-esac
-"#,
-            store_dir.display()
-        );
-
-        crate::write_test_executable(&script_path, script);
-
-        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring.clone()),
-        );
-
-        // Pre-migration storage contains plaintext tokens
-        let legacy_json = serde_json::json!({
-            "user_email": "migrate@example.com",
-            "server_url": "https://vault.example.com",
-            "access_token": "plaintext_access_123",
-            "refresh_token": "plaintext_refresh_456",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        std::fs::write(&storage_path, legacy_json.to_string()).unwrap();
-
-        // Check status triggers migration
-        let st = auth_mgr.get_status(false);
-        assert!(st.has_session);
-        assert_eq!(st.status, "locked");
-
-        // Verify tokens migrated to Keyring
-        assert_eq!(
-            mock_keyring.get_token("https://vault.example.com", KIND_ACCESS_TOKEN),
-            Some("plaintext_access_123".to_string())
-        );
-        assert_eq!(
-            mock_keyring.get_token("https://vault.example.com", KIND_REFRESH_TOKEN),
-            Some("plaintext_refresh_456".to_string())
-        );
-
-        // Verify plaintext tokens scrubbed from disk
-        let fresh_storage = storage_mgr.load();
-        assert!(fresh_storage.access_token.is_none());
-        assert!(fresh_storage.refresh_token.is_none());
-    }
-
-    #[test]
-    fn test_auth_status_token_migration_failure_preserves_disk_tokens() {
-        use std::fs;
-
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_migration_failure.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let script_path = dir.path().join("mock-secret-tool-fail");
-        // Script is an executable that always exits with code 1
-        let script = "#!/bin/sh\nexit 1\n";
-        crate::write_test_executable(&script_path, script);
-
-        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
-        // keyring is_available() will return true because the binary exists, but store will fail
-        assert!(mock_keyring.is_available());
-
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
-        let legacy_json = serde_json::json!({
-            "user_email": "safeguard@example.com",
-            "server_url": "https://vault.example.com",
-            "access_token": "critical_access_tok",
-            "refresh_token": "critical_refresh_tok",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        fs::write(&storage_path, legacy_json.to_string()).unwrap();
-
-        let st = auth_mgr.get_status(false);
-        assert!(st.has_session);
-
-        // Tokens MUST remain on disk because keyring store failed!
-        let fresh_storage = storage_mgr.load();
-        assert_eq!(
-            fresh_storage.access_token.as_deref(),
-            Some("critical_access_tok")
-        );
-        assert_eq!(
-            fresh_storage.refresh_token.as_deref(),
-            Some("critical_refresh_tok")
-        );
     }
 
     #[test]
@@ -1913,16 +1787,13 @@ esac
         let custom_url = "https://vaultwarden.custom.local";
         let client_id = "user.custom-client-123";
 
-        // Store API secret keyed to custom_url
-        assert!(mock_keyring.store_api_secret(custom_url, client_id, "top_secret"));
-
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 50 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
-        assert!(mock_keyring.store_token(custom_url, KIND_ACCESS_TOKEN, &expired_token));
 
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: custom_url.to_string(),
             user_email: "custom@local.org".to_string(),
             client_id: Some(client_id.to_string()),
@@ -1930,6 +1801,9 @@ esac
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(KIND_API_SECRET, "top_secret"));
+        assert!(keys.store_token(KIND_ACCESS_TOKEN, &expired_token));
 
         // get_status should prioritize storage.server_url over default self.server_url and find the secret
         let st = auth_mgr.get_status(false);

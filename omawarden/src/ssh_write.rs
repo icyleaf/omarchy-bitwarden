@@ -76,7 +76,9 @@ impl VaultManager {
                 .storage
                 .read()
                 .map_err(|_| "Vault state unavailable".to_string())?;
-            if !*unlocked || generation != self.lock_generation() || !active.same_account(&storage)
+            if !*unlocked
+                || generation != self.lock_generation()
+                || !active.same_active_slot(&storage)
             {
                 return Err(WriteError::Rejected("Vault session changed.".into()));
             }
@@ -99,10 +101,7 @@ impl VaultManager {
         let client = BitwardenApiClient::for_cipher_write(server, context).map_err(|_| {
             WriteError::Rejected("Could not initialize the cipher HTTP client.".into())
         })?;
-        let token = self
-            .keyring_mgr
-            .for_storage(&storage, server)
-            .access_token();
+        let token = self.keyring_mgr.for_storage(&storage).access_token();
         let renew = || self.renew_for_account(&storage, context, generation);
         let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
             Some(t) => t,
@@ -135,7 +134,7 @@ impl VaultManager {
             let same_account = self
                 .storage_mgr
                 .load_existing()
-                .is_ok_and(|s| s.same_account(&storage));
+                .is_ok_and(|s| s.same_active_slot(&storage));
             let current = self
                 .is_unlocked
                 .read()
@@ -182,7 +181,7 @@ impl VaultManager {
         id: &str,
     ) -> Option<()> {
         let base = self.storage_mgr.cache_snapshot().ok()?;
-        if !base.storage.same_account(account) {
+        if !base.storage.same_active_slot(account) {
             return None;
         }
         let mut updated = base.storage.clone();

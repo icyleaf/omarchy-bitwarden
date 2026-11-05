@@ -28,10 +28,7 @@ impl VaultManager {
         };
         let identity = account.credential_identity_url(self.identity_url.as_deref());
         let client = BitwardenApiClient::with_options(server, identity, context);
-        let token = self
-            .keyring_mgr
-            .for_storage(&account, server)
-            .access_token();
+        let token = self.keyring_mgr.for_storage(&account).access_token();
         let mut token = match token {
             Some(token) if !crate::auth::is_jwt_expired(&token) => token,
             _ => self.renew_for_account(&account, context, session.generation)?,
@@ -51,7 +48,7 @@ impl VaultManager {
                         return Err(CacheCommitError::SessionChanged.to_string());
                     }
                     let base = self.storage_mgr.snapshot().map_err(snapshot_error)?;
-                    if !base.storage.same_account(&account) {
+                    if !base.storage.same_active_slot(&account) {
                         return Err(CacheCommitError::SessionChanged.to_string());
                     }
                     base
@@ -169,6 +166,7 @@ mod tests {
                 server_url: url.clone(),
                 user_email: "fixture@example.invalid".into(),
                 user_id: Some("user-id".into()),
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
                 enc_user_key: Some(wrap),
                 kdf_iterations: Some(100_000),
                 ..Default::default()
@@ -726,6 +724,7 @@ mod tests {
     enum LoginPublication {
         KeyringFailure,
         RenameFailure,
+        DirectorySyncFailure,
         Committed,
     }
 
@@ -744,7 +743,7 @@ mod tests {
                 r#"#!/bin/sh
 command=$1
 shift
-case "$1" in --label=*) shift;; esac
+case "$1" in --label=*|--all) shift;; esac
 while [ "$#" -ge 2 ]; do
     case "$1" in
         service) service=$2;;
@@ -754,7 +753,8 @@ while [ "$#" -ge 2 ]; do
     esac
     shift 2
 done
-prefix="{}/$service.$account.$slot."
+directory="{}"
+prefix="$directory/$service.$account.$slot."
 case "$command" in
     store)
         secret=$(/bin/cat)
@@ -764,7 +764,13 @@ case "$command" in
         printf '%s' "$secret" > "$prefix$kind"
         ;;
     lookup) /bin/cat "$prefix$kind";;
-    clear) if [ -n "$kind" ]; then /bin/rm -f "$prefix$kind"; else /bin/rm -f "$prefix"*; fi;;
+    clear) /bin/rm -f "$directory/$service."*".$slot."*;;
+    search)
+        for item in "$directory/$service."*".$slot."*; do
+            if [ -f "$item" ]; then echo present; break; fi
+        done
+        exit 0
+        ;;
     *) exit 1;;
 esac
 "#,
@@ -782,7 +788,7 @@ esac
         mgr.storage_mgr.save(&original).unwrap();
         seed(&mgr, vec![cipher("original")]);
         let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
-        let original_keys = mgr.keyring_mgr.for_storage(&original, &mgr.server_url);
+        let original_keys = mgr.keyring_mgr.for_storage(&original);
         assert!(original_keys.store_token(KIND_ACCESS_TOKEN, "original-access"));
         assert!(original_keys.store_token(KIND_REFRESH_TOKEN, "original-refresh"));
         assert!(original_keys.store_token(KIND_API_SECRET, "original-secret"));
@@ -796,13 +802,16 @@ esac
         };
         assert!(mgr
             .keyring_mgr
-            .for_storage(&unused, &mgr.server_url)
+            .for_storage(&unused)
             .access_token()
             .is_none());
 
+        let mut publication_storage = mgr.storage_mgr.clone();
+        publication_storage.fail_credential_cleanup_sync =
+            outcome == LoginPublication::DirectorySyncFailure;
         let mut auth = crate::auth::AuthManager::new(
             &mgr.server_url,
-            Some(mgr.storage_mgr.clone()),
+            Some(publication_storage),
             Some(mgr.keyring_mgr.clone()),
         );
         if outcome == LoginPublication::RenameFailure {
@@ -830,16 +839,29 @@ esac
             json!({"ciphers":[], "profile":{"id":user_id, "email":email}}),
         );
         let result = task.join().unwrap();
-        if outcome == LoginPublication::Committed {
+        if matches!(
+            outcome,
+            LoginPublication::Committed | LoginPublication::DirectorySyncFailure
+        ) {
             assert!(result.ok, "{:?}", result.error);
             let active = mgr.storage_mgr.load_existing().unwrap();
             assert_ne!(active.credential_id, original.credential_id);
             assert_eq!(active.user_id.as_deref(), Some(user_id));
-            assert!(original_keys.access_token().is_none());
-            assert!(original_keys.refresh_token().is_none());
-            assert!(original_keys.api_secret().is_none());
+            let retained = outcome == LoginPublication::DirectorySyncFailure;
+            assert_eq!(
+                original_keys.access_token().as_deref(),
+                retained.then_some("original-access")
+            );
+            assert_eq!(
+                original_keys.refresh_token().as_deref(),
+                retained.then_some("original-refresh")
+            );
+            assert_eq!(
+                original_keys.api_secret().as_deref(),
+                retained.then_some("original-secret")
+            );
             assert!(mgr.keyring_mgr.clear_all());
-            let active_keys = mgr.keyring_mgr.for_storage(&active, &mgr.server_url);
+            let active_keys = mgr.keyring_mgr.for_storage(&active);
             assert_eq!(active_keys.access_token().as_deref(), Some("other-access"));
             assert_eq!(
                 active_keys.refresh_token().as_deref(),
@@ -886,7 +908,14 @@ esac
 
     #[test]
     fn login_publishes_the_new_slot_and_retires_the_old_one() {
-        login_candidate_slot(LoginPublication::Committed, true);
+        for replace_account in [true, false] {
+            login_candidate_slot(LoginPublication::Committed, replace_account);
+        }
+    }
+
+    #[test]
+    fn login_retains_previous_credentials_when_directory_sync_fails() {
+        login_candidate_slot(LoginPublication::DirectorySyncFailure, true);
     }
 
     #[test]

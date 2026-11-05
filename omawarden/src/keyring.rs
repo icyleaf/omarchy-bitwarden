@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
 use crate::storage::VaultStorage;
@@ -83,6 +83,39 @@ impl KeyringManager {
             .is_ok_and(|output| output.status.success())
     }
 
+    pub(crate) fn erase_credential_slot(&self, credential_id: Option<&str>) -> io::Result<()> {
+        let scoped;
+        let attributes: &[&str] = if let Some(id) = credential_id {
+            scoped = ["service", SCOPED_SERVICE_NAME, "credential_id", id];
+            &scoped
+        } else {
+            &["service", SERVICE_NAME]
+        };
+        let _ = self.clear(attributes);
+
+        // clear may find nothing or leave locked entries behind. Confirm
+        // absence without capturing or logging the search output.
+        let mut search = Command::new(&self.secret_tool_path)
+            .args(["search", "--all"])
+            .args(attributes)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let empty = search
+            .stdout
+            .take()
+            .is_some_and(|mut output| matches!(output.read(&mut [0]), Ok(0)));
+        if !empty {
+            let _ = search.kill();
+        }
+        if search.wait()?.success() && empty {
+            Ok(())
+        } else {
+            Err(io::Error::other("Could not confirm keyring cleanup"))
+        }
+    }
+
     pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
         legacy_token_attributes(server_url, kind)
             .is_some_and(|attrs| self.store(credential_label(kind), &attrs, token))
@@ -134,19 +167,10 @@ impl KeyringManager {
         self.clear(&attrs)
     }
 
-    pub(crate) fn for_storage<'a>(
-        &'a self,
-        storage: &'a VaultStorage,
-        fallback_server: &'a str,
-    ) -> AccountKeyring<'a> {
+    pub(crate) fn for_storage<'a>(&'a self, storage: &'a VaultStorage) -> AccountKeyring<'a> {
         AccountKeyring {
             keyring: self,
             storage,
-            server: normalize_server_url(if storage.server_url.is_empty() {
-                fallback_server
-            } else {
-                &storage.server_url
-            }),
         }
     }
 }
@@ -201,31 +225,26 @@ fn legacy_session_attributes(server: &str) -> Option<[&str; 6]> {
 pub(crate) struct AccountKeyring<'a> {
     keyring: &'a KeyringManager,
     storage: &'a VaultStorage,
-    server: &'a str,
 }
 
 impl AccountKeyring<'_> {
     fn slot(&self) -> Option<[&str; 10]> {
         let id = self.storage.credential_id.as_deref()?;
+        let server = normalize_server_url(&self.storage.server_url);
         let account = self
             .storage
             .user_id
             .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or(&self.storage.user_email);
-        if self.storage.server_url.is_empty()
-            || self.server.is_empty()
-            || account.is_empty()
-            || id.len() != 32
-            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if server.is_empty() || account.is_empty() || !crate::credential_slots::valid_id(id) {
             return None;
         }
         Some([
             "service",
             SCOPED_SERVICE_NAME,
             "server_url",
-            self.server,
+            server,
             "account",
             account,
             "credential_id",
@@ -249,58 +268,24 @@ impl AccountKeyring<'_> {
     }
 
     pub(crate) fn access_token(&self) -> Option<String> {
-        if self.storage.credential_id.is_some() {
-            self.keyring.lookup(&self.attributes(KIND_ACCESS_TOKEN)?)
-        } else {
-            self.keyring
-                .get_session(self.server)
-                .or_else(|| self.storage.access_token.clone())
-        }
+        self.keyring.lookup(&self.attributes(KIND_ACCESS_TOKEN)?)
     }
 
     pub(crate) fn refresh_token(&self) -> Option<String> {
-        if self.storage.credential_id.is_some() {
-            self.keyring.lookup(&self.attributes(KIND_REFRESH_TOKEN)?)
-        } else {
-            self.keyring
-                .get_token(self.server, KIND_REFRESH_TOKEN)
-                .or_else(|| self.storage.refresh_token.clone())
-        }
+        self.keyring.lookup(&self.attributes(KIND_REFRESH_TOKEN)?)
     }
 
     pub(crate) fn api_secret(&self) -> Option<String> {
-        if self.storage.credential_id.is_some() {
-            self.keyring.lookup(&self.attributes(KIND_API_SECRET)?)
-        } else {
-            self.keyring
-                .get_api_secret(self.server, self.storage.client_id.as_deref()?)
-        }
+        self.keyring.lookup(&self.attributes(KIND_API_SECRET)?)
     }
 
     pub(crate) fn store_token(&self, kind: &str, token: &str) -> bool {
-        if self.storage.credential_id.is_some() {
-            self.attributes(kind)
-                .is_some_and(|attrs| self.keyring.store(credential_label(kind), &attrs, token))
-        } else {
-            self.keyring.store_token(self.server, kind, token)
-        }
+        self.attributes(kind)
+            .is_some_and(|attrs| self.keyring.store(credential_label(kind), &attrs, token))
     }
 
     pub(crate) fn clear_token(&self, kind: &str) {
-        if self.storage.credential_id.is_some() {
-            if let Some(attrs) = self.attributes(kind) {
-                self.keyring.clear(&attrs);
-            }
-        } else if kind == KIND_ACCESS_TOKEN {
-            self.keyring.clear_session(self.server);
-        } else {
-            self.keyring.clear_token(self.server, kind);
-        }
-    }
-
-    /// Clear only the referenced slot. Legacy records have no isolated slot.
-    pub(crate) fn clear_slot(&self) {
-        if let Some(attrs) = self.slot() {
+        if let Some(attrs) = self.attributes(kind) {
             self.keyring.clear(&attrs);
         }
     }

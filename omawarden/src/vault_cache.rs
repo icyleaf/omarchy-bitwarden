@@ -82,7 +82,7 @@ impl VaultManager {
             .storage
             .write()
             .map_err(|_| CacheCommitError::Unavailable)?;
-        if !current.same_account(&base.storage) {
+        if !current.same_active_slot(&base.storage) {
             return Err(CacheCommitError::SessionChanged);
         }
         if !base.is_current(&self.storage_mgr)? {

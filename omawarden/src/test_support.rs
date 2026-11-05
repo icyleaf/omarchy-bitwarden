@@ -2,6 +2,8 @@
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
+pub(crate) const CREDENTIAL_ID: &str = "11111111111111111111111111111111";
+
 #[derive(Default)]
 pub(crate) struct PausePoint(Mutex<Option<Box<dyn FnOnce() + Send>>>);
 

@@ -823,6 +823,9 @@ impl VaultManager {
         client_context: Option<&ClientContext>,
         generation: u64,
     ) -> Result<String, String> {
+        if storage.credential_id.is_none() {
+            return Err("Please log in again to use account-scoped credentials.".into());
+        }
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
         } else {
@@ -830,7 +833,7 @@ impl VaultManager {
         };
         let id_url = storage.credential_identity_url(self.identity_url.as_deref());
         let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
-        let keyring = self.keyring_mgr.for_storage(storage, s_url);
+        let keyring = self.keyring_mgr.for_storage(storage);
 
         let mut had_credentials = false;
         let mut auth_failed = false;
@@ -963,13 +966,11 @@ impl VaultManager {
             self.revoke_account(storage, generation);
             "Vault cache unavailable"
         })?;
-        if generation != self.lock_generation() || !storage.same_account(&updated_storage) {
+        if generation != self.lock_generation() || !storage.same_active_slot(&updated_storage) {
             return Err("Session changed during token renewal".into());
         }
         if self.keyring_mgr.is_available() {
-            let keyring = self
-                .keyring_mgr
-                .for_storage(&updated_storage, &self.server_url);
+            let keyring = self.keyring_mgr.for_storage(&updated_storage);
             let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
             let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
                 keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
@@ -1009,12 +1010,12 @@ impl VaultManager {
     fn revoke_account(&self, expected: &VaultStorage, generation: u64) {
         let disk = self.storage_mgr.load_existing();
         if self.lock_generation() != generation
-            || disk.as_ref().is_ok_and(|s| !s.same_account(expected))
+            || disk.as_ref().is_ok_and(|s| !s.same_active_slot(expected))
         {
             return;
         }
         self.lock();
-        let keyring = self.keyring_mgr.for_storage(expected, &self.server_url);
+        let keyring = self.keyring_mgr.for_storage(expected);
         keyring.clear_token(crate::keyring::KIND_ACCESS_TOKEN);
         keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
         if let Ok(mut updated) = disk {
@@ -1236,9 +1237,7 @@ impl VaultManager {
 
     pub fn get_status(&self) -> Value {
         let fresh_storage = self.storage_mgr.load();
-        let keyring = self
-            .keyring_mgr
-            .for_storage(&fresh_storage, &self.server_url);
+        let keyring = self.keyring_mgr.for_storage(&fresh_storage);
         let active_token = keyring.access_token();
         let has_refresh = keyring.refresh_token().is_some();
         let has_api_secret = keyring.api_secret().is_some();
@@ -2292,7 +2291,7 @@ pub(crate) mod tests {
         assert!(sync_err.is_err());
         assert_eq!(
             sync_err.unwrap_err(),
-            "Session token missing. Please log in."
+            "Please log in again to use account-scoped credentials."
         );
     }
 
@@ -2301,12 +2300,15 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault_sync_locked.json");
         let storage_mgr = StorageManager::new(path.clone());
-        let legacy_json = serde_json::json!({
-            "access_token": "fake_test_token"
+        let fixture = serde_json::json!({
+            "server_url": "http://127.0.0.1:9",
+            "user_email": "fixture@example.invalid",
+            "credential_id": crate::test_support::CREDENTIAL_ID,
         });
-        std::fs::write(&path, legacy_json.to_string()).unwrap();
-
-        let dummy_keyring = KeyringManager::new("/nonexistent-keyring");
+        std::fs::write(&path, fixture.to_string()).unwrap();
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(&script, "#!/bin/sh\necho fake_test_token\n");
+        let dummy_keyring = KeyringManager::new(script.to_str().unwrap());
         let vault_mgr =
             VaultManager::new("http://127.0.0.1:9", Some(storage_mgr), Some(dummy_keyring));
         assert!(!vault_mgr.is_unlocked());
@@ -2502,27 +2504,22 @@ esac
         let client_id = "user.reauth-test-id";
         let client_secret = "reauth-secret-val";
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
-
         // Store an EXPIRED access token in Keyring
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 300 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_ACCESS_TOKEN,
-            &expired_token
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: server_url.clone(),
             user_email: "reauth@example.com".to_string(),
             client_id: Some(client_id.to_string()),
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, client_secret));
+        assert!(keys.store_token(crate::keyring::KIND_ACCESS_TOKEN, &expired_token));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -2542,7 +2539,7 @@ esac
 
         // Verify the new token is stored in Keyring
         assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_ACCESS_TOKEN),
+            keys.access_token(),
             Some("renewed_access_token_abc123".to_string())
         );
         // Verify disk storage remains zero-plaintext
@@ -2562,7 +2559,7 @@ esac
         let server_url = format!("http://{}", listener.local_addr().unwrap());
 
         let server_handle = thread::spawn(move || {
-            for stream in listener.incoming().take(1) {
+            for stream in listener.incoming().take(2) {
                 let mut stream = stream.unwrap();
                 let mut buf = [0u8; 4096];
                 let n = stream.read(&mut buf).unwrap();
@@ -2647,23 +2644,18 @@ esac
         let client_id = "user.fail-test";
         let client_secret = "secret-val-to-retain";
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
-
-        // Set refresh token in Keyring and storage
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "revoked_ref_token"
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+            client_id: Some(client_id.into()),
             server_url: server_url.clone(),
             user_email: "fail@example.com".to_string(),
             refresh_token: Some("revoked_ref_token".to_string()),
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, client_secret));
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "revoked_ref_token"));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -2682,20 +2674,11 @@ esac
         let _ = server_handle.join();
 
         // Keyring tokens purged
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_ACCESS_TOKEN),
-            None
-        );
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_REFRESH_TOKEN),
-            None
-        );
+        assert_eq!(keys.access_token(), None);
+        assert_eq!(keys.refresh_token(), None);
 
         // API secret is preserved
-        assert_eq!(
-            mock_keyring.get_api_secret(&server_url, client_id),
-            Some(client_secret.to_string())
-        );
+        assert_eq!(keys.api_secret(), Some(client_secret.to_string()));
 
         // Storage tokens purged
         let fresh_storage = storage_mgr.load();
@@ -2768,19 +2751,16 @@ esac
 
         let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
 
-        // Set refresh token
-        assert!(mock_keyring.store_token(
-            "http://127.0.0.1:9",
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "valid_ref_token"
-        ));
-
         let legacy_json = serde_json::json!({
+            "credential_id": crate::test_support::CREDENTIAL_ID,
             "server_url": "http://127.0.0.1:9",
             "user_email": "offline@example.com",
             "refresh_token": "valid_ref_token"
         });
         fs::write(&storage_path, legacy_json.to_string()).unwrap();
+        let stored = storage_mgr.load();
+        let keys = mock_keyring.for_storage(&stored);
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
 
         let vault_mgr = VaultManager::new(
             "http://127.0.0.1:9",
@@ -2794,10 +2774,7 @@ esac
         assert!(res.unwrap_err().contains("Network error"));
 
         // Keyring refresh token NOT purged
-        assert_eq!(
-            mock_keyring.get_token("http://127.0.0.1:9", crate::keyring::KIND_REFRESH_TOKEN),
-            Some("valid_ref_token".to_string())
-        );
+        assert_eq!(keys.refresh_token(), Some("valid_ref_token".to_string()));
 
         // Storage tokens NOT purged
         let fresh_storage = storage_mgr.load();
@@ -2895,21 +2872,18 @@ esac
 
         let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
 
-        // Set refresh token and api secret
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "valid_ref_token"
-        ));
-        assert!(mock_keyring.store_api_secret(&server_url, "test_client_id", "test_secret"));
-
         let legacy_json = serde_json::json!({
+            "credential_id": crate::test_support::CREDENTIAL_ID,
             "server_url": server_url.clone(),
             "user_email": "gateway502@example.com",
             "client_id": "test_client_id",
             "refresh_token": "valid_ref_token"
         });
         fs::write(&storage_path, legacy_json.to_string()).unwrap();
+        let stored = storage_mgr.load();
+        let keys = mock_keyring.for_storage(&stored);
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, "test_secret"));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -2923,14 +2897,8 @@ esac
         assert!(res.unwrap_err().contains("Network error"));
 
         // Keyring refresh token and api secret NOT purged
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_REFRESH_TOKEN),
-            Some("valid_ref_token".to_string())
-        );
-        assert_eq!(
-            mock_keyring.get_api_secret(&server_url, "test_client_id"),
-            Some("test_secret".to_string())
-        );
+        assert_eq!(keys.refresh_token(), Some("valid_ref_token".to_string()));
+        assert_eq!(keys.api_secret(), Some("test_secret".to_string()));
 
         // Storage tokens NOT purged
         let fresh_storage = storage_mgr.load();
