@@ -721,6 +721,7 @@ Item {
     root.lastSyncWasManual = !isBackground
     root.isBusy = true
     root.statusMessage = "Syncing vault with Bitwarden..."
+    vaultSyncProc.revision = root.vaultRevision
     vaultSyncProc.command = [root.helperPath, "vault", "sync"]
     vaultSyncProc.running = true
   }
@@ -1715,6 +1716,7 @@ Item {
     root.loadingAttachmentId = (att.id || att.fileName || "loading")
     attachmentProc.activeAttachmentId = att.id || ""
     attachmentProc.activeItemId = item.id || ""
+    attachmentProc.revision = root.vaultRevision
     attachmentProc.command = [
       root.helperPath,
       "attachment",
@@ -1742,6 +1744,7 @@ Item {
     if (root.config && root.config.download_dir) {
       cmd.push("--output-dir", root.config.download_dir)
     }
+    attachmentProc.revision = root.vaultRevision
     attachmentProc.command = cmd
     attachmentProc.running = true
   }
@@ -3328,20 +3331,17 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
+            root.clearSensitiveState()
             var statusVal = data.status || "unlocked"
             if (statusVal === "locked") {
-              root.statusMessage = "API Key authenticated. Please enter Master Password to unlock."
+              root.statusMessage = "Signed in. Enter your master password to unlock."
             } else {
               root.statusMessage = "Logged in successfully."
             }
-            root.searchQuery = ""
             root.show2FAField = false
             root.isNewDeviceVerification = false
-            root.twoFactorProvider = 0
-            root.availableTwoFactorProviders = []
             root.fido2Status = ""
             if (authViewComponent) {
-              authViewComponent.clearInputs()
               authViewComponent.show2FAField = false
               authViewComponent.isNewDeviceVerification = false
               authViewComponent.twoFactorProvider = 0
@@ -3569,11 +3569,13 @@ Item {
 
   Process {
     id: vaultSyncProc
+    property int revision: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.isBusy = false
+        if (vaultSyncProc.revision !== root.vaultRevision) return
         try {
           var res = JSON.parse(text)
           if (res && res.ok === false) {
@@ -3616,7 +3618,7 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0 && !root.errorMessage) {
+      if (vaultSyncProc.revision === root.vaultRevision && code !== 0 && !root.errorMessage) {
         root.errorMessage = "Vault sync failed."
         root.logError("omarchy:vault", "Vault sync process exited with code " + code)
       }
@@ -3757,12 +3759,14 @@ Item {
 
   Process {
     id: attachmentProc
+    property int revision: 0
     property string activeAttachmentId: ""
     property string activeItemId: ""
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (attachmentProc.revision !== root.vaultRevision) return
         root.loadingAttachmentId = ""
         if (!root.authState || root.authState.status !== "unlocked") {
           root.activeAttachmentPreview = null
@@ -3795,6 +3799,7 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:attachment")
     }
     onExited: function(code) {
+      if (attachmentProc.revision !== root.vaultRevision) return
       root.loadingAttachmentId = ""
       if (code !== 0 && !root.errorMessage) root.errorMessage = "Attachment command failed."
     }
