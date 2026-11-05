@@ -149,6 +149,13 @@ impl Default for SshAgent {
 }
 
 impl SshAgent {
+    pub(crate) fn cancel_pending(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+            self.answered.notify_all();
+        }
+    }
+
     /// Pending prompts, oldest first (for the overlay).
     pub fn pending(&self) -> Vec<Prompt> {
         let mut list: Vec<Prompt> = self
@@ -192,12 +199,18 @@ impl SshAgent {
 }
 
 /// Post a prompt and wait for its answer; no answer within the timeout denies.
-fn ask(host: &Arc<dyn Host>, mut prompt: Prompt) -> Decision {
+fn ask(host: &Arc<dyn Host>, mut prompt: Prompt, generation: u64) -> Decision {
     let agent = host.agent();
     let id = agent.next_id.fetch_add(1, Ordering::Relaxed);
     prompt.id = id;
     let (title, body) = notification_text(&prompt);
-    if let Ok(mut pending) = agent.pending.lock() {
+    {
+        let Ok(mut pending) = agent.pending.lock() else {
+            return Decision::default();
+        };
+        if host.lock_generation() != generation {
+            return Decision::default();
+        }
         pending.insert(
             id,
             Pending {
@@ -234,7 +247,10 @@ fn ask(host: &Arc<dyn Host>, mut prompt: Prompt) -> Decision {
         return Decision::default();
     };
     let decision = loop {
-        if let Some(d) = pending.get(&id).and_then(|p| p.decision) {
+        let Some(request) = pending.get(&id) else {
+            break Decision::default();
+        };
+        if let Some(d) = request.decision {
             break d;
         }
         let now = Instant::now();
@@ -792,7 +808,7 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
             remembered: remembers,
         };
         drop(key);
-        let decision = ask(host, prompt);
+        let decision = ask(host, prompt, generation);
         if !decision.approve {
             return Err("denied".into());
         }
@@ -1811,6 +1827,22 @@ mod tests {
         task.join().unwrap();
         assert_eq!(host.activity(), 0);
         assert!(host.agent.approvals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_pending_approval_denies_the_request() {
+        let host = FakeHost::new(Confirm::Always, Card::Ignore);
+        let revoked = Arc::clone(&host);
+        let task = std::thread::spawn(move || {
+            assert!(eventually(|| !revoked.agent.pending().is_empty()));
+            let id = revoked.agent.pending()[0].id;
+            revoked.agent.cancel_pending();
+            assert!(revoked.agent.pending().is_empty());
+            assert!(!revoked.agent.reply(id, Decision { approve: true }));
+        });
+        assert!(Client::connect(&host, SSH, TERMINAL).sign(&host).is_none());
+        task.join().unwrap();
+        assert_eq!(host.activity(), 0);
     }
 
     #[test]

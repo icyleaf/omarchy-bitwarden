@@ -36,6 +36,15 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Value> {
     Ok(serde_json::from_str(&line)?)
 }
 
+fn discard_published_candidate(storage: &StorageManager, id: &str) {
+    if let Err(error) = storage.remove_candidate_snapshot(id) {
+        crate::log_warn!(
+            "omawarden:auth",
+            "Cannot remove the published login snapshot. {error}"
+        );
+    }
+}
+
 impl LoginConnection {
     pub(crate) fn begin(expected_context: Option<&str>) -> Result<Self, String> {
         let unavailable = || "Cannot verify the daemon session before login.".to_string();
@@ -96,6 +105,7 @@ impl LoginConnection {
             .load_existing()
             .is_ok_and(|current| current.scoped_credential_id() == Some(&self.attempt_id))
         {
+            discard_published_candidate(storage, &self.attempt_id);
             return Ok(None);
         }
         Err(ActivationError::Unknown)
@@ -157,16 +167,14 @@ pub(crate) fn serve(
             .storage_mgr
             .open_login_candidate(&id)
             .map_err(|_| "Cannot read the prepared login snapshot.")?;
-        vault.activate_account(&base, candidate, expected, || state.reset_session_timers())
+        vault.activate_account(&base, candidate, expected, || {
+            state.reset_session_timers();
+            state.ssh_agent.cancel_pending();
+        })
     })();
     let reply = match result {
         Ok(context) => {
-            if let Err(error) = vault.storage_mgr.remove_candidate_snapshot(&id) {
-                crate::log_warn!(
-                    "omawarden:auth",
-                    "Cannot remove the published login snapshot. {error}"
-                );
-            }
+            discard_published_candidate(&vault.storage_mgr, &id);
             json!({"outcome":"committed","attempt_id":id,"unlock_context":context})
         }
         Err(error) => json!({"outcome":"rejected","attempt_id":id,"error":error}),

@@ -1,5 +1,9 @@
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+#[doc(hidden)]
+pub const CLIPBOARD_SETUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct ClipboardManager {
@@ -25,8 +29,31 @@ impl ClipboardManager {
     }
 
     pub fn copy(&self, text: &str, sensitive: bool, timeout_seconds: i64) -> bool {
-        let result = if sensitive && timeout_seconds > 0 {
-            self.copy_with_expiry(text, timeout_seconds)
+        self.copy_inner(text, sensitive, timeout_seconds, None)
+    }
+
+    /// Copy only while the vault session that supplied the text is current.
+    #[doc(hidden)]
+    pub fn copy_in_session(
+        &self,
+        text: &str,
+        sensitive: bool,
+        timeout_seconds: i64,
+        generation: u64,
+    ) -> bool {
+        self.copy_inner(text, sensitive, timeout_seconds, Some(generation))
+    }
+
+    fn copy_inner(
+        &self,
+        text: &str,
+        sensitive: bool,
+        timeout_seconds: i64,
+        generation: Option<u64>,
+    ) -> bool {
+        let seconds = if sensitive { timeout_seconds.max(0) } else { 0 };
+        let result = if generation.is_some() || seconds > 0 {
+            self.copy_with_holder(text, sensitive, seconds, generation)
         } else {
             self.copy_without_expiry(text, sensitive)
         };
@@ -48,7 +75,13 @@ impl ClipboardManager {
         }
     }
 
-    fn copy_with_expiry(&self, text: &str, seconds: i64) -> io::Result<bool> {
+    fn copy_with_holder(
+        &self,
+        text: &str,
+        sensitive: bool,
+        seconds: i64,
+        generation: Option<u64>,
+    ) -> io::Result<bool> {
         let (input, mut sender) = io::pipe()?;
         let (mut ready, ack) = io::pipe()?;
         let mut worker = Command::new(std::env::current_exe()?);
@@ -59,6 +92,12 @@ impl ClipboardManager {
             .stdin(input)
             .stdout(ack)
             .stderr(Stdio::null());
+        if !sensitive {
+            worker.arg("--public");
+        }
+        if let Some(generation) = generation {
+            worker.args(["--expected-lock-generation", &generation.to_string()]);
+        }
 
         // Register the waiter before spawning: the CLI may exit immediately
         // after the ack, while a long-running daemon needs to reap every holder.
@@ -93,17 +132,40 @@ impl ClipboardManager {
     }
 
     pub fn clear(&self) -> bool {
-        match Command::new(&self.wl_copy_path).arg("--clear").output() {
-            Ok(output) => {
-                let success = output.status.success();
-                if success {
-                    crate::log_info!("omawarden:clipboard", "Clipboard cleared.");
-                }
-                success
+        match self.clear_selection() {
+            Ok(true) => {
+                crate::log_info!("omawarden:clipboard", "Clipboard cleared.");
+                true
             }
+            Ok(false) => false,
             Err(err) => {
                 crate::log_error!("omawarden:clipboard", "Failed to clear clipboard: {err}");
                 false
+            }
+        }
+    }
+
+    fn clear_selection(&self) -> io::Result<bool> {
+        let mut child = Command::new(&self.wl_copy_path)
+            .arg("--clear")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let deadline = Instant::now() + CLIPBOARD_SETUP_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status.success()),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(result.err().unwrap_or_else(|| {
+                        io::Error::new(io::ErrorKind::TimedOut, "wl-copy --clear timed out")
+                    }));
+                }
             }
         }
     }

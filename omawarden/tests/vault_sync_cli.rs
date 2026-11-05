@@ -38,6 +38,7 @@ enum LoginCase {
     WarmPassword,
     LockAfterActivation,
     LostActivationReceipt,
+    LostLiveActivationReceipt,
     LostRejectedReceipt,
 }
 
@@ -109,12 +110,26 @@ impl ActivationProxy {
                     assert_eq!(reply["outcome"], "rejected");
                 } else {
                     assert_eq!(reply["outcome"], "committed");
-                    let action = if case == LoginCase::LostActivationReceipt {
-                        "stop"
-                    } else {
-                        "lock"
-                    };
-                    assert_eq!(ipc(&target, json!({"action":action}))["ok"], true);
+                    if case == LoginCase::LostActivationReceipt {
+                        assert_eq!(ipc(&target, json!({"action":"stop"}))["ok"], true);
+                    }
+                    if case == LoginCase::LockAfterActivation {
+                        assert_eq!(ipc(&target, json!({"action":"lock"}))["ok"], true);
+                    }
+                    if matches!(
+                        case,
+                        LoginCase::LostActivationReceipt | LoginCase::LostLiveActivationReceipt
+                    ) {
+                        // Model a snapshot left after rename but before the
+                        // daemon removes the candidate and acknowledges it.
+                        let dir = target.parent().unwrap();
+                        let id = activation["attempt_id"].as_str().unwrap();
+                        std::fs::copy(
+                            dir.join("data.json"),
+                            dir.join("data.credentials").join(format!("{id}.candidate")),
+                        )
+                        .unwrap();
+                    }
                 }
                 if case == LoginCase::LockAfterActivation {
                     client.get_mut().write_all(receipt.as_bytes()).unwrap();
@@ -352,6 +367,11 @@ fn a_lost_activation_receipt_confirms_the_new_account_without_unlocking() {
 }
 
 #[test]
+fn a_live_daemon_with_a_lost_receipt_leaves_the_new_account_locked() {
+    password_login_case(LoginCase::LostLiveActivationReceipt);
+}
+
+#[test]
 fn a_lost_rejection_keeps_the_attempt_for_safe_cleanup() {
     password_login_case(LoginCase::LostRejectedReceipt);
 }
@@ -401,6 +421,15 @@ fn password_login_case(case: LoginCase) {
     let keyring = dir.path().join("secret-tool");
     std::fs::write(&keyring, "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\nstore*) read value; exit 0;;\n*) exit 1;;\nesac\n").unwrap();
     std::fs::set_permissions(&keyring, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if api_key {
+        let clipboard = dir.path().join("wl-copy");
+        std::fs::write(
+            &clipboard,
+            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nif [ \"${1:-}\" = --clear ]; then exec /usr/bin/rm -f \"$selection\"; fi\nexec /usr/bin/cat > \"$selection\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(clipboard, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let command = || {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
         cmd.env_clear()
@@ -441,12 +470,47 @@ fn password_login_case(case: LoginCase) {
         assert!(!socket.exists());
         None
     };
+    let pending_copy = if api_key {
+        let status = ipc(&socket, json!({"action":"status"}));
+        let generation = status["lock_generation"].as_str().unwrap();
+        let spawn_copy = || {
+            command()
+                .args([
+                    "copy",
+                    "--stdin",
+                    "--sensitive",
+                    "--timeout",
+                    "0",
+                    "--expected-lock-generation",
+                    generation,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut initial = spawn_copy();
+        writeln!(initial.stdin.take().unwrap(), "fixture-old").unwrap();
+        assert!(initial.wait_with_output().unwrap().status.success());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("selection")).unwrap(),
+            "fixture-old"
+        );
+        let previews = dir.path().join("omarchy-bitwarden/attachments/old-only");
+        std::fs::create_dir_all(&previews).unwrap();
+        std::fs::write(previews.join("old-preview.txt"), "fixture-old").unwrap();
+        Some(spawn_copy())
+    } else {
+        None
+    };
     let mut old_context = None;
     let before = std::fs::read(&cache).unwrap();
     let proxy = matches!(
         case,
         LoginCase::LockAfterActivation
             | LoginCase::LostActivationReceipt
+            | LoginCase::LostLiveActivationReceipt
             | LoginCase::LostRejectedReceipt
     )
     .then(|| ActivationProxy::new(socket.clone(), case));
@@ -555,6 +619,31 @@ fn password_login_case(case: LoginCase) {
         assert_eq!(status["user_id"], "other-account");
         assert_eq!(status["server_url"], url);
         assert_eq!(status["is_unlocked"], unlocked);
+        if let Some(mut copy) = pending_copy {
+            let selection = dir.path().join("selection");
+            assert!(
+                !selection.exists(),
+                "activation left the old selection available"
+            );
+            assert!(!dir.path().join("omarchy-bitwarden/attachments").exists());
+            writeln!(copy.stdin.take().unwrap(), "late-old-copy").unwrap();
+            assert!(!copy.wait_with_output().unwrap().status.success());
+            assert!(
+                !selection.exists(),
+                "the old helper replaced the cleared selection"
+            );
+        }
+        if matches!(
+            case,
+            LoginCase::LostActivationReceipt | LoginCase::LostLiveActivationReceipt
+        ) {
+            let id = status["credential_id"].as_str().unwrap();
+            assert!(!dir
+                .path()
+                .join("data.credentials")
+                .join(format!("{id}.candidate"))
+                .exists());
+        }
         if unlocked {
             let list = ipc(&socket, json!({"action":"list"}));
             assert_eq!(list.as_array().unwrap().len(), 1);

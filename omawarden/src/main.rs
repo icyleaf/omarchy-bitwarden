@@ -118,9 +118,18 @@ enum Commands {
         public_key: bool,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
+        #[arg(long, hide = true, requires = "stdin")]
+        expected_lock_generation: Option<u64>,
     },
     #[command(hide = true)]
-    ClipboardHolder { seconds: u64, wl_copy: PathBuf },
+    ClipboardHolder {
+        seconds: u64,
+        wl_copy: PathBuf,
+        #[arg(long)]
+        public: bool,
+        #[arg(long)]
+        expected_lock_generation: Option<u64>,
+    },
     #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
         #[arg(
@@ -378,6 +387,8 @@ enum AttachmentAction {
         open: bool,
         #[arg(long)]
         preview: bool,
+        #[arg(long, hide = true)]
+        expected_lock_generation: Option<String>,
     },
     #[command(about = "Clean temporary preview attachments")]
     Clean {
@@ -548,10 +559,17 @@ fn main() -> ExitCode {
     let mut cfg = config_mgr.load();
 
     match cli.command {
-        Commands::ClipboardHolder { seconds, wl_copy } => {
+        Commands::ClipboardHolder {
+            seconds,
+            wl_copy,
+            public,
+            expected_lock_generation,
+        } => {
             match clipboard_holder::hold_selection(
                 &wl_copy,
                 std::time::Duration::from_secs(seconds),
+                !public,
+                expected_lock_generation,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::FAILURE,
@@ -1326,6 +1344,7 @@ fn main() -> ExitCode {
             private_key,
             public_key,
             timeout,
+            expected_lock_generation,
         } => {
             let clip_mgr = ClipboardManager::default();
             if !clip_mgr.is_available() {
@@ -1356,7 +1375,12 @@ fn main() -> ExitCode {
             if stdin {
                 let text_val = read_clipboard_stdin();
                 let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-                let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
+                let ok = match expected_lock_generation {
+                    Some(generation) => {
+                        clip_mgr.copy_in_session(&text_val, sensitive, timeout_val, generation)
+                    }
+                    None => clip_mgr.copy(&text_val, sensitive, timeout_val),
+                };
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
@@ -1850,6 +1874,7 @@ fn main() -> ExitCode {
                 output_dir,
                 open,
                 preview,
+                expected_lock_generation,
             } => {
                 let res = get_attachment(
                     &item_id,
@@ -1859,7 +1884,7 @@ fn main() -> ExitCode {
                     open,
                     preview,
                     None,
-                    None,
+                    expected_lock_generation.as_deref(),
                     true,
                 );
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());

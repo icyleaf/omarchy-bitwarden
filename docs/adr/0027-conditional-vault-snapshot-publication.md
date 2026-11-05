@@ -55,8 +55,10 @@ receipts and retry rules remain in
    initial sync, the CLI stores credentials under that slot and writes a
    private encrypted snapshot. The activation request sends only the attempt ID.
 
-   Runtime and cache instance locks prevent a second daemon from becoming an
-   independent session owner.
+   Runtime and cache instance locks serialize daemons that implement these
+   locks. A live socket also prevents takeover in the same runtime directory.
+   A legacy daemon in a different runtime directory must be stopped before
+   upgrading a shared cache.
 
    The daemon opens the snapshot relative to its private directory and holds
    a lease while reading and publishing it. It validates the pinned cache and
@@ -71,12 +73,25 @@ receipts and retry rules remain in
    credentials. If durability cannot be confirmed, the new account stays
    locked and retirement stays pending. A missing activation reply is resolved
    by comparing the attempt ID with the active credential reference. A match
-   confirms publication and supplies no authorization to unlock. Other results
-   remain unconfirmed, with the candidate retained for lease-based cleanup.
+   confirms publication and permits removal of the encrypted candidate. It
+   supplies no authorization to unlock. Other results remain unconfirmed,
+   with the candidate retained for lease-based cleanup.
 
    On confirmed login, the overlay clears the previous account’s data and
-   advances its vault revision. Late list, sync, and attachment replies are
-   discarded when their revision belongs to the previous account.
+   advances its vault revision. It stops the previous copy and attachment
+   helpers and dismisses old SSH approvals. Replies from the previous revision
+   cannot update the overlay. The daemon also denies pending SSH approvals
+   when changing accounts.
+
+   Overlay copies and attachment outputs carry the unlocked session's
+   generation. The helper verifies it at publication under a runtime file
+   lock shared with revocation. The detached clipboard holder retains the
+   gate until the compositor confirms setup. Attachment HTTP and decryption
+   run before acquiring the gate. Activation clears the clipboard and
+   previews under the gate before renaming the new account, including on
+   the path where the activation receipt is lost. A failed rename can leave
+   the previous account active with these outputs cleared. Completed
+   downloads are user-owned files.
 
 6. **Keep command outcomes honest.** `vault sync` uses the daemon exclusively.
    Missing or malformed IPC replies report failure instead of starting a second

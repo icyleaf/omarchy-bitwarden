@@ -412,7 +412,9 @@ Item {
   function clearSensitiveState() {
     root.forgetSelection()
     root.pendingFieldCopy = null
+    if (vaultSyncProc.running && vaultSyncProc.revision === root.vaultRevision) root.isBusy = false
     root.invalidateVaultList()
+    root.isLoadingVault = false
     root.checkingCachedSession = false
     root.lastSyncTime = 0
     root.searchQuery = ""
@@ -447,9 +449,17 @@ Item {
 
     root.showSshKeyModal = false
     root.sshKeyModalItem = null
+    root.sshApprovalPrompt = null
+    root.sshApprovalRemaining = 0
+
+    clipCopyProc.secret = ""
+    clipCopyProc.successMessage = ""
+    clipCopyProc.running = false
 
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
+    attachmentProc.activeAttachmentId = ""
+    attachmentProc.activeItemId = ""
 
     root.twoFactorProvider = 0
     root.availableTwoFactorProviders = []
@@ -469,7 +479,6 @@ Item {
         return
       }
       root.sshApprovalOnly = true
-      root.refreshSshApprovals()
     }
     if (!root.opened && !root.sshApprovalOnly && root.rawVaultItems.length && root.authState.lock_generation) {
       root.checkingCachedSession = true
@@ -519,6 +528,7 @@ Item {
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
     root.opened = true
+    if (root.sshApprovalOnly) root.refreshSshApprovals()
     root.checkDependencies()
     if (!root.dependenciesMissing) {
       root.refreshHealth()
@@ -540,6 +550,7 @@ Item {
 
   function refreshSshApprovals() {
     if (sshPendingProc.running) return
+    sshPendingProc.revision = root.vaultRevision
     sshPendingProc.command = [root.helperPath, "ssh-agent", "pending"]
     sshPendingProc.running = true
   }
@@ -1181,9 +1192,13 @@ Item {
     root.activeCategory = root.categoryList[idx]
   }
 
-  function copyToClipboard(text, isSensitive, label) {
+  function copyToClipboard(text, isSensitive, label, standalone) {
     if (!text || clipCopyProc.running) return
     root.statusMessage = ""
+    if (!standalone && !root.authState.lock_generation) {
+      root.errorMessage = "Vault session is changing. Try copying again after it unlocks."
+      return
+    }
     if (root.cliHealth && root.cliHealth.clipboard_available === false) {
       root.errorMessage = "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
       root.logWarn("omarchy:clipboard", root.errorMessage)
@@ -1191,6 +1206,7 @@ Item {
     }
     root.logInfo("omarchy:clipboard", "Copying " + (label || "item") + " to clipboard (sensitive: " + isSensitive + ")")
     var cmd = [root.helperPath, "copy", "--stdin"]
+    if (!standalone) cmd.push("--expected-lock-generation", root.authState.lock_generation)
     if (isSensitive) {
       cmd.push("--sensitive")
     }
@@ -1198,6 +1214,7 @@ Item {
     cmd.push("--timeout", String(ttl))
     clipCopyProc.successMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive && ttl > 0 ? (" (clears in " + ttl + "s)") : "") + "."
     clipCopyProc.secret = JSON.stringify({ text: String(text) })
+    clipCopyProc.revision = root.vaultRevision
     clipCopyProc.command = cmd
     clipCopyProc.running = true
   }
@@ -1711,7 +1728,7 @@ Item {
   }
 
   function viewAttachment(item, att) {
-    if (!item || !att) return
+    if (!item || !att || attachmentProc.running || !root.authState.lock_generation) return
     root.logInfo("omarchy:attachment", "Requesting preview for " + (att.fileName || "attachment"))
     root.loadingAttachmentId = (att.id || att.fileName || "loading")
     attachmentProc.activeAttachmentId = att.id || ""
@@ -1724,13 +1741,14 @@ Item {
       "--item-id", item.id,
       "--attachment-id", att.id,
       "--filename", att.fileName || "attachment",
+      "--expected-lock-generation", root.authState.lock_generation,
       "--preview"
     ]
     attachmentProc.running = true
   }
 
   function downloadAttachment(item, att) {
-    if (!item || !att) return
+    if (!item || !att || attachmentProc.running || !root.authState.lock_generation) return
     root.logInfo("omarchy:attachment", "Requesting download for " + (att.fileName || "attachment"))
     root.statusMessage = "Downloading attachment " + (att.fileName || "") + "..."
     var cmd = [
@@ -1739,7 +1757,8 @@ Item {
       "download",
       "--item-id", item.id,
       "--attachment-id", att.id,
-      "--filename", att.fileName || "attachment"
+      "--filename", att.fileName || "attachment",
+      "--expected-lock-generation", root.authState.lock_generation
     ]
     if (root.config && root.config.download_dir) {
       cmd.push("--output-dir", root.config.download_dir)
@@ -1883,7 +1902,7 @@ Item {
     }
     report += "```\n"
 
-    root.copyToClipboard(report, false, "Diagnostics report")
+    root.copyToClipboard(report, false, "Diagnostics report", true)
     root.statusMessage = "Diagnostics report copied to clipboard."
   }
 
@@ -2558,7 +2577,7 @@ Item {
                 root.doCheckFido2Status()
               }
             }
-            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
+            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl, true) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
             onCheckFido2StatusRequested: { root.doCheckFido2Status() }
@@ -2758,7 +2777,7 @@ Item {
         cardBackground: Commons.Color.popups.background
         borderColor: Commons.Color.popups.border
         onGenerateRequested: function(opts) { root.generatePasswordOrPassphrase(opts) }
-        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
+        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label, true) }
         onUpgradeRequested: {
           root.showPasswordGeneratorModal = false
           root.installPackage(root.enginePackage || "omawarden")
@@ -2935,10 +2954,17 @@ Item {
   }
   Process {
     id: sshPendingProc
+    property int revision: 0
     command: []
+    onExited: {
+      if (sshPendingProc.revision !== root.vaultRevision && root.opened) {
+        Qt.callLater(root.refreshSshApprovals)
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (sshPendingProc.revision !== root.vaultRevision) return
         var prompts = []
         try {
           var data = JSON.parse((text || "").trim() || "{}")
@@ -3332,6 +3358,9 @@ Item {
           var data = JSON.parse(text)
           if (data.ok) {
             root.clearSensitiveState()
+            // Activation has passed the output gate, so the previous helper
+            // cannot be partway through a plaintext write here.
+            attachmentProc.running = false
             var statusVal = data.status || "unlocked"
             if (statusVal === "locked") {
               root.statusMessage = "Signed in. Enter your master password to unlock."
@@ -3574,8 +3603,8 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.isBusy = false
         if (vaultSyncProc.revision !== root.vaultRevision) return
+        root.isBusy = false
         try {
           var res = JSON.parse(text)
           if (res && res.ok === false) {
@@ -3617,8 +3646,9 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
     }
     onExited: function(code) {
+      if (vaultSyncProc.revision !== root.vaultRevision) return
       root.isBusy = false
-      if (vaultSyncProc.revision === root.vaultRevision && code !== 0 && !root.errorMessage) {
+      if (code !== 0 && !root.errorMessage) {
         root.errorMessage = "Vault sync failed."
         root.logError("omarchy:vault", "Vault sync process exited with code " + code)
       }
@@ -3637,9 +3667,9 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (vaultListProc.revision !== root.vaultRevision) return
+        root.isLoadingVault = false
         try {
-          root.isLoadingVault = false
-          if (vaultListProc.revision !== root.vaultRevision) return
           if (!root.authState || root.authState.status !== "unlocked") {
             root.clearSensitiveState()
             return
@@ -3693,14 +3723,16 @@ Item {
     id: clipCopyProc
     property string secret: ""
     property string successMessage: ""
+    property int revision: 0
     onExited: function(code, exitStatus) {
+      if (clipCopyProc.revision !== root.vaultRevision) return
       secret = ""
       root.statusMessage = code === 0 && exitStatus === 0 ? successMessage : "Failed to copy to clipboard."
       successMessage = ""
     }
     stdinEnabled: true
     onStarted: {
-      if (secret) {
+      if (clipCopyProc.revision === root.vaultRevision && secret) {
         write(secret + "\n")
         secret = ""
       }

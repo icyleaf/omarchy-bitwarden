@@ -142,3 +142,16 @@ fn failed_owner_is_reported_to_caller() {
     let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(reply["ok"], false);
 }
+
+#[test]
+fn stalled_selection_setup_fails_before_expiry_starts() {
+    let clip = Clipboard::new();
+    fs::write(
+        clip.0.path().join("wl-copy"),
+        "#!/bin/sh\nexec /usr/bin/sleep 10\n",
+    )
+    .unwrap();
+    let output = clip.copy("never served", "30");
+    assert!(!output.status.success());
+    assert!(clip.paste().is_none());
+}

@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -46,6 +46,41 @@ pub fn get_runtime_dir() -> PathBuf {
 
 pub fn get_socket_path() -> PathBuf {
     get_runtime_dir().join("omawarden.sock")
+}
+
+// The gate belongs to the runtime (clipboard and previews), not to a cache
+// inode. Only final output and its revocation take it.
+pub(crate) fn lock_session_outputs() -> io::Result<fs::File> {
+    let gate = open_daemon_lock(&get_socket_path().with_extension("outputs.lock"))?;
+    gate.lock()?;
+    Ok(gate)
+}
+
+pub(crate) fn output_generation() -> io::Result<u64> {
+    let changed = || io::Error::other("Vault session changed. Unlock the vault and try again.");
+    let mut stream = connect_daemon().map_err(|_| changed())?;
+    let timeout = Some(Duration::from_secs(2));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    writeln!(stream, "{}", json!({"action":"output_generation"}))?;
+    let mut reply = String::new();
+    BufReader::new(stream).take(256).read_line(&mut reply)?;
+    let reply: Value = serde_json::from_str(&reply)?;
+    reply["lock_generation"].as_u64().ok_or_else(changed)
+}
+
+/// Hold the output gate while publishing data from the named unlocked session.
+#[doc(hidden)]
+pub fn guard_session_output(expected: u64) -> io::Result<fs::File> {
+    let gate = lock_session_outputs()?;
+    // The generation query takes neither the output gate nor the restore
+    // guard. It must remain safe to answer while a revocation waits for us.
+    if output_generation()? != expected {
+        return Err(io::Error::other(
+            "Vault session changed. Unlock the vault and try again.",
+        ));
+    }
+    Ok(gate)
 }
 
 /// Validates that a socket file (and its parent directory) is owned by the current UID
@@ -741,16 +776,13 @@ impl DaemonState {
 
     /// Hard lock (ADR-0025): wipes the retained key and resets the session timers.
     pub fn lock(&self) {
-        {
-            let _restore = self
-                .vault_mgr
-                .restore_guard
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            self.vault_mgr.hard_lock_inner();
-            self.reset_session_timers();
-        }
-        let _ = crate::clipboard::ClipboardManager::default().clear();
+        let _restore = self
+            .vault_mgr
+            .restore_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.vault_mgr.hard_lock_inner();
+        self.reset_session_timers();
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -767,7 +799,6 @@ impl DaemonState {
         } else {
             self.vault_mgr.hard_lock();
         }
-        let _ = crate::clipboard::ClipboardManager::default().clear();
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -841,7 +872,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
     )
 }
 
-fn lock_daemon_instance(path: &Path) -> std::io::Result<fs::File> {
+fn open_daemon_lock(path: &Path) -> io::Result<fs::File> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -864,6 +895,13 @@ fn lock_daemon_instance(path: &Path) -> std::io::Result<fs::File> {
             "Invalid daemon instance lock",
         ));
     }
+    Ok(file)
+}
+
+fn lock_daemon_instance(path: &Path) -> io::Result<fs::File> {
+    use std::io::{Error, ErrorKind};
+
+    let file = open_daemon_lock(path)?;
     file.try_lock().map_err(|error| match error {
         fs::TryLockError::WouldBlock => {
             Error::new(ErrorKind::AlreadyExists, "Vault daemon already running")
@@ -1157,6 +1195,10 @@ pub(crate) fn handle_client(
     drop(reader);
     let session = state.vault_mgr.cache_session().ok();
     let is_unlocked = session.is_some_and(|s| s.unlocked);
+    if action == "output_generation" {
+        let generation = session.filter(|s| s.unlocked).map(|s| s.generation);
+        return writeln!(stream, "{}", json!({"lock_generation":generation}));
+    }
 
     let reads_plaintext = matches!(
         action,
@@ -1182,6 +1224,17 @@ pub(crate) fn handle_client(
             json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
         );
         return Ok(());
+    }
+    if action == "get_attachment_key"
+        && req
+            .get("expected_lock_generation")
+            .is_some_and(|expected| session.is_none_or(|s| expected.as_u64() != Some(s.generation)))
+    {
+        return writeln!(
+            stream,
+            "{}",
+            json!({"ok":false,"error":"Vault session changed."})
+        );
     }
 
     if should_touch_activity(action, &req) {
@@ -1215,7 +1268,6 @@ pub(crate) fn handle_client(
         "stop" => {
             state.lock();
             crate::ssh_agent::remove_socket();
-            crate::attachment::clear_preview_attachments(None);
             let _ = writeln!(stream, "{}", json!({ "ok": true }));
             let _ = stream.flush();
             std::process::exit(0);
@@ -1299,7 +1351,6 @@ pub(crate) fn handle_client(
         }
         "lock" => {
             state.lock();
-            crate::attachment::clear_preview_attachments(None);
             json!({ "ok": true, "status": "locked" })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {

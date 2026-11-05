@@ -383,7 +383,21 @@ impl VaultManager {
             *key = None;
         }
         drop(unlocked);
+        let _outputs = crate::daemon::lock_session_outputs().inspect_err(|error| {
+            crate::log_warn!(
+                "omawarden:vault",
+                "Cannot secure session output cleanup. {error}"
+            );
+        });
+        Self::clear_session_outputs();
+    }
+
+    fn clear_session_outputs() {
         crate::attachment::clear_preview_attachments(None);
+        let clipboard = crate::clipboard::ClipboardManager::default();
+        if clipboard.is_available() && !clipboard.clear() {
+            crate::log_warn!("omawarden:vault", "Could not clear the Wayland clipboard.");
+        }
     }
 
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
@@ -436,6 +450,20 @@ impl VaultManager {
             if self.unlock_context() != expected_context {
                 return Err(SESSION_CHANGED.into());
             }
+            let _outputs = crate::daemon::lock_session_outputs()
+                .map_err(|_| "Cannot secure output from the previous vault session")?;
+            if self.is_unlocked()
+                && !self
+                    .storage
+                    .read()
+                    .is_ok_and(|storage| storage.same_active_slot(&base.storage))
+            {
+                return Err(SESSION_CHANGED.into());
+            }
+            // Revoke outputs before rename, including when the daemon dies
+            // before sending its receipt. A failed rename can clear outputs
+            // while leaving the previous account active.
+            Self::clear_session_outputs();
             {
                 let mut unlocked = self
                     .is_unlocked
@@ -445,9 +473,6 @@ impl VaultManager {
                     .storage
                     .write()
                     .map_err(|_| "Vault state unavailable")?;
-                if *unlocked && !storage.same_active_slot(&base.storage) {
-                    return Err(SESSION_CHANGED.into());
-                }
                 let mut items = self
                     .decrypted_items
                     .write()
@@ -484,7 +509,6 @@ impl VaultManager {
                 *storage = replacement;
             }
             reset_session();
-            crate::attachment::clear_preview_attachments(None);
             self.unlock_context()
         };
         let retired = self.storage_mgr.retired_credentials(Some(&id));

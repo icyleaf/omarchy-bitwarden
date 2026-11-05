@@ -347,6 +347,7 @@ ScrollView {
           anchors.margins: 4
           fillMode: Image.PreserveAspectFit
           source: (inspectorRoot.activeAttachmentPreview && inspectorRoot.activeAttachmentPreview.is_image) ? ("file://" + inspectorRoot.activeAttachmentPreview.path) : ""
+          cache: false
           smooth: true
           asynchronous: true
         }
