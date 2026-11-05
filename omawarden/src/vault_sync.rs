@@ -442,6 +442,32 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_sync_response_preserves_cache_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        let (task, mut stream) = sync(&mgr, &api);
+        reply(&mut stream, json!({"ciphers":[cipher("retained")]}));
+        assert_eq!(task.join().unwrap().unwrap(), 1);
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        let last_sync = mgr.storage.read().unwrap().last_sync.clone();
+        assert!(last_sync.is_some());
+
+        for body in [
+            json!({"error":"snapshot unavailable"}),
+            json!([null, [], [], []]),
+        ] {
+            let (task, mut stream) = sync(&mgr, &api);
+            reply(&mut stream, body);
+            assert!(task.join().unwrap().is_err());
+            assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+            assert_eq!(mgr.storage.read().unwrap().last_sync, last_sync);
+            let items = mgr.decrypted_items.read().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].id, "retained");
+        }
+    }
+
+    #[test]
     fn a_locked_sync_only_updates_ciphertext() {
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
@@ -606,7 +632,7 @@ mod tests {
         assert_eq!(mgr.unlock("fixture").unwrap(), 0);
     }
 
-    fn failed_initial_sync_preserves_account(password_login: bool) {
+    fn failed_initial_sync_preserves_account(password_login: bool, status: &str, body: &str) {
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _runtime = RuntimeEnv::new(dir.path());
@@ -659,7 +685,7 @@ mod tests {
         );
         let mut initial = accept(&api);
         assert_eq!(request(&mut initial).0, "/api/sync");
-        write!(initial, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        write!(initial, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         let result = task.join().unwrap();
         assert!(
             !result.ok,
@@ -678,12 +704,22 @@ mod tests {
 
     #[test]
     fn failed_password_login_initial_sync_preserves_the_previous_account() {
-        failed_initial_sync_preserves_account(true);
+        failed_initial_sync_preserves_account(true, "500 Internal Server Error", "{}");
     }
 
     #[test]
     fn failed_apikey_login_initial_sync_preserves_the_previous_account() {
-        failed_initial_sync_preserves_account(false);
+        failed_initial_sync_preserves_account(false, "500 Internal Server Error", "{}");
+    }
+
+    #[test]
+    fn incomplete_sync_response_cannot_replace_account_during_password_login() {
+        failed_initial_sync_preserves_account(true, "200 OK", "{}");
+    }
+
+    #[test]
+    fn incomplete_sync_response_cannot_replace_account_during_apikey_login() {
+        failed_initial_sync_preserves_account(false, "200 OK", "{}");
     }
 
     #[test]

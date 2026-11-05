@@ -187,7 +187,7 @@ pub struct SyncResponse {
     pub folders: Vec<Value>,
     #[serde(default)]
     pub collections: Vec<Value>,
-    #[serde(default)]
+    // An empty vault must be explicit before sync can replace the local cache.
     pub ciphers: Vec<Value>,
 }
 
@@ -1354,7 +1354,14 @@ impl BitwardenApiClient {
             ));
         }
 
-        read_response_json::<SyncResponse>(&mut resp, MAX_SYNC_BODY_SIZE)
+        let content_len = resp.content_length();
+        let body = read_response_limited(&mut resp, content_len, MAX_SYNC_BODY_SIZE)?;
+        // Serde can also decode a struct from a positional JSON array.
+        let first_byte = body.iter().find(|byte| !byte.is_ascii_whitespace());
+        if first_byte != Some(&b'{') {
+            return Err(ApiError::Json("Sync response must be a JSON object".into()));
+        }
+        serde_json::from_slice(&body).map_err(|e| ApiError::Json(e.to_string()))
     }
 
     /// A redirect or transparent transport retry could submit a second create.
@@ -2097,6 +2104,23 @@ mod tests {
 
     type Aes256CbcEnc = cbc::Encryptor<Aes256>;
     type HmacSha256 = Hmac<Sha256>;
+
+    #[test]
+    fn incomplete_sync_response_requires_a_cipher_array() {
+        for body in [
+            "{}",
+            r#"{"error":"snapshot unavailable"}"#,
+            r#"{"ciphers":null}"#,
+            r#"{"ciphers":{}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SyncResponse>(body).is_err(),
+                "{body}"
+            );
+        }
+        let empty = serde_json::from_str::<SyncResponse>(r#"{"ciphers":[]}"#).unwrap();
+        assert!(empty.ciphers.is_empty());
+    }
 
     fn encrypt_test_string(plaintext: &str, key: &SymmetricCryptoKey) -> String {
         let iv = [2u8; 16];
