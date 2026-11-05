@@ -3,6 +3,14 @@ use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient
 use crate::vault::VaultManager;
 use crate::vault_cache::{CacheCommitError, IndexUpdate};
 
+fn snapshot_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        "A cipher write is in progress. Please retry synchronization after it finishes.".into()
+    } else {
+        format!("Cannot read the vault cache: {error}")
+    }
+}
+
 impl VaultManager {
     pub fn sync(&self) -> Result<usize, String> {
         self.sync_with_client(None)
@@ -10,11 +18,9 @@ impl VaultManager {
 
     pub fn sync_with_client(&self, context: Option<&ClientContext>) -> Result<usize, String> {
         let session = self.cache_session().map_err(|e| e.to_string())?;
-        let account = self
-            .storage_mgr
-            .snapshot()
-            .map_err(|e| format!("Cannot read the vault cache: {e}"))?
-            .storage;
+        // An outstanding write may be waiting on the network. Fail promptly
+        // here; the bounded refetch below handles completed cache changes.
+        let account = self.storage_mgr.snapshot().map_err(snapshot_error)?.storage;
         let server = if account.server_url.is_empty() {
             &self.server_url
         } else {
@@ -48,10 +54,7 @@ impl VaultManager {
                     {
                         return Err(CacheCommitError::SessionChanged.to_string());
                     }
-                    let base = self
-                        .storage_mgr
-                        .snapshot()
-                        .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+                    let base = self.storage_mgr.snapshot().map_err(snapshot_error)?;
                     if !base.storage.same_account(&account) {
                         return Err(CacheCommitError::SessionChanged.to_string());
                     }
@@ -571,7 +574,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let pending = mgr.storage_mgr.begin_cipher_write().unwrap();
-        assert!(mgr.sync().unwrap_err().contains("retry"));
+        let error = mgr.sync().unwrap_err();
+        assert!(error.contains("retry"), "{error}");
+        assert!(
+            !error.contains("Cannot read"),
+            "contention is not cache corruption: {error}"
+        );
         mgr.lock();
         assert!(!mgr.is_unlocked());
         drop(pending);
@@ -596,5 +604,124 @@ mod tests {
         assert!(mgr.user_key.read().unwrap().is_none());
         assert!(mgr.decrypted_items.read().unwrap().is_empty());
         assert_eq!(mgr.unlock("fixture").unwrap(), 0);
+    }
+
+    fn failed_initial_sync_preserves_account(password_login: bool) {
+        let _environment = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeEnv::new(dir.path());
+        let (mgr, api) = fixture(dir.path());
+        seed(&mgr, vec![cipher("original-account-item")]);
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        let stores = dir.path().join("token-stores");
+        crate::write_test_executable(
+            &dir.path().join("secret-tool"),
+            format!("#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\nstore*) /bin/cat >/dev/null; echo stored >> '{}'; exit 0;;\n*) exit 1;;\nesac\n", stores.display()),
+        );
+        let email = "other@example.invalid";
+        let master = crate::crypto::derive_master_key(
+            email,
+            "fixture",
+            crate::crypto::KdfType::Pbkdf2Sha256,
+            100_000,
+            None,
+            None,
+        )
+        .unwrap();
+        let other_wrap = SymmetricCryptoKey::from_master_key(master.as_slice())
+            .encrypt(&[43; 64])
+            .unwrap();
+        let auth = crate::auth::AuthManager::new(
+            &mgr.server_url,
+            Some(mgr.storage_mgr.clone()),
+            Some(mgr.keyring_mgr.clone()),
+        );
+        let task = thread::spawn(move || {
+            if password_login {
+                auth.login_password(email, "fixture", None, None, None)
+            } else {
+                auth.login_apikey("user.other", "other-secret")
+            }
+        });
+        if password_login {
+            let mut prelogin = accept(&api);
+            assert!(request(&mut prelogin).0.ends_with("/accounts/prelogin"));
+            reply(&mut prelogin, json!({"kdf":0, "kdfIterations":100_000}));
+        }
+        let mut grant = accept(&api);
+        assert_eq!(request(&mut grant).0, "/identity/connect/token");
+        reply(
+            &mut grant,
+            json!({
+                "access_token":"other-token", "refresh_token":"other-refresh", "expires_in":3600,
+                "key":other_wrap, "kdf":0, "kdf_iterations":100_000
+            }),
+        );
+        let mut initial = accept(&api);
+        assert_eq!(request(&mut initial).0, "/api/sync");
+        write!(initial, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        let result = task.join().unwrap();
+        assert!(
+            !result.ok,
+            "a failed initial sync cannot install another account"
+        );
+        assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+        assert!(
+            !stores.exists(),
+            "credentials must not change before initial sync succeeds"
+        );
+        assert_eq!(
+            mgr.decrypted_items.read().unwrap()[0].id,
+            "original-account-item"
+        );
+    }
+
+    #[test]
+    fn failed_password_login_initial_sync_preserves_the_previous_account() {
+        failed_initial_sync_preserves_account(true);
+    }
+
+    #[test]
+    fn failed_apikey_login_initial_sync_preserves_the_previous_account() {
+        failed_initial_sync_preserves_account(false);
+    }
+
+    #[test]
+    fn successful_login_does_not_inherit_the_previous_profile_metadata() {
+        let _environment = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeEnv::new(dir.path());
+        let (mgr, api) = fixture(dir.path());
+        let mut original = mgr.storage_mgr.load();
+        original.user_id = Some("old-user".into());
+        original.organizations = vec![json!({"id":"old-organization"})];
+        original.client_id = Some("user.old".into());
+        mgr.storage_mgr.save(&original).unwrap();
+        crate::write_test_executable(&dir.path().join("secret-tool"), "#!/bin/sh\nexit 0\n");
+        let auth = crate::auth::AuthManager::new(
+            &mgr.server_url,
+            Some(mgr.storage_mgr.clone()),
+            Some(mgr.keyring_mgr.clone()),
+        );
+        let task = thread::spawn(move || auth.login_apikey("user.other", "other-secret"));
+        let mut grant = accept(&api);
+        assert_eq!(request(&mut grant).0, "/identity/connect/token");
+        reply(
+            &mut grant,
+            json!({"access_token":"other-token", "expires_in":3600, "key":original.enc_user_key}),
+        );
+        let mut initial = accept(&api);
+        assert_eq!(request(&mut initial).0, "/api/sync");
+        reply(
+            &mut initial,
+            json!({"ciphers":[],"profile":{"email":"other@example.invalid"}}),
+        );
+        assert!(task.join().unwrap().ok);
+        let current = mgr.storage_mgr.load();
+        assert_eq!(current.client_id.as_deref(), Some("user.other"));
+        assert_eq!(current.user_email, "other@example.invalid");
+        assert!(current.user_id.is_none());
+        assert!(current.organizations.is_empty());
+        assert!(current.ciphers.is_empty());
     }
 }

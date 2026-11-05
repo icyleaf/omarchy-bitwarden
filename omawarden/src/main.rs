@@ -890,7 +890,6 @@ fn main() -> ExitCode {
                     let mut effective_code = stdin_code;
                     let mut effective_provider = stdin_provider;
                     let mut effective_new_device_otp = stdin_new_device_otp;
-                    omawarden::daemon::ensure_daemon_running();
                     let mut res = auth_mgr.login_password(
                         &email,
                         &pwd,

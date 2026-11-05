@@ -28,8 +28,41 @@ fn ipc(socket: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoginCase {
+    WarmLock,
+    ColdLock,
+    ColdSuccess,
+}
+
+struct DaemonSocket(std::path::PathBuf);
+impl Drop for DaemonSocket {
+    fn drop(&mut self) {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&self.0) {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = writeln!(stream, "{}", json!({"action":"stop"}));
+            let mut reply = String::new();
+            let _ = BufReader::new(stream).read_line(&mut reply);
+        }
+    }
+}
+
 #[test]
 fn locking_during_password_login_cancels_the_late_snapshot_and_auto_unlock() {
+    password_login_case(LoginCase::WarmLock);
+}
+
+#[test]
+fn cold_password_login_starts_the_daemon_and_auto_unlocks() {
+    password_login_case(LoginCase::ColdSuccess);
+}
+
+#[test]
+fn locking_a_cold_login_does_not_allow_late_auto_unlock() {
+    password_login_case(LoginCase::ColdLock);
+}
+
+fn password_login_case(case: LoginCase) {
     use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
     use std::process::Stdio;
     use std::time::Instant;
@@ -63,25 +96,32 @@ fn locking_during_password_login_cancels_the_late_snapshot_and_auto_unlock() {
             .env("OMAWARDEN_CONFIG_DIR", dir.path());
         cmd
     };
-    let _daemon = Daemon(
-        command()
-            .arg("daemon")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
     let socket = dir.path().join("omawarden.sock");
+    let _shutdown = DaemonSocket(socket.clone());
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "daemon did not start");
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(
-        ipc(&socket, json!({"action":"unlock","password":"fixture"}))["ok"],
-        true
-    );
-    let old_context = ipc(&socket, json!({"action":"ping"}))["unlock_context"].clone();
+    let _daemon = if case == LoginCase::WarmLock {
+        let daemon = Daemon(
+            command()
+                .arg("daemon")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "daemon did not start");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            ipc(&socket, json!({"action":"unlock","password":"fixture"}))["ok"],
+            true
+        );
+        Some(daemon)
+    } else {
+        assert!(!socket.exists());
+        None
+    };
+    let mut old_context = None;
     let before = std::fs::read(&cache).unwrap();
     let mut login = command()
         .args(["auth", "login-password", "--email", email])
@@ -122,7 +162,11 @@ fn locking_during_password_login_cancels_the_late_snapshot_and_auto_unlock() {
         reader.read_exact(&mut vec![0; size]).unwrap();
         let synced = path == "/api/sync";
         let body = if synced {
-            assert_eq!(ipc(&socket, json!({"action":"lock"}))["ok"], true);
+            assert!(socket.exists(), "login_password must start the daemon before sampling its context");
+            old_context = Some(ipc(&socket, json!({"action":"ping"}))["unlock_context"].clone());
+            if case != LoginCase::ColdSuccess {
+                assert_eq!(ipc(&socket, json!({"action":"lock"}))["ok"], true);
+            }
             json!({"ciphers":[]})
         } else if path.ends_with("/connect/token") {
             json!({"access_token":"new", "expires_in":3600,"key":wrap,"kdf":0,"kdf_iterations":100_000})
@@ -137,18 +181,26 @@ fn locking_during_password_login_cancels_the_late_snapshot_and_auto_unlock() {
     }
     let output = login.wait_with_output().unwrap();
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(!output.status.success(), "{result}");
-    assert_eq!(result["ok"], false);
-    assert_eq!(ipc(&socket, json!({"action":"ping"}))["unlocked"], false);
-    assert_eq!(std::fs::read(&cache).unwrap(), before);
-    // Close the final check/unlock race too: a stale context cannot unlock.
-    assert_eq!(
-        ipc(
-            &socket,
-            json!({"action":"unlock","password":"fixture","expected_unlock_context":old_context})
-        )["ok"],
-        false
-    );
+    let success = case == LoginCase::ColdSuccess;
+    assert_eq!(output.status.success(), success, "{result}");
+    assert_eq!(result["ok"], success);
+    assert_eq!(ipc(&socket, json!({"action":"ping"}))["unlocked"], success);
+    if success {
+        assert_eq!(result["status"], "unlocked");
+        assert!(
+            serde_json::from_slice::<Value>(&std::fs::read(&cache).unwrap()).unwrap()["last_sync"]
+                .is_string()
+        );
+    } else {
+        assert_eq!(std::fs::read(&cache).unwrap(), before);
+        assert_eq!(
+            ipc(
+                &socket,
+                json!({"action":"unlock","password":"fixture","expected_unlock_context":old_context.unwrap()})
+            )["ok"],
+            false
+        );
+    }
 }
 
 #[test]

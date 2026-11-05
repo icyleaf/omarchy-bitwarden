@@ -464,6 +464,9 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        // Start once at the login entry point. The later context check must
+        // observe a stopped/locked daemon, never restart it and sample anew.
+        crate::daemon::ensure_daemon_running();
         let login_context = Self::daemon_unlock_context();
         let client =
             BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
@@ -642,7 +645,16 @@ impl AuthManager {
                 }
             }
         };
-        let initial_sync = client.sync_vault(&token_resp.access_token);
+        let initial_sync = match client.sync_vault(&token_resp.access_token) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return AuthResult {
+                    ok: false,
+                    error: Some("Initial vault synchronization failed. Check the connection and sign in again.".into()),
+                    ..Default::default()
+                };
+            }
+        };
         if Self::daemon_unlock_context() != login_context {
             return AuthResult {
                 ok: false,
@@ -665,16 +677,18 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let mut storage = before_sync.storage.clone();
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.user_email = email.trim().to_lowercase();
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
+        let mut storage = VaultStorage {
+            server_url: self.server_url.clone(),
+            identity_url: self.identity_url.clone(),
+            user_email: email.trim().to_lowercase(),
+            enc_user_key: token_resp.key,
+            enc_private_key: token_resp.private_key,
+            kdf: token_resp.kdf,
+            kdf_iterations: token_resp.kdf_iterations,
+            kdf_memory: token_resp.kdf_memory,
+            kdf_parallelism: token_resp.kdf_parallelism,
+            ..Default::default()
+        };
 
         if !self.keyring_mgr.store_token(
             &self.server_url,
@@ -718,31 +732,30 @@ impl AuthManager {
         storage.access_token = None;
         storage.refresh_token = None;
 
-        // Pull initial sync
-        if let Ok(sync_data) = initial_sync {
-            storage.ciphers = sync_data.ciphers;
-            storage.folders = sync_data.folders;
-            storage.collections = sync_data.collections;
-            if let Some(ref prof) = sync_data.profile {
-                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
-                    storage.user_id = Some(id.to_string());
-                }
-                if storage.enc_user_key.is_none() {
-                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
-                        storage.enc_user_key = Some(key.to_string());
-                    }
-                }
-                if storage.enc_private_key.is_none() {
-                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
-                        storage.enc_private_key = Some(pk.to_string());
-                    }
-                }
-                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                    storage.organizations = orgs.clone();
+        // Install only a complete snapshot belonging to these credentials.
+        let sync_data = initial_sync;
+        storage.ciphers = sync_data.ciphers;
+        storage.folders = sync_data.folders;
+        storage.collections = sync_data.collections;
+        if let Some(ref prof) = sync_data.profile {
+            if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                storage.user_id = Some(id.to_string());
+            }
+            if storage.enc_user_key.is_none() {
+                if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                    storage.enc_user_key = Some(key.to_string());
                 }
             }
-            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+            if storage.enc_private_key.is_none() {
+                if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                    storage.enc_private_key = Some(pk.to_string());
+                }
+            }
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                storage.organizations = orgs.clone();
+            }
         }
+        storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
         if self.storage_mgr.save(&storage).is_err() {
             return AuthResult {
@@ -762,7 +775,6 @@ impl AuthManager {
         }
 
         // Auto-unlock daemon with decrypted items in memory
-        crate::daemon::ensure_daemon_running();
         let context = login_context;
         let mut unlocked = false;
         if let Some(context) = context {
@@ -864,7 +876,16 @@ impl AuthManager {
                 }
             }
         };
-        let initial_sync = client.sync_vault(&token_resp.access_token);
+        let initial_sync = match client.sync_vault(&token_resp.access_token) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return AuthResult {
+                    ok: false,
+                    error: Some("Initial vault synchronization failed. Check the connection and sign in again.".into()),
+                    ..Default::default()
+                };
+            }
+        };
         if Self::daemon_unlock_context() != login_context {
             return AuthResult {
                 ok: false,
@@ -887,16 +908,18 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let mut storage = before_sync.storage.clone();
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.client_id = Some(client_id.trim().to_string());
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
+        let mut storage = VaultStorage {
+            server_url: self.server_url.clone(),
+            identity_url: self.identity_url.clone(),
+            client_id: Some(client_id.trim().to_string()),
+            enc_user_key: token_resp.key,
+            enc_private_key: token_resp.private_key,
+            kdf: token_resp.kdf,
+            kdf_iterations: token_resp.kdf_iterations,
+            kdf_memory: token_resp.kdf_memory,
+            kdf_parallelism: token_resp.kdf_parallelism,
+            ..Default::default()
+        };
 
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
@@ -957,54 +980,53 @@ impl AuthManager {
         storage.access_token = None;
         storage.refresh_token = None;
 
-        // Pull initial sync
-        if let Ok(sync_data) = initial_sync {
-            storage.ciphers = sync_data.ciphers;
-            storage.folders = sync_data.folders;
-            storage.collections = sync_data.collections;
-            if let Some(ref prof) = sync_data.profile {
-                if let Some(email) = prof.get("email").and_then(|v| v.as_str()) {
-                    storage.user_email = email.trim().to_lowercase();
-                }
-                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
-                    storage.user_id = Some(id.to_string());
-                }
-                if storage.enc_user_key.is_none() {
-                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
-                        storage.enc_user_key = Some(key.to_string());
-                    }
-                }
-                if storage.enc_private_key.is_none() {
-                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
-                        storage.enc_private_key = Some(pk.to_string());
-                    }
-                }
-                if storage.kdf.is_none() {
-                    if let Some(kdf) = prof.get("kdf").and_then(|v| v.as_u64()) {
-                        storage.kdf = Some(kdf as u32);
-                    }
-                }
-                if storage.kdf_iterations.is_none() {
-                    if let Some(iter) = prof.get("kdfIterations").and_then(|v| v.as_u64()) {
-                        storage.kdf_iterations = Some(iter as u32);
-                    }
-                }
-                if storage.kdf_memory.is_none() {
-                    if let Some(mem) = prof.get("kdfMemory").and_then(|v| v.as_u64()) {
-                        storage.kdf_memory = Some(mem as u32);
-                    }
-                }
-                if storage.kdf_parallelism.is_none() {
-                    if let Some(par) = prof.get("kdfParallelism").and_then(|v| v.as_u64()) {
-                        storage.kdf_parallelism = Some(par as u32);
-                    }
-                }
-                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                    storage.organizations = orgs.clone();
+        // Install only a complete snapshot belonging to these credentials.
+        let sync_data = initial_sync;
+        storage.ciphers = sync_data.ciphers;
+        storage.folders = sync_data.folders;
+        storage.collections = sync_data.collections;
+        if let Some(ref prof) = sync_data.profile {
+            if let Some(email) = prof.get("email").and_then(|v| v.as_str()) {
+                storage.user_email = email.trim().to_lowercase();
+            }
+            if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                storage.user_id = Some(id.to_string());
+            }
+            if storage.enc_user_key.is_none() {
+                if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                    storage.enc_user_key = Some(key.to_string());
                 }
             }
-            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+            if storage.enc_private_key.is_none() {
+                if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                    storage.enc_private_key = Some(pk.to_string());
+                }
+            }
+            if storage.kdf.is_none() {
+                if let Some(kdf) = prof.get("kdf").and_then(|v| v.as_u64()) {
+                    storage.kdf = Some(kdf as u32);
+                }
+            }
+            if storage.kdf_iterations.is_none() {
+                if let Some(iter) = prof.get("kdfIterations").and_then(|v| v.as_u64()) {
+                    storage.kdf_iterations = Some(iter as u32);
+                }
+            }
+            if storage.kdf_memory.is_none() {
+                if let Some(mem) = prof.get("kdfMemory").and_then(|v| v.as_u64()) {
+                    storage.kdf_memory = Some(mem as u32);
+                }
+            }
+            if storage.kdf_parallelism.is_none() {
+                if let Some(par) = prof.get("kdfParallelism").and_then(|v| v.as_u64()) {
+                    storage.kdf_parallelism = Some(par as u32);
+                }
+            }
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                storage.organizations = orgs.clone();
+            }
         }
+        storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
         if storage.user_email.is_empty() {
             storage.user_email = client_id.trim().to_string();
@@ -2393,6 +2415,14 @@ esac
                         body
                     );
                     let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
                     break;
                 }
             }
@@ -2459,6 +2489,14 @@ esac
                     let body = r#"{"access_token":"synthetic_api_token_789","token_type":"Bearer","Key":"2.dummy_iv|dummy_ct|dummy_mac"}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
