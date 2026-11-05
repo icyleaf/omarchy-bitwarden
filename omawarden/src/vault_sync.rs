@@ -900,7 +900,10 @@ esac
         original.organizations = vec![json!({"id":"old-organization"})];
         original.client_id = Some("user.old".into());
         mgr.storage_mgr.save(&original).unwrap();
-        crate::write_test_executable(&dir.path().join("secret-tool"), "#!/bin/sh\nexit 0\n");
+        crate::write_test_executable(
+            &dir.path().join("secret-tool"),
+            "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
+        );
         let auth = crate::auth::AuthManager::new(
             &mgr.server_url,
             Some(mgr.storage_mgr.clone()),

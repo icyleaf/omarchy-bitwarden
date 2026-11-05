@@ -1074,7 +1074,10 @@ mod tests {
         latest["ciphers"] = serde_json::json!([{"id":"created"}]);
         fs::write(&manager.file_path, latest.to_string()).unwrap();
         let script = dir.path().join("secret-tool");
-        crate::write_test_executable(&script, "#!/bin/sh\nexit 0\n");
+        crate::write_test_executable(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
+        );
         let keyring = KeyringManager::new(script.to_str().unwrap());
         let response =
             serde_json::from_value(serde_json::json!({"access_token":"new", "expires_in":3600}))

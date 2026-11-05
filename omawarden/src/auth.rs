@@ -1131,7 +1131,10 @@ mod tests {
 
     fn create_test_mock_keyring(dir: &std::path::Path) -> KeyringManager {
         let script_path = dir.join("mock-secret-tool");
-        crate::write_test_executable(&script_path, "#!/bin/sh\nexit 0\n");
+        crate::write_test_executable(
+            &script_path,
+            "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
+        );
         KeyringManager::new(script_path.to_str().unwrap())
     }
 
