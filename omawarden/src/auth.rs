@@ -4,8 +4,8 @@ use zeroize::Zeroizing;
 
 use crate::api::BitwardenApiClient;
 use crate::config::ConfigManager;
-use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_REFRESH_TOKEN};
-use crate::storage::{StorageManager, VaultStorage};
+use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
+use crate::storage::{CacheSnapshot, StorageManager, VaultStorage};
 
 pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     let raw = match err_str {
@@ -157,6 +157,8 @@ pub struct AuthManager {
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
     pub config_mgr: Option<ConfigManager>,
+    #[cfg(test)]
+    pub(crate) before_login_persist: Option<fn(&tempfile::NamedTempFile)>,
 }
 
 impl AuthManager {
@@ -205,12 +207,104 @@ impl AuthManager {
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
             config_mgr,
+            #[cfg(test)]
+            before_login_persist: None,
         }
     }
 
-    fn daemon_unlock_context() -> Option<String> {
-        crate::daemon::send_daemon_request(&serde_json::json!({"action":"ping"}))
-            .and_then(|reply| reply["unlock_context"].as_str().map(str::to_owned))
+    fn daemon_unlock_context() -> Result<Option<String>, &'static str> {
+        use crate::daemon::{dispatch_daemon_request, DispatchError};
+
+        match dispatch_daemon_request(&serde_json::json!({"action":"ping"})) {
+            Ok(reply) if reply["credential_slots_v2"] == true => reply["unlock_context"]
+                .as_str()
+                .map(|context| Some(context.to_owned()))
+                .ok_or("Cannot verify the daemon session before login."),
+            Ok(_) => Err("Lock the vault to update the running daemon, then sign in again."),
+            Err(DispatchError::NotSent) => Ok(None),
+            Err(DispatchError::Unconfirmed) => {
+                Err("Cannot verify the daemon session before login.")
+            }
+        }
+    }
+
+    fn publish_login(
+        &self,
+        base: &CacheSnapshot,
+        expected_context: Option<&str>,
+        storage: &mut VaultStorage,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        api_secret: Option<&str>,
+    ) -> Result<(), &'static str> {
+        let check_context = || {
+            if Self::daemon_unlock_context()?.as_deref() != expected_context {
+                return Err("Vault session changed during login. Sign in again.");
+            }
+            Ok(())
+        };
+        let check_cache = || {
+            base.is_current(&self.storage_mgr)
+                .unwrap_or(false)
+                .then_some(())
+                .ok_or("Vault cache changed during login. Sign in again.")
+        };
+        // Skip keyring work if initial sync already lost the publication race.
+        check_context()?;
+        check_cache()?;
+        storage.credential_id = Some(format!("{:032x}", rand::random::<u128>()));
+        let staged = self
+            .storage_mgr
+            .stage_durable(storage)
+            .map_err(|_| "Cannot stage the account cache")?;
+        let candidate = self.keyring_mgr.for_storage(storage, &self.server_url);
+        let publication = (|| {
+            if !candidate.store_token(KIND_ACCESS_TOKEN, access_token) {
+                return Err("Failed to store access token in system keyring.");
+            }
+            if refresh_token.is_some_and(|token| !candidate.store_token(KIND_REFRESH_TOKEN, token))
+            {
+                return Err("Failed to store refresh token in system keyring.");
+            }
+            if api_secret.is_some_and(|secret| !candidate.store_token(KIND_API_SECRET, secret)) {
+                return Err("Failed to store API secret in system keyring.");
+            }
+
+            check_context()?;
+            let _account = self
+                .storage_mgr
+                .account_guard()
+                .map_err(|_| "Cannot secure the account cache")?;
+            check_cache()?;
+            #[cfg(test)]
+            if let Some(hook) = self.before_login_persist {
+                hook(&staged);
+            }
+            staged
+                .persist(&self.storage_mgr.file_path)
+                .map_err(|_| "Cannot save the account cache")?;
+            Ok(self.storage_mgr.sync_parent())
+        })();
+        match publication {
+            Err(error) => {
+                candidate.clear_slot();
+                Err(error)
+            }
+            Ok(Ok(())) => {
+                self.keyring_mgr
+                    .for_storage(&base.storage, &self.server_url)
+                    .clear_slot();
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                crate::log_warn!(
+                    "omawarden:auth",
+                    "Account cache published but directory sync failed. Retaining previous credentials: {}",
+                    error
+                );
+                Ok(())
+            }
+        }
     }
 
     // Reload under the cross-process guard: status polling must never write
@@ -218,7 +312,10 @@ impl AuthManager {
     fn migrate_legacy_tokens(&self, expected: &VaultStorage) -> Option<VaultStorage> {
         let _account = self.storage_mgr.account_guard().ok()?;
         let mut storage = self.storage_mgr.load_existing().ok()?;
-        if !storage.same_account(expected) || !self.keyring_mgr.is_available() {
+        if storage.credential_id.is_some()
+            || !storage.same_account(expected)
+            || !self.keyring_mgr.is_available()
+        {
             return None;
         }
         let server = if storage.server_url.is_empty() {
@@ -261,32 +358,15 @@ impl AuthManager {
         if !storage.same_account(expected) {
             return false;
         }
-        let server = if storage.server_url.is_empty() {
-            &self.server_url
-        } else {
-            &storage.server_url
-        };
-        let current = self
-            .keyring_mgr
-            .get_token(server, KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(server))
-            .or_else(|| storage.access_token.clone());
+        let keyring = self.keyring_mgr.for_storage(&storage, &self.server_url);
+        let current = keyring.access_token();
         if current.as_deref() != Some(token)
-            || self
-                .keyring_mgr
-                .get_token(server, KIND_REFRESH_TOKEN)
-                .is_some()
-            || storage.refresh_token.is_some()
-            || storage
-                .client_id
-                .as_ref()
-                .and_then(|id| self.keyring_mgr.get_api_secret(server, id))
-                .is_some()
+            || keyring.refresh_token().is_some()
+            || keyring.api_secret().is_some()
         {
             return false;
         }
-        self.keyring_mgr.clear_token(server, KIND_ACCESS_TOKEN);
-        self.keyring_mgr.clear_session(server);
+        keyring.clear_token(KIND_ACCESS_TOKEN);
         if storage.access_token.take().is_some() {
             let _ = self.storage_mgr.save(&storage);
         }
@@ -302,30 +382,10 @@ impl AuthManager {
             }
         }
 
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-
-        // 1. Resolve active access token from Keyring or Storage fallback
-        let active_token = self
-            .keyring_mgr
-            .get_token(s_url, KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        // Detect renewal capabilities using correct server URL precedence
-        let has_refresh = self
-            .keyring_mgr
-            .get_token(s_url, KIND_REFRESH_TOKEN)
-            .is_some()
-            || storage.refresh_token.is_some();
-        let has_api_secret = storage
-            .client_id
-            .as_ref()
-            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-            .is_some();
+        let keyring = self.keyring_mgr.for_storage(&storage, &self.server_url);
+        let active_token = keyring.access_token();
+        let has_refresh = keyring.refresh_token().is_some();
+        let has_api_secret = keyring.api_secret().is_some();
 
         if (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
             || (storage.user_email.is_empty() && storage.client_id.is_none())
@@ -467,7 +527,15 @@ impl AuthManager {
         // Start once at the login entry point. The later context check must
         // observe a stopped/locked daemon, never restart it and sample anew.
         crate::daemon::ensure_daemon_running();
-        let login_context = Self::daemon_unlock_context();
+        let login_context = match Self::daemon_unlock_context() {
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error.into()),
+                    ..Default::default()
+                }
+            }
+        };
         let client =
             BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let password_zeroizing = Zeroizing::new(password.to_string());
@@ -655,28 +723,6 @@ impl AuthManager {
                 };
             }
         };
-        if Self::daemon_unlock_context() != login_context {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault session changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
-
-        let Ok(account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Cannot secure the account cache".into()),
-                ..Default::default()
-            };
-        };
-        if !before_sync.is_current(&self.storage_mgr).unwrap_or(false) {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault cache changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
         let mut storage = VaultStorage {
             server_url: self.server_url.clone(),
             identity_url: self.identity_url.clone(),
@@ -689,48 +735,6 @@ impl AuthManager {
             kdf_parallelism: token_resp.kdf_parallelism,
             ..Default::default()
         };
-
-        if !self.keyring_mgr.store_token(
-            &self.server_url,
-            KIND_ACCESS_TOKEN,
-            &token_resp.access_token,
-        ) {
-            let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                two_factor_required: None,
-                two_factor_providers: None,
-                ..Default::default()
-            };
-        }
-
-        if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self
-                .keyring_mgr
-                .store_token(&self.server_url, KIND_REFRESH_TOKEN, ref_tok)
-            {
-                self.keyring_mgr
-                    .clear_token(&self.server_url, KIND_ACCESS_TOKEN);
-                let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
-                return AuthResult {
-                    ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(err_msg.to_string()),
-                    two_factor_required: None,
-                    two_factor_providers: None,
-                    ..Default::default()
-                };
-            }
-        }
-
-        storage.access_token = None;
-        storage.refresh_token = None;
 
         // Install only a complete snapshot belonging to these credentials.
         let sync_data = initial_sync;
@@ -757,14 +761,20 @@ impl AuthManager {
         }
         storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
-        if self.storage_mgr.save(&storage).is_err() {
+        if let Err(error) = self.publish_login(
+            &before_sync,
+            login_context.as_deref(),
+            &mut storage,
+            &token_resp.access_token,
+            token_resp.refresh_token.as_deref(),
+            None,
+        ) {
             return AuthResult {
                 ok: false,
-                error: Some("Cannot save the account cache".into()),
+                error: Some(error.into()),
                 ..Default::default()
             };
         }
-        drop(account_guard);
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -837,7 +847,15 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let login_context = Self::daemon_unlock_context();
+        let login_context = match Self::daemon_unlock_context() {
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error.into()),
+                    ..Default::default()
+                }
+            }
+        };
         let client =
             BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let token_resp = match client.login_apikey(client_id, client_secret) {
@@ -886,28 +904,6 @@ impl AuthManager {
                 };
             }
         };
-        if Self::daemon_unlock_context() != login_context {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault session changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
-
-        let Ok(account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Cannot secure the account cache".into()),
-                ..Default::default()
-            };
-        };
-        if !before_sync.is_current(&self.storage_mgr).unwrap_or(false) {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault cache changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
         let mut storage = VaultStorage {
             server_url: self.server_url.clone(),
             identity_url: self.identity_url.clone(),
@@ -920,65 +916,6 @@ impl AuthManager {
             kdf_parallelism: token_resp.kdf_parallelism,
             ..Default::default()
         };
-
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-
-        if !self
-            .keyring_mgr
-            .store_token(s_url, KIND_ACCESS_TOKEN, &token_resp.access_token)
-        {
-            let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                ..Default::default()
-            };
-        }
-
-        if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self
-                .keyring_mgr
-                .store_token(s_url, KIND_REFRESH_TOKEN, ref_tok)
-            {
-                self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
-                let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
-                return AuthResult {
-                    ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(err_msg.to_string()),
-                    ..Default::default()
-                };
-            }
-        }
-
-        if !self
-            .keyring_mgr
-            .store_api_secret(s_url, client_id.trim(), client_secret.trim())
-        {
-            self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
-            self.keyring_mgr.clear_token(s_url, KIND_REFRESH_TOKEN);
-            let err_msg = "Failed to store API secret in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                ..Default::default()
-            };
-        }
-
-        storage.access_token = None;
-        storage.refresh_token = None;
 
         // Install only a complete snapshot belonging to these credentials.
         let sync_data = initial_sync;
@@ -1032,14 +969,20 @@ impl AuthManager {
             storage.user_email = client_id.trim().to_string();
         }
 
-        if self.storage_mgr.save(&storage).is_err() {
+        if let Err(error) = self.publish_login(
+            &before_sync,
+            login_context.as_deref(),
+            &mut storage,
+            &token_resp.access_token,
+            token_resp.refresh_token.as_deref(),
+            Some(client_secret.trim()),
+        ) {
             return AuthResult {
                 ok: false,
-                error: Some("Cannot save the account cache".into()),
+                error: Some(error.into()),
                 ..Default::default()
             };
         }
-        drop(account_guard);
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -1085,16 +1028,13 @@ impl AuthManager {
                     &self.server_url
                 };
 
-                let token_opt = self
-                    .keyring_mgr
-                    .get_token(s_url, KIND_ACCESS_TOKEN)
-                    .or_else(|| self.keyring_mgr.get_session(s_url))
-                    .or_else(|| storage.access_token.clone());
-
-                if let Some(ref token) = token_opt {
-                    if token != "session_unlocked" && !token.is_empty() {
-                        self.keyring_mgr
-                            .store_token(s_url, KIND_ACCESS_TOKEN, token);
+                if storage.credential_id.is_none() {
+                    let keyring = self.keyring_mgr.for_storage(&storage, s_url);
+                    if let Some(token) = keyring
+                        .access_token()
+                        .filter(|token| token != "session_unlocked" && !token.is_empty())
+                    {
+                        keyring.store_token(KIND_ACCESS_TOKEN, &token);
                     }
                 }
 
@@ -1129,15 +1069,12 @@ impl AuthManager {
 
     pub fn lock(&self) -> AuthResult {
         let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        self.keyring_mgr.clear_session(s_url);
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        self.keyring_mgr
+            .for_storage(&storage, &self.server_url)
+            .clear_token(KIND_ACCESS_TOKEN);
         crate::attachment::clear_preview_attachments(None);
         crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
@@ -1149,12 +1086,6 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> AuthResult {
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
         let _ = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
@@ -1165,20 +1096,23 @@ impl AuthManager {
                 ..Default::default()
             };
         };
-        self.keyring_mgr.clear_all();
-        self.keyring_mgr.clear_session(s_url);
-        if self.storage_mgr.save(&VaultStorage::default()).is_err() {
+        let storage = self.storage_mgr.load();
+        let cleared = self.storage_mgr.stage_durable(&VaultStorage::default());
+        if !cleared.is_ok_and(|file| file.persist(&self.storage_mgr.file_path).is_ok()) {
             return AuthResult {
                 ok: false,
                 error: Some("Vault locked; failed to clear the account cache.".into()),
                 ..Default::default()
             };
         }
+        if self.storage_mgr.sync_parent().is_ok() {
+            self.keyring_mgr
+                .for_storage(&storage, &self.server_url)
+                .clear_slot();
+            self.keyring_mgr.clear_all();
+        }
         crate::attachment::clear_preview_attachments(None);
-        crate::log_info!(
-            "omawarden:auth",
-            "Account logged out and all keyring credentials cleared."
-        );
+        crate::log_info!("omawarden:auth", "Account logged out.");
         AuthResult {
             ok: true,
             status: Some("unauthenticated".to_string()),
@@ -2651,7 +2585,7 @@ esac
                                 let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
                                 let resp = match action {
                                     "ping" => {
-                                        serde_json::json!({ "ok": true, "commit": env!("GIT_HASH"), "unlock_context": "fixture-context" })
+                                        serde_json::json!({ "ok": true, "commit": env!("GIT_HASH"), "credential_slots_v2": true, "unlock_context": "fixture-context" })
                                     }
                                     "unlock" => serde_json::json!({
                                         "ok": true,

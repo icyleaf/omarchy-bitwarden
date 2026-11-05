@@ -828,21 +828,16 @@ impl VaultManager {
         } else {
             &self.server_url
         };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
+        let id_url = storage.credential_identity_url(self.identity_url.as_deref());
         let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
+        let keyring = self.keyring_mgr.for_storage(storage, s_url);
 
         let mut had_credentials = false;
         let mut auth_failed = false;
         let mut last_error = None;
 
         // 1. Try refresh_token grant
-        let refresh_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-            .or_else(|| storage.refresh_token.clone());
+        let refresh_token = keyring.refresh_token();
 
         if let Some(ref ref_tok) = refresh_token {
             had_credentials = true;
@@ -888,7 +883,7 @@ impl VaultManager {
 
         // 2. Try client_credentials grant via client_id + client_secret in Keyring
         if let Some(ref cid) = storage.client_id {
-            if let Some(sec) = self.keyring_mgr.get_api_secret(s_url, cid) {
+            if let Some(sec) = keyring.api_secret() {
                 had_credentials = true;
                 crate::log_info!(
                     "omawarden:vault",
@@ -971,23 +966,15 @@ impl VaultManager {
         if generation != self.lock_generation() || !storage.same_account(&updated_storage) {
             return Err("Session changed during token renewal".into());
         }
-        let s_url = if !updated_storage.server_url.is_empty() {
-            &updated_storage.server_url
-        } else {
-            &self.server_url
-        };
         if self.keyring_mgr.is_available() {
-            let s1 = self.keyring_mgr.store_token(
-                s_url,
-                crate::keyring::KIND_ACCESS_TOKEN,
-                &tok_resp.access_token,
-            );
+            let keyring = self
+                .keyring_mgr
+                .for_storage(&updated_storage, &self.server_url);
+            let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
             let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
-                self.keyring_mgr
-                    .store_token(s_url, crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+                keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
             } else {
-                self.keyring_mgr
-                    .clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
+                keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
                 true
             };
             if s1 && s2 {
@@ -1027,16 +1014,9 @@ impl VaultManager {
             return;
         }
         self.lock();
-        let s_url = if !expected.server_url.is_empty() {
-            &expected.server_url
-        } else {
-            &self.server_url
-        };
-        self.keyring_mgr
-            .clear_token(s_url, crate::keyring::KIND_ACCESS_TOKEN);
-        self.keyring_mgr
-            .clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
-        self.keyring_mgr.clear_session(s_url);
+        let keyring = self.keyring_mgr.for_storage(expected, &self.server_url);
+        keyring.clear_token(crate::keyring::KIND_ACCESS_TOKEN);
+        keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
         if let Ok(mut updated) = disk {
             updated.access_token = None;
             updated.refresh_token = None;
@@ -1256,27 +1236,12 @@ impl VaultManager {
 
     pub fn get_status(&self) -> Value {
         let fresh_storage = self.storage_mgr.load();
-        let s_url = if !fresh_storage.server_url.is_empty() {
-            &fresh_storage.server_url
-        } else {
-            &self.server_url
-        };
-        let active_token = self
+        let keyring = self
             .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| fresh_storage.access_token.clone());
-
-        let has_refresh = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-            .is_some()
-            || fresh_storage.refresh_token.is_some();
-        let has_api_secret = fresh_storage
-            .client_id
-            .as_ref()
-            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-            .is_some();
+            .for_storage(&fresh_storage, &self.server_url);
+        let active_token = keyring.access_token();
+        let has_refresh = keyring.refresh_token().is_some();
+        let has_api_secret = keyring.api_secret().is_some();
 
         let has_valid_token = if let Some(ref tok) = active_token {
             !crate::auth::is_jwt_expired(tok) || has_refresh || has_api_secret

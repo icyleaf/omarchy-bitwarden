@@ -26,16 +26,12 @@ impl VaultManager {
         } else {
             &account.server_url
         };
-        let identity = self
-            .identity_url
-            .as_deref()
-            .or(account.identity_url.as_deref());
+        let identity = account.credential_identity_url(self.identity_url.as_deref());
         let client = BitwardenApiClient::with_options(server, identity, context);
         let token = self
             .keyring_mgr
-            .get_token(server, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(server))
-            .or_else(|| account.access_token.clone());
+            .for_storage(&account, server)
+            .access_token();
         let mut token = match token {
             Some(token) if !crate::auth::is_jwt_expired(&token) => token,
             _ => self.renew_for_account(&account, context, session.generation)?,
@@ -724,6 +720,173 @@ mod tests {
         for body in ["{}", "[null, [], [], []]"] {
             failed_initial_sync_preserves_account(false, "200 OK", body);
         }
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum LoginPublication {
+        KeyringFailure,
+        RenameFailure,
+        Committed,
+    }
+
+    fn login_candidate_slot(outcome: LoginPublication, replace_account: bool) {
+        use crate::keyring::{KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
+
+        let _environment = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeEnv::new(dir.path());
+        let (mgr, api) = fixture(dir.path());
+        let key_dir = dir.path().join("keys");
+        std::fs::create_dir(&key_dir).unwrap();
+        crate::write_test_executable(
+            &dir.path().join("secret-tool"),
+            format!(
+                r#"#!/bin/sh
+command=$1
+shift
+case "$1" in --label=*) shift;; esac
+while [ "$#" -ge 2 ]; do
+    case "$1" in
+        service) service=$2;;
+        account) account=$2;;
+        credential_id) slot=$2;;
+        kind) kind=$2;;
+    esac
+    shift 2
+done
+prefix="{}/$service.$account.$slot."
+case "$command" in
+    store)
+        secret=$(/bin/cat)
+        if [ "{}" = yes ] && [ "$secret" = other-refresh ]; then
+            exit 1
+        fi
+        printf '%s' "$secret" > "$prefix$kind"
+        ;;
+    lookup) /bin/cat "$prefix$kind";;
+    clear) if [ -n "$kind" ]; then /bin/rm -f "$prefix$kind"; else /bin/rm -f "$prefix"*; fi;;
+    *) exit 1;;
+esac
+"#,
+                key_dir.display(),
+                if outcome == LoginPublication::KeyringFailure {
+                    "yes"
+                } else {
+                    "no"
+                },
+            ),
+        );
+        let mut original = mgr.storage_mgr.load();
+        original.credential_id = Some(format!("{:032x}", 1));
+        original.client_id = Some("user.fixture".into());
+        mgr.storage_mgr.save(&original).unwrap();
+        seed(&mgr, vec![cipher("original")]);
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        let original_keys = mgr.keyring_mgr.for_storage(&original, &mgr.server_url);
+        assert!(original_keys.store_token(KIND_ACCESS_TOKEN, "original-access"));
+        assert!(original_keys.store_token(KIND_REFRESH_TOKEN, "original-refresh"));
+        assert!(original_keys.store_token(KIND_API_SECRET, "original-secret"));
+        assert!(mgr
+            .keyring_mgr
+            .store_token(&mgr.server_url, KIND_ACCESS_TOKEN, "legacy-access"));
+        let unused = VaultStorage {
+            credential_id: Some(format!("{:032x}", 2)),
+            access_token: Some("legacy-disk-token".into()),
+            ..original.clone()
+        };
+        assert!(mgr
+            .keyring_mgr
+            .for_storage(&unused, &mgr.server_url)
+            .access_token()
+            .is_none());
+
+        let mut auth = crate::auth::AuthManager::new(
+            &mgr.server_url,
+            Some(mgr.storage_mgr.clone()),
+            Some(mgr.keyring_mgr.clone()),
+        );
+        if outcome == LoginPublication::RenameFailure {
+            auth.before_login_persist = Some(|file| std::fs::remove_file(file.path()).unwrap());
+        }
+        let (user_id, email, client_id) = if replace_account {
+            ("other-id", "other@example.invalid", "user.other")
+        } else {
+            ("user-id", "fixture@example.invalid", "user.fixture")
+        };
+        let task = thread::spawn(move || auth.login_apikey(client_id, "other-secret"));
+        let mut grant = accept(&api);
+        assert_eq!(request(&mut grant).0, "/identity/connect/token");
+        reply(
+            &mut grant,
+            json!({
+                "access_token":"other-access", "refresh_token":"other-refresh", "expires_in":3600,
+                "key":original.enc_user_key
+            }),
+        );
+        let mut initial = accept(&api);
+        assert_eq!(request(&mut initial).0, "/api/sync");
+        reply(
+            &mut initial,
+            json!({"ciphers":[], "profile":{"id":user_id, "email":email}}),
+        );
+        let result = task.join().unwrap();
+        if outcome == LoginPublication::Committed {
+            assert!(result.ok, "{:?}", result.error);
+            let active = mgr.storage_mgr.load_existing().unwrap();
+            assert_ne!(active.credential_id, original.credential_id);
+            assert_eq!(active.user_id.as_deref(), Some(user_id));
+            assert!(original_keys.access_token().is_none());
+            assert!(original_keys.refresh_token().is_none());
+            assert!(original_keys.api_secret().is_none());
+            assert!(mgr.keyring_mgr.clear_all());
+            let active_keys = mgr.keyring_mgr.for_storage(&active, &mgr.server_url);
+            assert_eq!(active_keys.access_token().as_deref(), Some("other-access"));
+            assert_eq!(
+                active_keys.refresh_token().as_deref(),
+                Some("other-refresh")
+            );
+            assert_eq!(active_keys.api_secret().as_deref(), Some("other-secret"));
+        } else {
+            assert!(!result.ok);
+            let expected = if outcome == LoginPublication::KeyringFailure {
+                "Failed to store refresh token in system keyring."
+            } else {
+                "Cannot save the account cache"
+            };
+            assert_eq!(result.error.as_deref(), Some(expected));
+            assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+            assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "original");
+            assert_eq!(
+                original_keys.access_token().as_deref(),
+                Some("original-access")
+            );
+            assert_eq!(
+                original_keys.refresh_token().as_deref(),
+                Some("original-refresh")
+            );
+            assert_eq!(
+                original_keys.api_secret().as_deref(),
+                Some("original-secret")
+            );
+            assert_eq!(std::fs::read_dir(key_dir).unwrap().count(), 4);
+        }
+    }
+
+    #[test]
+    fn login_keyring_failure_preserves_active_credentials() {
+        login_candidate_slot(LoginPublication::KeyringFailure, true);
+    }
+
+    #[test]
+    fn login_rename_failure_preserves_active_credentials() {
+        for replace_account in [true, false] {
+            login_candidate_slot(LoginPublication::RenameFailure, replace_account);
+        }
+    }
+
+    #[test]
+    fn login_publishes_the_new_slot_and_retires_the_old_one() {
+        login_candidate_slot(LoginPublication::Committed, true);
     }
 
     #[test]

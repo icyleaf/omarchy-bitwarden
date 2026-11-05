@@ -298,14 +298,19 @@ impl ConfigManager {
             }));
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
             let _account_guard = storage_mgr.account_guard()?;
+            let storage = storage_mgr.load();
             match fs::remove_file(&storage_mgr.file_path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
 
-            keyring_mgr.clear_all();
-            keyring_mgr.clear_session(&cfg.server_url);
+            if storage_mgr.sync_parent().is_ok() {
+                keyring_mgr
+                    .for_storage(&storage, &cfg.server_url)
+                    .clear_slot();
+                keyring_mgr.clear_all();
+            }
 
             crate::attachment::clear_preview_attachments(None);
 

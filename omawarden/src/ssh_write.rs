@@ -2,7 +2,6 @@
 //! boundary, and only a receipt crosses the return IPC boundary.
 use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient, ClientContext};
 use crate::crypto::SymmetricCryptoKey;
-use crate::keyring::KIND_ACCESS_TOKEN;
 use crate::storage::VaultStorage;
 use crate::vault::VaultManager;
 use crate::vault_cache::{CacheSession, IndexUpdate};
@@ -102,9 +101,8 @@ impl VaultManager {
         })?;
         let token = self
             .keyring_mgr
-            .get_token(server, KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(server))
-            .or_else(|| storage.access_token.clone());
+            .for_storage(&storage, server)
+            .access_token();
         let renew = || self.renew_for_account(&storage, context, generation);
         let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
             Some(t) => t,

@@ -20,6 +20,8 @@ pub struct VaultStorage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
     #[serde(default, skip_serializing)]
@@ -42,11 +44,25 @@ pub struct VaultStorage {
 }
 
 impl VaultStorage {
+    /// The active account and the credential slot that was published with it.
     pub(crate) fn same_account(&self, other: &Self) -> bool {
         self.server_url == other.server_url
+            && self.identity_url == other.identity_url
             && self.user_email == other.user_email
             && self.user_id == other.user_id
             && self.enc_user_key == other.enc_user_key
+            && self.credential_id == other.credential_id
+    }
+
+    pub(crate) fn credential_identity_url<'a>(
+        &'a self,
+        configured: Option<&'a str>,
+    ) -> Option<&'a str> {
+        if self.credential_id.is_some() {
+            self.identity_url.as_deref()
+        } else {
+            configured.or(self.identity_url.as_deref())
+        }
     }
 }
 
@@ -289,6 +305,24 @@ impl StorageManager {
             serde_json::to_writer_pretty(&mut writer, data)?;
             writer.flush()?;
         }
+        Ok(staged)
+    }
+
+    pub(crate) fn sync_parent(&self) -> std::io::Result<()> {
+        let parent = self
+            .file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::File::open(parent)?.sync_all()
+    }
+
+    pub(crate) fn stage_durable(
+        &self,
+        data: &VaultStorage,
+    ) -> std::io::Result<tempfile::NamedTempFile> {
+        let staged = self.stage(data)?;
+        staged.as_file().sync_all()?;
         Ok(staged)
     }
 

@@ -219,11 +219,11 @@ pub fn get_attachment(
         cfg.server_url.trim_end_matches('/')
     };
 
-    let initial_token = session_token
-        .map(|s| s.to_string())
-        .or_else(|| keyring_mgr.get_token(initial_server_url, crate::keyring::KIND_ACCESS_TOKEN))
-        .or_else(|| keyring_mgr.get_session(initial_server_url))
-        .or_else(|| storage.access_token.clone());
+    let initial_token = session_token.map(|s| s.to_string()).or_else(|| {
+        keyring_mgr
+            .for_storage(&storage, initial_server_url)
+            .access_token()
+    });
 
     let token_val = match initial_token {
         Some(ref t) if !t.is_empty() && !crate::auth::is_jwt_expired(t) => Some(t.clone()),
@@ -355,10 +355,7 @@ pub fn get_attachment(
     } else {
         &cfg.server_url
     };
-    let effective_id_url = cfg
-        .identity_url
-        .as_deref()
-        .or(storage.identity_url.as_deref());
+    let effective_id_url = storage.credential_identity_url(cfg.identity_url.as_deref());
     let env_urls = crate::api::EnvironmentUrls::resolve(raw_server_url, effective_id_url);
 
     let download_url = format!(
@@ -776,18 +773,19 @@ fn attempt_attachment_token_refresh(
     keyring_mgr: &KeyringManager,
     storage: &VaultStorage,
 ) -> Option<String> {
-    let effective_id_url = if server_url.is_empty() || server_url == storage.server_url {
+    let effective_id_url = if server_url.is_empty()
+        || server_url == crate::keyring::normalize_server_url(&storage.server_url)
+    {
         storage.identity_url.as_deref()
     } else {
         None
     };
     let api_client =
         crate::api::BitwardenApiClient::with_identity_url(server_url, effective_id_url);
+    let keyring = keyring_mgr.for_storage(storage, server_url);
 
     // 1. Try refresh_token
-    let refresh_token = keyring_mgr
-        .get_token(server_url, crate::keyring::KIND_REFRESH_TOKEN)
-        .or_else(|| storage.refresh_token.clone());
+    let refresh_token = keyring.refresh_token();
 
     if let Some(ref ref_tok) = refresh_token {
         if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
@@ -799,7 +797,7 @@ fn attempt_attachment_token_refresh(
 
     // 2. Try client_credentials via client_id + client_secret in Keyring
     if let Some(ref cid) = storage.client_id {
-        if let Some(sec) = keyring_mgr.get_api_secret(server_url, cid) {
+        if let Some(sec) = keyring.api_secret() {
             if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
                 if persist_attachment_tokens(
                     server_url,
@@ -833,21 +831,13 @@ fn persist_attachment_tokens(
     if !fresh_st.same_account(expected) {
         return false;
     }
-    let s_url = if !fresh_st.server_url.is_empty() {
-        fresh_st.server_url.as_str()
-    } else {
-        server_url
-    };
     if keyring_mgr.is_available() {
-        let s1 = keyring_mgr.store_token(
-            s_url,
-            crate::keyring::KIND_ACCESS_TOKEN,
-            &tok_resp.access_token,
-        );
+        let keyring = keyring_mgr.for_storage(&fresh_st, server_url);
+        let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
         let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
-            keyring_mgr.store_token(s_url, crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+            keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
         } else {
-            keyring_mgr.clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
+            keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
             true
         };
         if s1 && s2 {
