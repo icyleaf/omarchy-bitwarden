@@ -794,15 +794,69 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
     )
 }
 
-pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
-    let socket_path = get_socket_path();
-    if socket_path.exists() {
-        validate_socket_path(&socket_path)?;
-        let _ = fs::remove_file(&socket_path);
-    }
+fn lock_daemon_instance(path: &Path) -> std::io::Result<fs::File> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::OpenOptionsExt;
 
+    if let Some(parent) = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && !p.exists())
+    {
+        crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid daemon instance lock",
+        ));
+    }
+    file.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => {
+            Error::new(ErrorKind::AlreadyExists, "Vault daemon already running")
+        }
+        fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
+pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let socket_path = get_socket_path();
     if let Some(parent) = socket_path.parent() {
         crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+    }
+    // One owner for the socket and one for the encrypted cache, even when a
+    // second process starts with a different runtime or configuration path.
+    let _socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
+    let _cache_owner = lock_daemon_instance(
+        &state
+            .vault_mgr
+            .storage_mgr
+            .file_path
+            .with_extension("daemon.lock"),
+    )?;
+    if socket_path.exists() {
+        validate_socket_path(&socket_path)?;
+        match UnixStream::connect(&socket_path) {
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorKind::AlreadyExists,
+                    "Vault daemon already running",
+                ))
+            }
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                fs::remove_file(&socket_path)?
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     let listener = UnixListener::bind(&socket_path)?;

@@ -48,6 +48,60 @@ impl Drop for DaemonSocket {
 }
 
 #[test]
+fn a_second_daemon_cannot_replace_the_live_login_authority() {
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let spawn = |runtime: &std::path::Path| {
+        Daemon(
+            Command::new(env!("CARGO_BIN_EXE_omawarden"))
+                .arg("daemon")
+                .env_clear()
+                .env("HOME", root)
+                .env("PATH", root)
+                .env("XDG_RUNTIME_DIR", runtime)
+                .env("OMAWARDEN_DATA_DIR", root)
+                .env("OMAWARDEN_CONFIG_DIR", root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let _first = spawn(root);
+    let socket = root.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let context = ipc(&socket, json!({"action":"ping"}))["unlock_context"].clone();
+    let alternate_runtime = root.join("another-runtime");
+    std::fs::create_dir(&alternate_runtime).unwrap();
+    for runtime in [root, &alternate_runtime] {
+        let mut duplicate = spawn(runtime);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = duplicate.0.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "duplicate daemon took over the live cache"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert_eq!(
+        ipc(&socket, json!({"action":"ping"}))["unlock_context"],
+        context
+    );
+}
+
+#[test]
 fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
     use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
     use std::process::Stdio;
