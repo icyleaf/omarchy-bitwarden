@@ -55,6 +55,54 @@ pub struct StorageManager {
     pub file_path: PathBuf,
 }
 
+/// Pins the original inode until commit, preventing inode reuse from passing
+/// a stale comparison. All production cache writers replace the file atomically.
+pub(crate) struct CacheSnapshot {
+    pub(crate) storage: VaultStorage,
+    source: Option<(fs::File, fs::Metadata)>,
+    write_revision: Option<[u8; 16]>,
+}
+
+impl CacheSnapshot {
+    /// Call under account_guard when using this as a commit precondition.
+    pub(crate) fn is_current(&self, manager: &StorageManager) -> std::io::Result<bool> {
+        if let Some(expected) = self.write_revision {
+            let barrier = match manager.cipher_barrier() {
+                Ok(barrier) => barrier,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            if StorageManager::write_revision(&barrier)? != expected {
+                return Ok(false);
+            }
+        }
+        use std::os::unix::fs::MetadataExt;
+        match (&self.source, manager.file_path.metadata()) {
+            (Some((_file, original)), Ok(current)) => Ok((
+                original.dev(),
+                original.ino(),
+                original.len(),
+                original.mtime(),
+                original.mtime_nsec(),
+                original.ctime(),
+                original.ctime_nsec(),
+            ) == (
+                current.dev(),
+                current.ino(),
+                current.len(),
+                current.mtime(),
+                current.mtime_nsec(),
+                current.ctime(),
+                current.ctime_nsec(),
+            )),
+            (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            (_, Err(e)) => Err(e),
+            (None, Ok(_)) => Ok(false),
+        }
+    }
+}
+
 pub fn resolve_legacy_storage_path() -> PathBuf {
     let xdg_config = env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -129,6 +177,118 @@ impl StorageManager {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => VaultStorage::default(),
         }
+    }
+
+    /// Capture before remote work. Missing storage is valid for first login;
+    /// unreadable or malformed storage must never become an empty snapshot.
+    pub(crate) fn snapshot(&self) -> std::io::Result<CacheSnapshot> {
+        let barrier = self.cipher_barrier()?;
+        let revision = Self::write_revision(&barrier)?;
+        let mut snapshot = self.snapshot_for_receipt()?;
+        snapshot.write_revision = Some(revision);
+        Ok(snapshot)
+    }
+
+    // A receipt is itself inside the write barrier. It still needs a pinned
+    // cache version, but must not attempt an exclusive barrier against itself.
+    pub(crate) fn snapshot_for_receipt(&self) -> std::io::Result<CacheSnapshot> {
+        match fs::File::open(&self.file_path) {
+            Ok(source) => {
+                let metadata = source.metadata()?;
+                let storage = serde_json::from_reader(std::io::BufReader::new(&source))?;
+                Ok(CacheSnapshot {
+                    storage,
+                    source: Some((source, metadata)),
+                    write_revision: None,
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CacheSnapshot {
+                storage: VaultStorage::default(),
+                source: None,
+                write_revision: None,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_cipher_barrier(&self) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = self.file_path.parent() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.file_path.with_extension("writes.lock"))
+    }
+
+    fn write_revision(file: &fs::File) -> std::io::Result<[u8; 16]> {
+        use std::os::unix::fs::FileExt;
+        let mut revision = [0; 16];
+        match file.metadata()?.len() {
+            0 => {}
+            16 => file.read_exact_at(&mut revision, 0)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid cipher write revision",
+                ))
+            }
+        }
+        Ok(revision)
+    }
+
+    fn cipher_barrier(&self) -> std::io::Result<fs::File> {
+        let barrier = self.open_cipher_barrier()?;
+        barrier.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Cipher write in progress. Please retry synchronization.",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
+        Ok(barrier)
+    }
+
+    /// Shared operation marker, held through the HTTP request and receipt.
+    /// It contains no secrets and never blocks lock(), which does not use it.
+    /// Sync/login readers fail promptly while any request is outstanding.
+    pub(crate) fn begin_cipher_write(&self) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::FileExt;
+        let _account = self.account_guard()?;
+        let barrier = self.open_cipher_barrier()?;
+        barrier.try_lock_shared().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Vault snapshot in progress. Please retry the write.",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
+        Self::write_revision(&barrier)?;
+        barrier.write_all_at(&rand::random::<[u8; 16]>(), 0)?;
+        Ok(barrier)
+    }
+
+    /// Serialize outside the session critical section; persist only after
+    /// validating the snapshot under account_guard. NamedTempFile uses 0600.
+    pub(crate) fn stage(&self, data: &VaultStorage) -> std::io::Result<tempfile::NamedTempFile> {
+        use std::io::{BufWriter, Write};
+        let parent = self
+            .file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        {
+            let mut writer = BufWriter::new(staged.as_file_mut());
+            serde_json::to_writer_pretty(&mut writer, data)?;
+            writer.flush()?;
+        }
+        Ok(staged)
     }
 
     /// Serialize credential replacement and revocation across CLI and daemon processes.

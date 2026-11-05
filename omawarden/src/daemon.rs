@@ -731,7 +731,11 @@ impl DaemonState {
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
-        let count = self.vault_mgr.unlock(password)?;
+        self.unlock_in_context(password, &self.vault_mgr.unlock_context())
+    }
+
+    fn unlock_in_context(&self, password: &str, expected: &str) -> Result<usize, String> {
+        let count = self.vault_mgr.unlock_in_context(password, expected)?;
         if let Ok(mut ua_guard) = self.unlocked_at.lock() {
             *ua_guard = Some(Instant::now());
         }
@@ -1083,6 +1087,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             "ok": true,
             "pong": true,
             "ssh_write_receipt": true,
+            "unlock_context": state.vault_mgr.unlock_context(),
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
@@ -1127,7 +1132,12 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
         "unlock" => {
             let pwd = req.get("password").and_then(|v| v.as_str()).unwrap_or("");
-            match state.unlock(pwd) {
+            let result = match req.get("expected_unlock_context") {
+                Some(Value::String(context)) => state.unlock_in_context(pwd, context),
+                Some(_) => Err("Invalid unlock context".into()),
+                None => state.unlock(pwd),
+            };
+            match result {
                 Ok(count) => json!({
                     "ok": true,
                     "status": "unlocked",

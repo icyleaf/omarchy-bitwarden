@@ -379,14 +379,8 @@ impl VaultManager {
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
     /// the fail-safe default — retention happens only through soft_lock().
     pub fn lock(&self) {
-        // Order matters. wipe_quick_unlock takes restore_guard and bumps the
-        // epoch, which is what makes an in-flight quick_unlock_restore abort
-        // instead of committing. Purging first would leave a window where a
-        // restore commit lands between the purge and the wipe: the vault
-        // would end up unlocked with the decrypted items and user key back,
-        // and the wipe (which only clears the slot) would not undo it. The
-        // hard lock must therefore invalidate restores before it purges.
-        self.wipe_quick_unlock();
+        let _restore = self.restore_guard.lock().unwrap_or_else(|e| e.into_inner());
+        self.wipe_quick_unlock_inner();
         self.purge_decrypted_state();
     }
 
@@ -462,6 +456,10 @@ impl VaultManager {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        self.wipe_quick_unlock_inner();
+    }
+
+    fn wipe_quick_unlock_inner(&self) {
         self.quick_unlock_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut slot) = self.quick_unlock_key.write() {
@@ -676,6 +674,28 @@ impl VaultManager {
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
+        self.unlock_in_context(password, &self.unlock_context())
+    }
+
+    pub(crate) fn unlock_context(&self) -> String {
+        format!(
+            "{}:{}",
+            self.lock_generation(),
+            self.quick_unlock_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
+    pub(crate) fn unlock_in_context(
+        &self,
+        password: &str,
+        expected: &str,
+    ) -> Result<usize, String> {
+        if self.unlock_context() != expected {
+            return Err(
+                "Vault session changed during login. Unlock explicitly to continue.".into(),
+            );
+        }
         let fresh_storage = self.storage_mgr.load();
         if fresh_storage.enc_user_key.is_none() {
             crate::log_error!(
@@ -701,6 +721,15 @@ impl VaultManager {
             fresh_storage.enc_private_key.as_deref(),
         );
         let count = items.len();
+        let _restore = self
+            .restore_guard
+            .lock()
+            .map_err(|_| "Vault state unavailable")?;
+        if self.unlock_context() != expected {
+            return Err(
+                "Vault session changed during login. Unlock explicitly to continue.".into(),
+            );
+        }
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
             *dec_items = items;
@@ -732,154 +761,6 @@ impl VaultManager {
             "Decrypted and cached {} items in memory.",
             count
         );
-        Ok(count)
-    }
-
-    pub fn sync(&self) -> Result<usize, String> {
-        self.sync_with_client(None)
-    }
-
-    pub fn sync_with_client(
-        &self,
-        client_context: Option<&ClientContext>,
-    ) -> Result<usize, String> {
-        crate::log_info!(
-            "omawarden:vault",
-            "Starting vault synchronization with server..."
-        );
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
-
-        let initial_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        let active_token = match initial_token {
-            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
-            Some(_) => {
-                crate::log_info!(
-                    "omawarden:vault",
-                    "Access token is expired, attempting renewal..."
-                );
-                self.renew_session_with_client(client_context)?
-            }
-            None => {
-                let has_refresh = self
-                    .keyring_mgr
-                    .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-                    .is_some()
-                    || storage.refresh_token.is_some();
-                let has_api_secret = storage
-                    .client_id
-                    .as_ref()
-                    .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-                    .is_some();
-                if has_refresh || has_api_secret {
-                    self.renew_session_with_client(client_context)?
-                } else {
-                    crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
-                    return Err("Session token missing. Please log in.".to_string());
-                }
-            }
-        };
-
-        let sync_resp_res = client.sync_vault(&active_token);
-
-        let sync_resp = match sync_resp_res {
-            Ok(resp) => resp,
-            Err(ApiError::HttpStatus(code, _))
-                if code == reqwest::StatusCode::UNAUTHORIZED
-                    || code == reqwest::StatusCode::FORBIDDEN =>
-            {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP {} on sync. Attempting session renewal...",
-                    code
-                );
-                let renewed_token = self.renew_session_with_client(client_context)?;
-                client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
-                    format!("Sync failed: {:?}", e)
-                })?
-            }
-            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP 401/403 on sync. Attempting session renewal..."
-                );
-                let renewed_token = self.renew_session_with_client(client_context)?;
-                client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
-                    format!("Sync failed: {:?}", e)
-                })?
-            }
-            Err(e) => {
-                crate::log_error!("omawarden:vault", "Sync failed: {:?}", e);
-                return Err(format!("Sync failed: {:?}", e));
-            }
-        };
-
-        let count = sync_resp.ciphers.len();
-        let mut updated = self.storage_mgr.load();
-        updated.ciphers = sync_resp.ciphers;
-        updated.folders = sync_resp.folders;
-        updated.collections = sync_resp.collections;
-        if let Some(ref prof) = sync_resp.profile {
-            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                updated.organizations = orgs.clone();
-            }
-        }
-        updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
-
-        self.storage_mgr
-            .save(&updated)
-            .map_err(|e| format!("Failed to save storage: {:?}", e))?;
-
-        if let Ok(key_guard) = self.user_key.read() {
-            if let Some(user_key) = key_guard.as_ref() {
-                let items = decrypt_sync_ciphers_with_context(
-                    &updated.ciphers,
-                    &updated.folders,
-                    &updated.organizations,
-                    user_key,
-                    updated.enc_private_key.as_deref(),
-                );
-                if let Ok(mut dec_items) = self.decrypted_items.write() {
-                    *dec_items = items;
-                }
-            }
-        }
-
-        if let Ok(mut st) = self.storage.write() {
-            *st = updated;
-        }
-
-        crate::log_info!(
-            "omawarden:vault",
-            "Vault sync complete. {} ciphers, {} folders saved.",
-            count,
-            self.storage.read().map(|s| s.folders.len()).unwrap_or(0)
-        );
-
         Ok(count)
     }
 

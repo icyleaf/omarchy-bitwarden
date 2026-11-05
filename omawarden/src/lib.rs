@@ -19,6 +19,8 @@ mod ssh_write;
 pub mod storage;
 pub mod totp;
 pub mod vault;
+mod vault_cache;
+mod vault_sync;
 pub mod webauthn;
 
 /// Serialises tests that change process-wide environment variables, and tests

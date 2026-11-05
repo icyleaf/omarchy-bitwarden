@@ -890,6 +890,7 @@ fn main() -> ExitCode {
                     let mut effective_code = stdin_code;
                     let mut effective_provider = stdin_provider;
                     let mut effective_new_device_otp = stdin_new_device_otp;
+                    omawarden::daemon::ensure_daemon_running();
                     let mut res = auth_mgr.login_password(
                         &email,
                         &pwd,
@@ -1210,38 +1211,23 @@ fn main() -> ExitCode {
                     if let Some(ref ctx) = client_ctx {
                         sync_req["client"] = json!(ctx);
                     }
-                    let resp = send_daemon_request(&sync_req);
-                    if let Some(resp_val) = resp {
-                        let ok = resp_val
-                            .get("ok")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
-                        if ok {
-                            ExitCode::SUCCESS
-                        } else {
-                            ExitCode::FAILURE
-                        }
+                    let resp_val = match omawarden::daemon::dispatch_daemon_request(&sync_req) {
+                        Ok(response) => response,
+                        Err(omawarden::daemon::DispatchError::NotSent) => json!({
+                            "ok": false,
+                            "error": "Cannot reach the vault daemon. Restart it and retry synchronization."
+                        }),
+                        Err(omawarden::daemon::DispatchError::Unconfirmed) => json!({
+                            "ok": false,
+                            "error": "Could not confirm synchronization. Check the vault before retrying."
+                        }),
+                    };
+                    let ok = resp_val["ok"].as_bool().unwrap_or(false);
+                    println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
+                    if ok {
+                        ExitCode::SUCCESS
                     } else {
-                        match vault_mgr.sync_with_client(client_ctx.as_ref()) {
-                            Ok(_) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({ "ok": true })).unwrap()
-                                );
-                                ExitCode::SUCCESS
-                            }
-                            Err(e) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(
-                                        &json!({ "ok": false, "error": e })
-                                    )
-                                    .unwrap()
-                                );
-                                ExitCode::FAILURE
-                            }
-                        }
+                        ExitCode::FAILURE
                     }
                 }
                 VaultAction::List { category } => {

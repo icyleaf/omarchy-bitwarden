@@ -791,8 +791,9 @@ fn attempt_attachment_token_refresh(
 
     if let Some(ref ref_tok) = refresh_token {
         if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
-            persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
-            return Some(tok_resp.access_token);
+            if persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, storage, &tok_resp) {
+                return Some(tok_resp.access_token);
+            }
         }
     }
 
@@ -800,8 +801,15 @@ fn attempt_attachment_token_refresh(
     if let Some(ref cid) = storage.client_id {
         if let Some(sec) = keyring_mgr.get_api_secret(server_url, cid) {
             if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
-                persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
-                return Some(tok_resp.access_token);
+                if persist_attachment_tokens(
+                    server_url,
+                    storage_mgr,
+                    keyring_mgr,
+                    storage,
+                    &tok_resp,
+                ) {
+                    return Some(tok_resp.access_token);
+                }
             }
         }
     }
@@ -813,9 +821,18 @@ fn persist_attachment_tokens(
     server_url: &str,
     storage_mgr: &StorageManager,
     keyring_mgr: &KeyringManager,
+    expected: &VaultStorage,
     tok_resp: &crate::api::TokenResponse,
-) {
-    let mut fresh_st = storage_mgr.load();
+) -> bool {
+    let Ok(_account) = storage_mgr.account_guard() else {
+        return false;
+    };
+    let Ok(mut fresh_st) = storage_mgr.load_existing() else {
+        return false;
+    };
+    if !fresh_st.same_account(expected) {
+        return false;
+    }
     let s_url = if !fresh_st.server_url.is_empty() {
         fresh_st.server_url.as_str()
     } else {
@@ -834,16 +851,15 @@ fn persist_attachment_tokens(
             true
         };
         if s1 && s2 {
-            fresh_st.access_token = None;
-            fresh_st.refresh_token = None;
+            if fresh_st.access_token.is_some() || fresh_st.refresh_token.is_some() {
+                fresh_st.access_token = None;
+                fresh_st.refresh_token = None;
+                return storage_mgr.save(&fresh_st).is_ok();
+            }
+            return true;
         }
-        // Keyring store failed: drop the tokens instead of stashing them in
-        // this short-lived copy. VaultStorage never serializes them to disk
-        // (skip_serializing), and nothing else reads them from here — same
-        // fail-closed posture as vault.rs.
     }
-    // No keyring at all: tokens are dropped for the same reason.
-    let _ = storage_mgr.save(&fresh_st);
+    false
 }
 
 fn is_cached_file_valid(path: &Path, expected_encrypted_size: Option<u64>, bytes: &[u8]) -> bool {
@@ -1053,6 +1069,47 @@ fn build_attachment_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_token_cleanup_preserves_latest_ciphers_and_rejects_old_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let initial = serde_json::json!({
+            "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
+            "access_token":"legacy", "ciphers":[]
+        });
+        fs::write(&manager.file_path, initial.to_string()).unwrap();
+        let expected = manager.load();
+        let mut latest = initial;
+        latest["ciphers"] = serde_json::json!([{"id":"created"}]);
+        fs::write(&manager.file_path, latest.to_string()).unwrap();
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(&script, "#!/bin/sh\nexit 0\n");
+        let keyring = KeyringManager::new(script.to_str().unwrap());
+        let response =
+            serde_json::from_value(serde_json::json!({"access_token":"new", "expires_in":3600}))
+                .unwrap();
+        assert!(persist_attachment_tokens(
+            "https://fixture.invalid",
+            &manager,
+            &keyring,
+            &expected,
+            &response
+        ));
+        assert_eq!(manager.load().ciphers[0]["id"], "created");
+        assert!(manager.load().access_token.is_none());
+        let mut other = manager.load();
+        other.user_email = "other@example.invalid".into();
+        manager.save(&other).unwrap();
+        assert!(!persist_attachment_tokens(
+            "https://fixture.invalid",
+            &manager,
+            &keyring,
+            &expected,
+            &response
+        ));
+        assert_eq!(manager.load().user_email, "other@example.invalid");
+    }
 
     #[test]
     fn test_missing_ids() {

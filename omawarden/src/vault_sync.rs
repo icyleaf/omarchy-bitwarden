@@ -1,0 +1,600 @@
+//! Fetch full snapshots without holding session locks, then conditionally publish.
+use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient, ClientContext};
+use crate::vault::VaultManager;
+use crate::vault_cache::{CacheCommitError, IndexUpdate};
+
+impl VaultManager {
+    pub fn sync(&self) -> Result<usize, String> {
+        self.sync_with_client(None)
+    }
+
+    pub fn sync_with_client(&self, context: Option<&ClientContext>) -> Result<usize, String> {
+        let session = self.cache_session().map_err(|e| e.to_string())?;
+        let account = self
+            .storage_mgr
+            .snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?
+            .storage;
+        let server = if account.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &account.server_url
+        };
+        let identity = self
+            .identity_url
+            .as_deref()
+            .or(account.identity_url.as_deref());
+        let client = BitwardenApiClient::with_options(server, identity, context);
+        let token = self
+            .keyring_mgr
+            .get_token(server, crate::keyring::KIND_ACCESS_TOKEN)
+            .or_else(|| self.keyring_mgr.get_session(server))
+            .or_else(|| account.access_token.clone());
+        let mut token = match token {
+            Some(token) if !crate::auth::is_jwt_expired(&token) => token,
+            _ => self.renew_for_account(&account, context, session.generation)?,
+        };
+        let mut renewed_after_rejection = false;
+        // A stale snapshot is safe to discard, but repeated conflicts should
+        // ask the caller to retry rather than creating an unbounded GET loop.
+        for attempt in 0..2 {
+            let (base, response) = loop {
+                let base = {
+                    let unlocked = self
+                        .is_unlocked
+                        .read()
+                        .map_err(|_| CacheCommitError::Unavailable.to_string())?;
+                    if *unlocked != session.unlocked || self.lock_generation() != session.generation
+                    {
+                        return Err(CacheCommitError::SessionChanged.to_string());
+                    }
+                    let base = self
+                        .storage_mgr
+                        .snapshot()
+                        .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+                    if !base.storage.same_account(&account) {
+                        return Err(CacheCommitError::SessionChanged.to_string());
+                    }
+                    base
+                };
+                match client.sync_vault(&token) {
+                    Ok(response) => break (base, response),
+                    Err(ApiError::HttpStatus(status, _))
+                        if !renewed_after_rejection
+                            && (status == reqwest::StatusCode::UNAUTHORIZED
+                                || status == reqwest::StatusCode::FORBIDDEN) =>
+                    {
+                        renewed_after_rejection = true;
+                        token = self.renew_for_account(&account, context, session.generation)?;
+                        // Renewal may scrub legacy tokens and replace data.json:
+                        // capture a new base *before* issuing the next GET.
+                    }
+                    Err(error) => return Err(format!("Sync failed: {error:?}")),
+                }
+            };
+            let mut updated = base.storage.clone();
+            updated.ciphers = response.ciphers;
+            updated.folders = response.folders;
+            updated.collections = response.collections;
+            if let Some(orgs) = response
+                .profile
+                .as_ref()
+                .and_then(|p| p.get("organizations"))
+                .and_then(|v| v.as_array())
+            {
+                updated.organizations = orgs.clone();
+            }
+            updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
+            let count = updated.ciphers.len();
+            let index = if session.unlocked {
+                let key = self
+                    .user_key
+                    .read()
+                    .map_err(|_| CacheCommitError::Unavailable.to_string())?;
+                let key = key
+                    .as_ref()
+                    .ok_or_else(|| CacheCommitError::SessionChanged.to_string())?;
+                IndexUpdate::Replace(decrypt_sync_ciphers_with_context(
+                    &updated.ciphers,
+                    &updated.folders,
+                    &updated.organizations,
+                    key,
+                    updated.enc_private_key.as_deref(),
+                ))
+            } else {
+                // Low-level callers may refresh ciphertext while locked. They
+                // must never populate a plaintext index or unlock the vault.
+                IndexUpdate::CiphertextOnly
+            };
+            match self.commit_cache(&base, updated, index, session) {
+                Ok(()) => return Ok(count),
+                Err(CacheCommitError::Conflict) if attempt == 0 => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err(CacheCommitError::Conflict.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::crypto::SymmetricCryptoKey;
+    use crate::keyring::KeyringManager;
+    use crate::storage::{StorageManager, VaultStorage};
+    use crate::vault::VaultManager;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    struct RuntimeEnv(Option<std::ffi::OsString>);
+    impl RuntimeEnv {
+        fn new(dir: &std::path::Path) -> Self {
+            let old = std::env::var_os("XDG_RUNTIME_DIR");
+            std::env::set_var("XDG_RUNTIME_DIR", dir);
+            Self(old)
+        }
+    }
+    impl Drop for RuntimeEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    fn fixture(dir: &std::path::Path) -> (Arc<VaultManager>, TcpListener) {
+        let api = TcpListener::bind("127.0.0.1:0").unwrap();
+        api.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", api.local_addr().unwrap());
+        let keyring = dir.join("secret-tool");
+        crate::write_test_executable(&keyring, "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\n*) exit 1;;\nesac\n");
+        let storage_mgr = StorageManager::new(dir.join("data.json"));
+        let master = crate::crypto::derive_master_key(
+            "fixture@example.invalid",
+            "fixture",
+            crate::crypto::KdfType::Pbkdf2Sha256,
+            100_000,
+            None,
+            None,
+        )
+        .unwrap();
+        let wrap = SymmetricCryptoKey::from_master_key(master.as_slice())
+            .encrypt(&[42; 64])
+            .unwrap();
+        storage_mgr
+            .save(&VaultStorage {
+                server_url: url.clone(),
+                user_email: "fixture@example.invalid".into(),
+                user_id: Some("user-id".into()),
+                enc_user_key: Some(wrap),
+                kdf_iterations: Some(100_000),
+                ..Default::default()
+            })
+            .unwrap();
+        let mgr = VaultManager::new(
+            &url,
+            Some(storage_mgr),
+            Some(KeyringManager::new(keyring.to_str().unwrap())),
+        );
+        *mgr.is_unlocked.write().unwrap() = true;
+        *mgr.user_key.write().unwrap() =
+            Some(SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap());
+        (Arc::new(mgr), api)
+    }
+
+    fn accept(api: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match api.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    return stream;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "missing API request");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    fn request(stream: &mut TcpStream) -> (String, Value) {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let path = line.split_whitespace().nth(1).unwrap().to_owned();
+        let mut size = 0;
+        loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                size = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; size];
+        reader.read_exact(&mut body).unwrap();
+        (path, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    fn reply(stream: &mut TcpStream, body: Value) {
+        let body = body.to_string();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    }
+
+    fn sync(
+        mgr: &Arc<VaultManager>,
+        api: &TcpListener,
+    ) -> (JoinHandle<Result<usize, String>>, TcpStream) {
+        let mgr = Arc::clone(mgr);
+        let task = thread::spawn(move || mgr.sync());
+        let mut stream = accept(api);
+        assert_eq!(request(&mut stream).0, "/api/sync");
+        (task, stream)
+    }
+
+    fn stale_sync_after_create(cache_receipt: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        let (task, mut old_sync) = sync(&mgr, &api);
+        let writer = Arc::clone(&mgr);
+        let create = thread::spawn(move || {
+            writer.write_ssh_key(json!({
+            "name":"new key", "private_key":"private", "public_key":"public", "fingerprint":"fingerprint"
+        }), None).map_err(|e| e.response())
+        });
+        let mut post = accept(&api);
+        let (path, mut cipher) = request(&mut post);
+        assert_eq!(path, "/api/ciphers");
+        cipher["id"] = json!("created");
+        let mut receipt = cipher.clone();
+        if !cache_receipt {
+            receipt["name"] = Value::Null;
+        }
+        reply(&mut post, receipt);
+        assert_eq!(
+            create.join().unwrap().unwrap()["outcome"],
+            if cache_receipt {
+                "saved"
+            } else {
+                "saved_needs_sync"
+            }
+        );
+        reply(&mut old_sync, json!({"ciphers":[]}));
+        // The fixed implementation refetches once. The old one completes
+        // immediately, allowing the data-loss assertion below to report it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut refetched = false;
+        while !task.is_finished() {
+            match api.accept() {
+                Ok((mut fresh, _)) => {
+                    assert_eq!(request(&mut fresh).0, "/api/sync");
+                    reply(&mut fresh, json!({"ciphers":[cipher]}));
+                    assert!(!refetched, "sync must not refetch indefinitely");
+                    refetched = true;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "sync did not finish");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert!(task.join().unwrap().is_ok());
+        assert_eq!(
+            mgr.storage_mgr.load().ciphers.len(),
+            1,
+            "confirmed create lost from disk"
+        );
+        assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "created");
+        assert!(refetched);
+    }
+
+    #[test]
+    fn stale_sync_does_not_erase_a_confirmed_create() {
+        stale_sync_after_create(true);
+    }
+
+    #[test]
+    fn an_uncached_write_invalidates_sync_even_without_a_disk_change() {
+        stale_sync_after_create(false);
+    }
+
+    fn cipher(id: &str) -> Value {
+        let key = SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap();
+        json!({"id": id, "type": 1, "name": key.encrypt_string(id).unwrap(), "login": {"password": key.encrypt_string("secret").unwrap()}})
+    }
+
+    fn seed(mgr: &VaultManager, ciphers: Vec<Value>) {
+        let _account = mgr.storage_mgr.account_guard().unwrap();
+        let mut storage = mgr.storage_mgr.load();
+        storage.ciphers = ciphers;
+        mgr.storage_mgr.save(&storage).unwrap();
+        *mgr.decrypted_items.write().unwrap() = crate::api::decrypt_sync_ciphers(
+            &storage.ciphers,
+            mgr.user_key.read().unwrap().as_ref().unwrap(),
+        );
+        *mgr.storage.write().unwrap() = storage;
+    }
+
+    #[test]
+    fn out_of_order_sync_refetches_without_rolling_back_the_newer_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        let (old, mut old_stream) = sync(&mgr, &api);
+        let (new, mut new_stream) = sync(&mgr, &api);
+        let latest = cipher("latest");
+        reply(&mut new_stream, json!({"ciphers":[latest]}));
+        assert_eq!(new.join().unwrap().unwrap(), 1);
+        let stamp = mgr.storage_mgr.load().last_sync;
+        reply(&mut old_stream, json!({"ciphers":[]}));
+        let mut retry = accept(&api);
+        assert_eq!(request(&mut retry).0, "/api/sync");
+        assert_eq!(mgr.storage_mgr.load().ciphers[0]["id"], "latest");
+        assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "latest");
+        assert_eq!(mgr.storage_mgr.load().last_sync, stamp);
+        reply(&mut retry, json!({"ciphers":[latest]}));
+        assert_eq!(old.join().unwrap().unwrap(), 1);
+    }
+
+    #[test]
+    fn two_conflicts_stop_without_advancing_last_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        let (task, mut stream) = sync(&mgr, &api);
+        seed(&mgr, vec![cipher("first")]);
+        reply(&mut stream, json!({"ciphers":[]}));
+        let mut retry = accept(&api);
+        assert_eq!(request(&mut retry).0, "/api/sync");
+        seed(&mgr, vec![cipher("second")]);
+        reply(&mut retry, json!({"ciphers":[]}));
+        let error = task.join().unwrap().unwrap_err();
+        assert!(error.contains("retry"), "{error}");
+        assert_eq!(mgr.storage_mgr.load().ciphers[0]["id"], "second");
+        assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "second");
+        assert!(mgr.storage_mgr.load().last_sync.is_none());
+        assert_eq!(
+            api.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn lock_cycles_and_account_changes_cancel_late_syncs() {
+        for action in [
+            "lock",
+            "lock-cycle",
+            "logout",
+            "server",
+            "account",
+            "remove",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mgr, api) = fixture(dir.path());
+            let (task, mut stream) = sync(&mgr, &api);
+            match action {
+                "lock" => mgr.lock(),
+                "lock-cycle" => {
+                    mgr.lock();
+                    mgr.unlock("fixture").unwrap();
+                }
+                "logout" => {
+                    mgr.lock();
+                    let _account = mgr.storage_mgr.account_guard().unwrap();
+                    mgr.storage_mgr.save(&VaultStorage::default()).unwrap();
+                }
+                "server" | "account" => {
+                    let _account = mgr.storage_mgr.account_guard().unwrap();
+                    let mut other = mgr.storage_mgr.load();
+                    if action == "server" {
+                        other.server_url = "https://other.invalid".into();
+                    } else {
+                        other.user_id = Some("other".into());
+                    }
+                    mgr.storage_mgr.save(&other).unwrap();
+                }
+                "remove" => {
+                    let _account = mgr.storage_mgr.account_guard().unwrap();
+                    std::fs::remove_file(&mgr.storage_mgr.file_path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = std::fs::read(&mgr.storage_mgr.file_path).ok();
+            reply(&mut stream, json!({"ciphers":[cipher("stale")]}));
+            assert!(task.join().unwrap().is_err(), "{action}");
+            assert_eq!(
+                std::fs::read(&mgr.storage_mgr.file_path).ok(),
+                before,
+                "{action}"
+            );
+            assert!(mgr.decrypted_items.read().unwrap().is_empty(), "{action}");
+            assert_eq!(
+                api.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_snapshot_applies_remote_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        seed(&mgr, vec![cipher("deleted-remotely")]);
+        let (task, mut stream) = sync(&mgr, &api);
+        reply(&mut stream, json!({"ciphers":[]}));
+        assert_eq!(task.join().unwrap().unwrap(), 0);
+        assert!(mgr.storage_mgr.load().ciphers.is_empty());
+        assert!(mgr.decrypted_items.read().unwrap().is_empty());
+        assert!(mgr.storage_mgr.load().last_sync.is_some());
+    }
+
+    #[test]
+    fn a_locked_sync_only_updates_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        mgr.lock();
+        let (task, mut stream) = sync(&mgr, &api);
+        reply(&mut stream, json!({"ciphers":[cipher("encrypted")]}));
+        assert_eq!(task.join().unwrap().unwrap(), 1);
+        assert_eq!(mgr.storage_mgr.load().ciphers.len(), 1);
+        assert!(mgr.decrypted_items.read().unwrap().is_empty());
+        assert!(!mgr.is_unlocked());
+        assert!(mgr.user_key.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupted_cache_is_not_replaced_or_treated_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        seed(&mgr, vec![cipher("retained")]);
+        let (task, mut stream) = sync(&mgr, &api);
+        std::fs::write(&mgr.storage_mgr.file_path, "broken").unwrap();
+        reply(&mut stream, json!({"ciphers":[]}));
+        assert!(task.join().unwrap().unwrap_err().contains("cache"));
+        assert_eq!(
+            std::fs::read_to_string(&mgr.storage_mgr.file_path).unwrap(),
+            "broken"
+        );
+        assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "retained");
+        assert!(mgr.sync().unwrap_err().contains("cache"));
+        assert_eq!(
+            api.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn failed_rename_preserves_disk_index_and_last_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        seed(&mgr, vec![cipher("retained")]);
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        let (task, mut stream) = sync(&mgr, &api);
+        let guard = mgr.storage_mgr.account_guard().unwrap();
+        reply(&mut stream, json!({"ciphers":[]}));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let staged = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|e| e.file_name().to_string_lossy().starts_with(".tmp"));
+            if let Some(staged) = staged {
+                std::fs::remove_file(staged.path()).unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline, "cache was not staged");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(guard);
+        assert!(task.join().unwrap().unwrap_err().contains("commit"));
+        assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+        assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "retained");
+        assert!(mgr.storage.read().unwrap().last_sync.is_none());
+    }
+
+    #[test]
+    fn login_initial_sync_cannot_overwrite_a_newer_cache() {
+        let _environment = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeEnv::new(dir.path());
+        let (mgr, api) = fixture(dir.path());
+        let auth = crate::auth::AuthManager::new(
+            &mgr.server_url,
+            Some(mgr.storage_mgr.clone()),
+            Some(mgr.keyring_mgr.clone()),
+        );
+        let task = thread::spawn(move || auth.login_apikey("user.fixture", "secret"));
+        let mut grant = accept(&api);
+        assert_eq!(request(&mut grant).0, "/identity/connect/token");
+        reply(&mut grant, json!({"access_token":"new", "expires_in":3600}));
+        let mut initial = accept(&api);
+        assert_eq!(request(&mut initial).0, "/api/sync");
+        seed(&mgr, vec![cipher("newer")]);
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        reply(&mut initial, json!({"ciphers":[]}));
+        let result = task.join().unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("changed during login"));
+        assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+    }
+
+    #[test]
+    fn login_initial_sync_observes_an_uncached_write_from_another_manager() {
+        let _environment = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeEnv::new(dir.path());
+        let (mgr, api) = fixture(dir.path());
+        let auth = crate::auth::AuthManager::new(
+            &mgr.server_url,
+            Some(mgr.storage_mgr.clone()),
+            Some(mgr.keyring_mgr.clone()),
+        );
+        let task = thread::spawn(move || auth.login_apikey("user.fixture", "secret"));
+        let mut grant = accept(&api);
+        assert_eq!(request(&mut grant).0, "/identity/connect/token");
+        reply(&mut grant, json!({"access_token":"new", "expires_in":3600}));
+        let mut initial = accept(&api);
+        assert_eq!(request(&mut initial).0, "/api/sync");
+        let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
+        let writer = Arc::clone(&mgr);
+        let write = thread::spawn(move || {
+            writer.write_ssh_key(json!({
+            "name":"new key", "private_key":"private", "public_key":"public", "fingerprint":"fingerprint"
+        }), None).map_err(|e| e.response())
+        });
+        let mut post = accept(&api);
+        assert_eq!(request(&mut post).0, "/api/ciphers");
+        reply(&mut post, json!({"id":"created"}));
+        assert_eq!(
+            write.join().unwrap().unwrap()["outcome"],
+            "saved_needs_sync"
+        );
+        assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+        reply(&mut initial, json!({"ciphers":[]}));
+        let result = task.join().unwrap();
+        assert!(!result.ok);
+        assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
+    }
+
+    #[test]
+    fn outstanding_writes_block_sync_without_blocking_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, api) = fixture(dir.path());
+        let pending = mgr.storage_mgr.begin_cipher_write().unwrap();
+        assert!(mgr.sync().unwrap_err().contains("retry"));
+        mgr.lock();
+        assert!(!mgr.is_unlocked());
+        drop(pending);
+        assert!(mgr.storage_mgr.snapshot().is_ok());
+        assert_eq!(
+            api.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn login_unlock_context_is_revoked_even_by_an_already_locked_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _) = fixture(dir.path());
+        let before = mgr.unlock_context();
+        mgr.lock();
+        assert!(mgr.unlock_in_context("fixture", &before).is_err());
+        let locked = mgr.unlock_context();
+        mgr.lock();
+        assert!(mgr.unlock_in_context("fixture", &locked).is_err());
+        assert!(!mgr.is_unlocked());
+        assert!(mgr.user_key.read().unwrap().is_none());
+        assert!(mgr.decrypted_items.read().unwrap().is_empty());
+        assert_eq!(mgr.unlock("fixture").unwrap(), 0);
+    }
+}

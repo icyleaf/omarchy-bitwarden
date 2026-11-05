@@ -5,9 +5,9 @@ use crate::crypto::SymmetricCryptoKey;
 use crate::keyring::KIND_ACCESS_TOKEN;
 use crate::storage::VaultStorage;
 use crate::vault::VaultManager;
+use crate::vault_cache::{CacheSession, IndexUpdate};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{fs::File, io::BufReader, os::unix::fs::MetadataExt};
 use zeroize::ZeroizeOnDrop;
 
 pub(crate) enum WriteError {
@@ -111,6 +111,10 @@ impl VaultManager {
             None => renew()?,
         };
         let mut renewed_after_rejection = false;
+        let _pending = self
+            .storage_mgr
+            .begin_cipher_write()
+            .map_err(|e| e.to_string())?;
         let cipher = loop {
             // Older caches can lack the profile ID. The server checks encryptedFor
             // against the very same bearer; the decoded subject is not authorization.
@@ -179,51 +183,34 @@ impl VaultManager {
         cipher: &Value,
         id: &str,
     ) -> Option<()> {
-        let path = &self.storage_mgr.file_path;
-        let original = File::open(path).ok()?;
-        let source = original.metadata().ok()?;
-        let mut disk: VaultStorage = serde_json::from_reader(BufReader::new(&original)).ok()?;
-        if !disk.same_account(account) {
+        let base = self.storage_mgr.snapshot_for_receipt().ok()?;
+        if !base.storage.same_account(account) {
             return None;
         }
-
-        // Prepare the encrypted snapshot outside the session lock. Only the
-        // atomic rename and in-memory publication need to exclude a lock.
-        disk.ciphers.retain(|c| c["id"] != id);
-        disk.ciphers.push(cipher.clone());
-        let mut staged = tempfile::NamedTempFile::new_in(path.parent()?).ok()?;
-        {
-            use std::io::{BufWriter, Write};
-            let mut writer = BufWriter::new(staged.as_file_mut());
-            serde_json::to_writer_pretty(&mut writer, &disk).ok()?;
-            writer.flush().ok()?;
-        }
-        let _account_guard = self.storage_mgr.account_guard().ok()?;
-        let unlocked = self.is_unlocked.read().ok()?;
-        if !*unlocked || self.lock_generation() != generation {
-            return None;
-        }
-        let key = self.user_key.read().ok()?;
-        let mut current = self.storage.write().ok()?;
-        let present = path.metadata().ok()?;
-        if !current.same_account(account)
-            || (source.dev(), source.ino()) != (present.dev(), present.ino())
-        {
-            return None;
-        }
-        let item = decrypt_sync_ciphers_with_context(
-            std::slice::from_ref(cipher),
-            &disk.folders,
-            &[],
-            key.as_ref()?,
-            None,
+        let mut updated = base.storage.clone();
+        updated.ciphers.retain(|c| c["id"] != id);
+        updated.ciphers.push(cipher.clone());
+        let item = {
+            let key = self.user_key.read().ok()?;
+            decrypt_sync_ciphers_with_context(
+                std::slice::from_ref(cipher),
+                &updated.folders,
+                &[],
+                key.as_ref()?,
+                None,
+            )
+            .pop()?
+        };
+        self.commit_cache(
+            &base,
+            updated,
+            IndexUpdate::Upsert(Box::new(item)),
+            CacheSession {
+                generation,
+                unlocked: true,
+            },
         )
-        .pop()?;
-        let mut items = self.decrypted_items.write().ok()?;
-        staged.persist(path).ok()?;
-        items.retain(|cached| cached.id != id);
-        items.push(item);
-        *current = disk;
+        .ok()?;
         Some(())
     }
 }
