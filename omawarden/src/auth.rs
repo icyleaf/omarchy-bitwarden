@@ -263,7 +263,7 @@ impl AuthManager {
             .storage_mgr
             .lease_candidate(&credential_id)
             .map_err(|_| "Cannot track the candidate credentials")?;
-        let candidate = self.keyring_mgr.for_storage(storage);
+        let candidate = self.keyring_mgr.for_storage(storage).with_lease(&lease);
         let publication = (|| {
             if !candidate.store_token(KIND_ACCESS_TOKEN, access_token) {
                 return Err("Failed to store access token in system keyring.");

@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
+use crate::credential_slots::CredentialSlot;
 use crate::storage::VaultStorage;
 
 pub const SERVICE_NAME: &str = "omarchy-bitwarden";
@@ -40,19 +41,28 @@ impl KeyringManager {
         which::which(&self.secret_tool_path).is_ok()
     }
 
-    fn store(&self, label: &str, attributes: &[&str], secret: &str) -> bool {
+    fn store(
+        &self,
+        label: &str,
+        attributes: &[&str],
+        secret: &str,
+        lease: Option<&CredentialSlot>,
+    ) -> bool {
         if secret.is_empty() {
             return false;
         }
-        let Ok(mut child) = Command::new(&self.secret_tool_path)
+        let mut command = Command::new(&self.secret_tool_path);
+        command
             .arg("store")
             .arg(format!("--label={label}"))
             .args(attributes)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+            .stderr(Stdio::null());
+        if lease.is_some_and(|slot| slot.inherit_in(&mut command).is_err()) {
+            return false;
+        }
+        let Ok(mut child) = command.spawn() else {
             return false;
         };
         let written = child
@@ -118,7 +128,7 @@ impl KeyringManager {
 
     pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
         legacy_token_attributes(server_url, kind)
-            .is_some_and(|attrs| self.store(credential_label(kind), &attrs, token))
+            .is_some_and(|attrs| self.store(credential_label(kind), &attrs, token, None))
     }
 
     pub fn get_token(&self, server_url: &str, kind: &str) -> Option<String> {
@@ -130,8 +140,9 @@ impl KeyringManager {
     }
 
     pub fn store_api_secret(&self, server_url: &str, client_id: &str, secret: &str) -> bool {
-        legacy_api_attributes(server_url, client_id)
-            .is_some_and(|attrs| self.store(credential_label(KIND_API_SECRET), &attrs, secret))
+        legacy_api_attributes(server_url, client_id).is_some_and(|attrs| {
+            self.store(credential_label(KIND_API_SECRET), &attrs, secret, None)
+        })
     }
 
     pub fn get_api_secret(&self, server_url: &str, client_id: &str) -> Option<String> {
@@ -151,7 +162,7 @@ impl KeyringManager {
             return false;
         };
         let _ = self.store_token(server_url, KIND_ACCESS_TOKEN, session_token);
-        self.store(LABEL, &attrs, session_token)
+        self.store(LABEL, &attrs, session_token, None)
     }
 
     pub fn get_session(&self, server_url: &str) -> Option<String> {
@@ -171,6 +182,7 @@ impl KeyringManager {
         AccountKeyring {
             keyring: self,
             storage,
+            lease: None,
         }
     }
 }
@@ -225,9 +237,15 @@ fn legacy_session_attributes(server: &str) -> Option<[&str; 6]> {
 pub(crate) struct AccountKeyring<'a> {
     keyring: &'a KeyringManager,
     storage: &'a VaultStorage,
+    lease: Option<&'a CredentialSlot>,
 }
 
-impl AccountKeyring<'_> {
+impl<'a> AccountKeyring<'a> {
+    pub(crate) fn with_lease(mut self, lease: &'a CredentialSlot) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
     fn slot(&self) -> Option<[&str; 10]> {
         let id = self.storage.credential_id.as_deref()?;
         let server = normalize_server_url(&self.storage.server_url);
@@ -254,7 +272,7 @@ impl AccountKeyring<'_> {
         ])
     }
 
-    fn attributes<'a>(&'a self, kind: &'a str) -> Option<Vec<&'a str>> {
+    fn attributes<'b>(&'b self, kind: &'b str) -> Option<Vec<&'b str>> {
         let mut attributes = self.slot()?.to_vec();
         attributes.extend(["kind", kind]);
         if kind == KIND_API_SECRET {
@@ -280,8 +298,10 @@ impl AccountKeyring<'_> {
     }
 
     pub(crate) fn store_token(&self, kind: &str, token: &str) -> bool {
-        self.attributes(kind)
-            .is_some_and(|attrs| self.keyring.store(credential_label(kind), &attrs, token))
+        self.attributes(kind).is_some_and(|attrs| {
+            self.keyring
+                .store(credential_label(kind), &attrs, token, self.lease)
+        })
     }
 
     pub(crate) fn clear_token(&self, kind: &str) {

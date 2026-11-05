@@ -1,8 +1,11 @@
 //! Durable, nonsecret markers for keyring slots and unpublished login attempts.
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::keyring::KeyringManager;
 use crate::storage::{StorageManager, VaultStorage};
@@ -20,6 +23,27 @@ pub(crate) struct CredentialSlot {
 }
 
 impl CredentialSlot {
+    /// Keep the slot leased if the writer outlives the parent process.
+    pub(crate) fn inherit_in(&self, command: &mut Command) -> io::Result<()> {
+        let lease = self._lease.try_clone()?;
+        if lease.as_raw_fd() < 3 {
+            return Err(io::Error::other(
+                "Credential lease conflicts with child stdio",
+            ));
+        }
+        // SAFETY: The closure owns the descriptor through spawn and calls
+        // async-signal-safe fcntl on the child's copy of its flags.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(lease.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn erase(self, keyring: &KeyringManager) -> io::Result<()> {
         keyring.erase_credential_slot((self.name != LEGACY).then_some(&self.name))?;
         match fs::remove_file(&self.marker) {
@@ -190,5 +214,30 @@ mod tests {
         let slots = manager.retired_credentials(Some(active)).unwrap();
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].name, running);
+    }
+
+    #[test]
+    fn cleanup_waits_for_a_keyring_child_after_the_parent_releases_its_lease() {
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let id = crate::test_support::CREDENTIAL_ID;
+        let lease = manager.lease_candidate(id).unwrap();
+        let mut command = Command::new("/bin/cat");
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        lease.inherit_in(&mut command).unwrap();
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        drop(lease);
+
+        let _account = manager.account_guard().unwrap();
+        let while_running = manager.retired_credentials(None);
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(while_running.unwrap().is_empty());
+        let slots = manager.retired_credentials(None).unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].name, id);
     }
 }
