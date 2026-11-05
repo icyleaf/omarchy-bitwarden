@@ -35,6 +35,8 @@ enum LoginCase {
     ColdLock,
     ColdSuccess,
     WarmApiKey,
+    ClipboardCleanupFailure,
+    PreviewCleanupFailure,
     WarmPassword,
     LockAfterActivation,
     LostActivationReceipt,
@@ -347,6 +349,16 @@ fn apikey_login_revokes_the_previous_accounts_unlocked_index() {
 }
 
 #[test]
+fn activation_retains_the_previous_account_when_output_cleanup_fails() {
+    for case in [
+        LoginCase::ClipboardCleanupFailure,
+        LoginCase::PreviewCleanupFailure,
+    ] {
+        password_login_case(case);
+    }
+}
+
+#[test]
 fn password_login_auto_unlocks_only_the_new_account() {
     password_login_case(LoginCase::WarmPassword);
 }
@@ -400,7 +412,11 @@ fn password_login_case(case: LoginCase) {
     let new_name = new_key.encrypt_string("New account item").unwrap();
     let cache = dir.path().join("data.json");
     let mut original = json!({"server_url":url,"user_email":old_email,"user_id":"fixture","enc_user_key":old_wrap,"kdf":0,"kdf_iterations":100_000});
-    let api_key = case == LoginCase::WarmApiKey;
+    let cleanup_failure = matches!(
+        case,
+        LoginCase::ClipboardCleanupFailure | LoginCase::PreviewCleanupFailure
+    );
+    let api_key = case == LoginCase::WarmApiKey || cleanup_failure;
     let warm = !matches!(case, LoginCase::ColdLock | LoginCase::ColdSuccess);
     if api_key {
         original["server_url"] = json!("https://old-vault.fixture.invalid");
@@ -425,7 +441,7 @@ fn password_login_case(case: LoginCase) {
         let clipboard = dir.path().join("wl-copy");
         std::fs::write(
             &clipboard,
-            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nif [ \"${1:-}\" = --clear ]; then exec /usr/bin/rm -f \"$selection\"; fi\nexec /usr/bin/cat > \"$selection\"\n",
+            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nif [ \"${1:-}\" = --clear ]; then\n  [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n  exec /usr/bin/rm -f \"$selection\"\nfi\nexec /usr/bin/cat > \"$selection\"\n",
         )
         .unwrap();
         std::fs::set_permissions(clipboard, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -475,6 +491,7 @@ fn password_login_case(case: LoginCase) {
         let generation = status["lock_generation"].as_str().unwrap();
         let spawn_copy = || {
             command()
+                .env("WAYLAND_DISPLAY", "fixture-wayland")
                 .args([
                     "copy",
                     "--stdin",
@@ -497,10 +514,24 @@ fn password_login_case(case: LoginCase) {
             std::fs::read_to_string(dir.path().join("selection")).unwrap(),
             "fixture-old"
         );
-        let previews = dir.path().join("omarchy-bitwarden/attachments/old-only");
+        let previews = dir.path().join(
+            "omarchy-bitwarden/scoped-attachments/11111111111111111111111111111111/old-only/attachment",
+        );
         std::fs::create_dir_all(&previews).unwrap();
         std::fs::write(previews.join("old-preview.txt"), "fixture-old").unwrap();
-        Some(spawn_copy())
+        match case {
+            LoginCase::ClipboardCleanupFailure => {
+                std::fs::write(dir.path().join("fail-clear"), "").unwrap();
+                None
+            }
+            LoginCase::PreviewCleanupFailure => {
+                // A regular file where the legacy preview directory should
+                // be makes remove_dir_all fail even as root.
+                std::fs::write(dir.path().join("omarchy-bitwarden/attachments"), "").unwrap();
+                None
+            }
+            _ => Some(spawn_copy()),
+        }
     } else {
         None
     };
@@ -592,19 +623,21 @@ fn password_login_case(case: LoginCase) {
         }
         daemon = Some(start_daemon());
     }
-    let success = !matches!(
-        case,
-        LoginCase::WarmLock
-            | LoginCase::ColdLock
-            | LoginCase::WarmLockThenUnlock
-            | LoginCase::LostRejectedReceipt
-    );
+    let success = !cleanup_failure
+        && !matches!(
+            case,
+            LoginCase::WarmLock
+                | LoginCase::ColdLock
+                | LoginCase::WarmLockThenUnlock
+                | LoginCase::LostRejectedReceipt
+        );
     assert_eq!(output.status.success(), success, "{result}");
     assert_eq!(result["ok"], success);
-    let unlocked = matches!(
-        case,
-        LoginCase::ColdSuccess | LoginCase::WarmPassword | LoginCase::WarmLockThenUnlock
-    );
+    let unlocked = cleanup_failure
+        || matches!(
+            case,
+            LoginCase::ColdSuccess | LoginCase::WarmPassword | LoginCase::WarmLockThenUnlock
+        );
     assert_eq!(ipc(&socket, json!({"action":"ping"}))["unlocked"], unlocked);
     if success {
         assert_eq!(
@@ -625,7 +658,10 @@ fn password_login_case(case: LoginCase) {
                 !selection.exists(),
                 "activation left the old selection available"
             );
-            assert!(!dir.path().join("omarchy-bitwarden/attachments").exists());
+            assert!(!dir
+                .path()
+                .join("omarchy-bitwarden/scoped-attachments")
+                .exists());
             writeln!(copy.stdin.take().unwrap(), "late-old-copy").unwrap();
             assert!(!copy.wait_with_output().unwrap().status.success());
             assert!(
@@ -653,14 +689,39 @@ fn password_login_case(case: LoginCase) {
         }
     } else {
         assert_eq!(std::fs::read(&cache).unwrap(), before);
-        assert_eq!(
-            ipc(
-                &socket,
-                json!({"action":"unlock","password":"fixture","expected_unlock_context":old_context.unwrap()})
-            )["ok"],
-            false
-        );
-        if case == LoginCase::WarmLockThenUnlock {
+        if cleanup_failure {
+            assert_eq!(
+                ipc(&socket, json!({"action":"ping"}))["unlock_context"],
+                old_context.unwrap()
+            );
+            let error = result["error"].as_str().unwrap();
+            let expected = if case == LoginCase::ClipboardCleanupFailure {
+                assert!(dir.path().join("selection").exists());
+                "Wayland clipboard cleanup failed"
+            } else {
+                assert!(!dir.path().join("selection").exists());
+                "Attachment preview cleanup failed"
+            };
+            assert!(error.contains(expected), "{error}");
+            assert!(!std::fs::read_dir(dir.path().join("data.credentials"))
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "candidate")
+                }));
+        } else {
+            assert_eq!(
+                ipc(
+                    &socket,
+                    json!({"action":"unlock","password":"fixture","expected_unlock_context":old_context.unwrap()})
+                )["ok"],
+                false
+            );
+        }
+        if cleanup_failure || case == LoginCase::WarmLockThenUnlock {
             assert_eq!(ipc(&socket, json!({"action":"list"}))[0]["id"], "old-only");
         }
         if case == LoginCase::LostRejectedReceipt {

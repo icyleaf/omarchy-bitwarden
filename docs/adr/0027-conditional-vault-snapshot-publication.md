@@ -83,15 +83,26 @@ receipts and retry rules remain in
    cannot update the overlay. The daemon also denies pending SSH approvals
    when changing accounts.
 
-   Overlay copies and attachment outputs carry the unlocked session's
-   generation. The helper verifies it at publication under a runtime file
-   lock shared with revocation. The detached clipboard holder retains the
-   gate until the compositor confirms setup. Attachment HTTP and decryption
-   run before acquiring the gate. Activation clears the clipboard and
-   previews under the gate before renaming the new account, including on
-   the path where the activation receipt is lost. A failed rename can leave
-   the previous account active with these outputs cleared. Completed
-   downloads are user-owned files.
+   Overlay copies, daemon-backed CLI copies and attachment outputs carry the
+   generation that supplied the plaintext. An offline CLI copy rechecks the
+   credential slot of the cache it decrypted. The detached holder revalidates
+   that authority under the output gate and keeps the gate until clipboard
+   setup completes. Attachment HTTP and decryption run outside the gate.
+   Previews are stored by credential slot, item and attachment ID.
+
+   The daemon and its helpers share the same validated runtime directory and
+   Wayland session. A vault copy records a marker before setting the selection.
+   The marker survives a daemon restart and is removed only after confirmed
+   clipboard clearing. A headless runtime without a configured Wayland
+   display, the default Wayland socket or a marker can sign in without a
+   clipboard operation.
+
+   Activation requires both preview deletion and applicable clipboard clearing
+   to succeed under the gate before renaming the new cache. A cleanup failure
+   rejects activation and preserves the previous account. A failed rename can
+   leave the previous account active with outputs already cleared. Lock still
+   revokes access when output cleanup fails. Logout can retry cleanup locally
+   when the daemon is unavailable. Completed downloads are user-owned files.
 
 6. **Keep command outcomes honest.** `vault sync` uses the daemon exclusively.
    Missing or malformed IPC replies report failure instead of starting a second

@@ -4,12 +4,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use omawarden::clipboard::ClipboardScope;
+
 /// Runs in a dedicated CLI process with the clipboard text on stdin.
 pub(super) fn hold_selection(
     wl_copy: &Path,
     timeout: Duration,
     sensitive: bool,
-    generation: Option<u64>,
+    scope: Option<&ClipboardScope>,
 ) -> io::Result<()> {
     // The holder must own its session before it can signal its process group.
     // SAFETY: setsid takes no arguments and affects only the calling process.
@@ -24,9 +26,7 @@ pub(super) fn hold_selection(
     }
     // The detached worker owns this gate. Stopping the GUI or the calling CLI
     // does not let activation clear the selection before this copy is ready.
-    let output = generation
-        .map(omawarden::daemon::guard_session_output)
-        .transpose()?;
+    let output = scope.map(ClipboardScope::begin_output).transpose()?;
     let revoke = || {
         // SAFETY: setsid succeeded above. Group zero can only reach this
         // holder and its private wl-copy descendants, even after a takeover.

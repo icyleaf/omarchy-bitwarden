@@ -954,13 +954,20 @@ impl AuthManager {
 
     pub fn lock(&self) -> AuthResult {
         let storage = self.storage_mgr.load();
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+        let reply = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
         self.keyring_mgr
             .for_storage(&storage)
             .clear_token(KIND_ACCESS_TOKEN);
-        crate::attachment::clear_preview_attachments(None);
+        if !reply.is_some_and(|reply| reply["outputs_cleared"] == true) {
+            if let Err(error) = crate::clipboard::revoke_session_outputs() {
+                crate::log_warn!(
+                    "omawarden:auth",
+                    "Session output cleanup is pending. {error}"
+                );
+            }
+        }
         crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
             ok: true,
@@ -971,11 +978,16 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> AuthResult {
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-            "action": "lock"
-        }));
         let cleared = (|| {
             let _account = self.storage_mgr.account_guard()?;
+            // Unlock and offline output publication need this same account
+            // guard. Revoke A before they can see the signed-out cache.
+            let locked =
+                crate::daemon::send_daemon_request(&serde_json::json!({ "action": "lock" }));
+            // The explicit wipe also covers a daemon with a separate quick-unlock handler.
+            let _ = crate::daemon::send_daemon_request(
+                &serde_json::json!({ "action": "wipe_quick_unlock" }),
+            );
             let current = self.storage_mgr.cache_snapshot()?;
             self.storage_mgr
                 .remember_credentials(&current.storage, true)?;
@@ -983,23 +995,33 @@ impl AuthManager {
                 .stage_durable(&VaultStorage::default())?
                 .persist(&self.storage_mgr.file_path)
                 .map_err(|error| error.error)?;
-            Ok::<_, std::io::Error>(self.storage_mgr.retired_credentials(None))
+            let outputs = if locked.is_some_and(|reply| reply["outputs_cleared"] == true) {
+                Ok(())
+            } else {
+                crate::clipboard::revoke_session_outputs()
+            };
+            Ok::<_, std::io::Error>((outputs, self.storage_mgr.retired_credentials(None)))
         })();
-        let retired = match cleared {
+        let (outputs, retired) = match cleared {
             Ok(retired) => retired,
             Err(error) => {
                 return AuthResult {
-                    error: Some(format!(
-                        "Vault locked. Could not clear the account cache. {error}"
-                    )),
+                    error: Some(format!("Could not complete logout. {error}")),
                     ..Default::default()
                 }
             }
         };
-        crate::attachment::clear_preview_attachments(None);
-        if let Err(error) = retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr)) {
-            let message =
-                format!("Signed out locally. Keyring cleanup is pending. Retry logout. {error}");
+        let credentials = retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr));
+        let pending = match (outputs, credentials) {
+            (Err(output), Err(keyring)) => Some(format!(
+                "Output cleanup failed. {output} Keyring cleanup failed. {keyring}"
+            )),
+            (Err(error), Ok(())) => Some(format!("Output cleanup is pending. {error}")),
+            (Ok(()), Err(error)) => Some(format!("Keyring cleanup is pending. {error}")),
+            (Ok(()), Ok(())) => None,
+        };
+        if let Some(pending) = pending {
+            let message = format!("Signed out locally. {pending} Retry logout.");
             crate::log_warn!("omawarden:auth", "{}", message);
             return AuthResult {
                 status: Some("unauthenticated".into()),

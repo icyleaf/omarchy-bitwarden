@@ -297,7 +297,7 @@ impl ConfigManager {
                 "action": "wipe_quick_unlock"
             }));
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
-            let retired = {
+            let (outputs, retired) = {
                 let _account = storage_mgr.account_guard()?;
                 let current = storage_mgr.cache_snapshot()?;
                 storage_mgr.remember_credentials(&current.storage, true)?;
@@ -306,15 +306,21 @@ impl ConfigManager {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e),
                 }
-                storage_mgr.retired_credentials(None)
+                (
+                    crate::clipboard::revoke_session_outputs(),
+                    storage_mgr.retired_credentials(None),
+                )
             };
 
-            crate::attachment::clear_preview_attachments(None);
             retired.and_then(|slots| crate::credential_slots::erase_retired(slots, keyring_mgr))
                 .map_err(|error| std::io::Error::new(
                     error.kind(),
                     format!("Vault cache removed locally. Keyring cleanup is pending. Retry changing the server. {error}"),
                 ))?;
+            outputs.map_err(|error| std::io::Error::new(
+                error.kind(),
+                format!("Vault cache removed locally. Output cleanup is pending. Retry changing the server. {error}"),
+            ))?;
 
             crate::log_info!(
                 "omawarden:config",

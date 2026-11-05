@@ -369,7 +369,19 @@ impl VaultManager {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn purge_decrypted_state(&self) {
+    pub(crate) fn output_session(&self) -> Option<crate::daemon::OutputSession> {
+        let unlocked = self.is_unlocked.read().ok()?;
+        if !*unlocked {
+            return None;
+        }
+        let storage = self.storage.read().ok()?;
+        Some(crate::daemon::OutputSession {
+            lock_generation: self.lock_generation(),
+            credential_id: storage.scoped_credential_id()?.to_owned(),
+        })
+    }
+
+    fn purge_decrypted_state(&self) -> bool {
         let mut unlocked = self.is_unlocked.write().unwrap_or_else(|e| e.into_inner());
         if *unlocked {
             self.lock_generation
@@ -383,21 +395,14 @@ impl VaultManager {
             *key = None;
         }
         drop(unlocked);
-        let _outputs = crate::daemon::lock_session_outputs().inspect_err(|error| {
+        if let Err(error) = crate::clipboard::revoke_session_outputs() {
             crate::log_warn!(
                 "omawarden:vault",
-                "Cannot secure session output cleanup. {error}"
+                "Vault locked. Session output cleanup is pending. {error}"
             );
-        });
-        Self::clear_session_outputs();
-    }
-
-    fn clear_session_outputs() {
-        crate::attachment::clear_preview_attachments(None);
-        let clipboard = crate::clipboard::ClipboardManager::default();
-        if clipboard.is_available() && !clipboard.clear() {
-            crate::log_warn!("omawarden:vault", "Could not clear the Wayland clipboard.");
+            return false;
         }
+        true
     }
 
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
@@ -408,9 +413,9 @@ impl VaultManager {
     }
 
     /// Revoke the current plaintext and retained key under restore_guard.
-    pub(crate) fn hard_lock_inner(&self) {
+    pub(crate) fn hard_lock_inner(&self) -> bool {
         self.wipe_quick_unlock_inner();
-        self.purge_decrypted_state();
+        self.purge_decrypted_state()
     }
 
     pub(crate) fn activate_account(
@@ -463,7 +468,9 @@ impl VaultManager {
             // Revoke outputs before rename, including when the daemon dies
             // before sending its receipt. A failed rename can clear outputs
             // while leaving the previous account active.
-            Self::clear_session_outputs();
+            crate::clipboard::clear_session_outputs().map_err(|error| {
+                format!("Could not clear the previous vault outputs. Retry sign-in after clearing them. {error}")
+            })?;
             {
                 let mut unlocked = self
                     .is_unlocked

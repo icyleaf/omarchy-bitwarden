@@ -56,7 +56,13 @@ pub(crate) fn lock_session_outputs() -> io::Result<fs::File> {
     Ok(gate)
 }
 
-pub(crate) fn output_generation() -> io::Result<u64> {
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct OutputSession {
+    pub(crate) lock_generation: u64,
+    pub(crate) credential_id: String,
+}
+
+pub(crate) fn output_session() -> io::Result<OutputSession> {
     let changed = || io::Error::other("Vault session changed. Unlock the vault and try again.");
     let mut stream = connect_daemon().map_err(|_| changed())?;
     let timeout = Some(Duration::from_secs(2));
@@ -65,8 +71,9 @@ pub(crate) fn output_generation() -> io::Result<u64> {
     writeln!(stream, "{}", json!({"action":"output_generation"}))?;
     let mut reply = String::new();
     BufReader::new(stream).take(256).read_line(&mut reply)?;
-    let reply: Value = serde_json::from_str(&reply)?;
-    reply["lock_generation"].as_u64().ok_or_else(changed)
+    serde_json::from_str::<Option<OutputSession>>(&reply)?
+        .filter(|session| crate::credential_slots::valid_id(&session.credential_id))
+        .ok_or_else(changed)
 }
 
 /// Hold the output gate while publishing data from the named unlocked session.
@@ -75,7 +82,7 @@ pub fn guard_session_output(expected: u64) -> io::Result<fs::File> {
     let gate = lock_session_outputs()?;
     // The generation query takes neither the output gate nor the restore
     // guard. It must remain safe to answer while a revocation waits for us.
-    if output_generation()? != expected {
+    if output_session()?.lock_generation != expected {
         return Err(io::Error::other(
             "Vault session changed. Unlock the vault and try again.",
         ));
@@ -688,7 +695,6 @@ impl DaemonState {
                     "Maximum session lifetime reached; locking vault"
                 );
                 self.lock();
-                crate::attachment::clear_preview_attachments(None);
                 return true;
             }
 
@@ -774,15 +780,16 @@ impl DaemonState {
         }
     }
 
-    /// Hard lock (ADR-0025): wipes the retained key and resets the session timers.
-    pub fn lock(&self) {
+    /// Hard lock (ADR-0025). Returns whether output cleanup also succeeded.
+    pub fn lock(&self) -> bool {
         let _restore = self
             .vault_mgr
             .restore_guard
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.vault_mgr.hard_lock_inner();
+        let outputs_cleared = self.vault_mgr.hard_lock_inner();
         self.reset_session_timers();
+        outputs_cleared
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -1193,12 +1200,11 @@ pub(crate) fn handle_client(
         return crate::account_activation::serve(&state, &mut stream, &mut reader, &req);
     }
     drop(reader);
+    if action == "output_generation" {
+        return writeln!(stream, "{}", json!(state.vault_mgr.output_session()));
+    }
     let session = state.vault_mgr.cache_session().ok();
     let is_unlocked = session.is_some_and(|s| s.unlocked);
-    if action == "output_generation" {
-        let generation = session.filter(|s| s.unlocked).map(|s| s.generation);
-        return writeln!(stream, "{}", json!({"lock_generation":generation}));
-    }
 
     let reads_plaintext = matches!(
         action,
@@ -1350,8 +1356,8 @@ pub(crate) fn handle_client(
             json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
-            state.lock();
-            json!({ "ok": true, "status": "locked" })
+            let outputs_cleared = state.lock();
+            json!({ "ok": true, "status": "locked", "outputs_cleared": outputs_cleared })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
@@ -1376,7 +1382,7 @@ pub(crate) fn handle_client(
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());
             if let Some(item) = state.vault_mgr.find_item(query, category) {
-                json!({ "ok": true, "item": item })
+                json!({ "ok": true, "item": item, "lock_generation": session.map(|s| s.generation) })
             } else {
                 json!({ "ok": false, "error": format!("Item '{}' not found in vault", query) })
             }
@@ -1433,6 +1439,7 @@ pub(crate) fn handle_client(
                                 "code": res.code,
                                 "ttl": res.ttl,
                                 "period": res.period,
+                                "lock_generation": session.map(|s| s.generation),
                                 "id": item.id,
                                 "name": item.name
                             })
@@ -2593,7 +2600,7 @@ exit $(cat {})
     #[test]
     fn test_logout_requests_end_retention_with_readiness_false() {
         // ADR-0025 decision 4: logout must zeroize the retained key. The
-        // logout flow (main.rs AuthAction::Logout) sends "lock" followed by
+        // logout flow (AuthManager::logout) sends "lock" followed by
         // an explicit "wipe_quick_unlock"; pin the daemon contract both
         // requests rely on: slot empty, readiness false in the ping payload.
         let _lock = crate::env_lock();
