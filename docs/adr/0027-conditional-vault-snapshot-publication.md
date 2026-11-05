@@ -74,6 +74,10 @@ receipts and retry rules remain in
    confirms publication and supplies no authorization to unlock. Other results
    remain unconfirmed, with the candidate retained for lease-based cleanup.
 
+   On confirmed login, the overlay clears the previous account’s data and
+   advances its vault revision. Late list, sync, and attachment replies are
+   discarded when their revision belongs to the previous account.
+
 6. **Keep command outcomes honest.** `vault sync` uses the daemon exclusively.
    Missing or malformed IPC replies report failure instead of starting a second
    CLI sync. Low-level callers may refresh ciphertext while locked, but cannot
