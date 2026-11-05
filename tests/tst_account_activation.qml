@@ -41,6 +41,7 @@ Item {
       check(attachment.command.indexOf("--expected-lock-generation") !== -1
             && attachment.command.indexOf("1") !== -1, "attachment was not bound to the old session")
       overlay.sshApprovalPrompt = ({ id: 2, key_name: "old key" })
+      overlay.sshApprovalOnly = true
       overlay.refreshSshApprovals()
       var approvals = processFor("pending")
       var previousRevision = overlay.vaultRevision
@@ -52,11 +53,16 @@ Item {
             "account activation retained the previous account's rows")
       check(!clipboard.running && clipboard.secret === "", "account activation retained a copy helper")
       check(!attachment.running && attachment.activeItemId === "", "account activation retained an attachment helper")
-      check(overlay.sshApprovalPrompt === null, "account activation retained an old SSH prompt")
+      check(overlay.sshApprovalPrompt === null && !overlay.sshApprovalOnly,
+            "account activation retained the previous SSH approval view")
 
       overlay.isLoadingVault = true
       overlay.isBusy = true
       var message = overlay.statusMessage
+      sync.stderr.text = "late-old-sync-error"
+      sync.stderr.streamFinished()
+      attachment.stderr.text = "late-old-attachment-error"
+      attachment.stderr.streamFinished()
       list.reply([previous])
       sync.reply({ ok: false, error: "Please log in again." })
       attachment.reply({ ok: true, action: "preview", filename: "old.txt" })
@@ -68,6 +74,8 @@ Item {
       check(overlay.statusMessage === message, "an old clipboard helper changed the new session's status")
       check(overlay.sshApprovalPrompt === null, "a late SSH reply restored an old approval")
       check(overlay.isLoadingVault && overlay.isBusy, "old replies cleared the new session's loading state")
+      check(!overlay.logBuffer.some(entry => entry.message.indexOf("late-old-") !== -1),
+            "an old helper wrote an error into the new session's log")
 
       overlay.doLoginPassword("new@example.invalid", "fixture-password")
       login.reply({ ok: true, status: "locked" })
@@ -77,6 +85,10 @@ Item {
       approvals.reply({ ok: true, prompts: [{ id: 3, key_name: "current key" }] })
       check(overlay.sshApprovalPrompt && overlay.sshApprovalPrompt.id === 3,
             "opening the overlay for a new SSH approval discarded the prompt")
+      overlay.authState = ({ status: "unlocked", lock_generation: "2", has_session: true })
+      overlay.clearSensitiveState()
+      check(!overlay.sshApprovalOnly && overlay.sshApprovalPrompt === null,
+            "discarding an unlocked session retained approval-only mode")
       console.log("Account activation overlay handoff passed")
       Qt.exit(0)
     } catch (e) { console.error(e, e.stack); Qt.exit(1) }

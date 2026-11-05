@@ -451,6 +451,7 @@ Item {
     root.sshKeyModalItem = null
     root.sshApprovalPrompt = null
     root.sshApprovalRemaining = 0
+    if (root.authState.lock_generation) root.sshApprovalOnly = false
 
     clipCopyProc.secret = ""
     clipCopyProc.successMessage = ""
@@ -3358,6 +3359,7 @@ Item {
           var data = JSON.parse(text)
           if (data.ok) {
             root.clearSensitiveState()
+            root.sshApprovalOnly = false
             // Activation has passed the output gate, so the previous helper
             // cannot be partway through a plaintext write here.
             attachmentProc.running = false
@@ -3643,7 +3645,9 @@ Item {
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
+      onStreamFinished: {
+        if (vaultSyncProc.revision === root.vaultRevision) root.handleProcessStderr(text, "omawarden:vault")
+      }
     }
     onExited: function(code) {
       if (vaultSyncProc.revision !== root.vaultRevision) return
@@ -3828,7 +3832,9 @@ Item {
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omawarden:attachment")
+      onStreamFinished: {
+        if (attachmentProc.revision === root.vaultRevision) root.handleProcessStderr(text, "omawarden:attachment")
+      }
     }
     onExited: function(code) {
       if (attachmentProc.revision !== root.vaultRevision) return
