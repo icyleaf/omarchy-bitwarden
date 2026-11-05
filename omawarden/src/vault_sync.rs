@@ -714,12 +714,16 @@ mod tests {
 
     #[test]
     fn incomplete_sync_response_cannot_replace_account_during_password_login() {
-        failed_initial_sync_preserves_account(true, "200 OK", "{}");
+        for body in ["{}", "[null, [], [], []]"] {
+            failed_initial_sync_preserves_account(true, "200 OK", body);
+        }
     }
 
     #[test]
     fn incomplete_sync_response_cannot_replace_account_during_apikey_login() {
-        failed_initial_sync_preserves_account(false, "200 OK", "{}");
+        for body in ["{}", "[null, [], [], []]"] {
+            failed_initial_sync_preserves_account(false, "200 OK", body);
+        }
     }
 
     #[test]
