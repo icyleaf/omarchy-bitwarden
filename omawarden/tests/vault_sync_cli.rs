@@ -48,6 +48,110 @@ impl Drop for DaemonSocket {
 }
 
 #[test]
+fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
+    use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cache = root.join("data.json");
+    let server = "https://fixture.invalid";
+    let email = "legacy@example.invalid";
+    let master =
+        derive_master_key(email, "fixture", KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+    let wrap = SymmetricCryptoKey::from_master_key(master.as_slice())
+        .encrypt(&[42; 64])
+        .unwrap();
+    let user_key = SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap();
+    let legacy = json!({
+        "server_url": server, "user_email": email, "enc_user_key": wrap,
+        "kdf": 0, "kdf_iterations": 100_000,
+        "ciphers": [{
+            "id": "legacy-item", "type": 1, "name": user_key.encrypt_string("Legacy item").unwrap(),
+            "login": {"password": user_key.encrypt_string("fixture secret").unwrap()}
+        }]
+    });
+    std::fs::write(&cache, legacy.to_string()).unwrap();
+    std::fs::write(
+        root.join("config.json"),
+        json!({"server_url":server}).to_string(),
+    )
+    .unwrap();
+    for (program, script) in [
+        ("secret-tool", "#!/bin/sh\necho fixture-legacy-token\n"),
+        ("wl-copy", "#!/bin/sh\n/bin/cat >/dev/null\n"),
+    ] {
+        let path = root.join(program);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let command = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
+        cmd.env_clear()
+            .env("HOME", root)
+            .env("PATH", root)
+            .env("XDG_RUNTIME_DIR", root)
+            .env("OMAWARDEN_DATA_DIR", root)
+            .env("OMAWARDEN_CONFIG_DIR", root);
+        cmd
+    };
+    let _daemon = Daemon(
+        command()
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = root.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let run_with_password = |args: &[&str]| {
+        let mut cli = command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        writeln!(cli.stdin.take().unwrap(), "fixture").unwrap();
+        let output = cli.wait_with_output().unwrap();
+        (
+            output.status.success(),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        )
+    };
+
+    let (cli_ok, cli) = run_with_password(&["auth", "unlock"]);
+    ipc(&socket, json!({"action":"lock"}));
+    let (copy_ok, copy) =
+        run_with_password(&["copy", "legacy-item", "--password", "--timeout", "0"]);
+    ipc(&socket, json!({"action":"lock"}));
+    let daemon = ipc(&socket, json!({"action":"unlock","password":"fixture"}));
+    let listed = ipc(&socket, json!({"action":"list"}));
+    let locked = ipc(&socket, json!({"action":"ping"}))["unlocked"] == false;
+    assert!(
+        !cli_ok && !copy_ok && locked,
+        "CLI unlock: {cli}; daemon unlock: {daemon}; copy ok: {copy_ok}; locked: {locked}"
+    );
+    for reply in [cli, daemon, copy] {
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().unwrap().contains("Sign in again"));
+    }
+    assert_eq!(listed["ok"], false, "locked IPC list returned {listed}");
+    assert!(listed["error"]
+        .as_str()
+        .unwrap()
+        .contains("Vault is locked"));
+    assert_eq!(std::fs::read_to_string(cache).unwrap(), legacy.to_string());
+}
+
+#[test]
 fn locking_during_password_login_cancels_the_late_snapshot_and_auto_unlock() {
     password_login_case(LoginCase::WarmLock);
 }
@@ -77,7 +181,11 @@ fn password_login_case(case: LoginCase) {
         .encrypt(&[42; 64])
         .unwrap();
     let cache = dir.path().join("data.json");
-    std::fs::write(&cache, json!({"server_url":url,"user_email":email,"user_id":"fixture","enc_user_key":wrap,"kdf":0,"kdf_iterations":100_000}).to_string()).unwrap();
+    let mut original = json!({"server_url":url,"user_email":email,"user_id":"fixture","enc_user_key":wrap,"kdf":0,"kdf_iterations":100_000});
+    if case == LoginCase::WarmLock {
+        original["credential_id"] = json!("11111111111111111111111111111111");
+    }
+    std::fs::write(&cache, original.to_string()).unwrap();
     std::fs::write(
         dir.path().join("config.json"),
         json!({"server_url":url}).to_string(),
@@ -212,6 +320,7 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
         let storage = dir.path().join("data.json");
         let before = json!({
             "server_url":format!("http://{}", api.local_addr().unwrap()),
+            "credential_id":"11111111111111111111111111111111",
             "access_token":"fixture", "ciphers":[{"id":"retained"}]
         })
         .to_string();

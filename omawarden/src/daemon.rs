@@ -133,13 +133,21 @@ fn check_running_daemon(ping: &Value, our_commit: &str) -> DaemonCheck {
 pub fn ensure_daemon_running() {
     if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
         let check = check_running_daemon(&resp, env!("GIT_HASH"));
-        if check == DaemonCheck::Defer {
+        if check == DaemonCheck::UpToDate {
+            return;
+        }
+        // An older build may still hold plaintext from an unscoped login.
+        // Replace it when upgrading that cache to the sign-in requirement.
+        if check == DaemonCheck::Defer
+            && StorageManager::default()
+                .load()
+                .scoped_credential_id()
+                .is_some()
+        {
             crate::log_info!(
                 "omawarden:daemon",
                 "Running daemon is from another build but the vault is unlocked; keeping it until it locks"
             );
-        }
-        if check != DaemonCheck::Replace {
             return;
         }
         // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
@@ -455,7 +463,7 @@ impl DaemonState {
     /// ADR-0025: re-unlock the vault behind a polkit system-authentication
     /// check instead of the master password. Fail-closed on every rejection;
     /// three consecutive denials wipe the retained key.
-    pub fn perform_quick_unlock(&self) -> Result<usize, &'static str> {
+    pub fn perform_quick_unlock(&self) -> Result<usize, String> {
         self.perform_quick_unlock_with_timeout(crate::polkit::DEFAULT_CHECK_TIMEOUT)
     }
 
@@ -466,25 +474,25 @@ impl DaemonState {
     pub fn perform_quick_unlock_with_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, String> {
         if !self.quick_unlock_enabled() {
-            return Err("Quick unlock is disabled in settings.");
+            return Err("Quick unlock is disabled in settings.".into());
         }
         if self.vault_mgr.is_unlocked() {
             // Already unlocked: never re-prompt or re-arm timers.
-            return Err("Vault is already unlocked.");
+            return Err("Vault is already unlocked.".into());
         }
         if self.polkit_binary.as_os_str().is_empty() {
-            return Err("System authentication is unavailable right now.");
+            return Err("System authentication is unavailable right now.".into());
         }
         // Same gate quick_unlock_ready() advertises: without the policy the
         // pkcheck call can only fail (exit 127, action not registered), so
         // the SSH path must not even attempt it.
         if !self.polkit_policy_registered {
-            return Err("System authentication is unavailable right now.");
+            return Err("System authentication is unavailable right now.".into());
         }
         if !self.vault_mgr.quick_unlock_available() {
-            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+            return Err("Quick unlock is unavailable: the vault was hard-locked.".into());
         }
         // One interactive prompt at a time; concurrent callers fail fast and
         // the overlay falls back to the master password field. A panic in an
@@ -495,12 +503,12 @@ impl DaemonState {
             Ok(g) => g,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
-                return Err("Quick unlock is already in progress.");
+                return Err("Quick unlock is already in progress.".into());
             }
         };
         // Re-check: a wipe may have raced with acquiring the busy lock.
         if !self.vault_mgr.quick_unlock_available() {
-            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+            return Err("Quick unlock is unavailable: the vault was hard-locked.".into());
         }
 
         match crate::polkit::check(
@@ -530,11 +538,11 @@ impl DaemonState {
                         *n = 0;
                     }
                 }
-                return Err("System authentication was denied.");
+                return Err("System authentication was denied.".into());
             }
             crate::polkit::PolkitOutcome::Unavailable(reason) => {
                 crate::log_warn!("omawarden:daemon", "polkit unavailable: {}", reason);
-                return Err("System authentication is unavailable right now.");
+                return Err("System authentication is unavailable right now.".into());
             }
         }
 
@@ -556,7 +564,7 @@ impl DaemonState {
             }
             Err(e) => {
                 crate::log_error!("omawarden:daemon", "Quick unlock restore failed: {}", e);
-                Err("Quick unlock failed to restore the vault.")
+                Err(e)
             }
         }
     }
@@ -1706,7 +1714,15 @@ mod tests {
         let _lock = crate::env_lock();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+        StorageManager::default()
+            .save(&crate::storage::VaultStorage {
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
 
         // A daemon that answers every ping the same way; if it were replaced,
         // a second daemon would be spawned and the connection count would
@@ -1736,10 +1752,15 @@ mod tests {
             server.join().unwrap();
         }
 
-        old_runtime.map_or_else(
-            || std::env::remove_var("XDG_RUNTIME_DIR"),
-            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-        );
+        for (key, old) in [
+            ("XDG_RUNTIME_DIR", old_runtime),
+            ("OMAWARDEN_DATA_DIR", old_data),
+        ] {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]

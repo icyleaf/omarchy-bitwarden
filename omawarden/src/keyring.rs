@@ -1,5 +1,8 @@
 use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::credential_slots::CredentialSlot;
 use crate::storage::VaultStorage;
@@ -86,14 +89,27 @@ impl KeyringManager {
     }
 
     fn clear(&self, attributes: &[&str]) -> bool {
-        Command::new(&self.secret_tool_path)
-            .arg("clear")
-            .args(attributes)
-            .output()
-            .is_ok_and(|output| output.status.success())
+        self.clear_command(attributes)
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
-    pub(crate) fn erase_credential_slot(&self, credential_id: Option<&str>) -> io::Result<()> {
+    fn clear_command(&self, attributes: &[&str]) -> Command {
+        let mut command = Command::new(&self.secret_tool_path);
+        command
+            .arg("clear")
+            .args(attributes)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    pub(crate) fn erase_credential_slot(
+        &self,
+        credential_id: Option<&str>,
+        deadline: Instant,
+    ) -> io::Result<()> {
         let scoped;
         let attributes: &[&str] = if let Some(id) = credential_id {
             scoped = ["service", SCOPED_SERVICE_NAME, "credential_id", id];
@@ -101,29 +117,39 @@ impl KeyringManager {
         } else {
             &["service", SERVICE_NAME]
         };
-        let _ = self.clear(attributes);
+        cleanup_time_left(deadline)?;
+        wait_for_cleanup(self.clear_command(attributes).spawn()?, deadline)?;
 
         // clear may find nothing or leave locked entries behind. Confirm
         // absence without capturing or logging the search output.
-        let mut search = Command::new(&self.secret_tool_path)
+        let (mut output, writer) = UnixStream::pair()?;
+        let search = Command::new(&self.secret_tool_path)
             .args(["search", "--all"])
             .args(attributes)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(OwnedFd::from(writer)))
             .stderr(Stdio::null())
             .spawn()?;
-        let empty = search
-            .stdout
-            .take()
-            .is_some_and(|mut output| matches!(output.read(&mut [0]), Ok(0)));
-        if !empty {
-            let _ = search.kill();
+        let read = cleanup_time_left(deadline)
+            .and_then(|remaining| output.set_read_timeout(Some(remaining)))
+            .and_then(|()| output.read(&mut [0]));
+        match read {
+            Ok(0) => {
+                if wait_for_cleanup(search, deadline)?.success() {
+                    return Ok(());
+                }
+            }
+            read => {
+                stop_and_reap(search);
+                if let Err(error) = read {
+                    return Err(match error.kind() {
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => cleanup_timeout(),
+                        _ => error,
+                    });
+                }
+            }
         }
-        if search.wait()?.success() && empty {
-            Ok(())
-        } else {
-            Err(io::Error::other("Could not confirm keyring cleanup"))
-        }
+        Err(io::Error::other("Could not confirm keyring cleanup"))
     }
 
     pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
@@ -187,6 +213,38 @@ impl KeyringManager {
     }
 }
 
+fn cleanup_timeout() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "Keyring cleanup timed out")
+}
+
+fn cleanup_time_left(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(cleanup_timeout());
+    }
+    Ok(remaining)
+}
+
+fn stop_and_reap(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn wait_for_cleanup(mut child: Child, deadline: Instant) -> io::Result<ExitStatus> {
+    let error = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Err(error) => break error,
+            Ok(None) => match cleanup_time_left(deadline) {
+                Ok(remaining) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
+                Err(error) => break error,
+            },
+        }
+    };
+    stop_and_reap(child);
+    Err(error)
+}
+
 fn credential_label(kind: &str) -> &'static str {
     match kind {
         KIND_REFRESH_TOKEN => "Omarchy Bitwarden Refresh Token",
@@ -247,7 +305,7 @@ impl<'a> AccountKeyring<'a> {
     }
 
     fn slot(&self) -> Option<[&str; 10]> {
-        let id = self.storage.credential_id.as_deref()?;
+        let id = self.storage.scoped_credential_id()?;
         let server = normalize_server_url(&self.storage.server_url);
         let account = self
             .storage
@@ -255,7 +313,7 @@ impl<'a> AccountKeyring<'a> {
             .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or(&self.storage.user_email);
-        if server.is_empty() || account.is_empty() || !crate::credential_slots::valid_id(id) {
+        if server.is_empty() || account.is_empty() {
             return None;
         }
         Some([
@@ -323,6 +381,33 @@ mod tests {
         let mgr = KeyringManager::default();
         assert!(!mgr.store_session("https://vault.bitwarden.com", ""));
         assert!(!mgr.store_session("", "some_token"));
+    }
+
+    #[test]
+    fn cleanup_reaps_stalled_keyring_commands() {
+        for action in ["clear", "search"] {
+            let dir = tempdir().unwrap();
+            let started = dir.path().join("started");
+            let secret_tool = dir.path().join("secret-tool");
+            crate::write_test_executable(
+                &secret_tool,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = '{action}' ]; then echo $$ > '{}'; exec /bin/sleep 15; fi\n",
+                    started.display()
+                ),
+            );
+            let keyring = KeyringManager::new(secret_tool.to_str().unwrap());
+            let deadline = Instant::now() + Duration::from_millis(750);
+            let error = keyring
+                .erase_credential_slot(Some(crate::test_support::CREDENTIAL_ID), deadline)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{action}");
+            let pid = fs::read_to_string(&started).unwrap();
+            assert!(
+                !std::path::Path::new("/proc").join(pid.trim()).exists(),
+                "{action} was not reaped"
+            );
+        }
     }
 
     #[test]

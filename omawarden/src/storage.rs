@@ -44,6 +44,30 @@ pub struct VaultStorage {
 }
 
 impl VaultStorage {
+    pub(crate) fn scoped_credential_id(&self) -> Option<&str> {
+        self.credential_id
+            .as_deref()
+            .filter(|id| crate::credential_slots::valid_id(id))
+    }
+
+    pub(crate) fn has_login_metadata(&self) -> bool {
+        !self.user_email.is_empty()
+            || self.client_id.is_some()
+            || self.enc_user_key.is_some()
+            || self.access_token.is_some()
+            || self.refresh_token.is_some()
+    }
+
+    /// Require a scoped credential reference before unlocking cached ciphertext.
+    ///
+    /// # Errors
+    /// A missing or malformed reference requires a fresh sign-in.
+    pub fn check_unlock_credentials(&self) -> Result<(), &'static str> {
+        self.scoped_credential_id()
+            .map(|_| ())
+            .ok_or("Sign in again to use account-scoped credentials.")
+    }
+
     pub(crate) fn same_account(&self, other: &Self) -> bool {
         self.server_url == other.server_url
             && self.user_email == other.user_email
@@ -62,7 +86,7 @@ impl VaultStorage {
         configured: Option<&'a str>,
     ) -> Option<&'a str> {
         // The identity endpoint is bound to the credential slot at login.
-        if self.credential_id.is_some() {
+        if self.scoped_credential_id().is_some() {
             self.identity_url.as_deref()
         } else {
             configured.or(self.identity_url.as_deref())

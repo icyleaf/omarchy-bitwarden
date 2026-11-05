@@ -503,6 +503,17 @@ impl VaultManager {
             .cache_snapshot()
             .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
         let fresh_storage = &base.storage;
+        if let Err(error) = fresh_storage.check_unlock_credentials() {
+            let _restore = self.restore_guard.lock().unwrap_or_else(|e| e.into_inner());
+            if self
+                .quick_unlock_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == epoch_before
+            {
+                self.wipe_quick_unlock_inner();
+            }
+            return Err(error.into());
+        }
         if fresh_storage.enc_user_key.is_none() {
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
@@ -733,13 +744,14 @@ impl VaultManager {
             );
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
+        fresh_storage.check_unlock_credentials()?;
 
         let user_key = self
             .storage_mgr
             .unlock_user_key(password, fresh_storage)
             .map_err(|e| {
                 crate::log_warn!("omawarden:vault", "Unlock user key failed: {:?}", e);
-                format!("Unlock failed: {:?}", e)
+                e.to_string()
             })?;
 
         let items = decrypt_sync_ciphers_with_context(
@@ -1704,6 +1716,7 @@ pub(crate) mod tests {
         let storage = VaultStorage {
             server_url: "https://vault.example.com".to_string(),
             user_email: email.to_string(),
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             kdf: Some(0),
             kdf_iterations: Some(600_000),
             enc_user_key: Some(enc_user_key),
@@ -1780,6 +1793,24 @@ pub(crate) mod tests {
         vault.unlock("master-pw").unwrap();
         vault.lock();
         assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn quick_unlock_wipes_the_key_when_the_cache_has_no_scoped_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        let mut storage = vault.storage_mgr.load();
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        storage.credential_id = None;
+        vault.storage_mgr.save(&storage).unwrap();
+        let result = vault.quick_unlock_restore();
+        assert!(result.unwrap_err().contains("Sign in again"));
+        assert!(!vault.quick_unlock_available());
+        assert!(!vault.is_unlocked());
+        assert!(vault.user_key.read().unwrap().is_none());
+        assert!(vault.get_items().is_empty());
     }
 
     #[test]

@@ -728,7 +728,14 @@ mod tests {
         Committed,
     }
 
-    fn login_candidate_slot(outcome: LoginPublication, replace_account: bool) {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum PreviousLogin {
+        SameAccount,
+        DifferentAccount,
+        Legacy,
+    }
+
+    fn login_candidate_slot(outcome: LoginPublication, previous: PreviousLogin) {
         use crate::keyring::{KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
 
         let _environment = crate::env_lock();
@@ -783,15 +790,18 @@ esac
             ),
         );
         let mut original = mgr.storage_mgr.load();
-        original.credential_id = Some(format!("{:032x}", 1));
+        let legacy = previous == PreviousLogin::Legacy;
+        original.credential_id = (!legacy).then(|| format!("{:032x}", 1));
         original.client_id = Some("user.fixture".into());
         mgr.storage_mgr.save(&original).unwrap();
         seed(&mgr, vec![cipher("original")]);
         let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
         let original_keys = mgr.keyring_mgr.for_storage(&original);
-        assert!(original_keys.store_token(KIND_ACCESS_TOKEN, "original-access"));
-        assert!(original_keys.store_token(KIND_REFRESH_TOKEN, "original-refresh"));
-        assert!(original_keys.store_token(KIND_API_SECRET, "original-secret"));
+        if !legacy {
+            assert!(original_keys.store_token(KIND_ACCESS_TOKEN, "original-access"));
+            assert!(original_keys.store_token(KIND_REFRESH_TOKEN, "original-refresh"));
+            assert!(original_keys.store_token(KIND_API_SECRET, "original-secret"));
+        }
         assert!(mgr
             .keyring_mgr
             .store_token(&mgr.server_url, KIND_ACCESS_TOKEN, "legacy-access"));
@@ -817,7 +827,7 @@ esac
         if outcome == LoginPublication::RenameFailure {
             auth.before_login_persist = Some(|file| std::fs::remove_file(file.path()).unwrap());
         }
-        let (user_id, email, client_id) = if replace_account {
+        let (user_id, email, client_id) = if previous == PreviousLogin::DifferentAccount {
             ("other-id", "other@example.invalid", "user.other")
         } else {
             ("user-id", "fixture@example.invalid", "user.fixture")
@@ -839,6 +849,13 @@ esac
             json!({"ciphers":[], "profile":{"id":user_id, "email":email}}),
         );
         let result = task.join().unwrap();
+        let legacy_remains = !legacy || outcome != LoginPublication::Committed;
+        assert_eq!(
+            mgr.keyring_mgr
+                .get_token(&mgr.server_url, KIND_ACCESS_TOKEN)
+                .as_deref(),
+            legacy_remains.then_some("legacy-access")
+        );
         if matches!(
             outcome,
             LoginPublication::Committed | LoginPublication::DirectorySyncFailure
@@ -847,7 +864,7 @@ esac
             let active = mgr.storage_mgr.load_existing().unwrap();
             assert_ne!(active.credential_id, original.credential_id);
             assert_eq!(active.user_id.as_deref(), Some(user_id));
-            let retained = outcome == LoginPublication::DirectorySyncFailure;
+            let retained = !legacy && outcome == LoginPublication::DirectorySyncFailure;
             assert_eq!(
                 original_keys.access_token().as_deref(),
                 retained.then_some("original-access")
@@ -860,7 +877,6 @@ esac
                 original_keys.api_secret().as_deref(),
                 retained.then_some("original-secret")
             );
-            assert!(mgr.keyring_mgr.clear_all());
             let active_keys = mgr.keyring_mgr.for_storage(&active);
             assert_eq!(active_keys.access_token().as_deref(), Some("other-access"));
             assert_eq!(
@@ -880,42 +896,62 @@ esac
             assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "original");
             assert_eq!(
                 original_keys.access_token().as_deref(),
-                Some("original-access")
+                (!legacy).then_some("original-access")
             );
             assert_eq!(
                 original_keys.refresh_token().as_deref(),
-                Some("original-refresh")
+                (!legacy).then_some("original-refresh")
             );
             assert_eq!(
                 original_keys.api_secret().as_deref(),
-                Some("original-secret")
+                (!legacy).then_some("original-secret")
             );
-            assert_eq!(std::fs::read_dir(key_dir).unwrap().count(), 4);
+            assert_eq!(
+                std::fs::read_dir(key_dir).unwrap().count(),
+                if legacy { 1 } else { 4 }
+            );
         }
     }
 
     #[test]
     fn login_keyring_failure_preserves_active_credentials() {
-        login_candidate_slot(LoginPublication::KeyringFailure, true);
+        login_candidate_slot(
+            LoginPublication::KeyringFailure,
+            PreviousLogin::DifferentAccount,
+        );
     }
 
     #[test]
     fn login_rename_failure_preserves_active_credentials() {
-        for replace_account in [true, false] {
-            login_candidate_slot(LoginPublication::RenameFailure, replace_account);
+        for previous in [PreviousLogin::DifferentAccount, PreviousLogin::SameAccount] {
+            login_candidate_slot(LoginPublication::RenameFailure, previous);
         }
     }
 
     #[test]
     fn login_publishes_the_new_slot_and_retires_the_old_one() {
-        for replace_account in [true, false] {
-            login_candidate_slot(LoginPublication::Committed, replace_account);
+        for previous in [PreviousLogin::DifferentAccount, PreviousLogin::SameAccount] {
+            login_candidate_slot(LoginPublication::Committed, previous);
         }
     }
 
     #[test]
     fn login_retains_previous_credentials_when_directory_sync_fails() {
-        login_candidate_slot(LoginPublication::DirectorySyncFailure, true);
+        login_candidate_slot(
+            LoginPublication::DirectorySyncFailure,
+            PreviousLogin::DifferentAccount,
+        );
+    }
+
+    #[test]
+    fn first_scoped_login_retires_legacy_credentials_after_durable_publication() {
+        for outcome in [
+            LoginPublication::RenameFailure,
+            LoginPublication::DirectorySyncFailure,
+            LoginPublication::Committed,
+        ] {
+            login_candidate_slot(outcome, PreviousLogin::Legacy);
+        }
     }
 
     #[test]

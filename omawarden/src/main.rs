@@ -1094,7 +1094,6 @@ fn main() -> ExitCode {
                     } else {
                         read_secret_stdin()
                     };
-                    omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     print_json_redacting_session(&res);
                     if res.ok {
@@ -2352,6 +2351,7 @@ fn ensure_unlocked_user_key(
     if st.enc_user_key.is_none() {
         return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
     }
+    st.check_unlock_credentials()?;
 
     let (pwd, ..) = read_auth_payload();
     if pwd.is_empty() {

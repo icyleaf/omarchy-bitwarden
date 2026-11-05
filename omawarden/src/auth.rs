@@ -282,8 +282,10 @@ impl AuthManager {
                 .account_guard()
                 .map_err(|_| "Cannot secure the account cache")?;
             check_cache()?;
+            let retire_legacy =
+                base.storage.scoped_credential_id().is_none() && base.storage.has_login_metadata();
             self.storage_mgr
-                .remember_credentials(&base.storage, false)
+                .remember_credentials(&base.storage, retire_legacy)
                 .map_err(|_| "Cannot track the previous credentials")?;
             #[cfg(test)]
             if let Some(hook) = self.before_login_persist {
@@ -296,7 +298,7 @@ impl AuthManager {
         })();
         match publication {
             Err(error) => {
-                if let Err(cleanup_error) = lease.erase(&self.keyring_mgr) {
+                if let Err(cleanup_error) = erase_retired([lease], &self.keyring_mgr) {
                     crate::log_warn!(
                         "omawarden:auth",
                         "Candidate credential cleanup pending. {}",
@@ -352,7 +354,7 @@ impl AuthManager {
         let has_refresh = keyring.refresh_token().is_some();
         let has_api_secret = keyring.api_secret().is_some();
 
-        if storage.credential_id.is_none()
+        if storage.scoped_credential_id().is_none()
             || (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
             || (storage.user_email.is_empty() && storage.client_id.is_none())
         {
@@ -970,50 +972,41 @@ impl AuthManager {
 
     pub fn unlock(&self, password: &str) -> AuthResult {
         crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
+        crate::daemon::ensure_daemon_running();
         let storage = self.storage_mgr.load();
-        if storage.enc_user_key.is_none() {
-            crate::log_warn!("omawarden:auth", "Account is not logged in.");
+        let unlock_credentials = if storage.enc_user_key.is_some() {
+            storage.check_unlock_credentials()
+        } else {
+            Err("Account is not logged in.")
+        };
+        if let Err(error) = unlock_credentials {
             return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some("Account is not logged in.".to_string()),
+                status: Some("unauthenticated".into()),
+                error: Some(error.into()),
                 ..Default::default()
             };
         }
 
-        let password_zeroizing = Zeroizing::new(password.to_string());
-        match self
-            .storage_mgr
-            .unlock_user_key(&password_zeroizing, &storage)
-        {
-            Ok(_user_key) => {
-                // Auto-unlock daemon with decrypted items in memory
-                crate::daemon::ensure_daemon_running();
-                let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-                    "action": "unlock",
-                    "password": password
-                }));
-
-                crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
-
-                AuthResult {
-                    ok: true,
-                    status: Some("unlocked".to_string()),
-                    ..Default::default()
-                }
-            }
-            Err(e) => {
-                let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_warn!("omawarden:auth", "Unlock failed: {}", err_msg);
-                AuthResult {
-                    ok: false,
-                    status: Some("locked".to_string()),
-                    session: None,
-                    error: Some(err_msg),
-                    ..Default::default()
-                }
-            }
+        let reply = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "unlock", "password": password
+        }));
+        if reply.as_ref().is_some_and(|reply| reply["ok"] == true) {
+            return AuthResult {
+                ok: true,
+                status: Some("unlocked".into()),
+                ..Default::default()
+            };
+        }
+        let error = reply
+            .as_ref()
+            .and_then(|reply| reply["error"].as_str())
+            .map(|error| sanitize_auth_error(Some(error)))
+            .unwrap_or_else(|| "Could not confirm unlock with the vault daemon.".into());
+        crate::log_warn!("omawarden:auth", "Unlock failed: {}", error);
+        AuthResult {
+            status: Some("locked".into()),
+            error: Some(error),
+            ..Default::default()
         }
     }
 

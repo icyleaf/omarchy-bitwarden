@@ -20,6 +20,7 @@ fn fixture(dir: &std::path::Path) -> VaultManager {
         .save(&VaultStorage {
             server_url: "https://fixture.invalid".into(),
             user_email: email.into(),
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             enc_user_key: Some(wrap),
             kdf_iterations: Some(100_000),
             ..Default::default()

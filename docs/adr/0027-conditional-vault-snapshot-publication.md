@@ -60,17 +60,22 @@ receipts and retry rules remain in
    CLI sync. Low-level callers may refresh ciphertext while locked, but cannot
    publish a plaintext index or unlock the vault.
 
+7. **Require scoped credentials before unlocking.** Upgrade an existing cache
+   with a fresh sign-in. Keep the legacy cache encrypted until the replacement
+   is ready. Retire the legacy keyring entries after the new credential
+   reference is durable. Retain cleanup records if the keyring cannot confirm
+   deletion within the cleanup budget.
+
 ## Consequences
 - Long cipher requests can make sync ask the user to retry; they do not block
   hard/soft lock. A brief snapshot capture can similarly reject a concurrent
   create before dispatch.
 - Cache replacement and plaintext publication share one validated commit point.
   A failed rename preserves the existing disk cache and index.
-- Credential cleanup reloads current storage under the account guard. System
-  keyring operations still use this guard and can delay publishers. Moving those
-  side effects outside it needs a separate account/generation-aware credential
-  protocol: revalidation after a keyring store alone cannot undo an overwritten
-  token.
+- Credential cleanup selects inactive slots under the account guard and erases
+  them under their individual leases. Token renewal still uses the account
+  guard during keyring updates. Revalidation after an in-place keyring write
+  cannot undo an overwritten token.
 - A fresh server response is authoritative. This is local ordering protection,
   not an offline merge protocol or a server consistency guarantee.
 

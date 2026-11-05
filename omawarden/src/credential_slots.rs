@@ -6,11 +6,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::keyring::KeyringManager;
 use crate::storage::{StorageManager, VaultStorage};
 
 const LEGACY: &str = "legacy";
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -24,6 +26,7 @@ pub(crate) struct CredentialSlot {
 
 impl CredentialSlot {
     /// Keep the slot leased if the writer outlives the parent process.
+    /// The keyring writer must keep inherited descriptors open until it exits.
     pub(crate) fn inherit_in(&self, command: &mut Command) -> io::Result<()> {
         let lease = self._lease.try_clone()?;
         if lease.as_raw_fd() < 3 {
@@ -44,8 +47,8 @@ impl CredentialSlot {
         Ok(())
     }
 
-    pub(crate) fn erase(self, keyring: &KeyringManager) -> io::Result<()> {
-        keyring.erase_credential_slot((self.name != LEGACY).then_some(&self.name))?;
+    fn erase(self, keyring: &KeyringManager, deadline: Instant) -> io::Result<()> {
+        keyring.erase_credential_slot((self.name != LEGACY).then_some(&self.name), deadline)?;
         match fs::remove_file(&self.marker) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             result => result,
@@ -54,12 +57,16 @@ impl CredentialSlot {
 }
 
 pub(crate) fn erase_retired(
-    slots: Vec<CredentialSlot>,
+    slots: impl IntoIterator<Item = CredentialSlot>,
     keyring: &KeyringManager,
 ) -> io::Result<()> {
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
     let mut result = Ok(());
     for slot in slots {
-        if let Err(error) = slot.erase(keyring) {
+        if let Err(error) = slot.erase(keyring, deadline) {
+            if error.kind() == io::ErrorKind::TimedOut {
+                return Err(error);
+            }
             result = Err(error);
         }
     }
@@ -119,16 +126,11 @@ impl StorageManager {
         storage: &VaultStorage,
         erase_legacy: bool,
     ) -> io::Result<()> {
-        if let Some(id) = &storage.credential_id {
+        if let Some(id) = storage.scoped_credential_id() {
             self.credential_marker(id, false)?;
         }
         if erase_legacy
-            && (!storage.user_email.is_empty()
-                || storage.client_id.is_some()
-                || storage.enc_user_key.is_some()
-                || storage.access_token.is_some()
-                || storage.refresh_token.is_some()
-                || self.credential_slots_dir().try_exists()?)
+            && (storage.has_login_metadata() || self.credential_slots_dir().try_exists()?)
         {
             self.credential_marker(LEGACY, false)?;
         }
@@ -214,6 +216,32 @@ mod tests {
         let slots = manager.retired_credentials(Some(active)).unwrap();
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].name, running);
+    }
+
+    #[test]
+    fn cleanup_continues_after_a_slot_cannot_be_erased() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let locked = manager
+            .lease_candidate(crate::test_support::CREDENTIAL_ID)
+            .unwrap();
+        let absent = manager
+            .lease_candidate("22222222222222222222222222222222")
+            .unwrap();
+        let locked_marker = locked.marker.clone();
+        let absent_marker = absent.marker.clone();
+        let secret_tool = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &secret_tool,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\nclear*) exit 1;;\nsearch*{}) echo present;;\nesac\n",
+                locked.name
+            ),
+        );
+        let keyring = KeyringManager::new(secret_tool.to_str().unwrap());
+        assert!(erase_retired([locked, absent], &keyring).is_err());
+        assert!(locked_marker.is_file());
+        assert!(!absent_marker.exists());
     }
 
     #[test]
