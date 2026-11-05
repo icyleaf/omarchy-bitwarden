@@ -125,29 +125,12 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    struct RuntimeEnv(Option<std::ffi::OsString>);
-    impl RuntimeEnv {
-        fn new(dir: &std::path::Path) -> Self {
-            let old = std::env::var_os("XDG_RUNTIME_DIR");
-            std::env::set_var("XDG_RUNTIME_DIR", dir);
-            Self(old)
-        }
-    }
-    impl Drop for RuntimeEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-        }
-    }
-
     fn fixture(dir: &std::path::Path) -> (Arc<VaultManager>, TcpListener) {
         let api = TcpListener::bind("127.0.0.1:0").unwrap();
         api.set_nonblocking(true).unwrap();
         let url = format!("http://{}", api.local_addr().unwrap());
         let keyring = dir.join("secret-tool");
-        crate::write_test_executable(&keyring, "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\n*) exit 1;;\nesac\n");
+        crate::write_test_executable(&keyring, "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\nstore*) /bin/cat >/dev/null;;\nclear*|search*) exit 0;;\n*) exit 1;;\nesac\n");
         let storage_mgr = StorageManager::new(dir.join("data.json"));
         let master = crate::crypto::derive_master_key(
             "fixture@example.invalid",
@@ -529,8 +512,8 @@ mod tests {
     fn login_initial_sync_cannot_overwrite_a_newer_cache() {
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _runtime = RuntimeEnv::new(dir.path());
         let (mgr, api) = fixture(dir.path());
+        let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
         let auth = crate::auth::AuthManager::new(
             &mgr.server_url,
             Some(mgr.storage_mgr.clone()),
@@ -555,8 +538,8 @@ mod tests {
     fn login_initial_sync_observes_an_uncached_write_from_another_manager() {
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _runtime = RuntimeEnv::new(dir.path());
         let (mgr, api) = fixture(dir.path());
+        let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
         let auth = crate::auth::AuthManager::new(
             &mgr.server_url,
             Some(mgr.storage_mgr.clone()),
@@ -616,10 +599,10 @@ mod tests {
         let (mgr, _) = fixture(dir.path());
         let before = mgr.unlock_context();
         mgr.lock();
-        assert!(mgr.unlock_in_context("fixture", &before).is_err());
+        assert!(mgr.unlock_in_context("fixture", &before, None).is_err());
         let locked = mgr.unlock_context();
         mgr.lock();
-        assert!(mgr.unlock_in_context("fixture", &locked).is_err());
+        assert!(mgr.unlock_in_context("fixture", &locked, None).is_err());
         assert!(!mgr.is_unlocked());
         assert!(mgr.user_key.read().unwrap().is_none());
         assert!(mgr.decrypted_items.read().unwrap().is_empty());
@@ -629,8 +612,8 @@ mod tests {
     fn failed_initial_sync_preserves_account(password_login: bool, status: &str, body: &str) {
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _runtime = RuntimeEnv::new(dir.path());
         let (mgr, api) = fixture(dir.path());
+        let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
         seed(&mgr, vec![cipher("original-account-item")]);
         let before = std::fs::read(&mgr.storage_mgr.file_path).unwrap();
         let stores = dir.path().join("token-stores");
@@ -740,8 +723,11 @@ mod tests {
 
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _runtime = RuntimeEnv::new(dir.path());
-        let (mgr, api) = fixture(dir.path());
+        let (mut mgr, api) = fixture(dir.path());
+        Arc::get_mut(&mut mgr)
+            .unwrap()
+            .storage_mgr
+            .fail_credential_cleanup_sync = outcome == LoginPublication::DirectorySyncFailure;
         let key_dir = dir.path().join("keys");
         std::fs::create_dir(&key_dir).unwrap();
         crate::write_test_executable(
@@ -816,17 +802,18 @@ esac
             .access_token()
             .is_none());
 
-        let mut publication_storage = mgr.storage_mgr.clone();
-        publication_storage.fail_credential_cleanup_sync =
-            outcome == LoginPublication::DirectorySyncFailure;
-        let mut auth = crate::auth::AuthManager::new(
+        *mgr.quick_unlock_key.write().unwrap() = mgr.get_user_key();
+        if outcome == LoginPublication::RenameFailure {
+            mgr.before_activation_persist
+                .set(|file| std::fs::remove_file(file.path()).unwrap())
+                .unwrap();
+        }
+        let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
+        let auth = crate::auth::AuthManager::new(
             &mgr.server_url,
-            Some(publication_storage),
+            Some(mgr.storage_mgr.clone()),
             Some(mgr.keyring_mgr.clone()),
         );
-        if outcome == LoginPublication::RenameFailure {
-            auth.before_login_persist = Some(|file| std::fs::remove_file(file.path()).unwrap());
-        }
         let (user_id, email, client_id) = if previous == PreviousLogin::DifferentAccount {
             ("other-id", "other@example.invalid", "user.other")
         } else {
@@ -861,6 +848,10 @@ esac
             LoginPublication::Committed | LoginPublication::DirectorySyncFailure
         ) {
             assert!(result.ok, "{:?}", result.error);
+            assert!(!mgr.is_unlocked());
+            assert!(!mgr.quick_unlock_available());
+            assert!(mgr.decrypted_items.read().unwrap().is_empty());
+            assert!(mgr.user_key.read().unwrap().is_none());
             let active = mgr.storage_mgr.load_existing().unwrap();
             assert_ne!(active.credential_id, original.credential_id);
             assert_eq!(active.user_id.as_deref(), Some(user_id));
@@ -894,6 +885,8 @@ esac
             assert_eq!(result.error.as_deref(), Some(expected));
             assert_eq!(std::fs::read(&mgr.storage_mgr.file_path).unwrap(), before);
             assert_eq!(mgr.decrypted_items.read().unwrap()[0].id, "original");
+            assert!(mgr.is_unlocked());
+            assert!(mgr.quick_unlock_available());
             assert_eq!(
                 original_keys.access_token().as_deref(),
                 (!legacy).then_some("original-access")
@@ -958,17 +951,18 @@ esac
     fn successful_login_does_not_inherit_the_previous_profile_metadata() {
         let _environment = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _runtime = RuntimeEnv::new(dir.path());
         let (mgr, api) = fixture(dir.path());
         let mut original = mgr.storage_mgr.load();
         original.user_id = Some("old-user".into());
         original.organizations = vec![json!({"id":"old-organization"})];
         original.client_id = Some("user.old".into());
         mgr.storage_mgr.save(&original).unwrap();
+        *mgr.storage.write().unwrap() = original.clone();
         crate::write_test_executable(
             &dir.path().join("secret-tool"),
             "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
         );
+        let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
         let auth = crate::auth::AuthManager::new(
             &mgr.server_url,
             Some(mgr.storage_mgr.clone()),

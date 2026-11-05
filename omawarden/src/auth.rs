@@ -2,11 +2,12 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::account_activation::{ActivationError, LoginConnection};
 use crate::api::BitwardenApiClient;
 use crate::config::ConfigManager;
 use crate::credential_slots::erase_retired;
 use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
-use crate::storage::{CacheSnapshot, StorageManager, VaultStorage};
+use crate::storage::{StorageManager, VaultStorage};
 
 pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
     let raw = match err_str {
@@ -158,8 +159,6 @@ pub struct AuthManager {
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
     pub config_mgr: Option<ConfigManager>,
-    #[cfg(test)]
-    pub(crate) before_login_persist: Option<fn(&tempfile::NamedTempFile)>,
 }
 
 impl AuthManager {
@@ -208,8 +207,6 @@ impl AuthManager {
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
             config_mgr,
-            #[cfg(test)]
-            before_login_persist: None,
         }
     }
 
@@ -217,7 +214,7 @@ impl AuthManager {
         use crate::daemon::{dispatch_daemon_request, DispatchError};
 
         match dispatch_daemon_request(&serde_json::json!({"action":"ping"})) {
-            Ok(reply) if reply["credential_slots_v2"] == true => reply["unlock_context"]
+            Ok(reply) if reply["account_activation_v1"] == true => reply["unlock_context"]
                 .as_str()
                 .map(|context| Some(context.to_owned()))
                 .ok_or("Cannot verify the daemon session before login."),
@@ -231,40 +228,20 @@ impl AuthManager {
 
     fn publish_login(
         &self,
-        base: &CacheSnapshot,
-        expected_context: Option<&str>,
+        connection: LoginConnection,
         storage: &mut VaultStorage,
         access_token: &str,
         refresh_token: Option<&str>,
         api_secret: Option<&str>,
-    ) -> Result<(), &'static str> {
-        let check_context = || {
-            if Self::daemon_unlock_context()?.as_deref() != expected_context {
-                return Err("Vault session changed during login. Sign in again.");
-            }
-            Ok(())
-        };
-        let check_cache = || {
-            base.is_current(&self.storage_mgr)
-                .unwrap_or(false)
-                .then_some(())
-                .ok_or("Vault cache changed during login. Sign in again.")
-        };
-        // Skip keyring work if initial sync already lost the publication race.
-        check_context()?;
-        check_cache()?;
-        let credential_id = format!("{:032x}", rand::random::<u128>());
+    ) -> Result<Option<String>, String> {
+        let credential_id = connection.attempt_id.clone();
         storage.credential_id = Some(credential_id.clone());
-        let staged = self
-            .storage_mgr
-            .stage_durable(storage)
-            .map_err(|_| "Cannot stage the account cache")?;
         let lease = self
             .storage_mgr
             .lease_candidate(&credential_id)
             .map_err(|_| "Cannot track the candidate credentials")?;
         let candidate = self.keyring_mgr.for_storage(storage).with_lease(&lease);
-        let publication = (|| {
+        let prepared = (|| {
             if !candidate.store_token(KIND_ACCESS_TOKEN, access_token) {
                 return Err("Failed to store access token in system keyring.");
             }
@@ -276,29 +253,20 @@ impl AuthManager {
                 return Err("Failed to store API secret in system keyring.");
             }
 
-            check_context()?;
-            let _account = self
-                .storage_mgr
-                .account_guard()
-                .map_err(|_| "Cannot secure the account cache")?;
-            check_cache()?;
-            let retire_legacy =
-                base.storage.scoped_credential_id().is_none() && base.storage.has_login_metadata();
-            self.storage_mgr
-                .remember_credentials(&base.storage, retire_legacy)
-                .map_err(|_| "Cannot track the previous credentials")?;
-            #[cfg(test)]
-            if let Some(hook) = self.before_login_persist {
-                hook(&staged);
-            }
-            staged
-                .persist(&self.storage_mgr.file_path)
-                .map_err(|_| "Cannot save the account cache")?;
-            Ok(self.storage_mgr.retired_credentials(Some(&credential_id)))
+            lease
+                .write_candidate(storage)
+                .map_err(|_| "Cannot stage the login snapshot")
         })();
+        let publication = match prepared {
+            Ok(()) => connection.activate(&self.storage_mgr),
+            Err(error) => Err(ActivationError::Rejected(error.into())),
+        };
+        drop(lease);
         match publication {
-            Err(error) => {
-                if let Err(cleanup_error) = erase_retired([lease], &self.keyring_mgr) {
+            Err(ActivationError::Rejected(error)) => {
+                let cleanup = self.storage_mgr.rejected_candidate(&credential_id)
+                    .and_then(|slot| erase_retired(slot, &self.keyring_mgr));
+                if let Err(cleanup_error) = cleanup {
                     crate::log_warn!(
                         "omawarden:auth",
                         "Candidate credential cleanup pending. {}",
@@ -307,18 +275,10 @@ impl AuthManager {
                 }
                 Err(error)
             }
-            Ok(retired) => {
-                if let Err(error) =
-                    retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr))
-                {
-                    crate::log_warn!(
-                        "omawarden:auth",
-                        "Account cache published. Previous credential cleanup pending. {}",
-                        error
-                    );
-                }
-                Ok(())
-            }
+            Err(ActivationError::Unknown) => Err(format!(
+                "Could not confirm sign-in. Check the vault before trying again. Attempt {credential_id}."
+            )),
+            Ok(context) => Ok(context),
         }
     }
 
@@ -413,12 +373,8 @@ impl AuthManager {
                 .get("is_unlocked")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let daemon_email = daemon_resp
-                .get("user_email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let is_unlocked_same_user =
-                is_unlocked && !daemon_email.is_empty() && daemon_email == storage.user_email;
+            let is_unlocked_same_user = is_unlocked
+                && daemon_resp["credential_id"].as_str() == storage.scoped_credential_id();
             let status_str = if is_unlocked_same_user {
                 "unlocked".to_string()
             } else {
@@ -671,12 +627,11 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let before_sync = match self.storage_mgr.snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
+        let connection = match LoginConnection::begin(login_context.as_deref()) {
+            Ok(connection) => connection,
+            Err(error) => {
                 return AuthResult {
-                    ok: false,
-                    error: Some("Cannot read the account cache".into()),
+                    error: Some(error),
                     ..Default::default()
                 }
             }
@@ -729,20 +684,21 @@ impl AuthManager {
         }
         storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
-        if let Err(error) = self.publish_login(
-            &before_sync,
-            login_context.as_deref(),
+        let context = match self.publish_login(
+            connection,
             &mut storage,
             &token_resp.access_token,
             token_resp.refresh_token.as_deref(),
             None,
         ) {
-            return AuthResult {
-                ok: false,
-                error: Some(error.into()),
-                ..Default::default()
-            };
-        }
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error),
+                    ..Default::default()
+                }
+            }
+        };
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -752,27 +708,14 @@ impl AuthManager {
             }
         }
 
-        // Auto-unlock daemon with decrypted items in memory
-        let context = login_context;
-        let mut unlocked = false;
-        if let Some(context) = context {
-            if let Some(response) = crate::daemon::send_daemon_request(&serde_json::json!({
-                "action": "unlock", "password": password, "expected_unlock_context": context
-            })) {
-                if response["ok"] != true {
-                    return AuthResult {
-                        ok: false,
-                        status: Some("locked".into()),
-                        error: Some(
-                            "Vault session changed during login. Unlock explicitly to continue."
-                                .into(),
-                        ),
-                        ..Default::default()
-                    };
-                }
-                unlocked = true;
-            }
-        }
+        // A lock after activation takes priority over this optional auto-unlock.
+        let unlocked = context.is_some_and(|context| {
+            crate::daemon::send_daemon_request(&serde_json::json!({
+                "action":"unlock", "password":password, "expected_unlock_context":context,
+                "expected_credential_id":storage.credential_id
+            }))
+            .is_some_and(|reply| reply["ok"] == true)
+        });
 
         crate::log_info!(
             "omawarden:auth",
@@ -815,6 +758,7 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        crate::daemon::ensure_daemon_running();
         let login_context = match Self::daemon_unlock_context() {
             Ok(context) => context,
             Err(error) => {
@@ -852,12 +796,11 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let before_sync = match self.storage_mgr.snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
+        let connection = match LoginConnection::begin(login_context.as_deref()) {
+            Ok(connection) => connection,
+            Err(error) => {
                 return AuthResult {
-                    ok: false,
-                    error: Some("Cannot read the account cache".into()),
+                    error: Some(error),
                     ..Default::default()
                 }
             }
@@ -938,8 +881,7 @@ impl AuthManager {
         }
 
         if let Err(error) = self.publish_login(
-            &before_sync,
-            login_context.as_deref(),
+            connection,
             &mut storage,
             &token_resp.access_token,
             token_resp.refresh_token.as_deref(),
@@ -947,7 +889,7 @@ impl AuthManager {
         ) {
             return AuthResult {
                 ok: false,
-                error: Some(error.into()),
+                error: Some(error),
                 ..Default::default()
             };
         }
@@ -1124,10 +1066,15 @@ mod tests {
             Some(storage.clone()),
             Some(KeyringManager::new(script.to_str().unwrap())),
         );
-        for inline in [None, Some("another-account-token")] {
+        for (inline, credential_id) in [
+            (None, None),
+            (Some("another-account-token"), None),
+            (None, Some("malformed")),
+        ] {
             let before = serde_json::json!({
                 "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
                 "access_token":inline, "refresh_token":inline,
+                "credential_id":credential_id,
                 "enc_user_key":"2.dummy_iv|dummy_ct|dummy_mac",
                 "ciphers":[{"id":"existing"}]
             })
@@ -1975,8 +1922,10 @@ esac
             Some(config_mgr.clone()),
         );
 
+        let daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password("User@Example.COM", password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
+        drop(daemon);
 
         // Verify config.json email was populated with normalized email
         let updated_cfg = config_mgr.load();
@@ -2072,6 +2021,7 @@ esac
             Some(config_mgr.clone()),
         );
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr2);
         let res2 = auth_mgr2.login_password("other@example.com", password, None, None, None);
         assert!(res2.ok, "Login should succeed: {:?}", res2.error);
 
@@ -2234,6 +2184,7 @@ esac
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr.clone()), Some(mock_keyring));
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password("test@example.com", "password", None, None, None);
         assert!(!res.ok, "Login must fail when keyring store fails");
         assert!(
@@ -2312,6 +2263,7 @@ esac
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr.clone()), Some(mock_keyring));
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_apikey("client.id", "client_secret");
         assert!(!res.ok, "API login must fail when keyring store fails");
         assert!(
@@ -2339,11 +2291,8 @@ esac
     #[test]
     fn test_login_password_auto_unlocks_daemon() {
         let _lock = crate::env_lock();
-        use std::io::{BufRead, BufReader, Read, Write};
+        use std::io::{Read, Write};
         use std::net::TcpListener;
-        use std::os::unix::net::UnixListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
         use std::thread;
 
         use aes::Aes256;
@@ -2432,55 +2381,6 @@ esac
         });
 
         let dir = tempdir().unwrap();
-        let runtime_dir = dir.path().join("runtime");
-        std::fs::create_dir_all(&runtime_dir).unwrap();
-        let old_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
-
-        let socket_path = runtime_dir.join("omawarden.sock");
-
-        let unix_listener = UnixListener::bind(&socket_path).unwrap();
-        let stop_daemon = Arc::new(AtomicBool::new(false));
-        let stop_daemon_clone = stop_daemon.clone();
-
-        let daemon_handle = thread::spawn(move || {
-            unix_listener.set_nonblocking(true).unwrap();
-            while !stop_daemon_clone.load(Ordering::Relaxed) {
-                match unix_listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut reader = BufReader::new(stream.try_clone().unwrap());
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                                let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
-                                let resp = match action {
-                                    "ping" => {
-                                        serde_json::json!({ "ok": true, "commit": env!("GIT_HASH"), "credential_slots_v2": true, "unlock_context": "fixture-context" })
-                                    }
-                                    "unlock" => serde_json::json!({
-                                        "ok": true,
-                                        "status": "unlocked",
-                                        "session_token": "daemon-ephemeral-token-xyz-123"
-                                    }),
-                                    "sync" => {
-                                        serde_json::json!({ "ok": true, "ciphers_count": 0 })
-                                    }
-                                    _ => {
-                                        serde_json::json!({ "ok": false, "error": "unknown action" })
-                                    }
-                                };
-                                let _ = writeln!(stream, "{}", resp);
-                            }
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
         let storage_path = dir.path().join("daemon_test_data.json");
         let storage_mgr = StorageManager::new(storage_path);
         let config_path = dir.path().join("config.json");
@@ -2495,23 +2395,13 @@ esac
             Some(config_mgr),
         );
 
+        let daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password(email, password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
-
-        // Privileged sync request succeeds directly over socket
-        let sync_ok =
-            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "sync" })).unwrap();
-        assert_eq!(sync_ok.get("ok"), Some(&serde_json::Value::Bool(true)));
-
-        stop_daemon.store(true, Ordering::Relaxed);
-        let _ = daemon_handle.join();
-        let _ = http_handle.join();
-
-        if let Some(prev) = old_xdg {
-            std::env::set_var("XDG_RUNTIME_DIR", prev);
-        } else {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
+        assert_eq!(res.status.as_deref(), Some("unlocked"));
+        assert!(daemon.state.vault_mgr.is_unlocked());
+        assert!(daemon.state.vault_mgr.get_user_key().is_some());
+        http_handle.join().unwrap();
     }
 
     #[test]

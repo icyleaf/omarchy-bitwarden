@@ -60,6 +60,9 @@ impl VaultStorage {
 
     /// Require a scoped credential reference before unlocking cached ciphertext.
     ///
+    /// Offline unlock uses the encrypted cache and the master password. Remote
+    /// requests resolve tokens separately, so a locked keyring does not block it.
+    ///
     /// # Errors
     /// A missing or malformed reference requires a fresh sign-in.
     pub fn check_unlock_credentials(&self) -> Result<(), &'static str> {

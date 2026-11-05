@@ -47,24 +47,44 @@ receipts and retry rules remain in
    `last_sync`. A fresh full snapshot remains authoritative, including remote
    deletions. Do not union local and remote item sets.
 
-5. **Bind login to its starting session.** Password login starts the daemon at the
-   authentication entry point before capturing its unlock context. Later checks
-   only observe that context; they do not restart a stopped daemon or sample a
-   replacement context. Auto-unlock validates the expected context after the KDF
-   under `restore_guard`. Initial login sync must succeed before replacing
-   credentials or account storage; a new storage value is built from the new
-   response rather than inheriting the previous account's metadata.
+5. **Bind login to its starting session.** Both login modes start the daemon
+   before capturing its unlock context. The CLI handles authentication and 2FA.
+   Before the initial sync, the daemon pins the cache inode and write revision
+   on a dedicated, time-limited login connection. The daemon returns a random
+   attempt ID that also names the candidate credential slot. After a complete
+   initial sync, the CLI stores credentials under that slot and writes a
+   private encrypted snapshot. The activation request sends only the attempt ID.
+
+   Runtime and cache instance locks prevent a second daemon from becoming an
+   independent session owner.
+
+   The daemon opens the snapshot relative to its private directory and holds
+   a lease while reading and publishing it. It validates the pinned cache and
+   the original context under the account and restore guards. Rename publishes
+   the new account. In the same session transition, the daemon advances the
+   generation, wipes plaintext and quick-unlock retention, and installs the
+   new account in the locked state. API Key login ends there. Password login
+   may unlock using the context and credential reference from that activation.
+   A later lock invalidates the context, even if the vault was already locked.
+
+   The daemon confirms directory durability before retiring previous
+   credentials. If durability cannot be confirmed, the new account stays
+   locked and retirement stays pending. A missing activation reply is resolved
+   by comparing the attempt ID with the active credential reference. A match
+   confirms publication and supplies no authorization to unlock. Other results
+   remain unconfirmed, with the candidate retained for lease-based cleanup.
 
 6. **Keep command outcomes honest.** `vault sync` uses the daemon exclusively.
    Missing or malformed IPC replies report failure instead of starting a second
    CLI sync. Low-level callers may refresh ciphertext while locked, but cannot
    publish a plaintext index or unlock the vault.
 
-7. **Require scoped credentials before unlocking.** Upgrade an existing cache
+7. **Require a scoped credential reference before unlocking.** Upgrade an existing cache
    with a fresh sign-in. Keep the legacy cache encrypted until the replacement
    is ready. Retire the legacy keyring entries after the new credential
    reference is durable. Retain cleanup records if the keyring cannot confirm
-   deletion within the cleanup budget.
+   deletion within the cleanup budget. A scoped cache can be unlocked offline
+   with the master password. Remote operations resolve tokens independently.
 
 ## Consequences
 - Long cipher requests can make sync ask the user to retry; they do not block
@@ -85,4 +105,5 @@ preparation and publication to exercise newer syncs, account replacement, and
 hard/soft lock. [Sync tests](../../omawarden/src/vault_sync.rs) cover out-of-order
 responses, uncached receipts, bounded retries, remote deletion, and login failure.
 [CLI tests](../../omawarden/tests/vault_sync_cli.rs) cover cold daemon login,
-lock-during-login cancellation, and lost IPC replies using isolated vaults.
+same-server and cross-server account changes, locks on both sides of
+activation, and lost replies across daemon restart using isolated vaults.

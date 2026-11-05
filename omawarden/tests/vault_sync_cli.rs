@@ -31,8 +31,14 @@ fn ipc(socket: &std::path::Path, request: Value) -> Value {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LoginCase {
     WarmLock,
+    WarmLockThenUnlock,
     ColdLock,
     ColdSuccess,
+    WarmApiKey,
+    WarmPassword,
+    LockAfterActivation,
+    LostActivationReceipt,
+    LostRejectedReceipt,
 }
 
 struct DaemonSocket(std::path::PathBuf);
@@ -44,6 +50,89 @@ impl Drop for DaemonSocket {
             let mut reply = String::new();
             let _ = BufReader::new(stream).read_line(&mut reply);
         }
+    }
+}
+
+struct ActivationProxy {
+    runtime: tempfile::TempDir,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ActivationProxy {
+    fn new(target: std::path::PathBuf, case: LoginCase) -> Self {
+        use std::os::unix::net::UnixStream;
+
+        let runtime = tempfile::tempdir().unwrap();
+        let path = runtime.path().join("omawarden.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            let relay = |from: &mut BufReader<UnixStream>, to: &mut UnixStream| {
+                let mut line = String::new();
+                assert_ne!(from.read_line(&mut line).unwrap(), 0);
+                to.write_all(line.as_bytes()).unwrap();
+                serde_json::from_str::<Value>(&line).unwrap()
+            };
+            while !done.load(Ordering::Relaxed) {
+                let (client, _) = match listener.accept() {
+                    Ok(client) => client,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                let daemon = UnixStream::connect(&target).unwrap();
+                for stream in [&client, &daemon] {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(15)))
+                        .unwrap();
+                }
+                let mut client = BufReader::new(client);
+                let mut daemon = BufReader::new(daemon);
+                let request = relay(&mut client, daemon.get_mut());
+                relay(&mut daemon, client.get_mut());
+                if request["action"] != "prepare_account_login" {
+                    continue;
+                }
+                let activation = relay(&mut client, daemon.get_mut());
+                assert_eq!(activation["action"], "activate_account");
+                let mut receipt = String::new();
+                assert_ne!(daemon.read_line(&mut receipt).unwrap(), 0);
+                let reply: Value = serde_json::from_str(&receipt).unwrap();
+                assert_eq!(reply["attempt_id"], activation["attempt_id"]);
+                if case == LoginCase::LostRejectedReceipt {
+                    assert_eq!(reply["outcome"], "rejected");
+                } else {
+                    assert_eq!(reply["outcome"], "committed");
+                    let action = if case == LoginCase::LostActivationReceipt {
+                        "stop"
+                    } else {
+                        "lock"
+                    };
+                    assert_eq!(ipc(&target, json!({"action":action}))["ok"], true);
+                }
+                if case == LoginCase::LockAfterActivation {
+                    client.get_mut().write_all(receipt.as_bytes()).unwrap();
+                }
+            }
+        });
+        Self {
+            runtime,
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for ActivationProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.worker.take().unwrap().join().unwrap();
     }
 }
 
@@ -186,14 +275,16 @@ fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
     let (copy_ok, copy) =
         run_with_password(&["copy", "legacy-item", "--password", "--timeout", "0"]);
     ipc(&socket, json!({"action":"lock"}));
+    let (export_ok, export) = run_with_password(&["ssh-key", "export", "legacy-item", "--stdout"]);
+    ipc(&socket, json!({"action":"lock"}));
     let daemon = ipc(&socket, json!({"action":"unlock","password":"fixture"}));
     let listed = ipc(&socket, json!({"action":"list"}));
     let locked = ipc(&socket, json!({"action":"ping"}))["unlocked"] == false;
     assert!(
-        !cli_ok && !copy_ok && locked,
-        "CLI unlock: {cli}; daemon unlock: {daemon}; copy ok: {copy_ok}; locked: {locked}"
+        !cli_ok && !copy_ok && !export_ok && locked,
+        "CLI unlock: {cli}; daemon unlock: {daemon}; copy ok: {copy_ok}; export ok: {export_ok}; locked: {locked}"
     );
-    for reply in [cli, daemon, copy] {
+    for reply in [cli, daemon, copy, export] {
         assert_eq!(reply["ok"], false);
         assert!(reply["error"].as_str().unwrap().contains("Sign in again"));
     }
@@ -202,7 +293,22 @@ fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
         .as_str()
         .unwrap()
         .contains("Vault is locked"));
-    assert_eq!(std::fs::read_to_string(cache).unwrap(), legacy.to_string());
+    assert_eq!(std::fs::read_to_string(&cache).unwrap(), legacy.to_string());
+
+    // A scoped cache can still be read offline when the keyring is unavailable.
+    let mut scoped = legacy;
+    scoped["credential_id"] = json!("11111111111111111111111111111111");
+    std::fs::write(&cache, scoped.to_string()).unwrap();
+    std::fs::remove_file(root.join("secret-tool")).unwrap();
+    let (ok, result) = run_with_password(&["auth", "unlock"]);
+    assert!(ok, "{result}");
+    let status = ipc(&socket, json!({"action":"status"}));
+    assert_eq!(status["is_unlocked"], true);
+    assert_eq!(status["has_session"], false);
+    assert_eq!(
+        ipc(&socket, json!({"action":"list"}))[0]["id"],
+        "legacy-item"
+    );
 }
 
 #[test]
@@ -220,6 +326,36 @@ fn locking_a_cold_login_does_not_allow_late_auto_unlock() {
     password_login_case(LoginCase::ColdLock);
 }
 
+#[test]
+fn apikey_login_revokes_the_previous_accounts_unlocked_index() {
+    password_login_case(LoginCase::WarmApiKey);
+}
+
+#[test]
+fn password_login_auto_unlocks_only_the_new_account() {
+    password_login_case(LoginCase::WarmPassword);
+}
+
+#[test]
+fn locking_and_reopening_the_old_account_cancels_a_prepared_login() {
+    password_login_case(LoginCase::WarmLockThenUnlock);
+}
+
+#[test]
+fn a_lock_after_activation_wins_over_password_auto_unlock() {
+    password_login_case(LoginCase::LockAfterActivation);
+}
+
+#[test]
+fn a_lost_activation_receipt_confirms_the_new_account_without_unlocking() {
+    password_login_case(LoginCase::LostActivationReceipt);
+}
+
+#[test]
+fn a_lost_rejection_keeps_the_attempt_for_safe_cleanup() {
+    password_login_case(LoginCase::LostRejectedReceipt);
+}
+
 fn password_login_case(case: LoginCase) {
     use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
     use std::process::Stdio;
@@ -228,16 +364,33 @@ fn password_login_case(case: LoginCase) {
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     api.set_nonblocking(true).unwrap();
     let url = format!("http://{}", api.local_addr().unwrap());
-    let email = "fixture@example.invalid";
-    let master =
-        derive_master_key(email, "fixture", KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
-    let wrap = SymmetricCryptoKey::from_master_key(master.as_slice())
-        .encrypt(&[42; 64])
-        .unwrap();
+    let old_email = "fixture@example.invalid";
+    let email = "other@example.invalid";
+    let wrap_key = |email: &str, bytes: &[u8; 64]| {
+        let master =
+            derive_master_key(email, "fixture", KdfType::Pbkdf2Sha256, 100_000, None, None)
+                .unwrap();
+        SymmetricCryptoKey::from_master_key(master.as_slice())
+            .encrypt(bytes)
+            .unwrap()
+    };
+    let old_wrap = wrap_key(old_email, &[42; 64]);
+    let wrap = wrap_key(email, &[43; 64]);
+    let new_key = SymmetricCryptoKey::from_raw_bytes(&[43; 64]).unwrap();
+    let new_name = new_key.encrypt_string("New account item").unwrap();
     let cache = dir.path().join("data.json");
-    let mut original = json!({"server_url":url,"user_email":email,"user_id":"fixture","enc_user_key":wrap,"kdf":0,"kdf_iterations":100_000});
-    if case == LoginCase::WarmLock {
+    let mut original = json!({"server_url":url,"user_email":old_email,"user_id":"fixture","enc_user_key":old_wrap,"kdf":0,"kdf_iterations":100_000});
+    let api_key = case == LoginCase::WarmApiKey;
+    let warm = !matches!(case, LoginCase::ColdLock | LoginCase::ColdSuccess);
+    if api_key {
+        original["server_url"] = json!("https://old-vault.fixture.invalid");
+    }
+    if warm {
         original["credential_id"] = json!("11111111111111111111111111111111");
+        let key = SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap();
+        original["ciphers"] = json!([
+            {"id":"old-only", "type":1, "name":key.encrypt_string("Previous account item").unwrap()}
+        ]);
     }
     std::fs::write(&cache, original.to_string()).unwrap();
     std::fs::write(
@@ -261,7 +414,7 @@ fn password_login_case(case: LoginCase) {
     let socket = dir.path().join("omawarden.sock");
     let _shutdown = DaemonSocket(socket.clone());
     let deadline = Instant::now() + Duration::from_secs(15);
-    let _daemon = if case == LoginCase::WarmLock {
+    let start_daemon = || {
         let daemon = Daemon(
             command()
                 .arg("daemon")
@@ -274,10 +427,15 @@ fn password_login_case(case: LoginCase) {
             assert!(Instant::now() < deadline, "daemon did not start");
             thread::sleep(Duration::from_millis(5));
         }
+        daemon
+    };
+    let mut daemon = if warm {
+        let daemon = start_daemon();
         assert_eq!(
             ipc(&socket, json!({"action":"unlock","password":"fixture"}))["ok"],
             true
         );
+        assert_eq!(ipc(&socket, json!({"action":"list"}))[0]["id"], "old-only");
         Some(daemon)
     } else {
         assert!(!socket.exists());
@@ -285,8 +443,24 @@ fn password_login_case(case: LoginCase) {
     };
     let mut old_context = None;
     let before = std::fs::read(&cache).unwrap();
-    let mut login = command()
-        .args(["auth", "login-password", "--email", email])
+    let proxy = matches!(
+        case,
+        LoginCase::LockAfterActivation
+            | LoginCase::LostActivationReceipt
+            | LoginCase::LostRejectedReceipt
+    )
+    .then(|| ActivationProxy::new(socket.clone(), case));
+    let args = if api_key {
+        ["auth", "login-apikey", "--client-id", "user.other"]
+    } else {
+        ["auth", "login-password", "--email", email]
+    };
+    let mut login_command = command();
+    if let Some(proxy) = &proxy {
+        login_command.env("XDG_RUNTIME_DIR", proxy.runtime.path());
+    }
+    let mut login = login_command
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -326,10 +500,14 @@ fn password_login_case(case: LoginCase) {
         let body = if synced {
             assert!(socket.exists(), "login_password must start the daemon before sampling its context");
             old_context = Some(ipc(&socket, json!({"action":"ping"}))["unlock_context"].clone());
-            if case != LoginCase::ColdSuccess {
+            if matches!(case, LoginCase::WarmLock | LoginCase::ColdLock | LoginCase::WarmLockThenUnlock | LoginCase::LostRejectedReceipt) {
                 assert_eq!(ipc(&socket, json!({"action":"lock"}))["ok"], true);
             }
-            json!({"ciphers":[]})
+            if case == LoginCase::WarmLockThenUnlock {
+                assert_eq!(ipc(&socket, json!({"action":"unlock","password":"fixture"}))["ok"], true);
+            }
+            json!({"ciphers":[{"id":"new-only","type":1,"name":new_name}],
+                   "profile":{"id":"other-account","email":email}})
         } else if path.ends_with("/connect/token") {
             json!({"access_token":"new", "expires_in":3600,"key":wrap,"kdf":0,"kdf_iterations":100_000})
         } else {
@@ -343,16 +521,47 @@ fn password_login_case(case: LoginCase) {
     }
     let output = login.wait_with_output().unwrap();
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let success = case == LoginCase::ColdSuccess;
+    if case == LoginCase::LostActivationReceipt {
+        assert!(daemon.as_mut().unwrap().0.wait().unwrap().success());
+        if socket.exists() {
+            std::fs::remove_file(&socket).unwrap();
+        }
+        daemon = Some(start_daemon());
+    }
+    let success = !matches!(
+        case,
+        LoginCase::WarmLock
+            | LoginCase::ColdLock
+            | LoginCase::WarmLockThenUnlock
+            | LoginCase::LostRejectedReceipt
+    );
     assert_eq!(output.status.success(), success, "{result}");
     assert_eq!(result["ok"], success);
-    assert_eq!(ipc(&socket, json!({"action":"ping"}))["unlocked"], success);
+    let unlocked = matches!(
+        case,
+        LoginCase::ColdSuccess | LoginCase::WarmPassword | LoginCase::WarmLockThenUnlock
+    );
+    assert_eq!(ipc(&socket, json!({"action":"ping"}))["unlocked"], unlocked);
     if success {
-        assert_eq!(result["status"], "unlocked");
+        assert_eq!(
+            result["status"],
+            if unlocked { "unlocked" } else { "locked" }
+        );
         assert!(
             serde_json::from_slice::<Value>(&std::fs::read(&cache).unwrap()).unwrap()["last_sync"]
                 .is_string()
         );
+        let status = ipc(&socket, json!({"action":"status"}));
+        assert_eq!(status["user_id"], "other-account");
+        assert_eq!(status["server_url"], url);
+        assert_eq!(status["is_unlocked"], unlocked);
+        if unlocked {
+            let list = ipc(&socket, json!({"action":"list"}));
+            assert_eq!(list.as_array().unwrap().len(), 1);
+            assert_eq!(list[0]["id"], "new-only");
+        } else {
+            assert_eq!(ipc(&socket, json!({"action":"list"}))["ok"], false);
+        }
     } else {
         assert_eq!(std::fs::read(&cache).unwrap(), before);
         assert_eq!(
@@ -362,7 +571,24 @@ fn password_login_case(case: LoginCase) {
             )["ok"],
             false
         );
+        if case == LoginCase::WarmLockThenUnlock {
+            assert_eq!(ipc(&socket, json!({"action":"list"}))[0]["id"], "old-only");
+        }
+        if case == LoginCase::LostRejectedReceipt {
+            assert!(result["error"]
+                .as_str()
+                .unwrap()
+                .contains("Could not confirm sign-in"));
+            let candidates: Vec<_> = std::fs::read_dir(dir.path().join("data.credentials"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "candidate"))
+                .collect();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates[0].with_extension("").is_file());
+        }
     }
+    drop(daemon);
 }
 
 #[test]

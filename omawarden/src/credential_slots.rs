@@ -1,8 +1,9 @@
 //! Durable, nonsecret markers for keyring slots and unpublished login attempts.
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,6 +14,7 @@ use crate::storage::{StorageManager, VaultStorage};
 
 const LEGACY: &str = "legacy";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CANDIDATE_SIZE: u64 = crate::api::MAX_SYNC_BODY_SIZE + crate::api::MAX_API_BODY_SIZE;
 
 pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -25,6 +27,17 @@ pub(crate) struct CredentialSlot {
 }
 
 impl CredentialSlot {
+    pub(crate) fn write_candidate(&self, storage: &VaultStorage) -> io::Result<()> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.marker.with_extension("candidate"))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, storage)?;
+        writer.flush()
+    }
+
     /// Keep the slot leased if the writer outlives the parent process.
     /// The keyring writer must keep inherited descriptors open until it exits.
     pub(crate) fn inherit_in(&self, command: &mut Command) -> io::Result<()> {
@@ -48,11 +61,9 @@ impl CredentialSlot {
     }
 
     fn erase(self, keyring: &KeyringManager, deadline: Instant) -> io::Result<()> {
+        remove_if_exists(&self.marker.with_extension("candidate"))?;
         keyring.erase_credential_slot((self.name != LEGACY).then_some(&self.name), deadline)?;
-        match fs::remove_file(&self.marker) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        }
+        remove_if_exists(&self.marker)
     }
 }
 
@@ -71,6 +82,79 @@ pub(crate) fn erase_retired(
         }
     }
     result
+}
+
+fn remove_if_exists(path: &std::path::Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn open_private_file(dir: &File, name: &str) -> io::Result<File> {
+    let name = CString::new(name)?;
+    // SAFETY: dir and name are live for openat. A successful return owns a new fd.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new fd, now owned by File.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != dir.metadata()?.uid()
+        || meta.mode() & 0o7777 != 0o600
+        || meta.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid login file",
+        ));
+    }
+    Ok(file)
+}
+
+#[derive(serde::Deserialize)]
+struct CandidateSnapshot {
+    ciphers: Vec<serde_json::Value>,
+    folders: Vec<serde_json::Value>,
+    collections: Vec<serde_json::Value>,
+    #[serde(flatten)]
+    storage: VaultStorage,
+}
+
+fn parse_candidate(file: File, id: &str) -> io::Result<VaultStorage> {
+    let mut reader = BufReader::new(file.take(MAX_CANDIDATE_SIZE + 1));
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Invalid login snapshot");
+    if reader.fill_buf()?.first() != Some(&b'{') {
+        return Err(invalid());
+    }
+    let CandidateSnapshot {
+        ciphers,
+        folders,
+        collections,
+        mut storage,
+    } = serde_json::from_reader(&mut reader)?;
+    if reader.into_inner().limit() == 0
+        || storage.scoped_credential_id() != Some(id)
+        || storage.server_url.trim().is_empty()
+        || storage.user_email.trim().is_empty()
+        || storage.access_token.is_some()
+        || storage.refresh_token.is_some()
+        || storage.last_sync.is_none()
+    {
+        return Err(invalid());
+    }
+    storage.ciphers = ciphers;
+    storage.folders = folders;
+    storage.collections = collections;
+    Ok(storage)
 }
 
 impl StorageManager {
@@ -102,7 +186,7 @@ impl StorageManager {
             ));
         }
         if new {
-            file.lock()?;
+            file.lock_shared()?;
         }
         file.sync_all()?;
         File::open(dir)?.sync_all()?;
@@ -118,6 +202,85 @@ impl StorageManager {
             name: id.into(),
             _lease: lease,
         })
+    }
+
+    /// Pin the candidate slot while the daemon reads and publishes its snapshot.
+    pub(crate) fn open_login_candidate(&self, id: &str) -> io::Result<(File, VaultStorage)> {
+        if !valid_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid login attempt ID",
+            ));
+        }
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(self.credential_slots_dir())?;
+        let meta = dir.metadata()?;
+        // SAFETY: geteuid has no pointer arguments.
+        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o7777 != 0o700 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Unsafe login directory",
+            ));
+        }
+        let lease = open_private_file(&dir, id)?;
+        lease.try_lock_shared().map_err(io::Error::from)?;
+        let file = open_private_file(&dir, &format!("{id}.candidate"))?;
+        if file.metadata()?.len() > MAX_CANDIDATE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Login snapshot too large",
+            ));
+        }
+        let storage = parse_candidate(file, id)?;
+        Ok((lease, storage))
+    }
+
+    /// Reclaim an attempt known to have been rejected, after dropping the writer lease.
+    pub(crate) fn rejected_candidate(&self, id: &str) -> io::Result<Option<CredentialSlot>> {
+        let _account = self.account_guard()?;
+        if self.cache_snapshot()?.storage.scoped_credential_id() == Some(id) {
+            return Ok(None);
+        }
+        self.try_retired_slot(id)
+    }
+
+    pub(crate) fn remove_candidate_snapshot(&self, id: &str) -> io::Result<()> {
+        remove_if_exists(
+            &self
+                .credential_slots_dir()
+                .join(id)
+                .with_extension("candidate"),
+        )
+    }
+
+    fn try_retired_slot(&self, name: &str) -> io::Result<Option<CredentialSlot>> {
+        let marker = self.credential_slots_dir().join(name);
+        let lease = match OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&marker)
+        {
+            Ok(lease) => lease,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if !lease.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid credential marker",
+            ));
+        }
+        match lease.try_lock() {
+            Ok(()) => Ok(Some(CredentialSlot {
+                marker,
+                name: name.into(),
+                _lease: lease,
+            })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
     }
 
     /// Record the outgoing reference before changing the cache under account_guard.
@@ -162,30 +325,8 @@ impl StorageManager {
             if Some(name.as_str()) == active_id || (name != LEGACY && !valid_id(&name)) {
                 continue;
             }
-            let marker = entry.path();
-            let lease = match OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(&marker)
-            {
-                Ok(lease) => lease,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            if !lease.metadata()?.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid credential marker",
-                ));
-            }
-            match lease.try_lock() {
-                Ok(()) => slots.push(CredentialSlot {
-                    marker,
-                    name,
-                    _lease: lease,
-                }),
-                Err(fs::TryLockError::WouldBlock) => {}
-                Err(fs::TryLockError::Error(error)) => return Err(error),
+            if let Some(slot) = self.try_retired_slot(&name)? {
+                slots.push(slot);
             }
         }
         Ok(slots)
@@ -195,6 +336,47 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_reads_only_a_complete_private_candidate_bound_to_the_attempt() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let id = crate::test_support::CREDENTIAL_ID;
+        let lease = manager.lease_candidate(id).unwrap();
+        let storage = VaultStorage {
+            server_url: "https://fixture.invalid".into(),
+            user_email: "account@fixture.invalid".into(),
+            credential_id: Some(id.into()),
+            last_sync: Some("fixture".into()),
+            ..Default::default()
+        };
+        lease.write_candidate(&storage).unwrap();
+        assert_eq!(
+            manager.open_login_candidate(id).unwrap().1.credential_id,
+            storage.credential_id
+        );
+        let path = lease.marker.with_extension("candidate");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(manager.open_login_candidate(id).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut incomplete = serde_json::to_value(&storage).unwrap();
+        incomplete.as_object_mut().unwrap().remove("ciphers");
+        fs::write(&path, incomplete.to_string()).unwrap();
+        assert!(manager.open_login_candidate(id).is_err());
+        let mut wrong = serde_json::to_value(&storage).unwrap();
+        wrong["credential_id"] = serde_json::json!("22222222222222222222222222222222");
+        fs::write(&path, wrong.to_string()).unwrap();
+        assert!(manager.open_login_candidate(id).is_err());
+
+        let other_file = dir.path().join("other-file");
+        fs::rename(&path, &other_file).unwrap();
+        fs::write(&other_file, serde_json::to_vec(&storage).unwrap()).unwrap();
+        symlink(&other_file, &path).unwrap();
+        assert!(manager.open_login_candidate(id).is_err());
+    }
 
     #[test]
     fn cleanup_skips_the_active_reference_and_leased_candidates() {
@@ -222,12 +404,12 @@ mod tests {
     fn cleanup_continues_after_a_slot_cannot_be_erased() {
         let dir = tempfile::tempdir().unwrap();
         let manager = StorageManager::new(dir.path().join("data.json"));
-        let locked = manager
-            .lease_candidate(crate::test_support::CREDENTIAL_ID)
-            .unwrap();
-        let absent = manager
-            .lease_candidate("22222222222222222222222222222222")
-            .unwrap();
+        let locked_id = crate::test_support::CREDENTIAL_ID;
+        let absent_id = "22222222222222222222222222222222";
+        drop(manager.lease_candidate(locked_id).unwrap());
+        drop(manager.lease_candidate(absent_id).unwrap());
+        let locked = manager.rejected_candidate(locked_id).unwrap().unwrap();
+        let absent = manager.rejected_candidate(absent_id).unwrap().unwrap();
         let locked_marker = locked.marker.clone();
         let absent_marker = absent.marker.clone();
         let secret_tool = dir.path().join("secret-tool");

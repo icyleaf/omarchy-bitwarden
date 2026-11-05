@@ -1,3 +1,4 @@
+mod account_activation;
 pub mod api;
 pub mod attachment;
 pub mod auth;

@@ -2343,15 +2343,14 @@ fn ensure_unlocked_user_key(
     vault_mgr: &VaultManager,
     _server_url: &str,
 ) -> Result<omawarden::crypto::SymmetricCryptoKey, String> {
-    if let Some(key) = vault_mgr.get_user_key() {
-        return Ok(key);
-    }
-
     let st = vault_mgr.storage_mgr.load();
     if st.enc_user_key.is_none() {
         return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
     }
     st.check_unlock_credentials()?;
+    if let Some(key) = vault_mgr.get_user_key() {
+        return Ok(key);
+    }
 
     let (pwd, ..) = read_auth_payload();
     if pwd.is_empty() {
@@ -2371,6 +2370,24 @@ fn ensure_unlocked_user_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_decryption_rejects_an_unscoped_cache_even_with_a_cached_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = omawarden::storage::StorageManager::new(dir.path().join("data.json"));
+        manager
+            .save(&omawarden::storage::VaultStorage {
+                enc_user_key: Some("wrapped-fixture-key".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vault = VaultManager::new("", Some(manager), None);
+        *vault.is_unlocked.write().unwrap() = true;
+        *vault.user_key.write().unwrap() =
+            Some(omawarden::crypto::SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap());
+        let result = ensure_unlocked_user_key(&vault, "");
+        assert!(matches!(result, Err(error) if error.contains("Sign in again")));
+    }
 
     #[test]
     fn test_parse_cli_bool_accepts_known_values() {
