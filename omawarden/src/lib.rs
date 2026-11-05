@@ -23,6 +23,11 @@ mod vault_cache;
 mod vault_sync;
 pub mod webauthn;
 
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod vault_publication_tests;
+
 /// Serialises tests that change process-wide environment variables, and tests
 /// whose result depends on them, so they don't race under the parallel runner.
 #[cfg(test)]

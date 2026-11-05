@@ -72,7 +72,7 @@ impl CacheSnapshot {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                 Err(error) => return Err(error),
             };
-            if StorageManager::write_revision(&barrier)? != expected {
+            if StorageManager::current_write_revision(&barrier)? != expected {
                 return Ok(false);
             }
         }
@@ -183,15 +183,16 @@ impl StorageManager {
     /// unreadable or malformed storage must never become an empty snapshot.
     pub(crate) fn snapshot(&self) -> std::io::Result<CacheSnapshot> {
         let barrier = self.cipher_barrier()?;
-        let revision = Self::write_revision(&barrier)?;
-        let mut snapshot = self.snapshot_for_receipt()?;
+        let revision = Self::current_write_revision(&barrier)?;
+        let mut snapshot = self.cache_snapshot()?;
         snapshot.write_revision = Some(revision);
         Ok(snapshot)
     }
 
-    // A receipt is itself inside the write barrier. It still needs a pinned
-    // cache version, but must not attempt an exclusive barrier against itself.
-    pub(crate) fn snapshot_for_receipt(&self) -> std::io::Result<CacheSnapshot> {
+    // Local decryption and receipt edits pin the cached ciphertext, not a
+    // remote response. They need a cache-version check, but must not wait for
+    // HTTP writes: locking and re-unlocking cancels an old receipt separately.
+    pub(crate) fn cache_snapshot(&self) -> std::io::Result<CacheSnapshot> {
         match fs::File::open(&self.file_path) {
             Ok(source) => {
                 let metadata = source.metadata()?;
@@ -226,7 +227,7 @@ impl StorageManager {
             .open(self.file_path.with_extension("writes.lock"))
     }
 
-    fn write_revision(file: &fs::File) -> std::io::Result<[u8; 16]> {
+    fn current_write_revision(file: &fs::File) -> std::io::Result<[u8; 16]> {
         use std::os::unix::fs::FileExt;
         let mut revision = [0; 16];
         match file.metadata()?.len() {
@@ -268,7 +269,7 @@ impl StorageManager {
             ),
             std::fs::TryLockError::Error(error) => error,
         })?;
-        Self::write_revision(&barrier)?;
+        Self::current_write_revision(&barrier)?;
         barrier.write_all_at(&rand::random::<[u8; 16]>(), 0)?;
         Ok(barrier)
     }

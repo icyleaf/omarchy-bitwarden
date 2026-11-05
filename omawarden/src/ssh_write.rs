@@ -183,7 +183,7 @@ impl VaultManager {
         cipher: &Value,
         id: &str,
     ) -> Option<()> {
-        let base = self.storage_mgr.snapshot_for_receipt().ok()?;
+        let base = self.storage_mgr.cache_snapshot().ok()?;
         if !base.storage.same_account(account) {
             return None;
         }

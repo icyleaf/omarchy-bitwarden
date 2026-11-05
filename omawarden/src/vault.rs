@@ -293,6 +293,10 @@ pub struct VaultManager {
     /// commit section (which re-checks the epoch under the guard), making
     /// wipe-vs-restore mutually exclusive at the commit point.
     pub restore_guard: std::sync::Mutex<()>,
+    #[cfg(test)]
+    pub(crate) before_unlock_publication: crate::test_support::PausePoint,
+    #[cfg(test)]
+    pub(crate) cache_validated: crate::test_support::PausePoint,
 }
 
 impl VaultManager {
@@ -345,6 +349,10 @@ impl VaultManager {
             lock_generation: std::sync::atomic::AtomicU64::new(rand::random::<u64>() >> 1),
             quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
+            #[cfg(test)]
+            before_unlock_publication: Default::default(),
+            #[cfg(test)]
+            cache_validated: Default::default(),
         }
     }
 
@@ -490,7 +498,11 @@ impl VaultManager {
         }
         .ok_or_else(|| "No key retained for quick unlock".to_string())?;
 
-        let fresh_storage = self.storage_mgr.load();
+        let base = self
+            .storage_mgr
+            .cache_snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+        let fresh_storage = &base.storage;
         if fresh_storage.enc_user_key.is_none() {
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
@@ -631,7 +643,14 @@ impl VaultManager {
             return Err("The vault was locked during unlock. Try again.".to_string());
         }
 
+        #[cfg(test)]
+        self.before_unlock_publication.reach();
+
         {
+            let _account = self
+                .storage_mgr
+                .account_guard()
+                .map_err(|e| format!("Cannot secure the vault cache: {e}"))?;
             let _restore = match self.restore_guard.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -647,6 +666,12 @@ impl VaultManager {
                 );
                 return Err("The vault was locked during unlock. Try again.".to_string());
             }
+            if !base
+                .is_current(&self.storage_mgr)
+                .map_err(|e| format!("Cannot verify the vault cache: {e}"))?
+            {
+                return Err("Vault cache changed during unlock. Please retry.".into());
+            }
 
             if let Ok(mut dec_items) = self.decrypted_items.write() {
                 *dec_items = items;
@@ -658,7 +683,7 @@ impl VaultManager {
                 *unl = true;
             }
             if let Ok(mut st) = self.storage.write() {
-                *st = fresh_storage;
+                *st = base.storage;
             }
             // The retained slot is intentionally left untouched: it still
             // holds the same key, and rewriting it would resurrect a key a
@@ -696,7 +721,11 @@ impl VaultManager {
                 "Vault session changed during login. Unlock explicitly to continue.".into(),
             );
         }
-        let fresh_storage = self.storage_mgr.load();
+        let base = self
+            .storage_mgr
+            .cache_snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+        let fresh_storage = &base.storage;
         if fresh_storage.enc_user_key.is_none() {
             crate::log_error!(
                 "omawarden:vault",
@@ -707,7 +736,7 @@ impl VaultManager {
 
         let user_key = self
             .storage_mgr
-            .unlock_user_key(password, &fresh_storage)
+            .unlock_user_key(password, fresh_storage)
             .map_err(|e| {
                 crate::log_warn!("omawarden:vault", "Unlock user key failed: {:?}", e);
                 format!("Unlock failed: {:?}", e)
@@ -721,6 +750,12 @@ impl VaultManager {
             fresh_storage.enc_private_key.as_deref(),
         );
         let count = items.len();
+        #[cfg(test)]
+        self.before_unlock_publication.reach();
+        let _account = self
+            .storage_mgr
+            .account_guard()
+            .map_err(|e| format!("Cannot secure the vault cache: {e}"))?;
         let _restore = self
             .restore_guard
             .lock()
@@ -729,6 +764,12 @@ impl VaultManager {
             return Err(
                 "Vault session changed during login. Unlock explicitly to continue.".into(),
             );
+        }
+        if !base
+            .is_current(&self.storage_mgr)
+            .map_err(|e| format!("Cannot verify the vault cache: {e}"))?
+        {
+            return Err("Vault cache changed during unlock. Please retry.".into());
         }
 
         if let Ok(mut dec_items) = self.decrypted_items.write() {
@@ -753,7 +794,7 @@ impl VaultManager {
             *unl = true;
         }
         if let Ok(mut st) = self.storage.write() {
-            *st = fresh_storage;
+            *st = base.storage;
         }
 
         crate::log_info!(

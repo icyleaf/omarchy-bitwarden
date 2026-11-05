@@ -64,9 +64,13 @@ impl VaultManager {
         session: CacheSession,
     ) -> Result<(), CacheCommitError> {
         let staged = self.storage_mgr.stage(&updated)?;
-        // Lock order shared by sync and cipher receipts. No key, HTTP, or
-        // keyring work belongs in this publication critical section.
+        // Serializes publication with password/quick unlock and hard/soft lock.
+        // No key, HTTP, or keyring work belongs in this critical section.
         let _account = self.storage_mgr.account_guard()?;
+        let _restore = self
+            .restore_guard
+            .lock()
+            .map_err(|_| CacheCommitError::Unavailable)?;
         let unlocked = self
             .is_unlocked
             .read()
@@ -84,6 +88,8 @@ impl VaultManager {
         if !base.is_current(&self.storage_mgr)? {
             return Err(CacheCommitError::Conflict);
         }
+        #[cfg(test)]
+        self.cache_validated.reach();
         let mut items = self
             .decrypted_items
             .write()
