@@ -1,7 +1,14 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::credential_slots::CredentialSlot;
+use crate::storage::VaultStorage;
 
 pub const SERVICE_NAME: &str = "omarchy-bitwarden";
+const SCOPED_SERVICE_NAME: &str = "omarchy-bitwarden-v2";
 pub const ACCOUNT_NAME: &str = "session";
 pub const LABEL: &str = "Omarchy Bitwarden Session";
 pub const KIND_ACCESS_TOKEN: &str = "access_token";
@@ -37,319 +44,327 @@ impl KeyringManager {
         which::which(&self.secret_tool_path).is_ok()
     }
 
-    pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        if token.is_empty() || kind.is_empty() || norm_url.is_empty() {
+    fn store(
+        &self,
+        label: &str,
+        attributes: &[&str],
+        secret: &str,
+        lease: Option<&CredentialSlot>,
+    ) -> bool {
+        if secret.is_empty() {
             return false;
         }
-        let label = format!(
-            "Omarchy Bitwarden {}",
-            if kind == KIND_REFRESH_TOKEN {
-                "Refresh Token"
-            } else {
-                "Access Token"
-            }
-        );
-        let mut child = match Command::new(&self.secret_tool_path)
-            .args([
-                "store",
-                &format!("--label={}", label),
-                "service",
-                SERVICE_NAME,
-                "kind",
-                kind,
-                "server_url",
-                norm_url,
-            ])
+        let mut command = Command::new(&self.secret_tool_path);
+        command
+            .arg("store")
+            .arg(format!("--label={label}"))
+            .args(attributes)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
+            .stderr(Stdio::null());
+        if lease.is_some_and(|slot| slot.inherit_in(&mut command).is_err()) {
+            return false;
+        }
+        let Ok(mut child) = command.spawn() else {
+            return false;
         };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(token.as_bytes());
-        }
-
-        match child.wait() {
-            Ok(status) => status.success(),
-            Err(_) => false,
-        }
+        let written = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(secret.as_bytes()).is_ok());
+        child.wait().is_ok_and(|status| status.success()) && written
     }
 
-    pub fn get_token(&self, server_url: &str, kind: &str) -> Option<String> {
-        let norm_url = normalize_server_url(server_url);
-        if kind.is_empty() || norm_url.is_empty() {
-            return None;
-        }
+    fn lookup(&self, attributes: &[&str]) -> Option<String> {
         let output = Command::new(&self.secret_tool_path)
-            .args([
-                "lookup",
-                "service",
-                SERVICE_NAME,
-                "kind",
-                kind,
-                "server_url",
-                norm_url,
-            ])
+            .arg("lookup")
+            .args(attributes)
             .output()
             .ok()?;
-
-        if output.status.success() {
-            let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-
-        // Backwards compatibility fallback: lookup un-scoped token from older versions
-        let legacy = Command::new(&self.secret_tool_path)
-            .args(["lookup", "service", SERVICE_NAME, "kind", kind])
-            .output()
-            .ok()?;
-
-        if legacy.status.success() {
-            let val = String::from_utf8_lossy(&legacy.stdout).trim().to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-
-        None
-    }
-
-    pub fn clear_token(&self, server_url: &str, kind: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        if kind.is_empty() || norm_url.is_empty() {
-            return false;
-        }
-        match Command::new(&self.secret_tool_path)
-            .args([
-                "clear",
-                "service",
-                SERVICE_NAME,
-                "kind",
-                kind,
-                "server_url",
-                norm_url,
-            ])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
-    }
-
-    pub fn store_api_secret(&self, server_url: &str, client_id: &str, secret: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        let norm_cid = client_id.trim();
-        if secret.is_empty() || norm_cid.is_empty() || norm_url.is_empty() {
-            return false;
-        }
-        let label = "Omarchy Bitwarden API Secret";
-        let mut child = match Command::new(&self.secret_tool_path)
-            .args([
-                "store",
-                &format!("--label={}", label),
-                "service",
-                SERVICE_NAME,
-                "kind",
-                KIND_API_SECRET,
-                "server_url",
-                norm_url,
-                "client_id",
-                norm_cid,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(secret.as_bytes());
-        }
-
-        match child.wait() {
-            Ok(status) => status.success(),
-            Err(_) => false,
-        }
-    }
-
-    pub fn get_api_secret(&self, server_url: &str, client_id: &str) -> Option<String> {
-        let norm_url = normalize_server_url(server_url);
-        let norm_cid = client_id.trim();
-        if norm_cid.is_empty() || norm_url.is_empty() {
+        if !output.status.success() {
             return None;
         }
-        let output = Command::new(&self.secret_tool_path)
-            .args([
-                "lookup",
-                "service",
-                SERVICE_NAME,
-                "kind",
-                KIND_API_SECRET,
-                "server_url",
-                norm_url,
-                "client_id",
-                norm_cid,
-            ])
-            .output()
-            .ok()?;
-
-        if output.status.success() {
-            let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-        None
+        let secret = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!secret.is_empty()).then_some(secret)
     }
 
-    pub fn clear_api_secret(&self, server_url: &str, client_id: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        let norm_cid = client_id.trim();
-        if norm_cid.is_empty() || norm_url.is_empty() {
-            return false;
-        }
-        match Command::new(&self.secret_tool_path)
-            .args([
-                "clear",
-                "service",
-                SERVICE_NAME,
-                "kind",
-                KIND_API_SECRET,
-                "server_url",
-                norm_url,
-                "client_id",
-                norm_cid,
-            ])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
+    fn clear(&self, attributes: &[&str]) -> bool {
+        self.clear_command(attributes)
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
-    pub fn clear_all(&self) -> bool {
-        match Command::new(&self.secret_tool_path)
-            .args(["clear", "service", SERVICE_NAME])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
-    }
-
-    pub fn store_session(&self, server_url: &str, session_token: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        if session_token.is_empty() || norm_url.is_empty() {
-            return false;
-        }
-        let _ = self.store_token(norm_url, KIND_ACCESS_TOKEN, session_token);
-
-        let mut child = match Command::new(&self.secret_tool_path)
-            .args([
-                "store",
-                &format!("--label={}", LABEL),
-                "service",
-                SERVICE_NAME,
-                "account",
-                ACCOUNT_NAME,
-                "server_url",
-                norm_url,
-            ])
-            .stdin(Stdio::piped())
+    fn clear_command(&self, attributes: &[&str]) -> Command {
+        let mut command = Command::new(&self.secret_tool_path);
+        command
+            .arg("clear")
+            .args(attributes)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(session_token.as_bytes());
-        }
-
-        match child.wait() {
-            Ok(status) => status.success(),
-            Err(_) => false,
-        }
+            .stderr(Stdio::null());
+        command
     }
 
-    pub fn get_session(&self, server_url: &str) -> Option<String> {
-        let norm_url = normalize_server_url(server_url);
-        if norm_url.is_empty() {
-            return None;
-        }
-        // Prefer modern kind=access_token scoped to server_url first
-        if let Some(tok) = self.get_token(norm_url, KIND_ACCESS_TOKEN) {
-            return Some(tok);
-        }
+    pub(crate) fn erase_credential_slot(
+        &self,
+        credential_id: Option<&str>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        let scoped;
+        let attributes: &[&str] = if let Some(id) = credential_id {
+            scoped = ["service", SCOPED_SERVICE_NAME, "credential_id", id];
+            &scoped
+        } else {
+            &["service", SERVICE_NAME]
+        };
+        cleanup_time_left(deadline)?;
+        wait_for_cleanup(self.clear_command(attributes).spawn()?, deadline)?;
 
-        // Look up server_url scoped legacy account=session
-        if let Ok(output) = Command::new(&self.secret_tool_path)
-            .args([
-                "lookup",
-                "service",
-                SERVICE_NAME,
-                "account",
-                ACCOUNT_NAME,
-                "server_url",
-                norm_url,
-            ])
-            .output()
-        {
-            if output.status.success() {
-                let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !val.is_empty() {
-                    return Some(val);
+        // clear may find nothing or leave locked entries behind. Confirm
+        // absence without capturing or logging the search output.
+        let (mut output, writer) = UnixStream::pair()?;
+        let search = Command::new(&self.secret_tool_path)
+            .args(["search", "--all"])
+            .args(attributes)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(writer)))
+            .stderr(Stdio::null())
+            .spawn()?;
+        let read = cleanup_time_left(deadline)
+            .and_then(|remaining| output.set_read_timeout(Some(remaining)))
+            .and_then(|()| output.read(&mut [0]));
+        match read {
+            Ok(0) => {
+                if wait_for_cleanup(search, deadline)?.success() {
+                    return Ok(());
+                }
+            }
+            read => {
+                stop_and_reap(search);
+                if let Err(error) = read {
+                    return Err(match error.kind() {
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => cleanup_timeout(),
+                        _ => error,
+                    });
                 }
             }
         }
+        Err(io::Error::other("Could not confirm keyring cleanup"))
+    }
 
-        // Fallback to legacy un-scoped account=session
-        let output = Command::new(&self.secret_tool_path)
-            .args(["lookup", "service", SERVICE_NAME, "account", ACCOUNT_NAME])
-            .output()
-            .ok()?;
+    pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
+        legacy_token_attributes(server_url, kind)
+            .is_some_and(|attrs| self.store(credential_label(kind), &attrs, token, None))
+    }
 
-        if output.status.success() {
-            let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-        None
+    pub fn get_token(&self, server_url: &str, kind: &str) -> Option<String> {
+        self.lookup(&legacy_token_attributes(server_url, kind)?)
+    }
+
+    pub fn clear_token(&self, server_url: &str, kind: &str) -> bool {
+        legacy_token_attributes(server_url, kind).is_some_and(|attrs| self.clear(&attrs))
+    }
+
+    pub fn store_api_secret(&self, server_url: &str, client_id: &str, secret: &str) -> bool {
+        legacy_api_attributes(server_url, client_id).is_some_and(|attrs| {
+            self.store(credential_label(KIND_API_SECRET), &attrs, secret, None)
+        })
+    }
+
+    pub fn get_api_secret(&self, server_url: &str, client_id: &str) -> Option<String> {
+        self.lookup(&legacy_api_attributes(server_url, client_id)?)
+    }
+
+    pub fn clear_api_secret(&self, server_url: &str, client_id: &str) -> bool {
+        legacy_api_attributes(server_url, client_id).is_some_and(|attrs| self.clear(&attrs))
+    }
+
+    pub fn clear_all(&self) -> bool {
+        self.clear(&["service", SERVICE_NAME])
+    }
+
+    pub fn store_session(&self, server_url: &str, session_token: &str) -> bool {
+        let Some(attrs) = legacy_session_attributes(server_url) else {
+            return false;
+        };
+        let _ = self.store_token(server_url, KIND_ACCESS_TOKEN, session_token);
+        self.store(LABEL, &attrs, session_token, None)
+    }
+
+    pub fn get_session(&self, server_url: &str) -> Option<String> {
+        self.get_token(server_url, KIND_ACCESS_TOKEN)
+            .or_else(|| self.lookup(&legacy_session_attributes(server_url)?))
     }
 
     pub fn clear_session(&self, server_url: &str) -> bool {
-        let norm_url = normalize_server_url(server_url);
-        if norm_url.is_empty() {
+        let Some(attrs) = legacy_session_attributes(server_url) else {
             return false;
+        };
+        let _ = self.clear_token(server_url, KIND_ACCESS_TOKEN);
+        self.clear(&attrs)
+    }
+
+    pub(crate) fn for_storage<'a>(&'a self, storage: &'a VaultStorage) -> AccountKeyring<'a> {
+        AccountKeyring {
+            keyring: self,
+            storage,
+            lease: None,
         }
-        let _ = self.clear_token(norm_url, KIND_ACCESS_TOKEN);
-        match Command::new(&self.secret_tool_path)
-            .args([
-                "clear",
-                "service",
-                SERVICE_NAME,
-                "account",
-                ACCOUNT_NAME,
-                "server_url",
-                norm_url,
-            ])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+    }
+}
+
+fn cleanup_timeout() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "Keyring cleanup timed out")
+}
+
+fn cleanup_time_left(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(cleanup_timeout());
+    }
+    Ok(remaining)
+}
+
+fn stop_and_reap(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn wait_for_cleanup(mut child: Child, deadline: Instant) -> io::Result<ExitStatus> {
+    let error = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Err(error) => break error,
+            Ok(None) => match cleanup_time_left(deadline) {
+                Ok(remaining) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
+                Err(error) => break error,
+            },
+        }
+    };
+    stop_and_reap(child);
+    Err(error)
+}
+
+fn credential_label(kind: &str) -> &'static str {
+    match kind {
+        KIND_REFRESH_TOKEN => "Omarchy Bitwarden Refresh Token",
+        KIND_API_SECRET => "Omarchy Bitwarden API Secret",
+        _ => "Omarchy Bitwarden Access Token",
+    }
+}
+
+fn legacy_token_attributes<'a>(server: &'a str, kind: &'a str) -> Option<[&'a str; 6]> {
+    let server = normalize_server_url(server);
+    (!server.is_empty() && !kind.is_empty()).then_some([
+        "service",
+        SERVICE_NAME,
+        "kind",
+        kind,
+        "server_url",
+        server,
+    ])
+}
+
+fn legacy_api_attributes<'a>(server: &'a str, client_id: &'a str) -> Option<[&'a str; 8]> {
+    let server = normalize_server_url(server);
+    let client_id = client_id.trim();
+    (!server.is_empty() && !client_id.is_empty()).then_some([
+        "service",
+        SERVICE_NAME,
+        "kind",
+        KIND_API_SECRET,
+        "server_url",
+        server,
+        "client_id",
+        client_id,
+    ])
+}
+
+fn legacy_session_attributes(server: &str) -> Option<[&str; 6]> {
+    let server = normalize_server_url(server);
+    (!server.is_empty()).then_some([
+        "service",
+        SERVICE_NAME,
+        "account",
+        ACCOUNT_NAME,
+        "server_url",
+        server,
+    ])
+}
+
+pub(crate) struct AccountKeyring<'a> {
+    keyring: &'a KeyringManager,
+    storage: &'a VaultStorage,
+    lease: Option<&'a CredentialSlot>,
+}
+
+impl<'a> AccountKeyring<'a> {
+    pub(crate) fn with_lease(mut self, lease: &'a CredentialSlot) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    fn slot(&self) -> Option<[&str; 10]> {
+        let id = self.storage.scoped_credential_id()?;
+        let server = normalize_server_url(&self.storage.server_url);
+        let account = self
+            .storage
+            .user_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&self.storage.user_email);
+        if server.is_empty() || account.is_empty() {
+            return None;
+        }
+        Some([
+            "service",
+            SCOPED_SERVICE_NAME,
+            "server_url",
+            server,
+            "account",
+            account,
+            "credential_id",
+            id,
+            "identity_url",
+            self.storage.identity_url.as_deref().unwrap_or(""),
+        ])
+    }
+
+    fn attributes<'b>(&'b self, kind: &'b str) -> Option<Vec<&'b str>> {
+        let mut attributes = self.slot()?.to_vec();
+        attributes.extend(["kind", kind]);
+        if kind == KIND_API_SECRET {
+            let client_id = self.storage.client_id.as_deref()?.trim();
+            if client_id.is_empty() {
+                return None;
+            }
+            attributes.extend(["client_id", client_id]);
+        }
+        Some(attributes)
+    }
+
+    pub(crate) fn access_token(&self) -> Option<String> {
+        self.keyring.lookup(&self.attributes(KIND_ACCESS_TOKEN)?)
+    }
+
+    pub(crate) fn refresh_token(&self) -> Option<String> {
+        self.keyring.lookup(&self.attributes(KIND_REFRESH_TOKEN)?)
+    }
+
+    pub(crate) fn api_secret(&self) -> Option<String> {
+        self.keyring.lookup(&self.attributes(KIND_API_SECRET)?)
+    }
+
+    pub(crate) fn store_token(&self, kind: &str, token: &str) -> bool {
+        self.attributes(kind).is_some_and(|attrs| {
+            self.keyring
+                .store(credential_label(kind), &attrs, token, self.lease)
+        })
+    }
+
+    pub(crate) fn clear_token(&self, kind: &str) {
+        if let Some(attrs) = self.attributes(kind) {
+            self.keyring.clear(&attrs);
         }
     }
 }
@@ -366,6 +381,33 @@ mod tests {
         let mgr = KeyringManager::default();
         assert!(!mgr.store_session("https://vault.bitwarden.com", ""));
         assert!(!mgr.store_session("", "some_token"));
+    }
+
+    #[test]
+    fn cleanup_reaps_stalled_keyring_commands() {
+        for action in ["clear", "search"] {
+            let dir = tempdir().unwrap();
+            let started = dir.path().join("started");
+            let secret_tool = dir.path().join("secret-tool");
+            crate::write_test_executable(
+                &secret_tool,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = '{action}' ]; then echo $$ > '{}'; exec /bin/sleep 15; fi\n",
+                    started.display()
+                ),
+            );
+            let keyring = KeyringManager::new(secret_tool.to_str().unwrap());
+            let deadline = Instant::now() + Duration::from_millis(750);
+            let error = keyring
+                .erase_credential_slot(Some(crate::test_support::CREDENTIAL_ID), deadline)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{action}");
+            let pid = fs::read_to_string(&started).unwrap();
+            assert!(
+                !std::path::Path::new("/proc").join(pid.trim()).exists(),
+                "{action} was not reaped"
+            );
+        }
     }
 
     #[test]

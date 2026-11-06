@@ -149,6 +149,13 @@ impl Default for SshAgent {
 }
 
 impl SshAgent {
+    pub(crate) fn cancel_pending(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+            self.answered.notify_all();
+        }
+    }
+
     /// Pending prompts, oldest first (for the overlay).
     pub fn pending(&self) -> Vec<Prompt> {
         let mut list: Vec<Prompt> = self
@@ -192,12 +199,18 @@ impl SshAgent {
 }
 
 /// Post a prompt and wait for its answer; no answer within the timeout denies.
-fn ask(host: &Arc<dyn Host>, mut prompt: Prompt) -> Decision {
+fn ask(host: &Arc<dyn Host>, mut prompt: Prompt, generation: u64) -> Decision {
     let agent = host.agent();
     let id = agent.next_id.fetch_add(1, Ordering::Relaxed);
     prompt.id = id;
     let (title, body) = notification_text(&prompt);
-    if let Ok(mut pending) = agent.pending.lock() {
+    {
+        let Ok(mut pending) = agent.pending.lock() else {
+            return Decision::default();
+        };
+        if host.lock_generation() != generation {
+            return Decision::default();
+        }
         pending.insert(
             id,
             Pending {
@@ -234,7 +247,10 @@ fn ask(host: &Arc<dyn Host>, mut prompt: Prompt) -> Decision {
         return Decision::default();
     };
     let decision = loop {
-        if let Some(d) = pending.get(&id).and_then(|p| p.decision) {
+        let Some(request) = pending.get(&id) else {
+            break Decision::default();
+        };
+        if let Some(d) = request.decision {
             break d;
         }
         let now = Instant::now();
@@ -357,6 +373,21 @@ trait Host: Send + Sync + 'static {
     /// Changes each time an unlocked vault locks; see
     /// `VaultManager::lock_generation`.
     fn lock_generation(&self) -> u64;
+    fn approval_scope(&self) -> Option<String> {
+        None
+    }
+    fn sign_for_generation(
+        &self,
+        generation: u64,
+        key: &PrivateKey,
+        data: &[u8],
+        flags: u32,
+    ) -> Result<Vec<u8>, String> {
+        if !self.is_unlocked() || self.lock_generation() != generation {
+            return Err("vault session changed before signing".into());
+        }
+        sign_with(key, data, flags)
+    }
     fn keys(&self) -> Vec<AgentKey>;
     fn policy(&self) -> Confirm;
     /// A signature was made (keeps the vault from idle-locking).
@@ -389,6 +420,31 @@ impl Host for DaemonState {
     }
     fn lock_generation(&self) -> u64 {
         self.vault_mgr.lock_generation()
+    }
+    fn approval_scope(&self) -> Option<String> {
+        self.vault_mgr
+            .storage
+            .read()
+            .ok()?
+            .scoped_credential_id()
+            .map(str::to_owned)
+    }
+    fn sign_for_generation(
+        &self,
+        generation: u64,
+        key: &PrivateKey,
+        data: &[u8],
+        flags: u32,
+    ) -> Result<Vec<u8>, String> {
+        let unlocked = self
+            .vault_mgr
+            .is_unlocked
+            .read()
+            .map_err(|_| "vault state unavailable")?;
+        if !*unlocked || self.lock_generation() != generation {
+            return Err("vault session changed before signing".into());
+        }
+        sign_with(key, data, flags)
     }
     fn keys(&self) -> Vec<AgentKey> {
         vault_keys(self)
@@ -711,12 +767,17 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
     if !wait_for_unlock(host) {
         return Err("vault is locked".into());
     }
+    let generation = host.lock_generation();
+    let scope = host.approval_scope().unwrap_or_default();
     let find_key = || host.keys().into_iter().find(|k| k.blob == key_blob);
     let mut key = find_key().ok_or("key not in vault")?;
 
     let agent = host.agent();
     let policy = host.policy();
-    let remember_key = format!("{}|{}|{}", key.fingerprint, conn.peer.exe, conn.peer.app);
+    let remember_key = format!(
+        "{scope}|{}|{}|{}",
+        key.fingerprint, conn.peer.exe, conn.peer.app
+    );
     // Without /proc/<pid>/exe the requester can't be told apart from any other
     // such request, so nothing is remembered for it.
     let remembers = policy == Confirm::FirstUse && !conn.forwarded && !conn.peer.exe.is_empty();
@@ -735,32 +796,28 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
                 .is_some_and(|id| Reader(&data).string().ok() == Some(id))
         });
         let (title, action) = describe(&purpose(&data), bound_host);
-        let decision = ask(
-            host,
-            Prompt {
-                id: 0,
-                title,
-                action,
-                key_name: key.name.clone(),
-                fingerprint: key.fingerprint.clone(),
-                client: conn.peer.describe(),
-                command: conn.peer.cmdline.clone(),
-                forwarded: conn.forwarded,
-                remembered: remembers,
-            },
-        );
+        let prompt = Prompt {
+            id: 0,
+            title,
+            action,
+            key_name: key.name.clone(),
+            fingerprint: key.fingerprint.clone(),
+            client: conn.peer.describe(),
+            command: conn.peer.cmdline.clone(),
+            forwarded: conn.forwarded,
+            remembered: remembers,
+        };
+        drop(key);
+        let decision = ask(host, prompt, generation);
         if !decision.approve {
             return Err("denied".into());
         }
         // The prompt can wait a minute: don't sign with a key copied before
         // the vault locked, or one that has since changed.
-        if !host.is_unlocked() {
-            return Err("vault locked while waiting for approval".into());
+        if !host.is_unlocked() || host.lock_generation() != generation {
+            return Err("vault session changed while waiting for approval".into());
         }
         key = find_key().ok_or("key no longer in vault")?;
-        if remembers {
-            agent.approve(remember_key);
-        }
     }
 
     let mut private = PrivateKey::from_openssh(key.private_key.as_bytes())
@@ -776,7 +833,10 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
     }
     // Only a completed signature counts as activity: listing keys is open to
     // any process of this user and must not keep the vault unlocked.
-    let signature = sign_with(&private, &data, flags)?;
+    let signature = host.sign_for_generation(generation, &private, &data, flags)?;
+    if needs_prompt && remembers {
+        agent.approve(remember_key);
+    }
     host.record_activity();
     Ok(signature)
 }
@@ -1750,6 +1810,39 @@ mod tests {
         assert!(Client::connect(&host, SSH, TERMINAL).sign(&host).is_some());
         assert_eq!(host.cards(), 1, "no re-approval");
         assert_eq!(host.notifications(), vec!["Vault locked".to_string()]);
+    }
+
+    #[test]
+    fn pending_approval_cannot_sign_after_the_account_changes() {
+        let host = FakeHost::new(Confirm::FirstUse, Card::Ignore);
+        let approver = Arc::clone(&host);
+        let task = std::thread::spawn(move || {
+            assert!(eventually(|| !approver.agent.pending().is_empty()));
+            let id = approver.agent.pending()[0].id;
+            // A replacement account can contain the very same public key.
+            approver.generation.fetch_add(1, Ordering::SeqCst);
+            assert!(approver.agent.reply(id, Decision { approve: true }));
+        });
+        assert!(Client::connect(&host, SSH, TERMINAL).sign(&host).is_none());
+        task.join().unwrap();
+        assert_eq!(host.activity(), 0);
+        assert!(host.agent.approvals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_pending_approval_denies_the_request() {
+        let host = FakeHost::new(Confirm::Always, Card::Ignore);
+        let revoked = Arc::clone(&host);
+        let task = std::thread::spawn(move || {
+            assert!(eventually(|| !revoked.agent.pending().is_empty()));
+            let id = revoked.agent.pending()[0].id;
+            revoked.agent.cancel_pending();
+            assert!(revoked.agent.pending().is_empty());
+            assert!(!revoked.agent.reply(id, Decision { approve: true }));
+        });
+        assert!(Client::connect(&host, SSH, TERMINAL).sign(&host).is_none());
+        task.join().unwrap();
+        assert_eq!(host.activity(), 0);
     }
 
     #[test]

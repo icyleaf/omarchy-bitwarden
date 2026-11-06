@@ -3,8 +3,8 @@ mod clipboard_holder;
 use clap::{Parser, Subcommand};
 use omawarden::attachment::get_attachment;
 use omawarden::auth::AuthManager;
-use omawarden::clipboard::ClipboardManager;
-use omawarden::config::{ConfigManager, ConfigUpdateOptions};
+use omawarden::clipboard::{ClipboardManager, ClipboardScope};
+use omawarden::config::{Config, ConfigManager, ConfigUpdateOptions};
 use omawarden::daemon::{
     ensure_daemon_running, run_daemon_server, send_daemon_request, DaemonState,
 };
@@ -15,9 +15,9 @@ use omawarden::ssh::{
     generate_keypair, parse_private_key, write_keypair_files, write_keypair_files_named,
     SshAlgorithm,
 };
-use omawarden::storage::StorageManager;
-use omawarden::totp::generate_totp;
-use omawarden::vault::VaultManager;
+use omawarden::storage::{StorageManager, VaultStorage};
+use omawarden::totp::{generate_totp, TotpResult};
+use omawarden::vault::{VaultItem, VaultManager};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -118,9 +118,22 @@ enum Commands {
         public_key: bool,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
+        #[arg(long, hide = true, requires = "stdin")]
+        expected_lock_generation: Option<u64>,
     },
     #[command(hide = true)]
-    ClipboardHolder { seconds: u64, wl_copy: PathBuf },
+    ClipboardHolder {
+        seconds: u64,
+        wl_copy: PathBuf,
+        #[arg(long)]
+        public: bool,
+        #[arg(long, conflicts_with = "cache_path")]
+        expected_lock_generation: Option<u64>,
+        #[arg(long, requires = "expected_credential_id")]
+        cache_path: Option<PathBuf>,
+        #[arg(long, requires = "cache_path")]
+        expected_credential_id: Option<String>,
+    },
     #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
         #[arg(
@@ -378,6 +391,8 @@ enum AttachmentAction {
         open: bool,
         #[arg(long)]
         preview: bool,
+        #[arg(long, hide = true)]
+        expected_lock_generation: Option<String>,
     },
     #[command(about = "Clean temporary preview attachments")]
     Clean {
@@ -548,10 +563,29 @@ fn main() -> ExitCode {
     let mut cfg = config_mgr.load();
 
     match cli.command {
-        Commands::ClipboardHolder { seconds, wl_copy } => {
+        Commands::ClipboardHolder {
+            seconds,
+            wl_copy,
+            public,
+            expected_lock_generation,
+            cache_path,
+            expected_credential_id,
+        } => {
+            let scope = expected_lock_generation
+                .map(ClipboardScope::Session)
+                .or_else(|| {
+                    cache_path
+                        .zip(expected_credential_id)
+                        .map(|(path, credential_id)| ClipboardScope::Cache {
+                            path,
+                            credential_id,
+                        })
+                });
             match clipboard_holder::hold_selection(
                 &wl_copy,
                 std::time::Duration::from_secs(seconds),
+                !public,
+                scope.as_ref(),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::FAILURE,
@@ -1094,7 +1128,6 @@ fn main() -> ExitCode {
                     } else {
                         read_secret_stdin()
                     };
-                    omawarden::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     print_json_redacting_session(&res);
                     if res.ok {
@@ -1150,18 +1183,11 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 AuthAction::Lock => {
-                    let _ = send_daemon_request(&json!({ "action": "lock" }));
                     let res = auth_mgr.lock();
                     print_json_redacting_session(&res);
                     ExitCode::SUCCESS
                 }
                 AuthAction::Logout => {
-                    let _ = send_daemon_request(&json!({ "action": "lock" }));
-                    // ADR-0025 decision 4: logout must zeroize the retained
-                    // quick-unlock key. The daemon's lock handler already
-                    // hard-locks; the explicit wipe keeps that guarantee
-                    // independent of how the lock handler is implemented.
-                    let _ = send_daemon_request(&json!({ "action": "wipe_quick_unlock" }));
                     let res = auth_mgr.logout();
                     print_json_redacting_session(&res);
                     if res.ok {
@@ -1210,38 +1236,23 @@ fn main() -> ExitCode {
                     if let Some(ref ctx) = client_ctx {
                         sync_req["client"] = json!(ctx);
                     }
-                    let resp = send_daemon_request(&sync_req);
-                    if let Some(resp_val) = resp {
-                        let ok = resp_val
-                            .get("ok")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
-                        if ok {
-                            ExitCode::SUCCESS
-                        } else {
-                            ExitCode::FAILURE
-                        }
+                    let resp_val = match omawarden::daemon::dispatch_daemon_request(&sync_req) {
+                        Ok(response) => response,
+                        Err(omawarden::daemon::DispatchError::NotSent) => json!({
+                            "ok": false,
+                            "error": "Cannot reach the vault daemon. Restart it and retry synchronization."
+                        }),
+                        Err(omawarden::daemon::DispatchError::Unconfirmed) => json!({
+                            "ok": false,
+                            "error": "Could not confirm synchronization. Check the vault before retrying."
+                        }),
+                    };
+                    let ok = resp_val["ok"].as_bool().unwrap_or(false);
+                    println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
+                    if ok {
+                        ExitCode::SUCCESS
                     } else {
-                        match vault_mgr.sync_with_client(client_ctx.as_ref()) {
-                            Ok(_) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({ "ok": true })).unwrap()
-                                );
-                                ExitCode::SUCCESS
-                            }
-                            Err(e) => {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(
-                                        &json!({ "ok": false, "error": e })
-                                    )
-                                    .unwrap()
-                                );
-                                ExitCode::FAILURE
-                            }
-                        }
+                        ExitCode::FAILURE
                     }
                 }
                 VaultAction::List { category } => {
@@ -1342,6 +1353,7 @@ fn main() -> ExitCode {
             private_key,
             public_key,
             timeout,
+            expected_lock_generation,
         } => {
             let clip_mgr = ClipboardManager::default();
             if !clip_mgr.is_available() {
@@ -1372,7 +1384,12 @@ fn main() -> ExitCode {
             if stdin {
                 let text_val = read_clipboard_stdin();
                 let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-                let ok = clip_mgr.copy(&text_val, sensitive, timeout_val);
+                let ok = match expected_lock_generation {
+                    Some(generation) => {
+                        clip_mgr.copy_in_session(&text_val, sensitive, timeout_val, generation)
+                    }
+                    None => clip_mgr.copy(&text_val, sensitive, timeout_val),
+                };
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
@@ -1404,71 +1421,18 @@ fn main() -> ExitCode {
                 }
             };
 
-            omawarden::daemon::ensure_daemon_running();
-            let st = send_daemon_request(&json!({ "action": "status" }));
-            let is_unlocked = st
-                .as_ref()
-                .and_then(|v| v.get("is_unlocked"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let vault_mgr = VaultManager::with_identity_url(
-                &cfg.server_url,
-                cfg.identity_url.as_deref(),
-                None,
-                None,
-            );
-            let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
-                let daemon_res = send_daemon_request(&json!({
-                    "action": "get_item",
-                    "query": query
-                }));
-                daemon_res
-                    .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
-                    .and_then(|res| {
-                        res.get("item")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    })
-            } else {
-                match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
-                    Ok(user_key) => {
-                        let storage = vault_mgr.storage_mgr.load();
-                        let items = omawarden::api::decrypt_sync_ciphers_with_context(
-                            &storage.ciphers,
-                            &storage.folders,
-                            &storage.organizations,
-                            &user_key,
-                            storage.enc_private_key.as_deref(),
-                        );
-                        let lower = query.to_lowercase();
-                        items.into_iter().find(|i| {
-                            i.id == query
-                                || i.name.eq_ignore_ascii_case(&query)
-                                || i.name.to_lowercase().contains(&lower)
-                        })
-                    }
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
-                                .unwrap()
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                }
-            };
-
-            let item = match item {
-                Some(i) => i,
-                None => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "ok": false,
-                            "error": format!("Item '{}' not found in vault", query)
-                        }))
-                        .unwrap()
-                    );
+            let (item, scope) = match vault_output_item(&cfg, &query, true) {
+                Ok(Some(VaultOutputItem {
+                    item,
+                    scope: Some(scope),
+                })) => (item, scope),
+                result => {
+                    let error = match result {
+                        Ok(Some(_)) => "Could not verify the clipboard source session.".into(),
+                        Ok(None) => format!("Item '{}' not found in vault", query),
+                        Err(error) => error,
+                    };
+                    println!("{}", json!({ "ok": false, "error": error }));
                     return ExitCode::FAILURE;
                 }
             };
@@ -1611,7 +1575,7 @@ fn main() -> ExitCode {
             }
 
             let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-            let ok = clip_mgr.copy(&text_to_copy, is_sensitive, timeout_val);
+            let ok = clip_mgr.copy_vault_output(&text_to_copy, is_sensitive, timeout_val, &scope);
             if ok {
                 println!(
                     "{}",
@@ -1638,224 +1602,55 @@ fn main() -> ExitCode {
         }
 
         Commands::Totp { query, stdin, copy } => {
-            let clip_mgr = ClipboardManager::default();
+            let query = if stdin { None } else { query.as_deref() };
+            if query.is_some_and(|q| {
+                q.starts_with("otpauth://") || q.starts_with("otpauth-migration://")
+            }) {
+                eprintln!(
+                    "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | omawarden totp --stdin"
+                );
+                return ExitCode::FAILURE;
+            }
 
-            let (totp_res, item_info) = if stdin {
-                let stdin_val = read_secret_stdin();
-                if stdin_val.is_empty() {
-                    (None, None)
-                } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
-                    if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
-                        (generate_totp(sec, None, 6, 30), None)
-                    } else if let Some(q) = val
-                        .get("query")
-                        .or_else(|| val.get("id"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let daemon_res = send_daemon_request(&json!({
-                            "action": "totp",
-                            "query": q
-                        }));
-                        if let Some(res) = daemon_res {
-                            if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                                let code = res
-                                    .get("code")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
-                                let period =
-                                    res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
-                                let name =
-                                    res.get("name").and_then(|v| v.as_str()).map(String::from);
-                                let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
-                                (
-                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
-                                    if let (Some(id), Some(name)) = (id, name) {
-                                        Some((id, name))
-                                    } else {
-                                        None
-                                    },
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        } else {
-                            (None, None)
-                        }
-                    } else {
-                        (generate_totp(&stdin_val, None, 6, 30), None)
-                    }
-                } else {
-                    (generate_totp(&stdin_val, None, 6, 30), None)
-                }
-            } else if let Some(q) = query {
-                let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
-                if is_uri {
-                    eprintln!(
-                        "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | omawarden totp --stdin"
-                    );
+            let output = match totp_output(&cfg, query, copy) {
+                Ok(Some(output)) => output,
+                result => {
+                    let error = result.err().unwrap_or_else(|| {
+                        "Failed to generate TOTP: item not found or secret is invalid".into()
+                    });
+                    println!("{}", json!({ "ok": false, "error": error }));
                     return ExitCode::FAILURE;
-                } else {
-                    omawarden::daemon::ensure_daemon_running();
-                    let st = send_daemon_request(&json!({ "action": "status" }));
-                    let is_unlocked = st
-                        .as_ref()
-                        .and_then(|v| v.get("is_unlocked"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-
-                    let vault_mgr = VaultManager::with_identity_url(
-                        &cfg.server_url,
-                        cfg.identity_url.as_deref(),
-                        None,
-                        None,
-                    );
-                    let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
-                        let daemon_res = send_daemon_request(&json!({
-                            "action": "get_item",
-                            "query": q,
-                            "touch": false
-                        }));
-                        daemon_res
-                            .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
-                            .and_then(|res| {
-                                res.get("item")
-                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            })
-                    } else {
-                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
-                            Ok(user_key) => {
-                                let storage = vault_mgr.storage_mgr.load();
-                                let items = omawarden::api::decrypt_sync_ciphers_with_context(
-                                    &storage.ciphers,
-                                    &storage.folders,
-                                    &storage.organizations,
-                                    &user_key,
-                                    storage.enc_private_key.as_deref(),
-                                );
-                                let lower = q.to_lowercase();
-                                items.into_iter().find(|i| {
-                                    i.id == q
-                                        || i.name.eq_ignore_ascii_case(&q)
-                                        || i.name.to_lowercase().contains(&lower)
-                                })
-                            }
-                            Err(_) => None,
-                        }
-                    };
-
-                    if let Some(it) = item {
-                        let seed = it
-                            .login
-                            .as_ref()
-                            .and_then(|l| l.get("totp"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        (generate_totp(seed, None, 6, 30), Some((it.id, it.name)))
-                    } else {
-                        (generate_totp(&q, None, 6, 30), None)
-                    }
-                }
-            } else {
-                let stdin_val = read_secret_stdin();
-                if stdin_val.is_empty() {
-                    (None, None)
-                } else if let Ok(val) = serde_json::from_str::<Value>(&stdin_val) {
-                    if let Some(sec) = val.get("secret").and_then(|v| v.as_str()) {
-                        (generate_totp(sec, None, 6, 30), None)
-                    } else if let Some(q) = val
-                        .get("query")
-                        .or_else(|| val.get("id"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let daemon_res = send_daemon_request(&json!({
-                            "action": "totp",
-                            "query": q
-                        }));
-                        if let Some(res) = daemon_res {
-                            if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                                let code = res
-                                    .get("code")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let ttl = res.get("ttl").and_then(|v| v.as_u64()).unwrap_or(30);
-                                let period =
-                                    res.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
-                                let name =
-                                    res.get("name").and_then(|v| v.as_str()).map(String::from);
-                                let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
-                                (
-                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
-                                    if let (Some(id), Some(name)) = (id, name) {
-                                        Some((id, name))
-                                    } else {
-                                        None
-                                    },
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        } else {
-                            (None, None)
-                        }
-                    } else {
-                        (generate_totp(&stdin_val, None, 6, 30), None)
-                    }
-                } else {
-                    (generate_totp(&stdin_val, None, 6, 30), None)
                 }
             };
-
-            match totp_res {
-                Some(res) => {
-                    if copy {
-                        let ok = clip_mgr.copy(&res.code, true, 30);
-                        let mut resp = json!({
-                            "ok": ok,
-                            "code": res.code,
-                            "ttl": res.ttl,
-                            "period": res.period,
-                            "copied": true
-                        });
-                        if let Some((id, name)) = item_info {
-                            resp["id"] = json!(id);
-                            resp["name"] = json!(name);
-                        }
-                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
-                        if ok {
-                            ExitCode::SUCCESS
-                        } else {
-                            ExitCode::FAILURE
-                        }
-                    } else {
-                        let mut resp = json!({
-                            "ok": true,
-                            "code": res.code,
-                            "ttl": res.ttl,
-                            "period": res.period
-                        });
-                        if let Some((id, name)) = item_info {
-                            resp["id"] = json!(id);
-                            resp["name"] = json!(name);
-                        }
-                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
-                        ExitCode::SUCCESS
-                    }
-                }
-                None => {
+            let res = output.result;
+            if copy {
+                let clipboard = ClipboardManager::default();
+                let copied = match output.scope {
+                    Some(scope) => clipboard.copy_vault_output(&res.code, true, 30, &scope),
+                    None => clipboard.copy(&res.code, true, 30),
+                };
+                if !copied {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "ok": false,
-                            "error": "Failed to generate TOTP: item not found or secret is invalid"
-                        }))
-                        .unwrap()
+                        json!({
+                            "ok": false, "error": "Could not copy TOTP. Verify the vault session and retry."
+                        })
                     );
-                    ExitCode::FAILURE
+                    return ExitCode::FAILURE;
                 }
             }
+
+            let mut response =
+                json!({ "ok": true, "code": res.code, "ttl": res.ttl, "period": res.period });
+            if let Some((id, name)) = output.item {
+                response["id"] = json!(id);
+                response["name"] = json!(name);
+            }
+            if copy {
+                response["copied"] = json!(true);
+            }
+            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+            ExitCode::SUCCESS
         }
 
         Commands::Attachment { action } => match action {
@@ -1866,6 +1661,7 @@ fn main() -> ExitCode {
                 output_dir,
                 open,
                 preview,
+                expected_lock_generation,
             } => {
                 let res = get_attachment(
                     &item_id,
@@ -1875,7 +1671,7 @@ fn main() -> ExitCode {
                     open,
                     preview,
                     None,
-                    None,
+                    expected_lock_generation.as_deref(),
                     true,
                 );
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -1886,9 +1682,16 @@ fn main() -> ExitCode {
                 }
             }
             AttachmentAction::Clean { item_id } => {
-                omawarden::attachment::clear_preview_attachments(item_id.as_deref());
-                println!("{}", serde_json::json!({ "ok": true, "status": "cleaned" }));
-                ExitCode::SUCCESS
+                match omawarden::attachment::clean_previews(item_id.as_deref()) {
+                    Ok(()) => {
+                        println!("{}", json!({ "ok": true, "status": "cleaned" }));
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        println!("{}", json!({ "ok": false, "error": error.to_string() }));
+                        ExitCode::FAILURE
+                    }
+                }
             }
         },
 
@@ -2080,9 +1883,9 @@ fn main() -> ExitCode {
                                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                             })
                     } else {
-                        match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
+                        let storage = vault_mgr.storage_mgr.load();
+                        match ensure_unlocked_user_key(&vault_mgr, &storage) {
                             Ok(user_key) => {
-                                let storage = vault_mgr.storage_mgr.load();
                                 let items = omawarden::api::decrypt_sync_ciphers_with_context(
                                     &storage.ciphers,
                                     &storage.folders,
@@ -2355,19 +2158,152 @@ fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
     Ok(reply)
 }
 
+struct VaultOutputItem {
+    item: VaultItem,
+    scope: Option<ClipboardScope>,
+}
+
+fn vault_output_item(
+    cfg: &Config,
+    query: &str,
+    touch: bool,
+) -> Result<Option<VaultOutputItem>, String> {
+    ensure_daemon_running();
+    let unlocked = send_daemon_request(&json!({ "action": "status" }))
+        .is_some_and(|reply| reply["is_unlocked"] == true);
+    if unlocked {
+        let Some(mut reply) = send_daemon_request(&json!({
+            "action": "get_item", "query": query, "touch": touch
+        }))
+        .filter(|reply| reply["ok"] == true) else {
+            return Ok(None);
+        };
+        let scope = reply["lock_generation"]
+            .as_u64()
+            .map(ClipboardScope::Session);
+        return Ok(serde_json::from_value(reply["item"].take())
+            .ok()
+            .map(|item| VaultOutputItem { item, scope }));
+    }
+
+    let vault =
+        VaultManager::with_identity_url(&cfg.server_url, cfg.identity_url.as_deref(), None, None);
+    let storage = vault.storage_mgr.load();
+    let key = ensure_unlocked_user_key(&vault, &storage)?;
+    let query_lower = query.to_lowercase();
+    let item = omawarden::api::decrypt_sync_ciphers_with_context(
+        &storage.ciphers,
+        &storage.folders,
+        &storage.organizations,
+        &key,
+        storage.enc_private_key.as_deref(),
+    )
+    .into_iter()
+    .find(|item| {
+        item.id == query
+            || item.name.eq_ignore_ascii_case(query)
+            || item.name.to_lowercase().contains(&query_lower)
+    });
+    Ok(item.map(|item| VaultOutputItem {
+        item,
+        scope: storage
+            .credential_id
+            .map(|credential_id| ClipboardScope::Cache {
+                path: vault.storage_mgr.file_path,
+                credential_id,
+            }),
+    }))
+}
+
+struct TotpOutput {
+    result: TotpResult,
+    item: Option<(String, String)>,
+    scope: Option<ClipboardScope>,
+}
+
+impl TotpOutput {
+    fn standalone(secret: &str) -> Option<Self> {
+        generate_totp(secret, None, 6, 30).map(|result| Self {
+            result,
+            item: None,
+            scope: None,
+        })
+    }
+}
+
+fn totp_output(
+    cfg: &Config,
+    query: Option<&str>,
+    copy: bool,
+) -> Result<Option<TotpOutput>, String> {
+    let unverified = || "Could not verify the clipboard source session.".to_string();
+    if let Some(query) = query {
+        let Some(found) = vault_output_item(cfg, query, false).ok().flatten() else {
+            return Ok(TotpOutput::standalone(query));
+        };
+        if copy && found.scope.is_none() {
+            return Err(unverified());
+        }
+        let output = found
+            .item
+            .login
+            .as_ref()
+            .and_then(|login| login["totp"].as_str())
+            .and_then(|seed| generate_totp(seed, None, 6, 30));
+        return Ok(output.map(|result| TotpOutput {
+            result,
+            item: Some((found.item.id, found.item.name)),
+            scope: found.scope,
+        }));
+    }
+
+    let text = read_secret_stdin();
+    let input = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+    if let Some(secret) = input["secret"].as_str() {
+        return Ok(TotpOutput::standalone(secret));
+    }
+    let Some(query) = input["query"].as_str().or_else(|| input["id"].as_str()) else {
+        return Ok(TotpOutput::standalone(&text));
+    };
+    let Some(reply) = send_daemon_request(&json!({ "action": "totp", "query": query }))
+        .filter(|reply| reply["ok"] == true)
+    else {
+        return Ok(None);
+    };
+    let scope = reply["lock_generation"]
+        .as_u64()
+        .map(ClipboardScope::Session);
+    if copy && scope.is_none() {
+        return Err(unverified());
+    }
+    Ok(reply["code"].as_str().map(|code| TotpOutput {
+        result: TotpResult {
+            code: code.to_owned(),
+            ttl: reply["ttl"].as_u64().unwrap_or(30),
+            period: reply["period"].as_u64().unwrap_or(30),
+        },
+        item: reply["id"]
+            .as_str()
+            .zip(reply["name"].as_str())
+            .map(|(id, name)| (id.to_owned(), name.to_owned())),
+        scope,
+    }))
+}
+
 fn ensure_unlocked_user_key(
     vault_mgr: &VaultManager,
-    _server_url: &str,
+    st: &VaultStorage,
 ) -> Result<omawarden::crypto::SymmetricCryptoKey, String> {
+    if st.enc_user_key.is_none() {
+        return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
+    }
+    st.check_unlock_credentials()?;
     if let Some(key) = vault_mgr.get_user_key() {
         return Ok(key);
     }
 
-    let st = vault_mgr.storage_mgr.load();
-    if st.enc_user_key.is_none() {
-        return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
-    }
-
+    let context = send_daemon_request(&json!({ "action": "ping" }))
+        .and_then(|reply| reply["unlock_context"].as_str().map(str::to_owned));
     let (pwd, ..) = read_auth_payload();
     if pwd.is_empty() {
         return Err("Vault is locked. Please unlock the vault first using 'omawarden auth unlock' or provide Master Password.".to_string());
@@ -2375,10 +2311,15 @@ fn ensure_unlocked_user_key(
 
     let user_key = vault_mgr
         .storage_mgr
-        .unlock_user_key(&pwd, &st)
+        .unlock_user_key(&pwd, st)
         .map_err(|e| format!("Unlock failed: {:?}", e))?;
 
-    let _ = send_daemon_request(&json!({ "action": "unlock", "password": pwd }));
+    if let Some(context) = context {
+        let _ = send_daemon_request(&json!({
+            "action": "unlock", "password": pwd, "expected_unlock_context": context,
+            "expected_credential_id": st.credential_id
+        }));
+    }
 
     Ok(user_key)
 }
@@ -2386,6 +2327,24 @@ fn ensure_unlocked_user_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_decryption_rejects_an_unscoped_cache_even_with_a_cached_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = omawarden::storage::StorageManager::new(dir.path().join("data.json"));
+        manager
+            .save(&omawarden::storage::VaultStorage {
+                enc_user_key: Some("wrapped-fixture-key".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vault = VaultManager::new("", Some(manager), None);
+        *vault.is_unlocked.write().unwrap() = true;
+        *vault.user_key.write().unwrap() =
+            Some(omawarden::crypto::SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap());
+        let result = ensure_unlocked_user_key(&vault, &vault.storage_mgr.load());
+        assert!(matches!(result, Err(error) if error.contains("Sign in again")));
+    }
 
     #[test]
     fn test_parse_cli_bool_accepts_known_values() {

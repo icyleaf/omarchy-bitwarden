@@ -33,6 +33,7 @@ To streamline developer workflows on Linux (especially in Omarchy desktop enviro
    - Send `POST /api/ciphers` with modern `Bitwarden-Client-Version` and `Bitwarden-Client-Name` headers.
    - The daemon submits the create and returns an item receipt (ID and server revision). A confirmed reply updates the encrypted disk cache and the unlocked in-memory index for the same account and lock cycle.
    - `saved_needs_sync` means the server accepted the write but the local cache could not be updated. `unknown` means the caller could not confirm the write. Sync before attempting another create in either case. A definitive HTTP 401 allows one credential refresh and retry.
+   - General synchronization, cache publication, and unlock invariants are specified in [ADR 0027](0027-conditional-vault-snapshot-publication.md).
    - Upgrade the CLI and daemon together. After upgrading an unlocked older daemon, lock the vault so the CLI can replace it. Use `ssh-key export` to explicitly retrieve key material.
 
 4. **Security & Permission Hardening**:

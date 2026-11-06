@@ -20,6 +20,8 @@ pub struct VaultStorage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
     #[serde(default, skip_serializing)]
@@ -42,17 +44,112 @@ pub struct VaultStorage {
 }
 
 impl VaultStorage {
+    pub(crate) fn scoped_credential_id(&self) -> Option<&str> {
+        self.credential_id
+            .as_deref()
+            .filter(|id| crate::credential_slots::valid_id(id))
+    }
+
+    pub(crate) fn has_login_metadata(&self) -> bool {
+        !self.user_email.is_empty()
+            || self.client_id.is_some()
+            || self.enc_user_key.is_some()
+            || self.access_token.is_some()
+            || self.refresh_token.is_some()
+    }
+
+    /// Require a scoped credential reference before unlocking cached ciphertext.
+    ///
+    /// Offline unlock uses the encrypted cache and the master password. Remote
+    /// requests resolve tokens separately, so a locked keyring does not block it.
+    ///
+    /// # Errors
+    /// A missing or malformed reference requires a fresh sign-in.
+    pub fn check_unlock_credentials(&self) -> Result<(), &'static str> {
+        self.scoped_credential_id()
+            .map(|_| ())
+            .ok_or("Sign in again to use account-scoped credentials.")
+    }
+
     pub(crate) fn same_account(&self, other: &Self) -> bool {
         self.server_url == other.server_url
             && self.user_email == other.user_email
             && self.user_id == other.user_id
             && self.enc_user_key == other.enc_user_key
     }
+
+    pub(crate) fn same_active_slot(&self, other: &Self) -> bool {
+        self.same_account(other)
+            && self.identity_url == other.identity_url
+            && self.credential_id == other.credential_id
+    }
+
+    pub(crate) fn credential_identity_url<'a>(
+        &'a self,
+        configured: Option<&'a str>,
+    ) -> Option<&'a str> {
+        // The identity endpoint is bound to the credential slot at login.
+        if self.scoped_credential_id().is_some() {
+            self.identity_url.as_deref()
+        } else {
+            configured.or(self.identity_url.as_deref())
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct StorageManager {
     pub file_path: PathBuf,
+    #[cfg(test)]
+    pub(crate) fail_credential_cleanup_sync: bool,
+}
+
+/// Pins the original inode until commit, preventing inode reuse from passing
+/// a stale comparison. All production cache writers replace the file atomically.
+pub(crate) struct CacheSnapshot {
+    pub(crate) storage: VaultStorage,
+    source: Option<(fs::File, fs::Metadata)>,
+    write_revision: Option<[u8; 16]>,
+}
+
+impl CacheSnapshot {
+    /// Call under account_guard when using this as a commit precondition.
+    pub(crate) fn is_current(&self, manager: &StorageManager) -> std::io::Result<bool> {
+        if let Some(expected) = self.write_revision {
+            let barrier = match manager.cipher_barrier() {
+                Ok(barrier) => barrier,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            if StorageManager::current_write_revision(&barrier)? != expected {
+                return Ok(false);
+            }
+        }
+        use std::os::unix::fs::MetadataExt;
+        match (&self.source, manager.file_path.metadata()) {
+            (Some((_file, original)), Ok(current)) => Ok((
+                original.dev(),
+                original.ino(),
+                original.len(),
+                original.mtime(),
+                original.mtime_nsec(),
+                original.ctime(),
+                original.ctime_nsec(),
+            ) == (
+                current.dev(),
+                current.ino(),
+                current.len(),
+                current.mtime(),
+                current.mtime_nsec(),
+                current.ctime(),
+                current.ctime_nsec(),
+            )),
+            (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            (_, Err(e)) => Err(e),
+            (None, Ok(_)) => Ok(false),
+        }
+    }
 }
 
 pub fn resolve_legacy_storage_path() -> PathBuf {
@@ -110,15 +207,17 @@ pub fn resolve_default_storage_path() -> PathBuf {
 
 impl Default for StorageManager {
     fn default() -> Self {
-        Self {
-            file_path: resolve_default_storage_path(),
-        }
+        Self::new(resolve_default_storage_path())
     }
 }
 
 impl StorageManager {
     pub fn new(path: PathBuf) -> Self {
-        Self { file_path: path }
+        Self {
+            file_path: path,
+            #[cfg(test)]
+            fail_credential_cleanup_sync: false,
+        }
     }
 
     pub fn load(&self) -> VaultStorage {
@@ -129,6 +228,137 @@ impl StorageManager {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => VaultStorage::default(),
         }
+    }
+
+    /// Capture before remote work. Missing storage is valid for first login;
+    /// unreadable or malformed storage must never become an empty snapshot.
+    pub(crate) fn snapshot(&self) -> std::io::Result<CacheSnapshot> {
+        let barrier = self.cipher_barrier()?;
+        let revision = Self::current_write_revision(&barrier)?;
+        let mut snapshot = self.cache_snapshot()?;
+        snapshot.write_revision = Some(revision);
+        Ok(snapshot)
+    }
+
+    // Local decryption and receipt edits pin the cached ciphertext, not a
+    // remote response. They need a cache-version check, but must not wait for
+    // HTTP writes: locking and re-unlocking cancels an old receipt separately.
+    pub(crate) fn cache_snapshot(&self) -> std::io::Result<CacheSnapshot> {
+        match fs::File::open(&self.file_path) {
+            Ok(source) => {
+                let metadata = source.metadata()?;
+                let storage = serde_json::from_reader(std::io::BufReader::new(&source))?;
+                Ok(CacheSnapshot {
+                    storage,
+                    source: Some((source, metadata)),
+                    write_revision: None,
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CacheSnapshot {
+                storage: VaultStorage::default(),
+                source: None,
+                write_revision: None,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_cipher_barrier(&self) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = self.file_path.parent() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.file_path.with_extension("writes.lock"))
+    }
+
+    fn current_write_revision(file: &fs::File) -> std::io::Result<[u8; 16]> {
+        use std::os::unix::fs::FileExt;
+        let mut revision = [0; 16];
+        match file.metadata()?.len() {
+            0 => {}
+            16 => file.read_exact_at(&mut revision, 0)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid cipher write revision",
+                ))
+            }
+        }
+        Ok(revision)
+    }
+
+    fn cipher_barrier(&self) -> std::io::Result<fs::File> {
+        let barrier = self.open_cipher_barrier()?;
+        barrier.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Cipher write in progress. Please retry synchronization.",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
+        Ok(barrier)
+    }
+
+    /// Shared operation marker, held through the HTTP request and receipt.
+    /// It contains no secrets and never blocks lock(), which does not use it.
+    /// Sync/login readers fail promptly while any request is outstanding.
+    pub(crate) fn begin_cipher_write(&self) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::FileExt;
+        let _account = self.account_guard()?;
+        let barrier = self.open_cipher_barrier()?;
+        barrier.try_lock_shared().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Vault snapshot in progress. Please retry the write.",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
+        Self::current_write_revision(&barrier)?;
+        barrier.write_all_at(&rand::random::<[u8; 16]>(), 0)?;
+        Ok(barrier)
+    }
+
+    /// Serialize outside the session critical section; persist only after
+    /// validating the snapshot under account_guard. NamedTempFile uses 0600.
+    pub(crate) fn stage(&self, data: &VaultStorage) -> std::io::Result<tempfile::NamedTempFile> {
+        use std::io::{BufWriter, Write};
+        let parent = self
+            .file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        {
+            let mut writer = BufWriter::new(staged.as_file_mut());
+            serde_json::to_writer_pretty(&mut writer, data)?;
+            writer.flush()?;
+        }
+        Ok(staged)
+    }
+
+    pub(crate) fn sync_parent(&self) -> std::io::Result<()> {
+        let parent = self
+            .file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::File::open(parent)?.sync_all()
+    }
+
+    pub(crate) fn stage_durable(
+        &self,
+        data: &VaultStorage,
+    ) -> std::io::Result<tempfile::NamedTempFile> {
+        let staged = self.stage(data)?;
+        staged.as_file().sync_all()?;
+        Ok(staged)
     }
 
     /// Serialize credential replacement and revocation across CLI and daemon processes.

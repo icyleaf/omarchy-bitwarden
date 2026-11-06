@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -46,6 +46,48 @@ pub fn get_runtime_dir() -> PathBuf {
 
 pub fn get_socket_path() -> PathBuf {
     get_runtime_dir().join("omawarden.sock")
+}
+
+// The gate belongs to the runtime (clipboard and previews), not to a cache
+// inode. Only final output and its revocation take it.
+pub(crate) fn lock_session_outputs() -> io::Result<fs::File> {
+    let gate = open_daemon_lock(&get_socket_path().with_extension("outputs.lock"))?;
+    gate.lock()?;
+    Ok(gate)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct OutputSession {
+    pub(crate) lock_generation: u64,
+    pub(crate) credential_id: String,
+}
+
+pub(crate) fn output_session() -> io::Result<OutputSession> {
+    let changed = || io::Error::other("Vault session changed. Unlock the vault and try again.");
+    let mut stream = connect_daemon().map_err(|_| changed())?;
+    let timeout = Some(Duration::from_secs(2));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    writeln!(stream, "{}", json!({"action":"output_generation"}))?;
+    let mut reply = String::new();
+    BufReader::new(stream).take(256).read_line(&mut reply)?;
+    serde_json::from_str::<Option<OutputSession>>(&reply)?
+        .filter(|session| crate::credential_slots::valid_id(&session.credential_id))
+        .ok_or_else(changed)
+}
+
+/// Hold the output gate while publishing data from the named unlocked session.
+#[doc(hidden)]
+pub fn guard_session_output(expected: u64) -> io::Result<fs::File> {
+    let gate = lock_session_outputs()?;
+    // The generation query takes neither the output gate nor the restore
+    // guard. It must remain safe to answer while a revocation waits for us.
+    if output_session()?.lock_generation != expected {
+        return Err(io::Error::other(
+            "Vault session changed. Unlock the vault and try again.",
+        ));
+    }
+    Ok(gate)
 }
 
 /// Validates that a socket file (and its parent directory) is owned by the current UID
@@ -133,13 +175,21 @@ fn check_running_daemon(ping: &Value, our_commit: &str) -> DaemonCheck {
 pub fn ensure_daemon_running() {
     if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
         let check = check_running_daemon(&resp, env!("GIT_HASH"));
-        if check == DaemonCheck::Defer {
+        if check == DaemonCheck::UpToDate {
+            return;
+        }
+        // An older build may still hold plaintext from an unscoped login.
+        // Replace it when upgrading that cache to the sign-in requirement.
+        if check == DaemonCheck::Defer
+            && StorageManager::default()
+                .load()
+                .scoped_credential_id()
+                .is_some()
+        {
             crate::log_info!(
                 "omawarden:daemon",
                 "Running daemon is from another build but the vault is unlocked; keeping it until it locks"
             );
-        }
-        if check != DaemonCheck::Replace {
             return;
         }
         // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
@@ -193,33 +243,7 @@ pub enum DispatchError {
 
 /// Preserve the dispatch boundary for callers performing a non-idempotent write.
 pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
-    let socket_path = get_socket_path();
-    if !socket_path.exists() {
-        return Err(DispatchError::NotSent);
-    }
-
-    if let Err(e) = validate_socket_path(&socket_path) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to connect to socket {}: {}",
-            socket_path.display(),
-            e
-        );
-        return Err(DispatchError::NotSent);
-    }
-
-    let mut stream = UnixStream::connect(&socket_path).map_err(|_| DispatchError::NotSent)?;
-
-    // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
-    if let Err(e) = verify_peer_credentials(&stream) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to send request: server peer UID verification failed: {}",
-            e
-        );
-        return Err(DispatchError::NotSent);
-    }
-
+    let mut stream = connect_daemon()?;
     let mut payload_val = req.clone();
     if let Value::Object(ref mut map) = payload_val {
         if !map.contains_key("client") {
@@ -242,6 +266,37 @@ pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
         .map_err(|_| DispatchError::Unconfirmed)?;
 
     serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
+}
+
+pub(crate) fn connect_daemon() -> Result<UnixStream, DispatchError> {
+    let socket_path = get_socket_path();
+    if !socket_path.exists() {
+        return Err(DispatchError::NotSent);
+    }
+
+    if let Err(e) = validate_socket_path(&socket_path) {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Refusing to connect to socket {}: {}",
+            socket_path.display(),
+            e
+        );
+        return Err(DispatchError::NotSent);
+    }
+
+    let stream = UnixStream::connect(&socket_path).map_err(|_| DispatchError::NotSent)?;
+
+    // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
+    if let Err(e) = verify_peer_credentials(&stream) {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Refusing to send request: server peer UID verification failed: {}",
+            e
+        );
+        return Err(DispatchError::NotSent);
+    }
+
+    Ok(stream)
 }
 
 pub struct DaemonState {
@@ -455,7 +510,7 @@ impl DaemonState {
     /// ADR-0025: re-unlock the vault behind a polkit system-authentication
     /// check instead of the master password. Fail-closed on every rejection;
     /// three consecutive denials wipe the retained key.
-    pub fn perform_quick_unlock(&self) -> Result<usize, &'static str> {
+    pub fn perform_quick_unlock(&self) -> Result<usize, String> {
         self.perform_quick_unlock_with_timeout(crate::polkit::DEFAULT_CHECK_TIMEOUT)
     }
 
@@ -466,25 +521,25 @@ impl DaemonState {
     pub fn perform_quick_unlock_with_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, String> {
         if !self.quick_unlock_enabled() {
-            return Err("Quick unlock is disabled in settings.");
+            return Err("Quick unlock is disabled in settings.".into());
         }
         if self.vault_mgr.is_unlocked() {
             // Already unlocked: never re-prompt or re-arm timers.
-            return Err("Vault is already unlocked.");
+            return Err("Vault is already unlocked.".into());
         }
         if self.polkit_binary.as_os_str().is_empty() {
-            return Err("System authentication is unavailable right now.");
+            return Err("System authentication is unavailable right now.".into());
         }
         // Same gate quick_unlock_ready() advertises: without the policy the
         // pkcheck call can only fail (exit 127, action not registered), so
         // the SSH path must not even attempt it.
         if !self.polkit_policy_registered {
-            return Err("System authentication is unavailable right now.");
+            return Err("System authentication is unavailable right now.".into());
         }
         if !self.vault_mgr.quick_unlock_available() {
-            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+            return Err("Quick unlock is unavailable: the vault was hard-locked.".into());
         }
         // One interactive prompt at a time; concurrent callers fail fast and
         // the overlay falls back to the master password field. A panic in an
@@ -495,14 +550,15 @@ impl DaemonState {
             Ok(g) => g,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
-                return Err("Quick unlock is already in progress.");
+                return Err("Quick unlock is already in progress.".into());
             }
         };
         // Re-check: a wipe may have raced with acquiring the busy lock.
         if !self.vault_mgr.quick_unlock_available() {
-            return Err("Quick unlock is unavailable: the vault was hard-locked.");
+            return Err("Quick unlock is unavailable: the vault was hard-locked.".into());
         }
 
+        let context = self.vault_mgr.unlock_context();
         match crate::polkit::check(
             crate::polkit::POLKIT_ACTION_ID,
             &self.polkit_binary,
@@ -510,6 +566,14 @@ impl DaemonState {
         ) {
             crate::polkit::PolkitOutcome::Authorized => {}
             crate::polkit::PolkitOutcome::Denied => {
+                let _restore = self
+                    .vault_mgr
+                    .restore_guard
+                    .lock()
+                    .map_err(|_| "Vault state unavailable")?;
+                if self.vault_mgr.unlock_context() != context {
+                    return Err("Vault session changed during quick unlock.".into());
+                }
                 let strike = {
                     match self.quick_unlock_failures.lock() {
                         Ok(mut n) => {
@@ -525,21 +589,29 @@ impl DaemonState {
                         "Quick unlock denied {} times; wiping retained key",
                         strike
                     );
-                    self.vault_mgr.wipe_quick_unlock();
+                    self.vault_mgr.wipe_quick_unlock_inner();
                     if let Ok(mut n) = self.quick_unlock_failures.lock() {
                         *n = 0;
                     }
                 }
-                return Err("System authentication was denied.");
+                return Err("System authentication was denied.".into());
             }
             crate::polkit::PolkitOutcome::Unavailable(reason) => {
                 crate::log_warn!("omawarden:daemon", "polkit unavailable: {}", reason);
-                return Err("System authentication is unavailable right now.");
+                return Err("System authentication is unavailable right now.".into());
             }
         }
 
-        match self.vault_mgr.quick_unlock_restore() {
+        match self.vault_mgr.quick_unlock_restore_in_context(&context) {
             Ok(count) => {
+                let _restore = self
+                    .vault_mgr
+                    .restore_guard
+                    .lock()
+                    .map_err(|_| "Vault state unavailable")?;
+                if self.vault_mgr.unlock_context() != context {
+                    return Err("Vault was locked during quick unlock.".into());
+                }
                 if let Ok(mut n) = self.quick_unlock_failures.lock() {
                     *n = 0;
                 }
@@ -556,7 +628,7 @@ impl DaemonState {
             }
             Err(e) => {
                 crate::log_error!("omawarden:daemon", "Quick unlock restore failed: {}", e);
-                Err("Quick unlock failed to restore the vault.")
+                Err(e)
             }
         }
     }
@@ -623,7 +695,6 @@ impl DaemonState {
                     "Maximum session lifetime reached; locking vault"
                 );
                 self.lock();
-                crate::attachment::clear_preview_attachments(None);
                 return true;
             }
 
@@ -697,9 +768,7 @@ impl DaemonState {
         }
     }
 
-    /// Hard lock (ADR-0025): wipes the retained key. Used by explicit lock,
-    /// logout, stop, sleep and every other non-soft path.
-    pub fn lock(&self) {
+    pub(crate) fn reset_session_timers(&self) {
         if let Ok(mut ua) = self.unlocked_at.lock() {
             *ua = None;
         }
@@ -709,8 +778,18 @@ impl DaemonState {
         if let Ok(mut n) = self.quick_unlock_failures.lock() {
             *n = 0;
         }
-        self.vault_mgr.hard_lock();
-        let _ = crate::clipboard::ClipboardManager::default().clear();
+    }
+
+    /// Hard lock (ADR-0025). Returns whether output cleanup also succeeded.
+    pub fn lock(&self) -> bool {
+        let _restore = self
+            .vault_mgr
+            .restore_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let outputs_cleared = self.vault_mgr.hard_lock_inner();
+        self.reset_session_timers();
+        outputs_cleared
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -727,11 +806,29 @@ impl DaemonState {
         } else {
             self.vault_mgr.hard_lock();
         }
-        let _ = crate::clipboard::ClipboardManager::default().clear();
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
-        let count = self.vault_mgr.unlock(password)?;
+        self.unlock_in_context(password, &self.vault_mgr.unlock_context(), None)
+    }
+
+    fn unlock_in_context(
+        &self,
+        password: &str,
+        expected: &str,
+        credential_id: Option<&str>,
+    ) -> Result<usize, String> {
+        let count = self
+            .vault_mgr
+            .unlock_in_context(password, expected, credential_id)?;
+        let _restore = self
+            .vault_mgr
+            .restore_guard
+            .lock()
+            .map_err(|_| "Vault state unavailable")?;
+        if self.vault_mgr.unlock_context() != expected {
+            return Err("Vault was locked during unlock.".into());
+        }
         if let Ok(mut ua_guard) = self.unlocked_at.lock() {
             *ua_guard = Some(Instant::now());
         }
@@ -782,15 +879,76 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
     )
 }
 
-pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
-    let socket_path = get_socket_path();
-    if socket_path.exists() {
-        validate_socket_path(&socket_path)?;
-        let _ = fs::remove_file(&socket_path);
-    }
+fn open_daemon_lock(path: &Path) -> io::Result<fs::File> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::OpenOptionsExt;
 
+    if let Some(parent) = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && !p.exists())
+    {
+        crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid daemon instance lock",
+        ));
+    }
+    Ok(file)
+}
+
+fn lock_daemon_instance(path: &Path) -> io::Result<fs::File> {
+    use std::io::{Error, ErrorKind};
+
+    let file = open_daemon_lock(path)?;
+    file.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => {
+            Error::new(ErrorKind::AlreadyExists, "Vault daemon already running")
+        }
+        fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
+pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let socket_path = get_socket_path();
     if let Some(parent) = socket_path.parent() {
         crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+    }
+    // One owner for the socket and one for the encrypted cache, even when a
+    // second process starts with a different runtime or configuration path.
+    let _socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
+    let _cache_owner = lock_daemon_instance(
+        &state
+            .vault_mgr
+            .storage_mgr
+            .file_path
+            .with_extension("daemon.lock"),
+    )?;
+    if socket_path.exists() {
+        validate_socket_path(&socket_path)?;
+        match UnixStream::connect(&socket_path) {
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorKind::AlreadyExists,
+                    "Vault daemon already running",
+                ))
+            }
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                fs::remove_file(&socket_path)?
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     let listener = UnixListener::bind(&socket_path)?;
@@ -1004,7 +1162,10 @@ pub fn is_system_or_screen_locked() -> bool {
     system_lock_signal() != LockSignal::None
 }
 
-fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+pub(crate) fn handle_client(
+    mut stream: UnixStream,
+    state: Arc<DaemonState>,
+) -> std::io::Result<()> {
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
             "omawarden:daemon",
@@ -1034,22 +1195,24 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
     };
 
     drop(line);
-    drop(reader);
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    let is_unlocked = state.vault_mgr.is_unlocked();
+    if action == "prepare_account_login" {
+        return crate::account_activation::serve(&state, &mut stream, &mut reader, &req);
+    }
+    drop(reader);
+    if action == "output_generation" {
+        return writeln!(stream, "{}", json!(state.vault_mgr.output_session()));
+    }
+    let session = state.vault_mgr.cache_session().ok();
+    let is_unlocked = session.is_some_and(|s| s.unlocked);
 
-    let is_privileged = matches!(
+    let reads_plaintext = matches!(
         action,
-        "list"
-            | "search"
-            | "get_item"
-            | "get_ssh_key"
-            | "get_attachment_key"
-            | "ssh_key_create"
-            | "ssh_key_create_v2"
-            | "sync"
+        "list" | "search" | "get_item" | "get_ssh_key" | "get_attachment_key"
     ) || (action == "totp"
-        && (req.get("query").is_some() || req.get("id").is_some()))
+        && (req.get("query").is_some() || req.get("id").is_some()));
+    let is_privileged = reads_plaintext
+        || matches!(action, "ssh_key_create" | "ssh_key_create_v2" | "sync")
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
 
     if is_privileged && !is_unlocked {
@@ -1068,6 +1231,17 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         );
         return Ok(());
     }
+    if action == "get_attachment_key"
+        && req
+            .get("expected_lock_generation")
+            .is_some_and(|expected| session.is_none_or(|s| expected.as_u64() != Some(s.generation)))
+    {
+        return writeln!(
+            stream,
+            "{}",
+            json!({"ok":false,"error":"Vault session changed."})
+        );
+    }
 
     if should_touch_activity(action, &req) {
         state.touch_activity();
@@ -1083,6 +1257,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             "ok": true,
             "pong": true,
             "ssh_write_receipt": true,
+            "account_activation_v1": true,
+            "unlock_context": state.vault_mgr.unlock_context(),
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
@@ -1098,7 +1274,6 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         "stop" => {
             state.lock();
             crate::ssh_agent::remove_socket();
-            crate::attachment::clear_preview_attachments(None);
             let _ = writeln!(stream, "{}", json!({ "ok": true }));
             let _ = stream.flush();
             std::process::exit(0);
@@ -1127,7 +1302,18 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         }
         "unlock" => {
             let pwd = req.get("password").and_then(|v| v.as_str()).unwrap_or("");
-            match state.unlock(pwd) {
+            let result = match (
+                req.get("expected_unlock_context"),
+                req.get("expected_credential_id"),
+            ) {
+                (Some(Value::String(context)), Some(Value::String(id))) => {
+                    state.unlock_in_context(pwd, context, Some(id))
+                }
+                (Some(Value::String(context)), None) => state.unlock_in_context(pwd, context, None),
+                (None, None) => state.unlock(pwd),
+                _ => Err("Invalid unlock context".into()),
+            };
+            match result {
                 Ok(count) => json!({
                     "ok": true,
                     "status": "unlocked",
@@ -1170,9 +1356,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
-            state.lock();
-            crate::attachment::clear_preview_attachments(None);
-            json!({ "ok": true, "status": "locked" })
+            let outputs_cleared = state.lock();
+            json!({ "ok": true, "status": "locked", "outputs_cleared": outputs_cleared })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
@@ -1197,7 +1382,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());
             if let Some(item) = state.vault_mgr.find_item(query, category) {
-                json!({ "ok": true, "item": item })
+                json!({ "ok": true, "item": item, "lock_generation": session.map(|s| s.generation) })
             } else {
                 json!({ "ok": false, "error": format!("Item '{}' not found in vault", query) })
             }
@@ -1254,6 +1439,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                                 "code": res.code,
                                 "ttl": res.ttl,
                                 "period": res.period,
+                                "lock_generation": session.map(|s| s.generation),
                                 "id": item.id,
                                 "name": item.name
                             })
@@ -1381,7 +1567,19 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
-    let _ = writeln!(stream, "{}", response);
+    if reads_plaintext
+        && state.vault_mgr.cache_session().ok().is_none_or(|now| {
+            !now.unlocked || session.is_none_or(|then| now.generation != then.generation)
+        })
+    {
+        let _ = writeln!(
+            stream,
+            "{}",
+            json!({"ok":false,"error":"Vault session changed."})
+        );
+    } else {
+        let _ = writeln!(stream, "{}", response);
+    }
     Ok(())
 }
 
@@ -1695,7 +1893,15 @@ mod tests {
         let _lock = crate::env_lock();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+        StorageManager::default()
+            .save(&crate::storage::VaultStorage {
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
 
         // A daemon that answers every ping the same way; if it were replaced,
         // a second daemon would be spawned and the connection count would
@@ -1725,10 +1931,15 @@ mod tests {
             server.join().unwrap();
         }
 
-        old_runtime.map_or_else(
-            || std::env::remove_var("XDG_RUNTIME_DIR"),
-            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-        );
+        for (key, old) in [
+            ("XDG_RUNTIME_DIR", old_runtime),
+            ("OMAWARDEN_DATA_DIR", old_data),
+        ] {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]
@@ -2389,7 +2600,7 @@ exit $(cat {})
     #[test]
     fn test_logout_requests_end_retention_with_readiness_false() {
         // ADR-0025 decision 4: logout must zeroize the retained key. The
-        // logout flow (main.rs AuthAction::Logout) sends "lock" followed by
+        // logout flow (AuthManager::logout) sends "lock" followed by
         // an explicit "wipe_quick_unlock"; pin the daemon contract both
         // requests rely on: slot empty, readiness false in the ping payload.
         let _lock = crate::env_lock();

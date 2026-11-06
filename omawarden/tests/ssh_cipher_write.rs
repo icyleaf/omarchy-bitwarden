@@ -75,10 +75,10 @@ fn exercise(case: Case) {
     let keyring_actions = match case {
         Case::SlowKeyring => {
             r#"lookup*'kind refresh_token'*) echo fixture-refresh;;
-store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1)); [ "$n" -lt 1200 ] || exit 1; /bin/sleep 0.01; done; exit 0;;"#
+store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1)); [ "$n" -lt 1200 ] || exit 1; /bin/sleep 0.01; done; /bin/cat >/dev/null;;"#
         }
         Case::KeyringFailure => "lookup*'kind refresh_token'*) echo fixture-refresh;;",
-        Case::Renew401 => "lookup*) echo fixture-token;; store*) exit 0;;",
+        Case::Renew401 => "lookup*) echo fixture-token;; store*) /bin/cat >/dev/null;;",
         Case::LegacyProfile => "lookup*'kind access_token'*) echo x.eyJzdWIiOiJ1c2VyLWlkIn0.x;;",
         _ => "lookup*'kind access_token'*) echo fixture-token;;",
     };
@@ -98,6 +98,7 @@ store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1))
     let cache = dir.join("data.json");
     let mut data = json!({
         "user_id": "user-id", "user_email": email, "server_url": server_url,
+        "credential_id": "11111111111111111111111111111111",
         "enc_user_key": wrap, "kdf": 0, "kdf_iterations": 100_000
     });
     if case == Case::LegacyProfile {

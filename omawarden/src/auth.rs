@@ -2,9 +2,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::account_activation::{ActivationError, LoginConnection};
 use crate::api::BitwardenApiClient;
 use crate::config::ConfigManager;
-use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_REFRESH_TOKEN};
+use crate::credential_slots::erase_retired;
+use crate::keyring::{KeyringManager, KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
 use crate::storage::{StorageManager, VaultStorage};
 
 pub fn sanitize_auth_error(err_str: Option<&str>) -> String {
@@ -208,62 +210,112 @@ impl AuthManager {
         }
     }
 
-    pub fn get_status(&self, _verify: bool) -> AuthStatus {
-        let mut storage = self.storage_mgr.load();
+    fn daemon_unlock_context() -> Result<Option<String>, &'static str> {
+        use crate::daemon::{dispatch_daemon_request, DispatchError};
 
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-
-        // 1. Resolve active access token from Keyring or Storage fallback
-        let active_token = self
-            .keyring_mgr
-            .get_token(s_url, KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        // 2. Migration: If keyring is available and plaintext tokens are in storage, migrate them to Keyring safely
-        if self.keyring_mgr.is_available()
-            && (storage.access_token.is_some() || storage.refresh_token.is_some())
-        {
-            let mut access_saved = true;
-            if let Some(ref tok) = storage.access_token {
-                access_saved = self.keyring_mgr.store_token(s_url, KIND_ACCESS_TOKEN, tok);
-            }
-            let mut refresh_saved = true;
-            if let Some(ref ref_tok) = storage.refresh_token {
-                refresh_saved = self
-                    .keyring_mgr
-                    .store_token(s_url, KIND_REFRESH_TOKEN, ref_tok);
-            }
-
-            // Only scrub from disk if store was confirmed successful
-            if access_saved {
-                storage.access_token = None;
-            }
-            if refresh_saved {
-                storage.refresh_token = None;
-            }
-            if access_saved || refresh_saved {
-                let _ = self.storage_mgr.save(&storage);
+        match dispatch_daemon_request(&serde_json::json!({"action":"ping"})) {
+            Ok(reply) if reply["account_activation_v1"] == true => reply["unlock_context"]
+                .as_str()
+                .map(|context| Some(context.to_owned()))
+                .ok_or("Cannot verify the daemon session before login."),
+            Ok(_) => Err("Lock the vault to update the running daemon, then sign in again."),
+            Err(DispatchError::NotSent) => Ok(None),
+            Err(DispatchError::Unconfirmed) => {
+                Err("Cannot verify the daemon session before login.")
             }
         }
+    }
 
-        // Detect renewal capabilities using correct server URL precedence
-        let has_refresh = self
-            .keyring_mgr
-            .get_token(s_url, KIND_REFRESH_TOKEN)
-            .is_some()
-            || storage.refresh_token.is_some();
-        let has_api_secret = storage
-            .client_id
-            .as_ref()
-            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-            .is_some();
+    fn publish_login(
+        &self,
+        connection: LoginConnection,
+        storage: &mut VaultStorage,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        api_secret: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let credential_id = connection.attempt_id.clone();
+        storage.credential_id = Some(credential_id.clone());
+        let lease = self
+            .storage_mgr
+            .lease_candidate(&credential_id)
+            .map_err(|_| "Cannot track the candidate credentials")?;
+        let candidate = self.keyring_mgr.for_storage(storage).with_lease(&lease);
+        let prepared = (|| {
+            if !candidate.store_token(KIND_ACCESS_TOKEN, access_token) {
+                return Err("Failed to store access token in system keyring.");
+            }
+            if refresh_token.is_some_and(|token| !candidate.store_token(KIND_REFRESH_TOKEN, token))
+            {
+                return Err("Failed to store refresh token in system keyring.");
+            }
+            if api_secret.is_some_and(|secret| !candidate.store_token(KIND_API_SECRET, secret)) {
+                return Err("Failed to store API secret in system keyring.");
+            }
 
-        if (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
+            lease
+                .write_candidate(storage)
+                .map_err(|_| "Cannot stage the login snapshot")
+        })();
+        let publication = match prepared {
+            Ok(()) => connection.activate(&self.storage_mgr),
+            Err(error) => Err(ActivationError::Rejected(error.into())),
+        };
+        drop(lease);
+        match publication {
+            Err(ActivationError::Rejected(error)) => {
+                let cleanup = self.storage_mgr.rejected_candidate(&credential_id)
+                    .and_then(|slot| erase_retired(slot, &self.keyring_mgr));
+                if let Err(cleanup_error) = cleanup {
+                    crate::log_warn!(
+                        "omawarden:auth",
+                        "Candidate credential cleanup pending. {}",
+                        cleanup_error
+                    );
+                }
+                Err(error)
+            }
+            Err(ActivationError::Unknown) => Err(format!(
+                "Could not confirm sign-in. Check the vault before trying again. Attempt {credential_id}."
+            )),
+            Ok(context) => Ok(context),
+        }
+    }
+
+    fn invalidate_expired_session(&self, expected: &VaultStorage, token: &str) -> bool {
+        let Ok(_account) = self.storage_mgr.account_guard() else {
+            return false;
+        };
+        let Ok(mut storage) = self.storage_mgr.load_existing() else {
+            return false;
+        };
+        if !storage.same_active_slot(expected) {
+            return false;
+        }
+        let keyring = self.keyring_mgr.for_storage(&storage);
+        let current = keyring.access_token();
+        if current.as_deref() != Some(token)
+            || keyring.refresh_token().is_some()
+            || keyring.api_secret().is_some()
+        {
+            return false;
+        }
+        keyring.clear_token(KIND_ACCESS_TOKEN);
+        if storage.access_token.take().is_some() {
+            let _ = self.storage_mgr.save(&storage);
+        }
+        true
+    }
+
+    pub fn get_status(&self, _verify: bool) -> AuthStatus {
+        let storage = self.storage_mgr.load();
+        let keyring = self.keyring_mgr.for_storage(&storage);
+        let active_token = keyring.access_token();
+        let has_refresh = keyring.refresh_token().is_some();
+        let has_api_secret = keyring.api_secret().is_some();
+
+        if storage.scoped_credential_id().is_none()
+            || (storage.enc_user_key.is_none() && active_token.is_none() && !has_api_secret)
             || (storage.user_email.is_empty() && storage.client_id.is_none())
         {
             return AuthStatus {
@@ -289,27 +341,25 @@ impl AuthManager {
                         "omawarden:auth",
                         "Stored session token has expired and cannot be renewed. Invalidation required."
                     );
-                    self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
-                    self.keyring_mgr.clear_session(s_url);
-                    storage.access_token = None;
-                    let _ = self.storage_mgr.save(&storage);
-                    let _ = crate::daemon::send_daemon_request(
-                        &serde_json::json!({ "action": "lock" }),
-                    );
-
-                    return AuthStatus {
-                        lock_generation: None,
-                        status: "unauthenticated".to_string(),
-                        server_url: if storage.server_url.is_empty() {
-                            Some(self.server_url.clone())
-                        } else {
-                            Some(storage.server_url)
-                        },
-                        last_sync: storage.last_sync,
-                        user_email: Some(storage.user_email),
-                        user_id: storage.user_id,
-                        has_session: false,
-                    };
+                    if self.invalidate_expired_session(&storage, tok) {
+                        let _ = crate::daemon::send_daemon_request(
+                            &serde_json::json!({ "action": "lock" }),
+                        );
+                        return AuthStatus {
+                            lock_generation: None,
+                            status: "unauthenticated".to_string(),
+                            server_url: if storage.server_url.is_empty() {
+                                Some(self.server_url.clone())
+                            } else {
+                                Some(storage.server_url)
+                            },
+                            last_sync: storage.last_sync,
+                            user_email: Some(storage.user_email),
+                            user_id: storage.user_id,
+                            has_session: false,
+                        };
+                    }
+                    token_expired = true;
                 } else {
                     token_expired = true;
                 }
@@ -323,12 +373,8 @@ impl AuthManager {
                 .get("is_unlocked")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let daemon_email = daemon_resp
-                .get("user_email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let is_unlocked_same_user =
-                is_unlocked && !daemon_email.is_empty() && daemon_email == storage.user_email;
+            let is_unlocked_same_user = is_unlocked
+                && daemon_resp["credential_id"].as_str() == storage.scoped_credential_id();
             let status_str = if is_unlocked_same_user {
                 "unlocked".to_string()
             } else {
@@ -402,6 +448,18 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        // Start once at the login entry point. The later context check must
+        // observe a stopped/locked daemon, never restart it and sample anew.
+        crate::daemon::ensure_daemon_running();
+        let login_context = match Self::daemon_unlock_context() {
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error.into()),
+                    ..Default::default()
+                }
+            }
+        };
         let client =
             BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let password_zeroizing = Zeroizing::new(password.to_string());
@@ -569,104 +627,78 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let before_sync = self.storage_mgr.load();
-        let initial_sync = client.sync_vault(&token_resp.access_token);
-
-        let Ok(account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Cannot secure the account cache".into()),
-                ..Default::default()
-            };
+        let connection = match LoginConnection::begin(login_context.as_deref()) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error),
+                    ..Default::default()
+                }
+            }
         };
-        let mut storage = self.storage_mgr.load();
-        if !storage.same_account(&before_sync) {
-            return AuthResult {
-                ok: false,
-                error: Some("Account changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.user_email = email.trim().to_lowercase();
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
-
-        if !self.keyring_mgr.store_token(
-            &self.server_url,
-            KIND_ACCESS_TOKEN,
-            &token_resp.access_token,
-        ) {
-            let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                two_factor_required: None,
-                two_factor_providers: None,
-                ..Default::default()
-            };
-        }
-
-        if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self
-                .keyring_mgr
-                .store_token(&self.server_url, KIND_REFRESH_TOKEN, ref_tok)
-            {
-                self.keyring_mgr
-                    .clear_token(&self.server_url, KIND_ACCESS_TOKEN);
-                let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
+        let initial_sync = match client.sync_vault(&token_resp.access_token) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
                 return AuthResult {
                     ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(err_msg.to_string()),
-                    two_factor_required: None,
-                    two_factor_providers: None,
+                    error: Some("Initial vault synchronization failed. Check the connection and sign in again.".into()),
                     ..Default::default()
                 };
             }
-        }
+        };
+        let mut storage = VaultStorage {
+            server_url: self.server_url.clone(),
+            identity_url: self.identity_url.clone(),
+            user_email: email.trim().to_lowercase(),
+            enc_user_key: token_resp.key,
+            enc_private_key: token_resp.private_key,
+            kdf: token_resp.kdf,
+            kdf_iterations: token_resp.kdf_iterations,
+            kdf_memory: token_resp.kdf_memory,
+            kdf_parallelism: token_resp.kdf_parallelism,
+            ..Default::default()
+        };
 
-        storage.access_token = None;
-        storage.refresh_token = None;
-
-        // Pull initial sync
-        if let Ok(sync_data) = initial_sync {
-            storage.ciphers = sync_data.ciphers;
-            storage.folders = sync_data.folders;
-            storage.collections = sync_data.collections;
-            if let Some(ref prof) = sync_data.profile {
-                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
-                    storage.user_id = Some(id.to_string());
-                }
-                if storage.enc_user_key.is_none() {
-                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
-                        storage.enc_user_key = Some(key.to_string());
-                    }
-                }
-                if storage.enc_private_key.is_none() {
-                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
-                        storage.enc_private_key = Some(pk.to_string());
-                    }
-                }
-                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                    storage.organizations = orgs.clone();
+        // Install only a complete snapshot belonging to these credentials.
+        let sync_data = initial_sync;
+        storage.ciphers = sync_data.ciphers;
+        storage.folders = sync_data.folders;
+        storage.collections = sync_data.collections;
+        if let Some(ref prof) = sync_data.profile {
+            if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                storage.user_id = Some(id.to_string());
+            }
+            if storage.enc_user_key.is_none() {
+                if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                    storage.enc_user_key = Some(key.to_string());
                 }
             }
-            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+            if storage.enc_private_key.is_none() {
+                if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                    storage.enc_private_key = Some(pk.to_string());
+                }
+            }
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                storage.organizations = orgs.clone();
+            }
         }
+        storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
-        let _ = self.storage_mgr.save(&storage);
-        drop(account_guard);
+        let context = match self.publish_login(
+            connection,
+            &mut storage,
+            &token_resp.access_token,
+            token_resp.refresh_token.as_deref(),
+            None,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error),
+                    ..Default::default()
+                }
+            }
+        };
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -676,12 +708,14 @@ impl AuthManager {
             }
         }
 
-        // Auto-unlock daemon with decrypted items in memory
-        crate::daemon::ensure_daemon_running();
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-            "action": "unlock",
-            "password": password
-        }));
+        // A lock after activation takes priority over this optional auto-unlock.
+        let unlocked = context.is_some_and(|context| {
+            crate::daemon::send_daemon_request(&serde_json::json!({
+                "action":"unlock", "password":password, "expected_unlock_context":context,
+                "expected_credential_id":storage.credential_id
+            }))
+            .is_some_and(|reply| reply["ok"] == true)
+        });
 
         crate::log_info!(
             "omawarden:auth",
@@ -692,7 +726,7 @@ impl AuthManager {
 
         AuthResult {
             ok: true,
-            status: Some("unlocked".to_string()),
+            status: Some(if unlocked { "unlocked" } else { "locked" }.to_string()),
             ..Default::default()
         }
     }
@@ -724,6 +758,16 @@ impl AuthManager {
                 ..Default::default()
             };
         }
+        crate::daemon::ensure_daemon_running();
+        let login_context = match Self::daemon_unlock_context() {
+            Ok(context) => context,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error.into()),
+                    ..Default::default()
+                }
+            }
+        };
         let client =
             BitwardenApiClient::with_identity_url(&self.server_url, self.identity_url.as_deref());
         let token_resp = match client.login_apikey(client_id, client_secret) {
@@ -752,148 +796,103 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let before_sync = self.storage_mgr.load();
-        let initial_sync = client.sync_vault(&token_resp.access_token);
-
-        let Ok(account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Cannot secure the account cache".into()),
-                ..Default::default()
-            };
+        let connection = match LoginConnection::begin(login_context.as_deref()) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(error),
+                    ..Default::default()
+                }
+            }
         };
-        let mut storage = self.storage_mgr.load();
-        if !storage.same_account(&before_sync) {
-            return AuthResult {
-                ok: false,
-                error: Some("Account changed during login. Sign in again.".into()),
-                ..Default::default()
-            };
-        }
-        storage.server_url = self.server_url.clone();
-        storage.identity_url = self.identity_url.clone();
-        storage.client_id = Some(client_id.trim().to_string());
-        storage.enc_user_key = token_resp.key;
-        storage.enc_private_key = token_resp.private_key;
-        storage.kdf = token_resp.kdf;
-        storage.kdf_iterations = token_resp.kdf_iterations;
-        storage.kdf_memory = token_resp.kdf_memory;
-        storage.kdf_parallelism = token_resp.kdf_parallelism;
-
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-
-        if !self
-            .keyring_mgr
-            .store_token(s_url, KIND_ACCESS_TOKEN, &token_resp.access_token)
-        {
-            let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                ..Default::default()
-            };
-        }
-
-        if let Some(ref ref_tok) = token_resp.refresh_token {
-            if !self
-                .keyring_mgr
-                .store_token(s_url, KIND_REFRESH_TOKEN, ref_tok)
-            {
-                self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
-                let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
+        let initial_sync = match client.sync_vault(&token_resp.access_token) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
                 return AuthResult {
                     ok: false,
-                    status: Some("unauthenticated".to_string()),
-                    session: None,
-                    error: Some(err_msg.to_string()),
+                    error: Some("Initial vault synchronization failed. Check the connection and sign in again.".into()),
                     ..Default::default()
                 };
             }
-        }
+        };
+        let mut storage = VaultStorage {
+            server_url: self.server_url.clone(),
+            identity_url: self.identity_url.clone(),
+            client_id: Some(client_id.trim().to_string()),
+            enc_user_key: token_resp.key,
+            enc_private_key: token_resp.private_key,
+            kdf: token_resp.kdf,
+            kdf_iterations: token_resp.kdf_iterations,
+            kdf_memory: token_resp.kdf_memory,
+            kdf_parallelism: token_resp.kdf_parallelism,
+            ..Default::default()
+        };
 
-        if !self
-            .keyring_mgr
-            .store_api_secret(s_url, client_id.trim(), client_secret.trim())
-        {
-            self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
-            self.keyring_mgr.clear_token(s_url, KIND_REFRESH_TOKEN);
-            let err_msg = "Failed to store API secret in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
-            return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some(err_msg.to_string()),
-                ..Default::default()
-            };
-        }
-
-        storage.access_token = None;
-        storage.refresh_token = None;
-
-        // Pull initial sync
-        if let Ok(sync_data) = initial_sync {
-            storage.ciphers = sync_data.ciphers;
-            storage.folders = sync_data.folders;
-            storage.collections = sync_data.collections;
-            if let Some(ref prof) = sync_data.profile {
-                if let Some(email) = prof.get("email").and_then(|v| v.as_str()) {
-                    storage.user_email = email.trim().to_lowercase();
-                }
-                if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
-                    storage.user_id = Some(id.to_string());
-                }
-                if storage.enc_user_key.is_none() {
-                    if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
-                        storage.enc_user_key = Some(key.to_string());
-                    }
-                }
-                if storage.enc_private_key.is_none() {
-                    if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
-                        storage.enc_private_key = Some(pk.to_string());
-                    }
-                }
-                if storage.kdf.is_none() {
-                    if let Some(kdf) = prof.get("kdf").and_then(|v| v.as_u64()) {
-                        storage.kdf = Some(kdf as u32);
-                    }
-                }
-                if storage.kdf_iterations.is_none() {
-                    if let Some(iter) = prof.get("kdfIterations").and_then(|v| v.as_u64()) {
-                        storage.kdf_iterations = Some(iter as u32);
-                    }
-                }
-                if storage.kdf_memory.is_none() {
-                    if let Some(mem) = prof.get("kdfMemory").and_then(|v| v.as_u64()) {
-                        storage.kdf_memory = Some(mem as u32);
-                    }
-                }
-                if storage.kdf_parallelism.is_none() {
-                    if let Some(par) = prof.get("kdfParallelism").and_then(|v| v.as_u64()) {
-                        storage.kdf_parallelism = Some(par as u32);
-                    }
-                }
-                if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                    storage.organizations = orgs.clone();
+        // Install only a complete snapshot belonging to these credentials.
+        let sync_data = initial_sync;
+        storage.ciphers = sync_data.ciphers;
+        storage.folders = sync_data.folders;
+        storage.collections = sync_data.collections;
+        if let Some(ref prof) = sync_data.profile {
+            if let Some(email) = prof.get("email").and_then(|v| v.as_str()) {
+                storage.user_email = email.trim().to_lowercase();
+            }
+            if let Some(id) = prof.get("id").and_then(|v| v.as_str()) {
+                storage.user_id = Some(id.to_string());
+            }
+            if storage.enc_user_key.is_none() {
+                if let Some(key) = prof.get("key").and_then(|v| v.as_str()) {
+                    storage.enc_user_key = Some(key.to_string());
                 }
             }
-            storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
+            if storage.enc_private_key.is_none() {
+                if let Some(pk) = prof.get("privateKey").and_then(|v| v.as_str()) {
+                    storage.enc_private_key = Some(pk.to_string());
+                }
+            }
+            if storage.kdf.is_none() {
+                if let Some(kdf) = prof.get("kdf").and_then(|v| v.as_u64()) {
+                    storage.kdf = Some(kdf as u32);
+                }
+            }
+            if storage.kdf_iterations.is_none() {
+                if let Some(iter) = prof.get("kdfIterations").and_then(|v| v.as_u64()) {
+                    storage.kdf_iterations = Some(iter as u32);
+                }
+            }
+            if storage.kdf_memory.is_none() {
+                if let Some(mem) = prof.get("kdfMemory").and_then(|v| v.as_u64()) {
+                    storage.kdf_memory = Some(mem as u32);
+                }
+            }
+            if storage.kdf_parallelism.is_none() {
+                if let Some(par) = prof.get("kdfParallelism").and_then(|v| v.as_u64()) {
+                    storage.kdf_parallelism = Some(par as u32);
+                }
+            }
+            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
+                storage.organizations = orgs.clone();
+            }
         }
+        storage.last_sync = Some(chrono::Utc::now().to_rfc3339());
 
         if storage.user_email.is_empty() {
             storage.user_email = client_id.trim().to_string();
         }
 
-        let _ = self.storage_mgr.save(&storage);
-        drop(account_guard);
+        if let Err(error) = self.publish_login(
+            connection,
+            &mut storage,
+            &token_resp.access_token,
+            token_resp.refresh_token.as_deref(),
+            Some(client_secret.trim()),
+        ) {
+            return AuthResult {
+                ok: false,
+                error: Some(error),
+                ..Default::default()
+            };
+        }
 
         if let Some(ref cm) = self.config_mgr {
             let mut cfg = cm.load();
@@ -915,84 +914,60 @@ impl AuthManager {
 
     pub fn unlock(&self, password: &str) -> AuthResult {
         crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
+        crate::daemon::ensure_daemon_running();
         let storage = self.storage_mgr.load();
-        if storage.enc_user_key.is_none() {
-            crate::log_warn!("omawarden:auth", "Account is not logged in.");
+        let unlock_credentials = if storage.enc_user_key.is_some() {
+            storage.check_unlock_credentials()
+        } else {
+            Err("Account is not logged in.")
+        };
+        if let Err(error) = unlock_credentials {
             return AuthResult {
-                ok: false,
-                status: Some("unauthenticated".to_string()),
-                session: None,
-                error: Some("Account is not logged in.".to_string()),
+                status: Some("unauthenticated".into()),
+                error: Some(error.into()),
                 ..Default::default()
             };
         }
 
-        let password_zeroizing = Zeroizing::new(password.to_string());
-        match self
-            .storage_mgr
-            .unlock_user_key(&password_zeroizing, &storage)
-        {
-            Ok(_user_key) => {
-                let s_url = if !storage.server_url.is_empty() {
-                    &storage.server_url
-                } else {
-                    &self.server_url
-                };
-
-                let token_opt = self
-                    .keyring_mgr
-                    .get_token(s_url, KIND_ACCESS_TOKEN)
-                    .or_else(|| self.keyring_mgr.get_session(s_url))
-                    .or_else(|| storage.access_token.clone());
-
-                if let Some(ref token) = token_opt {
-                    if token != "session_unlocked" && !token.is_empty() {
-                        self.keyring_mgr
-                            .store_token(s_url, KIND_ACCESS_TOKEN, token);
-                    }
-                }
-
-                // Auto-unlock daemon with decrypted items in memory
-                crate::daemon::ensure_daemon_running();
-                let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-                    "action": "unlock",
-                    "password": password
-                }));
-
-                crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
-
-                AuthResult {
-                    ok: true,
-                    status: Some("unlocked".to_string()),
-                    ..Default::default()
-                }
-            }
-            Err(e) => {
-                let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_warn!("omawarden:auth", "Unlock failed: {}", err_msg);
-                AuthResult {
-                    ok: false,
-                    status: Some("locked".to_string()),
-                    session: None,
-                    error: Some(err_msg),
-                    ..Default::default()
-                }
-            }
+        let reply = crate::daemon::send_daemon_request(&serde_json::json!({
+            "action": "unlock", "password": password
+        }));
+        if reply.as_ref().is_some_and(|reply| reply["ok"] == true) {
+            return AuthResult {
+                ok: true,
+                status: Some("unlocked".into()),
+                ..Default::default()
+            };
+        }
+        let error = reply
+            .as_ref()
+            .and_then(|reply| reply["error"].as_str())
+            .map(|error| sanitize_auth_error(Some(error)))
+            .unwrap_or_else(|| "Could not confirm unlock with the vault daemon.".into());
+        crate::log_warn!("omawarden:auth", "Unlock failed: {}", error);
+        AuthResult {
+            status: Some("locked".into()),
+            error: Some(error),
+            ..Default::default()
         }
     }
 
     pub fn lock(&self) -> AuthResult {
         let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        self.keyring_mgr.clear_session(s_url);
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+        let reply = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
-        crate::attachment::clear_preview_attachments(None);
+        self.keyring_mgr
+            .for_storage(&storage)
+            .clear_token(KIND_ACCESS_TOKEN);
+        if !reply.is_some_and(|reply| reply["outputs_cleared"] == true) {
+            if let Err(error) = crate::clipboard::revoke_session_outputs() {
+                crate::log_warn!(
+                    "omawarden:auth",
+                    "Session output cleanup is pending. {error}"
+                );
+            }
+        }
         crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
             ok: true,
@@ -1003,36 +978,58 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> AuthResult {
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-            "action": "lock"
-        }));
-        let Ok(_account_guard) = self.storage_mgr.account_guard() else {
-            return AuthResult {
-                ok: false,
-                error: Some("Vault locked; could not secure the account cache for logout.".into()),
-                ..Default::default()
+        let cleared = (|| {
+            let _account = self.storage_mgr.account_guard()?;
+            // Unlock and offline output publication need this same account
+            // guard. Revoke A before they can see the signed-out cache.
+            let locked =
+                crate::daemon::send_daemon_request(&serde_json::json!({ "action": "lock" }));
+            // The explicit wipe also covers a daemon with a separate quick-unlock handler.
+            let _ = crate::daemon::send_daemon_request(
+                &serde_json::json!({ "action": "wipe_quick_unlock" }),
+            );
+            let current = self.storage_mgr.cache_snapshot()?;
+            self.storage_mgr
+                .remember_credentials(&current.storage, true)?;
+            self.storage_mgr
+                .stage_durable(&VaultStorage::default())?
+                .persist(&self.storage_mgr.file_path)
+                .map_err(|error| error.error)?;
+            let outputs = if locked.is_some_and(|reply| reply["outputs_cleared"] == true) {
+                Ok(())
+            } else {
+                crate::clipboard::revoke_session_outputs()
             };
+            Ok::<_, std::io::Error>((outputs, self.storage_mgr.retired_credentials(None)))
+        })();
+        let (outputs, retired) = match cleared {
+            Ok(retired) => retired,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(format!("Could not complete logout. {error}")),
+                    ..Default::default()
+                }
+            }
         };
-        self.keyring_mgr.clear_all();
-        self.keyring_mgr.clear_session(s_url);
-        if self.storage_mgr.save(&VaultStorage::default()).is_err() {
+        let credentials = retired.and_then(|slots| erase_retired(slots, &self.keyring_mgr));
+        let pending = match (outputs, credentials) {
+            (Err(output), Err(keyring)) => Some(format!(
+                "Output cleanup failed. {output} Keyring cleanup failed. {keyring}"
+            )),
+            (Err(error), Ok(())) => Some(format!("Output cleanup is pending. {error}")),
+            (Ok(()), Err(error)) => Some(format!("Keyring cleanup is pending. {error}")),
+            (Ok(()), Ok(())) => None,
+        };
+        if let Some(pending) = pending {
+            let message = format!("Signed out locally. {pending} Retry logout.");
+            crate::log_warn!("omawarden:auth", "{}", message);
             return AuthResult {
-                ok: false,
-                error: Some("Vault locked; failed to clear the account cache.".into()),
+                status: Some("unauthenticated".into()),
+                error: Some(message),
                 ..Default::default()
             };
         }
-        crate::attachment::clear_preview_attachments(None);
-        crate::log_info!(
-            "omawarden:auth",
-            "Account logged out and all keyring credentials cleared."
-        );
+        crate::log_info!("omawarden:auth", "Account logged out.");
         AuthResult {
             ok: true,
             status: Some("unauthenticated".to_string()),
@@ -1051,8 +1048,165 @@ mod tests {
 
     fn create_test_mock_keyring(dir: &std::path::Path) -> KeyringManager {
         let script_path = dir.join("mock-secret-tool");
-        crate::write_test_executable(&script_path, "#!/bin/sh\nexit 0\n");
+        crate::write_test_executable(
+            &script_path,
+            "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
+        );
         KeyringManager::new(script_path.to_str().unwrap())
+    }
+
+    fn fixture_access_keyring(dir: &std::path::Path, token: &str) -> KeyringManager {
+        let saved = dir.join("access");
+        fs::write(&saved, token).unwrap();
+        let script = dir.join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) /bin/cat '{}' 2>/dev/null;;\nclear*'kind access_token'*) /bin/rm '{}' ;;\n*) exit 1;;\nesac\n",
+                saved.display(),
+                saved.display(),
+            ),
+        );
+        KeyringManager::new(script.to_str().unwrap())
+    }
+
+    #[test]
+    fn legacy_credentials_require_sign_in_without_reading_or_migrating_tokens() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path().join("data.json"));
+        let trace = dir.path().join("keyring-called");
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                "#!/bin/sh\n: > '{}'\necho another-account-token\n",
+                trace.display()
+            ),
+        );
+        let auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(storage.clone()),
+            Some(KeyringManager::new(script.to_str().unwrap())),
+        );
+        for (inline, credential_id) in [
+            (None, None),
+            (Some("another-account-token"), None),
+            (None, Some("malformed")),
+        ] {
+            let before = serde_json::json!({
+                "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
+                "access_token":inline, "refresh_token":inline,
+                "credential_id":credential_id,
+                "enc_user_key":"2.dummy_iv|dummy_ct|dummy_mac",
+                "ciphers":[{"id":"existing"}]
+            })
+            .to_string();
+            fs::write(&storage.file_path, &before).unwrap();
+            let status = auth.get_status(false);
+            assert_eq!(status.status, "unauthenticated");
+            assert!(!status.has_session);
+            assert!(!trace.exists());
+            assert_eq!(fs::read_to_string(&storage.file_path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn logout_retains_cleanup_records_through_sync_and_keyring_failures() {
+        let _environment = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(dir.path().join("data.json"));
+        let server = "https://fixture.invalid";
+        storage_mgr
+            .save(&VaultStorage {
+                server_url: server.into(),
+                user_email: "fixture@example.invalid".into(),
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let scoped = dir.path().join("scoped");
+        let legacy = dir.path().join("legacy");
+        let trace = dir.path().join("keyring-called");
+        let locked = dir.path().join("keyring-locked");
+        for path in [&scoped, &legacy, &locked] {
+            fs::write(path, []).unwrap();
+        }
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            format!(
+                r#"#!/bin/sh
+command=$1
+shift
+if [ "$1" = --all ]; then shift; fi
+: > '{}'
+case "$2" in
+    omarchy-bitwarden-v2) record='{}';;
+    omarchy-bitwarden) record='{}';;
+    *) exit 1;;
+esac
+case "$command" in
+    clear)
+        if [ -e '{}' ]; then exit 1; fi
+        /bin/rm "$record"
+        ;;
+    search)
+        if [ -e "$record" ]; then echo present; fi
+        ;;
+    *) exit 1;;
+esac
+"#,
+                trace.display(),
+                scoped.display(),
+                legacy.display(),
+                locked.display(),
+            ),
+        );
+        let keyring = KeyringManager::new(script.to_str().unwrap());
+        let mut failed_sync = storage_mgr.clone();
+        failed_sync.fail_credential_cleanup_sync = true;
+        let auth = AuthManager::new(server, Some(failed_sync), Some(keyring.clone()));
+        let result = auth.logout();
+        assert!(!result.ok);
+        assert_eq!(result.status.as_deref(), Some("unauthenticated"));
+        assert!(result.error.unwrap().contains("directory sync failure"));
+        assert!(storage_mgr.load().credential_id.is_none());
+        assert!(!trace.exists());
+        assert!(scoped.exists() && legacy.exists());
+
+        let auth = AuthManager::new(server, Some(storage_mgr), Some(keyring));
+        let result = auth.logout();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Keyring cleanup is pending"));
+        assert!(trace.exists());
+        assert!(scoped.exists() && legacy.exists());
+
+        fs::remove_file(locked).unwrap();
+        assert!(auth.logout().ok);
+        assert!(!scoped.exists() && !legacy.exists());
+    }
+
+    #[test]
+    fn expired_session_cleanup_preserves_the_latest_cipher_snapshot() {
+        let dir = tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let initial = serde_json::json!({
+            "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
+            "access_token":"legacy", "ciphers":[], "credential_id":crate::test_support::CREDENTIAL_ID
+        });
+        fs::write(&manager.file_path, initial.to_string()).unwrap();
+        let expected = manager.load();
+        let mut latest = initial;
+        latest["ciphers"] = serde_json::json!([{"id":"created"}]);
+        fs::write(&manager.file_path, latest.to_string()).unwrap();
+        let auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(manager.clone()),
+            Some(fixture_access_keyring(dir.path(), "legacy")),
+        );
+        assert!(auth.invalidate_expired_session(&expected, "legacy"));
+        assert_eq!(manager.load().ciphers[0]["id"], "created");
+        assert!(manager.load().access_token.is_none());
     }
 
     #[test]
@@ -1143,7 +1297,7 @@ mod tests {
         let storage_path = dir.path().join("test_auth_data.json");
         let storage_mgr = StorageManager::new(storage_path);
 
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
+        let mock_keyring = create_test_mock_keyring(dir.path());
         let auth_mgr = AuthManager::new(
             "https://vault.example.com",
             Some(storage_mgr.clone()),
@@ -1156,6 +1310,7 @@ mod tests {
 
         // Simulate stored account
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             user_email: "test@example.com".to_string(),
             enc_user_key: Some("2.dummy_iv|dummy_ct|dummy_mac".to_string()),
             ..Default::default()
@@ -1179,6 +1334,7 @@ mod tests {
 
     #[test]
     fn test_login_apikey_network_failure() {
+        let _environment = crate::env_lock();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_apikey_data.json");
         let storage_mgr = StorageManager::new(storage_path);
@@ -1204,6 +1360,7 @@ mod tests {
 
     #[test]
     fn test_login_password_endpoint_404_error() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1243,6 +1400,7 @@ mod tests {
 
     #[test]
     fn test_login_password_two_factor_required() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1301,6 +1459,7 @@ mod tests {
 
     #[test]
     fn test_login_password_webauthn_smart_default_provider_selection() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1360,40 +1519,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_status_with_apikey_session() {
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_apikey_status.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
-        // Simulate legacy storage after API key authentication (pre-0.5.0 format with access_token on disk)
-        let legacy_json = serde_json::json!({
-            "user_email": "apikey-user@example.com",
-            "user_id": "user-uuid-123",
-            "access_token": "fake_access_token_abc",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        std::fs::write(
-            &storage_path,
-            serde_json::to_string_pretty(&legacy_json).unwrap(),
-        )
-        .unwrap();
-
-        let st = auth_mgr.get_status(false);
-        assert_eq!(st.status, "locked");
-        assert_eq!(st.lock_generation, None);
-        assert_eq!(st.user_email.as_deref(), Some("apikey-user@example.com"));
-        assert_eq!(st.user_id.as_deref(), Some("user-uuid-123"));
-        assert!(st.has_session);
-    }
-
-    #[test]
     fn test_jwt_expiration_detection() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
@@ -1422,19 +1547,19 @@ mod tests {
         let storage_path = dir.path().join("test_expired_status.json");
         let storage_mgr = StorageManager::new(storage_path.clone());
 
-        let mock_keyring = KeyringManager::new("non_existent_secret_tool_for_test");
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 100 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
 
+        let auth_mgr = AuthManager::new(
+            "https://vault.example.com",
+            Some(storage_mgr.clone()),
+            Some(fixture_access_keyring(dir.path(), &expired_token)),
+        );
         let legacy_json = serde_json::json!({
+            "server_url":"https://vault.example.com",
+            "credential_id":crate::test_support::CREDENTIAL_ID,
             "user_email": "expired-user@example.com",
             "user_id": "user-uuid-999",
             "access_token": expired_token,
@@ -1534,19 +1659,8 @@ esac
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(
-            "https://vault.example.com",
-            "user.test-client-id",
-            "secret_xyz_123"
-        ));
-        assert!(mock_keyring.store_token(
-            "https://vault.example.com",
-            KIND_ACCESS_TOKEN,
-            &expired_token
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: "https://vault.example.com".to_string(),
             user_email: "apikey-user@example.com".to_string(),
             user_id: Some("user-uuid-999".to_string()),
@@ -1557,159 +1671,14 @@ esac
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(KIND_API_SECRET, "secret_xyz_123"));
+        assert!(keys.store_token(KIND_ACCESS_TOKEN, &expired_token));
 
         let st = auth_mgr.get_status(false);
         // Because client_secret exists in keyring, has_session remains true
         assert!(st.has_session);
         assert_eq!(st.status, "locked");
-    }
-
-    #[test]
-    fn test_auth_status_token_auto_migration() {
-        use std::fs;
-
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_migration.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let store_dir = dir.path().join("store");
-        fs::create_dir_all(&store_dir).unwrap();
-        let script_path = dir.path().join("mock-secret-tool");
-
-        let script = format!(
-            r#"#!/bin/sh
-STORE_DIR="{}"
-cmd="$1"
-shift
-case "$1" in
-    --label=*)
-        shift
-        ;;
-esac
-
-key=""
-while [ $# -gt 0 ]; do
-    k="$1"
-    v="$2"
-    safe_v=$(printf '%s' "$v" | tr '/:' '_')
-    key="${{key}}__${{k}}=${{safe_v}}"
-    shift 2 2>/dev/null || shift 1
-done
-
-case "$cmd" in
-    store)
-        cat > "${{STORE_DIR}}/${{key}}"
-        exit 0
-        ;;
-    lookup)
-        if [ -f "${{STORE_DIR}}/${{key}}" ]; then
-            cat "${{STORE_DIR}}/${{key}}"
-            exit 0
-        else
-            exit 1
-        fi
-        ;;
-    clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
-            rm -f "${{STORE_DIR}}"/*
-        else
-            rm -f "${{STORE_DIR}}/${{key}}"*
-        fi
-        exit 0
-        ;;
-    *)
-        exit 1
-        ;;
-esac
-"#,
-            store_dir.display()
-        );
-
-        crate::write_test_executable(&script_path, script);
-
-        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring.clone()),
-        );
-
-        // Pre-migration storage contains plaintext tokens
-        let legacy_json = serde_json::json!({
-            "user_email": "migrate@example.com",
-            "server_url": "https://vault.example.com",
-            "access_token": "plaintext_access_123",
-            "refresh_token": "plaintext_refresh_456",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        std::fs::write(&storage_path, legacy_json.to_string()).unwrap();
-
-        // Check status triggers migration
-        let st = auth_mgr.get_status(false);
-        assert!(st.has_session);
-        assert_eq!(st.status, "locked");
-
-        // Verify tokens migrated to Keyring
-        assert_eq!(
-            mock_keyring.get_token("https://vault.example.com", KIND_ACCESS_TOKEN),
-            Some("plaintext_access_123".to_string())
-        );
-        assert_eq!(
-            mock_keyring.get_token("https://vault.example.com", KIND_REFRESH_TOKEN),
-            Some("plaintext_refresh_456".to_string())
-        );
-
-        // Verify plaintext tokens scrubbed from disk
-        let fresh_storage = storage_mgr.load();
-        assert!(fresh_storage.access_token.is_none());
-        assert!(fresh_storage.refresh_token.is_none());
-    }
-
-    #[test]
-    fn test_auth_status_token_migration_failure_preserves_disk_tokens() {
-        use std::fs;
-
-        let dir = tempdir().unwrap();
-        let storage_path = dir.path().join("test_migration_failure.json");
-        let storage_mgr = StorageManager::new(storage_path.clone());
-
-        let script_path = dir.path().join("mock-secret-tool-fail");
-        // Script is an executable that always exits with code 1
-        let script = "#!/bin/sh\nexit 1\n";
-        crate::write_test_executable(&script_path, script);
-
-        let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
-        // keyring is_available() will return true because the binary exists, but store will fail
-        assert!(mock_keyring.is_available());
-
-        let auth_mgr = AuthManager::new(
-            "https://vault.example.com",
-            Some(storage_mgr.clone()),
-            Some(mock_keyring),
-        );
-
-        let legacy_json = serde_json::json!({
-            "user_email": "safeguard@example.com",
-            "server_url": "https://vault.example.com",
-            "access_token": "critical_access_tok",
-            "refresh_token": "critical_refresh_tok",
-            "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
-        });
-        fs::write(&storage_path, legacy_json.to_string()).unwrap();
-
-        let st = auth_mgr.get_status(false);
-        assert!(st.has_session);
-
-        // Tokens MUST remain on disk because keyring store failed!
-        let fresh_storage = storage_mgr.load();
-        assert_eq!(
-            fresh_storage.access_token.as_deref(),
-            Some("critical_access_tok")
-        );
-        assert_eq!(
-            fresh_storage.refresh_token.as_deref(),
-            Some("critical_refresh_tok")
-        );
     }
 
     #[test]
@@ -1780,16 +1749,13 @@ esac
         let custom_url = "https://vaultwarden.custom.local";
         let client_id = "user.custom-client-123";
 
-        // Store API secret keyed to custom_url
-        assert!(mock_keyring.store_api_secret(custom_url, client_id, "top_secret"));
-
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 50 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
-        assert!(mock_keyring.store_token(custom_url, KIND_ACCESS_TOKEN, &expired_token));
 
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: custom_url.to_string(),
             user_email: "custom@local.org".to_string(),
             client_id: Some(client_id.to_string()),
@@ -1797,6 +1763,9 @@ esac
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(KIND_API_SECRET, "top_secret"));
+        assert!(keys.store_token(KIND_ACCESS_TOKEN, &expired_token));
 
         // get_status should prioritize storage.server_url over default self.server_url and find the secret
         let st = auth_mgr.get_status(false);
@@ -1864,6 +1833,7 @@ esac
 
     #[test]
     fn test_login_password_persists_email_to_config_based_on_remember_email() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1974,8 +1944,10 @@ esac
             Some(config_mgr.clone()),
         );
 
+        let daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password("User@Example.COM", password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
+        drop(daemon);
 
         // Verify config.json email was populated with normalized email
         let updated_cfg = config_mgr.load();
@@ -2071,6 +2043,7 @@ esac
             Some(config_mgr.clone()),
         );
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr2);
         let res2 = auth_mgr2.login_password("other@example.com", password, None, None, None);
         assert!(res2.ok, "Login should succeed: {:?}", res2.error);
 
@@ -2086,6 +2059,7 @@ esac
 
     #[test]
     fn test_login_keyring_unavailable_fails_closed() {
+        let _environment = crate::env_lock();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("data_unavailable.json");
         let storage_mgr = StorageManager::new(storage_path.clone());
@@ -2131,6 +2105,7 @@ esac
 
     #[test]
     fn test_login_password_keyring_store_failure_fails_closed() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -2216,6 +2191,14 @@ esac
                         body
                     );
                     let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
                     break;
                 }
             }
@@ -2223,6 +2206,7 @@ esac
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr.clone()), Some(mock_keyring));
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password("test@example.com", "password", None, None, None);
         assert!(!res.ok, "Login must fail when keyring store fails");
         assert!(
@@ -2251,6 +2235,7 @@ esac
 
     #[test]
     fn test_login_apikey_keyring_store_failure_fails_closed() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -2285,6 +2270,14 @@ esac
                         body
                     );
                     let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("GET /api/sync") {
+                    let body = r#"{"ciphers":[],"folders":[],"collections":[]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
                     break;
                 }
             }
@@ -2292,6 +2285,7 @@ esac
 
         let auth_mgr = AuthManager::new(&server_url, Some(storage_mgr.clone()), Some(mock_keyring));
 
+        let _daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_apikey("client.id", "client_secret");
         assert!(!res.ok, "API login must fail when keyring store fails");
         assert!(
@@ -2319,11 +2313,8 @@ esac
     #[test]
     fn test_login_password_auto_unlocks_daemon() {
         let _lock = crate::env_lock();
-        use std::io::{BufRead, BufReader, Read, Write};
+        use std::io::{Read, Write};
         use std::net::TcpListener;
-        use std::os::unix::net::UnixListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
         use std::thread;
 
         use aes::Aes256;
@@ -2412,55 +2403,6 @@ esac
         });
 
         let dir = tempdir().unwrap();
-        let runtime_dir = dir.path().join("runtime");
-        std::fs::create_dir_all(&runtime_dir).unwrap();
-        let old_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
-
-        let socket_path = runtime_dir.join("omawarden.sock");
-
-        let unix_listener = UnixListener::bind(&socket_path).unwrap();
-        let stop_daemon = Arc::new(AtomicBool::new(false));
-        let stop_daemon_clone = stop_daemon.clone();
-
-        let daemon_handle = thread::spawn(move || {
-            unix_listener.set_nonblocking(true).unwrap();
-            while !stop_daemon_clone.load(Ordering::Relaxed) {
-                match unix_listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut reader = BufReader::new(stream.try_clone().unwrap());
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                                let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
-                                let resp = match action {
-                                    "ping" => {
-                                        serde_json::json!({ "ok": true, "commit": env!("GIT_HASH") })
-                                    }
-                                    "unlock" => serde_json::json!({
-                                        "ok": true,
-                                        "status": "unlocked",
-                                        "session_token": "daemon-ephemeral-token-xyz-123"
-                                    }),
-                                    "sync" => {
-                                        serde_json::json!({ "ok": true, "ciphers_count": 0 })
-                                    }
-                                    _ => {
-                                        serde_json::json!({ "ok": false, "error": "unknown action" })
-                                    }
-                                };
-                                let _ = writeln!(stream, "{}", resp);
-                            }
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
         let storage_path = dir.path().join("daemon_test_data.json");
         let storage_mgr = StorageManager::new(storage_path);
         let config_path = dir.path().join("config.json");
@@ -2475,27 +2417,18 @@ esac
             Some(config_mgr),
         );
 
+        let daemon = crate::test_support::TestDaemon::for_auth(&auth_mgr);
         let res = auth_mgr.login_password(email, password, None, None, None);
         assert!(res.ok, "Login should succeed: {:?}", res.error);
-
-        // Privileged sync request succeeds directly over socket
-        let sync_ok =
-            crate::daemon::send_daemon_request(&serde_json::json!({ "action": "sync" })).unwrap();
-        assert_eq!(sync_ok.get("ok"), Some(&serde_json::Value::Bool(true)));
-
-        stop_daemon.store(true, Ordering::Relaxed);
-        let _ = daemon_handle.join();
-        let _ = http_handle.join();
-
-        if let Some(prev) = old_xdg {
-            std::env::set_var("XDG_RUNTIME_DIR", prev);
-        } else {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
+        assert_eq!(res.status.as_deref(), Some("unlocked"));
+        assert!(daemon.state.vault_mgr.is_unlocked());
+        assert!(daemon.state.vault_mgr.get_user_key().is_some());
+        http_handle.join().unwrap();
     }
 
     #[test]
     fn test_login_password_new_device_verification_flow() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -2558,6 +2491,7 @@ esac
 
     #[test]
     fn test_login_password_email_two_factor_flow() {
+        let _environment = crate::env_lock();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;

@@ -297,21 +297,34 @@ impl ConfigManager {
                 "action": "wipe_quick_unlock"
             }));
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
-            let _account_guard = storage_mgr.account_guard()?;
-            match fs::remove_file(&storage_mgr.file_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            let (outputs, retired) = {
+                let _account = storage_mgr.account_guard()?;
+                let current = storage_mgr.cache_snapshot()?;
+                storage_mgr.remember_credentials(&current.storage, true)?;
+                match fs::remove_file(&storage_mgr.file_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+                (
+                    crate::clipboard::revoke_session_outputs(),
+                    storage_mgr.retired_credentials(None),
+                )
+            };
 
-            keyring_mgr.clear_all();
-            keyring_mgr.clear_session(&cfg.server_url);
-
-            crate::attachment::clear_preview_attachments(None);
+            retired.and_then(|slots| crate::credential_slots::erase_retired(slots, keyring_mgr))
+                .map_err(|error| std::io::Error::new(
+                    error.kind(),
+                    format!("Vault cache removed locally. Keyring cleanup is pending. Retry changing the server. {error}"),
+                ))?;
+            outputs.map_err(|error| std::io::Error::new(
+                error.kind(),
+                format!("Vault cache removed locally. Output cleanup is pending. Retry changing the server. {error}"),
+            ))?;
 
             crate::log_info!(
                 "omawarden:config",
-                "Bitwarden server URL changed to '{}'. Previous session, API credentials, and vault cache purged.",
+                "Previous vault cache and credentials cleared before switching to '{}'.",
                 cfg.server_url
             );
         }
@@ -592,6 +605,12 @@ case "$cmd" in
         fi
         exit 0
         ;;
+    search)
+        for item in "${{STORE_DIR}}/${{key}}"*; do
+            if [ -f "$item" ]; then echo present; break; fi
+        done
+        exit 0
+        ;;
     *)
         exit 1
         ;;
@@ -654,16 +673,25 @@ esac
             .get_api_secret("https://vault.bitwarden.com", "user.test-api-key-id")
             .is_some());
 
-        // 2. Change server_url to a different server
+        let options = ConfigUpdateOptions {
+            server_url: Some("https://vaultwarden.custom.corp".to_string()),
+            ..Default::default()
+        };
+        let mut failed_sync = storage_mgr.clone();
+        failed_sync.fail_credential_cleanup_sync = true;
+        let error = config_mgr
+            .update_config(options.clone(), &failed_sync, &keyring_mgr)
+            .unwrap_err();
+        assert!(error.to_string().contains("Keyring cleanup is pending"));
+        assert_eq!(config_mgr.load().server_url, initial_cfg.server_url);
+        assert!(!storage_path.exists());
+        assert!(keyring_mgr
+            .get_token("https://vault.bitwarden.com", "access_token")
+            .is_some());
+
+        // Retry the same change. The outgoing credentials are still tracked.
         let (updated_cfg, server_changed) = config_mgr
-            .update_config(
-                ConfigUpdateOptions {
-                    server_url: Some("https://vaultwarden.custom.corp".to_string()),
-                    ..Default::default()
-                },
-                &storage_mgr,
-                &keyring_mgr,
-            )
+            .update_config(options, &storage_mgr, &keyring_mgr)
             .unwrap();
 
         // 3. Assert server_changed is true and previous session/tokens/data cache are purged,
