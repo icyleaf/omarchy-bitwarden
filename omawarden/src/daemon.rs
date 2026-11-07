@@ -783,6 +783,8 @@ pub struct DaemonState {
     pub last_boot_delta_secs: Mutex<Option<u64>>,
     pub shutdown: ShutdownSignal,
     pub socket_path: Mutex<Option<PathBuf>>,
+    /// Whether this daemon is hosted in-process inside an external application.
+    pub in_process: AtomicBool,
 }
 
 /// What locked the session. Sleep is treated harder than a screen lock
@@ -847,7 +849,23 @@ impl DaemonState {
             last_boot_delta_secs: Mutex::new(None),
             shutdown: ShutdownSignal::new(),
             socket_path: Mutex::new(None),
+            in_process: AtomicBool::new(
+                !env::current_exe()
+                    .ok()
+                    .as_deref()
+                    .is_some_and(is_omawarden_binary),
+            ),
         }
+    }
+
+    /// Returns true if this daemon is running in-process inside a host application.
+    pub fn is_in_process(&self) -> bool {
+        self.in_process.load(Ordering::SeqCst)
+    }
+
+    /// Sets whether this daemon is running in-process inside a host application.
+    pub fn set_in_process(&self, in_process: bool) {
+        self.in_process.store(in_process, Ordering::SeqCst);
     }
 
     /// CLOCK_BOOTTIME minus CLOCK_MONOTONIC in whole seconds. The two clocks
@@ -1397,6 +1415,12 @@ impl DaemonServer {
         self
     }
 
+    /// Mark whether this daemon server is hosted in-process inside an external application.
+    pub fn in_process(self, in_process: bool) -> Self {
+        self.state.set_in_process(in_process);
+        self
+    }
+
     /// Access the cooperative shutdown signal.
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.state.shutdown.clone()
@@ -1663,6 +1687,45 @@ pub fn verify_peer_credentials(stream: &UnixStream) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn get_peer_pid(stream: &UnixStream) -> std::io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut ucred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut ucred_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut libc::ucred as *mut libc::c_void,
+            &mut ucred_len,
+        )
+    };
+
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    if ucred.pid <= 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid peer PID",
+        ));
+    }
+
+    Ok(ucred.pid as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn get_peer_pid(_stream: &UnixStream) -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Peer PID inspection unsupported on this platform",
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn verify_peer_credentials(_stream: &UnixStream) -> std::io::Result<()> {
     Ok(())
@@ -1796,9 +1859,15 @@ pub fn is_system_or_screen_locked() -> bool {
     system_lock_signal() != LockSignal::None
 }
 
-pub(crate) fn handle_client(
+pub(crate) fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+    let peer_pid = get_peer_pid(&stream).ok();
+    handle_client_with_peer(stream, state, peer_pid)
+}
+
+pub(crate) fn handle_client_with_peer(
     mut stream: UnixStream,
     state: Arc<DaemonState>,
+    peer_pid: Option<u32>,
 ) -> std::io::Result<()> {
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
@@ -1921,6 +1990,59 @@ pub(crate) fn handle_client(
             "memory_locked": !crate::locked::mlock_fallback_active(),
         }),
         "stop" => {
+            // Dual-tier authorization boundaries (ADR-0028):
+            // 1. Host-Guarded In-Process Boundary:
+            //    When hosted in-process inside an external application (e.g. GUI shell),
+            //    daemon lifecycle is owned exclusively by that host process. External callers
+            //    (detected via kernel SO_PEERCRED PID != current PID) are strictly rejected,
+            //    even if `admin: true` is supplied.
+            // 2. Standalone Same-UID Explicit-Intent Boundary:
+            //    Standalone daemons serve all clients operating under the user's desktop UID.
+            //    Normal cooperative clients (sync, search, totp) must not terminate the daemon.
+            //    External callers must supply explicit administrative intent (`admin: true`),
+            //    which is satisfied by the dedicated administrative CLI (`omawarden daemon stop`).
+            // 3. Fail-Closed:
+            //    If peer_pid is None (kernel error or unsupported platform), external callers
+            //    fail closed (in-process denies all; standalone requires admin: true).
+            let is_same_process = peer_pid.is_some_and(|pid| pid == std::process::id());
+            let is_admin = req.get("admin").and_then(Value::as_bool).unwrap_or(false);
+
+            if state.is_in_process() && !is_same_process {
+                crate::log_warn!(
+                    "omawarden:daemon",
+                    "Rejected stop request from external PID {:?}: daemon is hosted in-process",
+                    peer_pid
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "error": "Access denied: cannot terminate in-process daemon hosted by an external application",
+                        "protocol_version": CURRENT_PROTOCOL_VERSION
+                    })
+                );
+                return Ok(());
+            }
+
+            if !is_same_process && !is_admin {
+                crate::log_warn!(
+                    "omawarden:daemon",
+                    "Rejected unauthorized stop request from external PID {:?}: missing admin: true",
+                    peer_pid
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "error": "Access denied: stopping the daemon requires explicit administrative authorization (admin: true)",
+                        "protocol_version": CURRENT_PROTOCOL_VERSION
+                    })
+                );
+                return Ok(());
+            }
+
             state.lock();
             crate::ssh_agent::stop(&state);
             let sock_path = state
@@ -2906,12 +3028,9 @@ mod tests {
 
     #[test]
     fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
-        let _lock = crate::env_lock();
         let runtime = tempdir().unwrap();
-        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-
-        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        let socket_path = runtime.path().join("omawarden.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         let server = {
             let listener = listener.try_clone().unwrap();
             std::thread::spawn(move || {
@@ -2931,6 +3050,8 @@ mod tests {
                     json!({ "ok": true, "pong": true, "unlocked": true, "version": "0.10.0" })
                 )
                 .unwrap();
+                let _ = stream.flush();
+                drop(stream);
 
                 // 2. Client sends status to legacy v0 daemon without protocol_version
                 let (mut stream2, _) = listener.accept().unwrap();
@@ -2948,10 +3069,12 @@ mod tests {
                     json!({ "ok": true, "is_unlocked": true, "unlocked": true })
                 )
                 .unwrap();
+                let _ = stream2.flush();
+                drop(stream2);
             })
         };
 
-        let client = DaemonClient::new();
+        let client = DaemonClient::new().with_socket_path(&socket_path);
         // Ping succeeds and accepts unversioned legacy v0
         let ping_res = client.send(&json!({ "action": "ping" })).unwrap();
         assert_eq!(ping_res["ok"], true);
@@ -2963,11 +3086,6 @@ mod tests {
         assert_eq!(status_res["is_unlocked"], true);
 
         server.join().unwrap();
-
-        match old_runtime {
-            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
-            None => std::env::remove_var("XDG_RUNTIME_DIR"),
-        }
     }
 
     #[test]
@@ -4116,6 +4234,190 @@ exit $(cat {})
     }
 
     #[test]
+    fn test_in_process_daemon_rejects_external_stop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(true);
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        // Simulate external caller PID: 99999
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, Some(99999));
+        });
+
+        let payload = format!("{}\n", json!({ "action": "stop", "admin": true }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot terminate in-process daemon"));
+        assert!(!state.shutdown.is_shutting_down());
+    }
+
+    #[test]
+    fn test_standalone_daemon_rejects_stop_without_admin() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(false);
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        // Simulate external caller PID: 99999
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, Some(99999));
+        });
+
+        let payload = format!("{}\n", json!({ "action": "stop" }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopping the daemon requires explicit administrative authorization"));
+        assert!(!state.shutdown.is_shutting_down());
+    }
+
+    #[test]
+    fn test_standalone_daemon_accepts_stop_with_admin() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(false);
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        // Simulate external caller PID: 99999 with admin: true
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, Some(99999));
+        });
+
+        let payload = format!("{}\n", json!({ "action": "stop", "admin": true }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert!(state.shutdown.is_shutting_down());
+    }
+
+    #[test]
+    fn test_same_process_caller_authorized_to_stop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(true);
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        // Caller PID is current process PID
+        let my_pid = std::process::id();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, Some(my_pid));
+        });
+
+        // Does not require admin: true because caller is in the same process
+        let payload = format!("{}\n", json!({ "action": "stop" }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert!(state.shutdown.is_shutting_down());
+    }
+
+    #[test]
+    fn test_daemon_fail_closed_when_peer_pid_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(true);
+
+        // 1. In-process daemon with peer_pid == None fails closed (rejects external stop)
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, None);
+        });
+
+        let payload = format!("{}\n", json!({ "action": "stop", "admin": true }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot terminate in-process daemon"));
+        assert!(!state.shutdown.is_shutting_down());
+
+        // 2. Standalone daemon with peer_pid == None without admin fails closed
+        state.set_in_process(false);
+        let (mut client2, server2) = UnixStream::pair().unwrap();
+        let st2 = state.clone();
+        let handle2 = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server2, st2, None);
+        });
+
+        let payload2 = format!("{}\n", json!({ "action": "stop" }));
+        client2.write_all(payload2.as_bytes()).unwrap();
+        client2.flush().unwrap();
+
+        let mut reader2 = BufReader::new(client2);
+        let mut line2 = String::new();
+        reader2.read_line(&mut line2).unwrap();
+        handle2.join().unwrap();
+
+        let resp2: Value = serde_json::from_str(&line2).unwrap();
+        assert_eq!(resp2["ok"], false);
+        assert!(resp2["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopping the daemon requires explicit administrative authorization"));
+        assert!(!state.shutdown.is_shutting_down());
+    }
+
+    #[test]
     fn test_programmatic_shutdown_via_handle() {
         let _lock = crate::env_lock();
         let runtime = tempdir().unwrap();
@@ -4425,21 +4727,28 @@ exit $(cat {})
 
     #[test]
     fn test_multi_client_differing_commits_coexistence() {
-        let _lock = crate::env_lock();
         let runtime = tempdir().unwrap();
-        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
-        env::set_var("XDG_RUNTIME_DIR", runtime.path());
-
         let storage_dir = tempdir().unwrap();
         let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
         let state = Arc::new(DaemonState::new(storage_mgr, 15));
 
-        let server = DaemonServer::new(state.clone());
+        let socket_path = runtime.path().join("omawarden.sock");
+        let server = DaemonServer::new(state.clone()).with_socket_path(socket_path.clone());
         let handle = server.spawn().expect("failed to spawn daemon server");
 
         // Client 1: Simulating omawarden-app built from commit "commit-app-v1"
-        let app_client = DaemonClient::new();
-        assert_eq!(app_client.ping().unwrap()["ok"], true);
+        let app_client = DaemonClient::new().with_socket_path(&socket_path);
+        let mut ready = false;
+        for _ in 0..50 {
+            if let Ok(ping) = app_client.ping() {
+                assert_eq!(ping["ok"], true);
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready, "daemon did not become ready in time");
+
         let app_ping = app_client
             .send(&json!({
                 "action": "ping",
@@ -4450,7 +4759,7 @@ exit $(cat {})
         assert_eq!(app_ping["protocol_version"], 1);
 
         // Client 2: Simulating Overlay CLI built from commit "commit-cli-v2"
-        let cli_client = DaemonClient::new();
+        let cli_client = DaemonClient::new().with_socket_path(&socket_path);
         let cli_ping = cli_client
             .send(&json!({
                 "action": "ping",
@@ -4478,10 +4787,5 @@ exit $(cat {})
         handle.stop();
         let join_res = handle.join().expect("daemon thread panicked");
         assert!(join_res.is_ok());
-
-        match old_runtime {
-            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
-            None => env::remove_var("XDG_RUNTIME_DIR"),
-        }
     }
 }

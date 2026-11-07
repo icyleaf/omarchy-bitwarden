@@ -22,7 +22,7 @@ Item {
 
   Timer {
     id: testTimer
-    interval: 50
+    interval: 100
     repeat: true
     running: true
     onTriggered: {
