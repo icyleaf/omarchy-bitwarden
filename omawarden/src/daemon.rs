@@ -151,50 +151,73 @@ pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// What to do about a running daemon built from a different commit.
-#[derive(Debug, PartialEq)]
-enum DaemonCheck {
-    UpToDate,
-    /// Mismatched but unlocked: replacing it would lock the vault and drop
-    /// the SSH agent socket mid-use, so leave it until it locks.
-    Defer,
-    Replace,
+/// The monotonically increasing integer version of the Daemon Protocol wire format.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+
+/// The minimum protocol version this client/server understands.
+/// Version 0 represents legacy unversioned daemons.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+
+/// The result of checking protocol version compatibility against the wire handshake.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProtocolCheck {
+    Compatible,
+    Incompatible {
+        running: u32,
+        min_supported: u32,
+        current: u32,
+    },
 }
 
-fn check_running_daemon(ping: &Value, our_commit: &str) -> DaemonCheck {
-    let running_commit = ping.get("commit").and_then(|v| v.as_str()).unwrap_or("");
-    if running_commit == our_commit {
-        DaemonCheck::UpToDate
-    } else if ping.get("unlocked").and_then(|v| v.as_bool()) == Some(true) {
-        DaemonCheck::Defer
+/// Evaluates daemon protocol version from a ping response.
+///
+/// Missing or malformed `protocol_version` fields are treated as legacy version 0.
+pub fn check_protocol_version(ping: &Value) -> ProtocolCheck {
+    let running = ping
+        .get("protocol_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    if running >= MIN_SUPPORTED_PROTOCOL_VERSION && running <= CURRENT_PROTOCOL_VERSION {
+        ProtocolCheck::Compatible
     } else {
-        DaemonCheck::Replace
+        ProtocolCheck::Incompatible {
+            running,
+            min_supported: MIN_SUPPORTED_PROTOCOL_VERSION,
+            current: CURRENT_PROTOCOL_VERSION,
+        }
     }
 }
 
-pub fn ensure_daemon_running() {
-    if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
-        let check = check_running_daemon(&resp, env!("GIT_HASH"));
-        if check == DaemonCheck::UpToDate {
-            return;
+pub fn ensure_daemon_running() -> Result<(), DispatchError> {
+    if let Some(resp) = send_daemon_request_raw(&json!({ "action": "ping" })) {
+        match check_protocol_version(&resp) {
+            ProtocolCheck::Compatible => {
+                // ADR-0028: Protocol version is compatible. Commit hash differences
+                // are purely informational and must NOT cause the daemon to be stopped.
+                return Ok(());
+            }
+            ProtocolCheck::Incompatible {
+                running,
+                min_supported,
+                current,
+            } => {
+                // ADR-0028: Incompatible protocol version. Fail closed immediately with
+                // an explicit error log and strictly avoid sending {"action": "stop"}.
+                crate::log_error!(
+                    "omawarden:daemon",
+                    "Running daemon protocol version {} is incompatible with client (supported: {}..={}). Restart daemon explicitly.",
+                    running,
+                    min_supported,
+                    current
+                );
+                return Err(DispatchError::IncompatibleProtocol {
+                    running,
+                    min_supported,
+                    current,
+                });
+            }
         }
-        // An older build may still hold plaintext from an unscoped login.
-        // Replace it when upgrading that cache to the sign-in requirement.
-        if check == DaemonCheck::Defer
-            && StorageManager::default()
-                .load()
-                .scoped_credential_id()
-                .is_some()
-        {
-            crate::log_info!(
-                "omawarden:daemon",
-                "Running daemon is from another build but the vault is unlocked; keeping it until it locks"
-            );
-            return;
-        }
-        // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
-        let _ = send_daemon_request(&json!({ "action": "stop" }));
-        std::thread::sleep(Duration::from_millis(50));
     }
 
     if let Ok(exe_path) = env::current_exe() {
@@ -224,25 +247,63 @@ pub fn ensure_daemon_running() {
 
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(20));
-            if send_daemon_request(&json!({ "action": "ping" })).is_some() {
+            if send_daemon_request_raw(&json!({ "action": "ping" })).is_some() {
                 break;
             }
         }
     }
+
+    Ok(())
 }
 
 pub fn send_daemon_request(req: &Value) -> Option<Value> {
     dispatch_daemon_request(req).ok()
 }
 
-#[derive(Debug)]
+pub(crate) fn send_daemon_request_raw(req: &Value) -> Option<Value> {
+    dispatch_daemon_request_raw(req).ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchError {
     NotSent,
     Unconfirmed,
+    IncompatibleProtocol {
+        running: u32,
+        min_supported: u32,
+        current: u32,
+    },
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(f, "Could not send the request to the daemon."),
+            Self::Unconfirmed => write!(f, "Daemon request unconfirmed."),
+            Self::IncompatibleProtocol {
+                running,
+                min_supported,
+                current,
+            } => write!(
+                f,
+                "Incompatible daemon protocol version {running} (supported: {min_supported}..={current}). Please restart the daemon."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+/// Dispatches request to the daemon, ensuring the daemon is running and protocol-compatible.
+pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
+    if req.get("action").and_then(|v| v.as_str()) != Some("ping") {
+        ensure_daemon_running()?;
+    }
+    dispatch_daemon_request_raw(req)
 }
 
 /// Preserve the dispatch boundary for callers performing a non-idempotent write.
-pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
+pub fn dispatch_daemon_request_raw(req: &Value) -> Result<Value, DispatchError> {
     let mut stream = connect_daemon()?;
     let mut payload_val = req.clone();
     if let Value::Object(ref mut map) = payload_val {
@@ -1256,6 +1317,7 @@ pub(crate) fn handle_client(
         "ping" => json!({
             "ok": true,
             "pong": true,
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
             "unlock_context": state.vault_mgr.unlock_context(),
@@ -1908,8 +1970,10 @@ mod tests {
         // show it.
         let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
         for reply in [
-            json!({ "ok": true, "commit": env!("GIT_HASH"), "unlocked": false }),
-            json!({ "ok": true, "commit": "another-build", "unlocked": true }),
+            json!({ "ok": true, "protocol_version": 1, "commit": env!("GIT_HASH"), "unlocked": false }),
+            json!({ "ok": true, "protocol_version": 1, "commit": "another-build", "unlocked": true }),
+            // ADR-0028: matching protocol version 1 is kept even when locked and commit differs!
+            json!({ "ok": true, "protocol_version": 1, "commit": "foreign-commit", "unlocked": false }),
         ] {
             let server = {
                 let listener = listener.try_clone().unwrap();
@@ -1927,7 +1991,7 @@ mod tests {
                     writeln!(stream, "{reply}").unwrap();
                 })
             };
-            ensure_daemon_running();
+            let _ = ensure_daemon_running();
             server.join().unwrap();
         }
 
@@ -1943,31 +2007,176 @@ mod tests {
     }
 
     #[test]
-    fn test_outdated_daemon_is_only_replaced_while_locked() {
-        let ping = |commit: &str, unlocked: Option<bool>| {
-            let mut v = json!({ "ok": true, "commit": commit });
-            if let Some(u) = unlocked {
-                v["unlocked"] = json!(u);
-            }
-            v
+    fn test_incompatible_protocol_version_fails_closed_without_stop() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        // Server answers ping with incompatible protocol_version: 99
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
+                )
+                .unwrap();
+                // Ensure no stop request is transmitted
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                let mut next_line = String::new();
+                let read_res = BufReader::new(stream).read_line(&mut next_line);
+                if let Ok(n) = read_res {
+                    if n > 0 {
+                        assert_ne!(
+                            serde_json::from_str::<Value>(&next_line).unwrap()["action"],
+                            "stop",
+                            "Incompatible protocol version must NOT trigger stop action"
+                        );
+                    }
+                }
+            })
         };
+
+        let _ = ensure_daemon_running();
+        server.join().unwrap();
+
+        for (key, old) in [
+            ("XDG_RUNTIME_DIR", old_runtime),
+            ("OMAWARDEN_DATA_DIR", old_data),
+        ] {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ping_advertises_protocol_version_1() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client(server, st);
+        });
+        let payload = format!("{}\n", json!({ "action": "ping" }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(
-            check_running_daemon(&ping("abc", Some(true)), "abc"),
-            DaemonCheck::UpToDate
+            resp.get("protocol_version").and_then(Value::as_u64),
+            Some(CURRENT_PROTOCOL_VERSION as u64)
         );
+    }
+
+    #[test]
+    fn test_protocol_version_negotiation() {
+        let compatible = json!({ "ok": true, "protocol_version": 1 });
         assert_eq!(
-            check_running_daemon(&ping("old", Some(true)), "abc"),
-            DaemonCheck::Defer
+            check_protocol_version(&compatible),
+            ProtocolCheck::Compatible
         );
+
+        // Missing protocol_version defaults to 0 (legacy unversioned) -> Incompatible
+        let legacy = json!({ "ok": true, "commit": "old" });
         assert_eq!(
-            check_running_daemon(&ping("old", Some(false)), "abc"),
-            DaemonCheck::Replace
+            check_protocol_version(&legacy),
+            ProtocolCheck::Incompatible {
+                running: 0,
+                min_supported: 1,
+                current: 1
+            }
         );
-        // Daemons predating the field are replaced as before.
+
+        // Future protocol version 99 -> Incompatible
+        let future = json!({ "ok": true, "protocol_version": 99 });
         assert_eq!(
-            check_running_daemon(&ping("old", None), "abc"),
-            DaemonCheck::Replace
+            check_protocol_version(&future),
+            ProtocolCheck::Incompatible {
+                running: 99,
+                min_supported: 1,
+                current: 1
+            }
         );
+    }
+
+    #[test]
+    fn test_dispatch_daemon_request_fails_closed_on_incompatible_protocol() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        // Server answers ping with incompatible protocol_version: 99
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
+                )
+                .unwrap();
+            })
+        };
+
+        // Attempting to dispatch a non-ping command must fail-closed with IncompatibleProtocol
+        let result = dispatch_daemon_request(&json!({ "action": "list" }));
+        assert_eq!(
+            result,
+            Err(DispatchError::IncompatibleProtocol {
+                running: 99,
+                min_supported: 1,
+                current: 1
+            })
+        );
+        server.join().unwrap();
+
+        for (key, old) in [
+            ("XDG_RUNTIME_DIR", old_runtime),
+            ("OMAWARDEN_DATA_DIR", old_data),
+        ] {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]

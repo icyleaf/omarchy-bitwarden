@@ -180,7 +180,7 @@ fn the_command_fails_when_the_daemon_cannot_start() {
 }
 
 #[test]
-fn a_locked_daemon_from_another_build_is_replaced() {
+fn a_daemon_from_another_build_with_compatible_protocol_is_kept() {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
 
@@ -188,7 +188,8 @@ fn a_locked_daemon_from_another_build_is_replaced() {
     sb.stdout(&["config", "set", "--ssh-agent", "true"]);
     let socket = sb.path("runtime").join("omawarden.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    // An old daemon: locked, so it may be replaced. It exits on `stop`.
+    // ADR-0028: A daemon from another commit with compatible protocol_version: 1
+    // is kept and NOT replaced or stopped, even when locked.
     let old_daemon = std::thread::spawn(move || {
         let mut seen = Vec::new();
         for stream in listener.incoming() {
@@ -199,14 +200,22 @@ fn a_locked_daemon_from_another_build_is_replaced() {
                 .unwrap();
             let action = json(&line)["action"].as_str().unwrap().to_string();
             let reply = match action.as_str() {
-                "ping" => serde_json::json!({ "ok": true, "commit": "old", "unlocked": false }),
+                "ping" => serde_json::json!({
+                    "ok": true,
+                    "protocol_version": 1,
+                    "commit": "other-commit",
+                    "unlocked": false
+                }),
+                "ssh_agent_status" => serde_json::json!({
+                    "ok": true,
+                    "running": true,
+                    "socket": "/tmp/test.sock"
+                }),
                 _ => serde_json::json!({ "ok": true }),
             };
             writeln!(stream, "{reply}").unwrap();
             seen.push(action.clone());
-            if action == "stop" {
-                std::fs::remove_file(listener.local_addr().unwrap().as_pathname().unwrap())
-                    .unwrap();
+            if action == "ssh_agent_status" {
                 return seen;
             }
         }
@@ -214,8 +223,11 @@ fn a_locked_daemon_from_another_build_is_replaced() {
     });
 
     let status = json(&sb.stdout(&["ssh-agent", "status"]));
-    assert_eq!(status["running"], true, "the new daemon runs the agent");
-    assert_eq!(old_daemon.join().unwrap(), ["ping", "stop"]);
+    assert_eq!(
+        status["running"], true,
+        "the compatible daemon answers status"
+    );
+    assert_eq!(old_daemon.join().unwrap(), ["ping", "ssh_agent_status"]);
 }
 
 #[test]

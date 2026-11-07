@@ -863,7 +863,7 @@ fn main() -> ExitCode {
                     json!({ "action": "ssh_agent_reply", "id": id, "approve": allow })
                 }
             };
-            ensure_daemon_running();
+            let _ = ensure_daemon_running();
             match send_daemon_request(&request) {
                 Some(mut resp) => {
                     if let Some(obj) = resp.as_object_mut() {
@@ -904,7 +904,7 @@ fn main() -> ExitCode {
             );
             match action {
                 AuthAction::Status => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let st = auth_mgr.get_status(false);
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
@@ -1137,7 +1137,7 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::QuickUnlock => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let resp = send_daemon_request(&json!({ "action": "quick_unlock" }))
                         .unwrap_or_else(|| {
                             json!({
@@ -1231,7 +1231,7 @@ fn main() -> ExitCode {
             match action {
                 VaultAction::Sync => {
                     let client_ctx = omawarden::api::resolve_effective_client_context(None);
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let mut sync_req = json!({ "action": "sync" });
                     if let Some(ref ctx) = client_ctx {
                         sync_req["client"] = json!(ctx);
@@ -1246,6 +1246,14 @@ fn main() -> ExitCode {
                             "ok": false,
                             "error": "Could not confirm synchronization. Check the vault before retrying."
                         }),
+                        Err(omawarden::daemon::DispatchError::IncompatibleProtocol {
+                            running,
+                            min_supported,
+                            current,
+                        }) => json!({
+                            "ok": false,
+                            "error": format!("Incompatible daemon protocol version {running} (supported: {min_supported}..={current}). Please restart the daemon.")
+                        }),
                     };
                     let ok = resp_val["ok"].as_bool().unwrap_or(false);
                     println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
@@ -1256,7 +1264,7 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -1297,7 +1305,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -1711,7 +1719,7 @@ fn main() -> ExitCode {
                     folder,
                     out_dir,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
                         Err(e) => {
@@ -1787,7 +1795,7 @@ fn main() -> ExitCode {
                     notes,
                     folder,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let raw_priv = if stdin || private_key.is_none() {
                         let mut buffer = String::new();
                         let _ = io::stdin().read_to_string(&mut buffer);
@@ -1863,7 +1871,7 @@ fn main() -> ExitCode {
                     public_only,
                     private_only: _,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    let _ = omawarden::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -2148,6 +2156,9 @@ fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
     let reply = dispatch_daemon_request(request).map_err(|e| match e {
         DispatchError::NotSent => reject("Could not send the request to the daemon."),
         DispatchError::Unconfirmed => unknown(),
+        DispatchError::IncompatibleProtocol { .. } => {
+            reject("Daemon protocol version is incompatible with this client.")
+        }
     })?;
     if reply["ok"] == false {
         return Err(reply);
@@ -2168,7 +2179,7 @@ fn vault_output_item(
     query: &str,
     touch: bool,
 ) -> Result<Option<VaultOutputItem>, String> {
-    ensure_daemon_running();
+    let _ = ensure_daemon_running();
     let unlocked = send_daemon_request(&json!({ "action": "status" }))
         .is_some_and(|reply| reply["is_unlocked"] == true);
     if unlocked {

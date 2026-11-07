@@ -223,6 +223,9 @@ impl AuthManager {
             Err(DispatchError::Unconfirmed) => {
                 Err("Cannot verify the daemon session before login.")
             }
+            Err(DispatchError::IncompatibleProtocol { .. }) => {
+                Err("Incompatible daemon protocol version. Restart the daemon to sign in.")
+            }
         }
     }
 
@@ -450,7 +453,7 @@ impl AuthManager {
         }
         // Start once at the login entry point. The later context check must
         // observe a stopped/locked daemon, never restart it and sample anew.
-        crate::daemon::ensure_daemon_running();
+        let _ = crate::daemon::ensure_daemon_running();
         let login_context = match Self::daemon_unlock_context() {
             Ok(context) => context,
             Err(error) => {
@@ -758,7 +761,7 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        crate::daemon::ensure_daemon_running();
+        let _ = crate::daemon::ensure_daemon_running();
         let login_context = match Self::daemon_unlock_context() {
             Ok(context) => context,
             Err(error) => {
@@ -914,7 +917,7 @@ impl AuthManager {
 
     pub fn unlock(&self, password: &str) -> AuthResult {
         crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
-        crate::daemon::ensure_daemon_running();
+        let _ = crate::daemon::ensure_daemon_running();
         let storage = self.storage_mgr.load();
         let unlock_credentials = if storage.enc_user_key.is_some() {
             storage.check_unlock_credentials()
