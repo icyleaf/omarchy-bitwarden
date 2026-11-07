@@ -49,7 +49,7 @@ impl Drop for DaemonSocket {
     fn drop(&mut self) {
         if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&self.0) {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = writeln!(stream, "{}", json!({"action":"stop"}));
+            let _ = writeln!(stream, "{}", json!({"action":"stop", "admin": true}));
             let mut reply = String::new();
             let _ = BufReader::new(stream).read_line(&mut reply);
         }
@@ -113,7 +113,10 @@ impl ActivationProxy {
                 } else {
                     assert_eq!(reply["outcome"], "committed");
                     if case == LoginCase::LostActivationReceipt {
-                        assert_eq!(ipc(&target, json!({"action":"stop"}))["ok"], true);
+                        assert_eq!(
+                            ipc(&target, json!({"action":"stop", "admin": true}))["ok"],
+                            true
+                        );
                     }
                     if case == LoginCase::LockAfterActivation {
                         assert_eq!(ipc(&target, json!({"action":"lock"}))["ok"], true);

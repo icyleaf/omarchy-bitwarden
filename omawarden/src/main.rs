@@ -165,10 +165,14 @@ enum Commands {
         #[command(subcommand)]
         action: SshAgentAction,
     },
-    #[command(about = "Run omawarden background daemon")]
+    #[command(about = "Manage or run omawarden background daemon")]
     Daemon {
-        #[arg(long)]
+        #[arg(long, help = "Auto-lock timeout in minutes")]
         auto_lock: Option<u64>,
+        #[arg(long, help = "Stop the running background daemon")]
+        stop: bool,
+        #[arg(value_name = "ACTION", help = "Optional daemon action: 'stop'")]
+        action: Option<String>,
     },
     #[command(about = "Generate cryptographically secure passwords or Diceware passphrases")]
     Generate {
@@ -592,35 +596,77 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::FAILURE,
             }
         }
-        Commands::Daemon { auto_lock } => {
-            let default_auto_lock = if cfg.auto_lock_minutes >= 0 {
-                cfg.auto_lock_minutes as u64
-            } else {
-                15
-            };
-            let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
-            let storage_mgr = match cli.config.as_deref() {
-                Some(cp) => {
-                    if let Some(parent) = cp.parent() {
-                        StorageManager::new(
-                            parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
-                        )
-                    } else {
-                        StorageManager::default()
+        Commands::Daemon {
+            auto_lock,
+            stop,
+            action,
+        } => {
+            if stop || action.as_deref() == Some("stop") {
+                let client = omawarden::daemon::DaemonClient::new();
+                let resp = client.send_raw(&json!({ "action": "stop", "admin": true }));
+                match resp {
+                    Ok(val) if val.get("ok") == Some(&Value::Bool(true)) => {
+                        println!("{}", serde_json::to_string_pretty(&val).unwrap());
+                        ExitCode::SUCCESS
+                    }
+                    Ok(val) => {
+                        eprintln!("{}", serde_json::to_string_pretty(&val).unwrap());
+                        ExitCode::FAILURE
+                    }
+                    Err(omawarden::daemon::DispatchError::NotSent) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "status": "stopped",
+                                "message": "Daemon is not running."
+                            }))
+                            .unwrap()
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": e.to_string(),
+                            }))
+                            .unwrap()
+                        );
+                        ExitCode::FAILURE
                     }
                 }
-                None => StorageManager::default(),
-            };
-            let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
-            println!(
-                "Starting omawarden daemon (auto_lock: {}m)...",
-                auto_lock_mins
-            );
-            if let Err(e) = run_daemon_server(state) {
-                eprintln!("Daemon server error: {}", e);
-                ExitCode::FAILURE
             } else {
-                ExitCode::SUCCESS
+                let default_auto_lock = if cfg.auto_lock_minutes >= 0 {
+                    cfg.auto_lock_minutes as u64
+                } else {
+                    15
+                };
+                let auto_lock_mins = auto_lock.unwrap_or(default_auto_lock);
+                let storage_mgr = match cli.config.as_deref() {
+                    Some(cp) => {
+                        if let Some(parent) = cp.parent() {
+                            StorageManager::new(
+                                parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                            )
+                        } else {
+                            StorageManager::default()
+                        }
+                    }
+                    None => StorageManager::default(),
+                };
+                let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
+                println!(
+                    "Starting omawarden daemon (auto_lock: {}m)...",
+                    auto_lock_mins
+                );
+                if let Err(e) = run_daemon_server(state) {
+                    eprintln!("Daemon server error: {}", e);
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
             }
         }
 
@@ -2567,7 +2613,15 @@ mod tests {
         // Without --auto-lock flag, auto_lock should be None so it can inherit from config
         let cli_default = Cli::try_parse_from(["omawarden", "daemon"]).unwrap();
         match cli_default.command {
-            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, None),
+            Commands::Daemon {
+                auto_lock,
+                stop,
+                action,
+            } => {
+                assert_eq!(auto_lock, None);
+                assert!(!stop);
+                assert_eq!(action, None);
+            }
             _ => panic!("Expected Commands::Daemon"),
         }
 
@@ -2575,7 +2629,21 @@ mod tests {
         let cli_explicit =
             Cli::try_parse_from(["omawarden", "daemon", "--auto-lock", "45"]).unwrap();
         match cli_explicit.command {
-            Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
+            Commands::Daemon { auto_lock, .. } => assert_eq!(auto_lock, Some(45)),
+            _ => panic!("Expected Commands::Daemon"),
+        }
+
+        // With stop action
+        let cli_stop_arg = Cli::try_parse_from(["omawarden", "daemon", "stop"]).unwrap();
+        match cli_stop_arg.command {
+            Commands::Daemon { action, .. } => assert_eq!(action.as_deref(), Some("stop")),
+            _ => panic!("Expected Commands::Daemon"),
+        }
+
+        // With --stop flag
+        let cli_stop_flag = Cli::try_parse_from(["omawarden", "daemon", "--stop"]).unwrap();
+        match cli_stop_flag.command {
+            Commands::Daemon { stop, .. } => assert!(stop),
             _ => panic!("Expected Commands::Daemon"),
         }
     }

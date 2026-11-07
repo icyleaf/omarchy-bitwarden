@@ -296,8 +296,9 @@ impl ConfigManager {
             let _ = crate::daemon::send_daemon_request_raw(&serde_json::json!({
                 "action": "wipe_quick_unlock"
             }));
-            let _ =
-                crate::daemon::send_daemon_request_raw(&serde_json::json!({ "action": "stop" }));
+            let _ = crate::daemon::send_daemon_request_raw(
+                &serde_json::json!({ "action": "stop", "admin": true }),
+            );
             let (outputs, retired) = {
                 let _account = storage_mgr.account_guard()?;
                 let current = storage_mgr.cache_snapshot()?;
