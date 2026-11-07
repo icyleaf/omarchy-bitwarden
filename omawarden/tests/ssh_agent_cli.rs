@@ -45,7 +45,7 @@ impl Sandbox {
     fn stop_daemon(&self) {
         let socket = self.path("runtime").join("omawarden.sock");
         if let Ok(mut stream) = UnixStream::connect(socket) {
-            let _ = stream.write_all(b"{\"action\":\"stop\"}\n");
+            let _ = stream.write_all(b"{\"action\":\"stop\",\"admin\":true}\n");
             let mut reply = String::new();
             let _ = stream.read_to_string(&mut reply);
         }
