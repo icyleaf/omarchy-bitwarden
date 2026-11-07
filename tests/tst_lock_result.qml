@@ -24,7 +24,7 @@ Item {
     throw new Error("Missing auth status process")
   }
 
-  function beginLock() {
+  function beginLock(withStatusInFlight) {
     statusProcess().running = false
     overlay.authState = ({
       status: "unlocked", server_url: "https://vault.example",
@@ -32,6 +32,10 @@ Item {
     })
     overlay.rawVaultItems = [{ id: "fixture", login: { password: "fixture-password" } }]
     overlay.errorMessage = ""
+    if (withStatusInFlight) {
+      overlay.refreshAuthStatus()
+      check(statusProcess().running, "fixture did not start the pre-lock status request")
+    }
     overlay.doLock()
     check(overlay.authState.status === "unlocked", "lock status changed before confirmation")
     check(overlay.rawVaultItems.length === 0, "pending lock retained locally displayed secrets")
@@ -40,7 +44,8 @@ Item {
     overlay.doLock()
     check(overlay.vaultRevision === revision, "a repeated lock replaced the pending request")
     overlay.refreshAuthStatus()
-    check(!statusProcess().running, "a status poll raced the pending lock result")
+    check(statusProcess().running === Boolean(withStatusInFlight),
+          "locking changed the pending status request or started a new poll")
     return processFor("lock")
   }
 
@@ -69,6 +74,32 @@ Item {
       check(overlay.isBusy && overlay.authState.status === "unlocked", "exit committed lock before stdout")
       output(process, { ok: true, status: "locked" })
       check(overlay.authState.status === "locked" && !overlay.isBusy, "reversed completion order lost lock result")
+
+      for (var statusAfterLock of [false, true]) {
+        process = beginLock(true)
+        var staleStatus = {
+          status: "unlocked", server_url: "https://vault.example",
+          user_email: "fixture@example.invalid", has_session: true, lock_generation: "1"
+        }
+        var stateBeforeReply = overlay.authState
+        if (statusAfterLock) {
+          output(process, { ok: true, status: "locked", epoch_advanced: true })
+          exit(process, 0, 0)
+          stateBeforeReply = overlay.authState
+        }
+        statusProcess().reply(staleStatus)
+        check(overlay.authState === stateBeforeReply,
+              "a pre-lock status reply replaced the current auth state")
+        check(overlay.rawVaultItems.length === 0,
+              "a pre-lock status reply restored sensitive items")
+        if (!statusAfterLock) {
+          check(overlay.isBusy, "a pre-lock status reply completed the pending lock")
+          output(process, { ok: true, status: "locked", epoch_advanced: true })
+          exit(process, 0, 0)
+        }
+        check(overlay.authState.status === "locked" && !overlay.isBusy,
+              "a pre-lock status reply prevented or undid the confirmed lock")
+      }
 
       var failures = [
         { reply: { ok: false, error: "Owner confirmation failed" }, code: 1, status: 0 },

@@ -50,6 +50,12 @@ epoch publication after that lock. Reserve `error` for unsuccessful operations.
 The overlay waits for both a successful JSON receipt and normal process exit
 before committing locked state, and refreshes auth status after failure.
 
+The optional JSON fields do not imply Rust source compatibility. `AuthResult`
+is a public Rust struct; consumers using exhaustive struct literals or patterns
+must account for its new `warning`, `epoch_advanced` and `lock_epoch` fields.
+Adding `#[non_exhaustive]` to the existing type would also break those callers
+and requires a separate API migration decision.
+
 #### Daemon `stop` Action Contract
 
 The `stop` action coordinates daemon shutdown under ADR-0028:
