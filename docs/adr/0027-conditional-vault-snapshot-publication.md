@@ -93,25 +93,44 @@ receipts and retry rules remain in
    copy. Attachment HTTP and decryption run outside the gate. Previews are
    stored by credential slot, item and attachment ID.
 
+   Offline authorization and final publication separately verify the daemon's
+   `shared_lock_epoch: true` ping capability. Clients require both wire
+   compatibility and this capability. With no reachable daemon, both the
+   runtime and cache owner leases must be available. The holder retains those
+   leases through clipboard setup. A busy owner with an unreachable socket
+   fails authorization. An epoch-unaware daemon requires an explicit upgrade
+   before it can authorize offline copies.
+
    Hard and soft lock advance the persisted runtime lock epoch before output
    cleanup, so an expired copy is rejected even when clipboard or preview
    cleanup stays pending. `auth lock` and `auth logout` advance the epoch
-   locally when the daemon is absent, is a legacy daemon without the epoch
-   reply field, or does not confirm the transition. A daemon restart never
-   resets or re-mints the epoch; a graceful stop is a lock transition and does
-   advance it. Quick unlock preserves the epoch. The epoch file contains no
+   locally after a daemon confirms locking without a durable epoch, or after
+   obtaining the owner leases and confirming the daemon is absent. An
+   unconfirmed reply from a live or starting daemon reports failure. A daemon
+   restart preserves a completed epoch. A graceful stop is a lock transition
+   and advances it. Quick unlock preserves the epoch. The epoch file contains no
    secrets, is serialized across CLI and daemon processes, and readers fail
    closed on corrupt data; a lock transition with corrupt data rotates to a
    fresh epoch so an old authorization can never be reused.
 
-   A daemon `lock` reply carries `lock_epoch` alongside `outputs_cleared`:
-   a numeric value proves that transition advanced the shared epoch, an absent
-   field identifies a legacy daemon (the client must apply its local fallback),
-   and `null` means the daemon locked but could not durably advance the epoch.
-   Direct IPC callers compare the field with their local observation and apply
-   the same fallback. The epoch is metadata for associating a cleanup result
-   with its transition (used by the pending-cleanup follow-up); it does not
-   replace `outputs_cleared`.
+   Lock transitions hold the output gate while advancing the epoch and
+   clearing outputs. Before staging a new epoch, the previous record is
+   invalidated and synced under the epoch guard. Failed writes and renames
+   therefore leave readers with invalid state. A subsequent successful
+   `omawarden auth lock` repairs that state. The guard inode remains stable and
+   records publication completion in its length. An empty guard marks an
+   unfinished transition. A readable old data record with that marker is
+   advanced before another authorization is issued, including when migrating
+   a guard from an older build.
+
+   A daemon `lock` reply carries `lock_epoch` and `epoch_advanced` alongside
+   `outputs_cleared`. A numeric epoch and `epoch_advanced: true` identify the
+   durable transition. `null` and `epoch_advanced: false` report a locked vault
+   whose new epoch could not be published. The CLI preserves confirmed lock
+   success while exposing that independent failure and its diagnostic. Direct
+   IPC callers apply the same owner checks before a local fallback. The epoch
+   associates a cleanup result with its transition for the pending-cleanup
+   follow-up.
 
    The daemon and its helpers share the same validated runtime directory and
    Wayland session. A vault copy records a marker before setting the selection.

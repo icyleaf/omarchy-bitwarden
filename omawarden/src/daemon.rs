@@ -91,6 +91,88 @@ pub fn guard_session_output(expected: u64) -> io::Result<fs::File> {
     Ok(gate)
 }
 
+pub(crate) struct DaemonOwnerGuard {
+    _socket: fs::File,
+    _cache: fs::File,
+}
+
+// Ping carries metadata only. Bound it separately from vault-data responses.
+const MAX_EPOCH_PING_BYTES: u64 = 16 * 1024;
+
+fn acquire_daemon_ownership(cache: &Path) -> io::Result<DaemonOwnerGuard> {
+    Ok(DaemonOwnerGuard {
+        _socket: lock_daemon_instance(&get_socket_path().with_extension("instance.lock"))?,
+        _cache: lock_daemon_instance(&cache.with_extension("daemon.lock"))?,
+    })
+}
+
+// Keep connection failures distinct from confirmed owner absence.
+fn existing_daemon_stream() -> io::Result<Option<UnixStream>> {
+    let path = get_socket_path();
+    validate_socket_path(&path)?;
+    let stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    verify_peer_credentials(&stream)?;
+    Ok(Some(stream))
+}
+
+/// Keep both owner leases while performing a local transition without a daemon.
+pub(crate) fn guard_absent_daemon(cache: &Path) -> io::Result<DaemonOwnerGuard> {
+    let owner = acquire_daemon_ownership(cache)?;
+    if existing_daemon_stream()?.is_some() {
+        return Err(io::Error::other(
+            "A live daemon must confirm the vault lock",
+        ));
+    }
+    Ok(owner)
+}
+
+/// Confirm shared-epoch support, or hold the leases proving the daemon absent.
+/// Call again under the output gate before publishing an offline value.
+pub(crate) fn guard_cache_daemon(cache: &Path) -> io::Result<Option<DaemonOwnerGuard>> {
+    let owner = match acquire_daemon_ownership(cache) {
+        Ok(owner) => Some(owner),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+        Err(error) => return Err(error),
+    };
+    let Some(mut stream) = existing_daemon_stream()? else {
+        return owner
+            .map(Some)
+            .ok_or_else(|| io::Error::other("Cannot confirm the daemon owner. Retry the copy."));
+    };
+    let timeout = Some(crate::clipboard::CLIPBOARD_SETUP_TIMEOUT);
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    // Publishers hold the output gate here. Ping must remain independent of
+    // both that gate and restore_guard, as output_generation is.
+    writeln!(stream, "{}", json!({"action": "ping"}))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .take(MAX_EPOCH_PING_BYTES)
+        .read_line(&mut response)?;
+    let reply: Value = serde_json::from_str(&response)?;
+    if reply["ok"] != true
+        || reply["pong"] != true
+        || reply["shared_lock_epoch"] != true
+        || check_protocol_version(&reply) != ProtocolCheck::Compatible
+    {
+        return Err(io::Error::other(
+            "The running daemon cannot authorize offline copies. Restart it with shared lock epoch support.",
+        ));
+    }
+    Ok(owner)
+}
+
 /// Validates that a socket file (and its parent directory) is owned by the current UID
 /// and is not a symlink to prevent cross-user socket hijacking or TOCTOU attacks.
 pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
@@ -1824,6 +1906,7 @@ pub(crate) fn handle_client(
             "protocol_version": CURRENT_PROTOCOL_VERSION,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
+            "shared_lock_epoch": true,
             "unlock_context": state.vault_mgr.unlock_context(),
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
@@ -1939,6 +2022,7 @@ pub(crate) fn handle_client(
                 "ok": true,
                 "status": "locked",
                 "outputs_cleared": outputs_cleared,
+                "epoch_advanced": lock_epoch.is_some(),
                 "lock_epoch": lock_epoch
             })
         }

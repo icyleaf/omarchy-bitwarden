@@ -3,8 +3,11 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -25,6 +28,96 @@ ln -sfn "$value" selection
 
 struct Clipboard(TempDir);
 
+struct DaemonProcess(std::process::Child);
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn deny_regular_file_writes(command: &mut Command) {
+    // SAFETY: this child-only hook changes a signal disposition and resource
+    // limit using libc calls before exec, without touching shared Rust state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+struct EpochDaemon {
+    stopped: Arc<AtomicBool>,
+    shared_epoch: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl EpochDaemon {
+    fn new(runtime: &Path, shared_epoch: bool) -> Self {
+        let socket = runtime.join("omawarden.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        let shared_epoch = Arc::new(AtomicBool::new(shared_epoch));
+        let capability = Arc::clone(&shared_epoch);
+        let thread = thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let mut reply = match request["action"].as_str() {
+                    Some("ping") => json!({"ok":true,"pong":true,"protocol_version":1}),
+                    Some("status") => json!({"ok":true,"is_unlocked":false,"protocol_version":1}),
+                    _ => json!({"ok":false,"error":"Unsupported fixture action"}),
+                };
+                if capability.load(Ordering::SeqCst) {
+                    reply["shared_lock_epoch"] = json!(true);
+                }
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        Self {
+            stopped,
+            shared_epoch,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for EpochDaemon {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
 impl Clipboard {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -34,24 +127,27 @@ impl Clipboard {
         Self(dir)
     }
 
-    fn run(&self, program: &Path, args: &[&str], text: &str) -> Output {
+    fn command(&self, program: &Path) -> Command {
         let dir = self.0.path();
-        let mut child = Command::new(program)
-            .args(args)
+        let mut command = Command::new(program);
+        command
+            .env_clear()
             .env("XDG_RUNTIME_DIR", dir)
             .env("XDG_CONFIG_HOME", dir)
             .env("OMAWARDEN_CONFIG_DIR", dir)
             .env("OMAWARDEN_DATA_DIR", dir)
             .env("HOME", dir)
             .env("WAYLAND_DISPLAY", "fixture-wayland")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env("OMA_DAEMON_LAUNCH_STRATEGY", "disabled")
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn run(&self, program: &Path, args: &[&str], text: &str) -> Output {
+        let mut child = self.command(program).args(args).spawn().unwrap();
         child
             .stdin
             .take()
@@ -367,12 +463,119 @@ fn cli_lock_without_daemon_advances_epoch_and_rejects_stale_holder() {
 }
 
 #[test]
-fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
-    use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
-
+fn epoch_write_failure_cannot_leave_a_stale_holder_authorized() {
     let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
     let clip = Clipboard::new();
     let root = clip.0.path();
+    let cache = root.join("data.json");
+    let active = "11111111111111111111111111111111";
+    fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+    let keyring = root.join("secret-tool");
+    fs::write(&keyring, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(keyring, fs::Permissions::from_mode(0o700)).unwrap();
+    clip.write_epoch(100);
+
+    let mut lock = Command::new(cli);
+    lock.args(["auth", "lock"])
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+        .env("XDG_RUNTIME_DIR", root)
+        .env("OMAWARDEN_DATA_DIR", root)
+        .env("OMAWARDEN_CONFIG_DIR", root)
+        .env("WAYLAND_DISPLAY", "fixture-wayland");
+    deny_regular_file_writes(&mut lock);
+    let locked = lock.output().unwrap();
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stdout)
+    );
+    let stale = holder_args(&root.join("wl-copy"), &cache, active, "100").map(str::to_owned);
+    let stale: Vec<_> = stale.iter().map(String::as_str).collect();
+    assert!(
+        !clip
+            .run(cli, &stale, "late fixture selection")
+            .status
+            .success(),
+        "a failed epoch write left the old authorization usable"
+    );
+    assert!(clip.paste().is_none());
+    let reply: Value = serde_json::from_slice(&locked.stdout).unwrap();
+    assert_eq!(reply["epoch_advanced"], false);
+    assert!(reply["error"]
+        .as_str()
+        .unwrap()
+        .contains("revocation is unconfirmed"));
+}
+
+#[test]
+fn daemon_epoch_write_failure_cannot_authorize_an_offline_holder() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let clip = Clipboard::new();
+    let root = clip.0.path();
+    let cache = root.join("data.json");
+    let active = "11111111111111111111111111111111";
+    fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+    clip.write_epoch(100);
+    let mut command = clip.command(cli);
+    command.arg("daemon");
+    deny_regular_file_writes(&mut command);
+    let _daemon = DaemonProcess(command.spawn().unwrap());
+    let socket = root.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "fault-injected daemon did not start"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(stream, "{}", json!({"action":"lock"})).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["outputs_cleared"], true);
+    assert_eq!(reply["epoch_advanced"], false);
+    assert_eq!(reply["lock_epoch"], Value::Null);
+    let wl_copy = root.join("wl-copy");
+    let stale = holder_args(&wl_copy, &cache, active, "100");
+    assert!(!clip
+        .run(cli, &stale, "late fixture selection")
+        .status
+        .success());
+    assert!(clip.paste().is_none());
+}
+
+#[test]
+fn offline_holder_requires_shared_epoch_support_from_a_live_daemon() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    for shared_epoch in [false, true] {
+        let clip = Clipboard::new();
+        let root = clip.0.path();
+        let active = "11111111111111111111111111111111";
+        let cache = root.join("data.json");
+        fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+        clip.write_epoch(100);
+        let _daemon = EpochDaemon::new(root, shared_epoch);
+        let wl_copy = root.join("wl-copy");
+        let holder = holder_args(&wl_copy, &cache, active, "100");
+        let copied = clip.run(cli, &holder, "fixture selection");
+        assert_eq!(
+            copied.status.success(),
+            shared_epoch,
+            "offline publication with shared-epoch capability {shared_epoch}"
+        );
+    }
+}
+
+fn write_offline_cache(root: &Path) {
+    use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+
     let email = "offline-copy@example.invalid";
     let master =
         derive_master_key(email, "fixture", KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
@@ -392,25 +595,25 @@ fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
             "ciphers": [{
                 "id": "offline-item", "type": 1,
                 "name": user_key.encrypt_string("Offline item").unwrap(),
-                "login": {"password": user_key.encrypt_string("offline secret").unwrap()}
+                "login": {
+                    "password": user_key.encrypt_string("offline secret").unwrap(),
+                    "totp": user_key.encrypt_string("JBSWY3DPEHPK3PXP").unwrap()
+                }
             }]
         })
         .to_string(),
     )
     .unwrap();
+}
 
-    let command = || {
-        let mut cmd = Command::new(cli);
-        cmd.env_clear()
-            .env("HOME", root)
-            .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
-            .env("XDG_RUNTIME_DIR", root)
-            .env("OMAWARDEN_DATA_DIR", root)
-            .env("OMAWARDEN_CONFIG_DIR", root)
-            .env("WAYLAND_DISPLAY", "fixture-wayland")
-            .env("OMA_DAEMON_LAUNCH_STRATEGY", "disabled");
-        cmd
-    };
+#[test]
+fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let clip = Clipboard::new();
+    let root = clip.0.path();
+    write_offline_cache(root);
+
+    let command = || clip.command(cli);
     let copy_args = ["copy", "offline-item", "--password", "--timeout", "0"];
     let mut pending = command()
         .args(copy_args)
@@ -466,6 +669,113 @@ fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
         String::from_utf8_lossy(&fresh_output.stdout)
     );
     assert_eq!(clip.paste().as_deref(), Some("offline secret"));
+}
+
+#[test]
+fn offline_copy_rejects_a_legacy_daemon_before_reading_the_password() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let cases: [&[&str]; 2] = [
+        &["copy", "offline-item", "--password", "--timeout", "0"],
+        &["totp", "offline-item", "--copy"],
+    ];
+    for args in cases {
+        let clip = Clipboard::new();
+        let root = clip.0.path();
+        write_offline_cache(root);
+        let _daemon = EpochDaemon::new(root, false);
+        let mut copy = clip.command(cli).args(args).spawn().unwrap();
+        // Keep stdin open: rejecting an unsupported owner must precede the
+        // password read and encrypted-cache authorization.
+        let input = copy.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = copy.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                copy.kill().unwrap();
+                copy.wait().unwrap();
+                panic!("{args:?} read the password before rejecting the legacy daemon");
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        drop(input);
+        assert!(!status.success());
+        let result = copy.wait_with_output().unwrap();
+        let reply: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("shared lock epoch support"));
+        assert!(!root.join("omawarden.lock-epoch").exists());
+        assert!(clip.paste().is_none());
+    }
+}
+
+#[test]
+fn offline_copy_rechecks_daemon_capability_after_authorization() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    for initially_running in [false, true] {
+        let clip = Clipboard::new();
+        let root = clip.0.path();
+        write_offline_cache(root);
+        let mut daemon = initially_running.then(|| EpochDaemon::new(root, true));
+        let mut copy = clip
+            .command(cli)
+            .args(["copy", "offline-item", "--password", "--timeout", "0"])
+            .spawn()
+            .unwrap();
+        let input = copy.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("omawarden.lock-epoch").exists() {
+            assert!(Instant::now() < deadline, "copy did not capture its epoch");
+            thread::sleep(Duration::from_millis(5));
+        }
+        if let Some(daemon) = &daemon {
+            daemon.shared_epoch.store(false, Ordering::SeqCst);
+        } else {
+            daemon = Some(EpochDaemon::new(root, false));
+        }
+        let mut input = input;
+        writeln!(input, "fixture").unwrap();
+        drop(input);
+        let result = copy.wait_with_output().unwrap();
+        assert!(
+            !result.status.success(),
+            "an epoch-unaware owner accepted a queued copy"
+        );
+        assert!(clip.paste().is_none());
+        drop(daemon);
+    }
+}
+
+#[test]
+fn unreachable_daemon_owner_blocks_offline_copy_and_local_lock_fallback() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let clip = Clipboard::new();
+    let root = clip.0.path();
+    let cache = root.join("data.json");
+    let active = "11111111111111111111111111111111";
+    fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+    clip.write_epoch(100);
+    let owner = File::create(root.join("omawarden.instance.lock")).unwrap();
+    owner.lock().unwrap();
+    let wl_copy = root.join("wl-copy");
+    let holder = holder_args(&wl_copy, &cache, active, "100");
+    assert!(!clip.run(cli, &holder, "fixture selection").status.success());
+    for action in ["lock", "logout"] {
+        let result = clip.run(cli, &["auth", action], "");
+        assert!(
+            !result.status.success(),
+            "{action} treated a busy owner as absent"
+        );
+        assert_eq!(clip.epoch(), 100);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&cache).unwrap()).unwrap()["credential_id"],
+            active
+        );
+    }
+    assert!(clip.paste().is_none());
 }
 
 #[test]
@@ -536,6 +846,7 @@ fn logout_invalidates_pending_offline_copies_when_cache_removal_fails() {
         fs::write(credentials.join(marker), []).unwrap();
     }
     fs::write(data_dir.join("data.account.lock"), []).unwrap();
+    fs::write(data_dir.join("data.daemon.lock"), []).unwrap();
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o500)).unwrap();
 
     let wl_copy = runtime.join("wl-copy");

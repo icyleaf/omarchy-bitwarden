@@ -1245,7 +1245,11 @@ fn main() -> ExitCode {
                 AuthAction::Lock => {
                     let res = auth_mgr.lock();
                     print_json_redacting_session(&res);
-                    ExitCode::SUCCESS
+                    if res.ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
                 }
                 AuthAction::Logout => {
                     let res = auth_mgr.logout();
@@ -2326,17 +2330,23 @@ fn vault_output_item(
     // Capture the shared epoch before the cache is read or decrypted. A lock
     // that lands while the master password is prompted, or after decryption,
     // makes the holder reject this copy instead of publishing stale plaintext.
-    let lock_epoch =
-        if for_clipboard {
-            Some(omawarden::clipboard::current_lock_epoch().map_err(|error| {
+    let storage_mgr = StorageManager::default();
+    let lock_epoch = if for_clipboard {
+        Some(
+            omawarden::clipboard::current_lock_epoch(&storage_mgr.file_path).map_err(|error| {
                 format!("Could not verify the current vault lock state. {error}")
-            })?)
-        } else {
-            None
-        };
+            })?,
+        )
+    } else {
+        None
+    };
 
-    let vault =
-        VaultManager::with_identity_url(&cfg.server_url, cfg.identity_url.as_deref(), None, None);
+    let vault = VaultManager::with_identity_url(
+        &cfg.server_url,
+        cfg.identity_url.as_deref(),
+        Some(storage_mgr),
+        None,
+    );
     let storage = vault.storage_mgr.load();
     let key = ensure_unlocked_user_key(&vault, &storage)?;
     let query_lower = query.to_lowercase();

@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,8 @@ pub enum ClipboardScope {
 /// Offline copy authorization captures this value before reading the
 /// encrypted cache; the detached holder compares it again before publishing.
 #[doc(hidden)]
-pub fn current_lock_epoch() -> io::Result<u64> {
+pub fn current_lock_epoch(cache: &Path) -> io::Result<u64> {
+    let _daemon = crate::daemon::guard_cache_daemon(cache)?;
     crate::lock_epoch::store()
         .current()
         .map(|epoch| epoch.value())
@@ -36,6 +37,7 @@ pub fn current_lock_epoch() -> io::Result<u64> {
 pub struct ClipboardOutput {
     _output: File,
     _account: Option<File>,
+    _daemon: Option<crate::daemon::DaemonOwnerGuard>,
 }
 
 impl ClipboardScope {
@@ -45,8 +47,12 @@ impl ClipboardScope {
         if !wayland_configured()? {
             return Err(io::Error::other("No Wayland clipboard is configured"));
         }
-        let (output, account) = match self {
-            Self::Session(generation) => (crate::daemon::guard_session_output(*generation)?, None),
+        let (output, account, daemon) = match self {
+            Self::Session(generation) => (
+                crate::daemon::guard_session_output(*generation)?,
+                None,
+                None,
+            ),
             Self::Cache {
                 path,
                 credential_id,
@@ -55,6 +61,7 @@ impl ClipboardScope {
                 let storage = crate::storage::StorageManager::new(path.clone());
                 let account = storage.account_guard()?;
                 let output = crate::daemon::lock_session_outputs()?;
+                let daemon = crate::daemon::guard_cache_daemon(path)?;
                 if storage.load_existing()?.scoped_credential_id() != Some(credential_id) {
                     return Err(io::Error::other("Vault account changed. Retry the copy."));
                 }
@@ -63,7 +70,7 @@ impl ClipboardScope {
                         "Vault was locked during the copy. Retry the copy.",
                     ));
                 }
-                (output, Some(account))
+                (output, Some(account), daemon)
             }
         };
         // Record possible exposure before contacting Wayland, even if the
@@ -78,6 +85,7 @@ impl ClipboardScope {
         Ok(ClipboardOutput {
             _output: output,
             _account: account,
+            _daemon: daemon,
         })
     }
 }
