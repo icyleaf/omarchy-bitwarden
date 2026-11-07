@@ -157,7 +157,7 @@ pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 
 /// The minimum protocol version this client/server understands.
 /// Version 0 represents legacy unversioned daemons.
-pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 0;
 
 /// The result of checking protocol version compatibility against the wire handshake.
 #[derive(Debug, PartialEq, Eq)]
@@ -179,7 +179,7 @@ pub fn check_protocol_version(ping: &Value) -> ProtocolCheck {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
-    if running >= MIN_SUPPORTED_PROTOCOL_VERSION && running <= CURRENT_PROTOCOL_VERSION {
+    if (MIN_SUPPORTED_PROTOCOL_VERSION..=CURRENT_PROTOCOL_VERSION).contains(&running) {
         ProtocolCheck::Compatible
     } else {
         ProtocolCheck::Incompatible {
@@ -367,7 +367,7 @@ impl DaemonClient {
         Self {
             socket_path: get_socket_path(),
             launch_strategy: daemon_launch_strategy(),
-            timeout: Some(Duration::from_secs(15)),
+            timeout: Some(Duration::from_secs(60)),
         }
     }
 
@@ -450,7 +450,7 @@ impl DaemonClient {
         stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
 
         let mut reader = BufReader::new(stream);
-        let mut response_line = String::new();
+        let mut response_line = zeroize::Zeroizing::new(String::new());
         reader
             .read_line(&mut response_line)
             .map_err(|_| DispatchError::Unconfirmed)?;
@@ -458,8 +458,9 @@ impl DaemonClient {
         serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
     }
 
-    /// Sends a request with automatic client context attachment.
+    /// Sends a request with automatic client context attachment and data-plane protocol validation.
     pub fn send(&self, req: &Value) -> Result<Value, DispatchError> {
+        let is_ping = req.get("action").and_then(|a| a.as_str()) == Some("ping");
         let mut payload_val = req.clone();
         if let Value::Object(ref mut map) = payload_val {
             if !map.contains_key("client") {
@@ -468,7 +469,23 @@ impl DaemonClient {
                 }
             }
         }
-        self.send_raw(&payload_val)
+        let resp = self.send_raw(&payload_val)?;
+        if is_ping || resp.get("protocol_version").is_some() {
+            match check_protocol_version(&resp) {
+                ProtocolCheck::Compatible => Ok(resp),
+                ProtocolCheck::Incompatible {
+                    running,
+                    min_supported,
+                    current,
+                } => Err(DispatchError::IncompatibleProtocol {
+                    running,
+                    min_supported,
+                    current,
+                }),
+            }
+        } else {
+            Ok(resp)
+        }
     }
 
     /// Pings the daemon and validates protocol compatibility.
@@ -544,8 +561,10 @@ impl DaemonClient {
 
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(20));
-            if self.send_raw(&json!({ "action": "ping" })).is_ok() {
-                return Ok(());
+            match self.ping() {
+                Ok(_) => return Ok(()),
+                Err(e @ DispatchError::IncompatibleProtocol { .. }) => return Err(e),
+                Err(_) => {}
             }
         }
 
@@ -1746,14 +1765,23 @@ pub(crate) fn handle_client(
             writeln!(
                 stream,
                 "{}",
-                json!({"ok": false, "outcome": "rejected", "error": "Unlock the vault before creating a cipher."})
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before creating a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
             )?;
             return Ok(());
         }
         let _ = writeln!(
             stream,
             "{}",
-            json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
+            json!({
+                "ok": false,
+                "error": "Vault is locked. Please unlock the vault first.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
         return Ok(());
     }
@@ -1765,7 +1793,11 @@ pub(crate) fn handle_client(
         return writeln!(
             stream,
             "{}",
-            json!({"ok":false,"error":"Vault session changed."})
+            json!({
+                "ok": false,
+                "error": "Vault session changed.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
     }
 
@@ -1778,7 +1810,7 @@ pub(crate) fn handle_client(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .filter(|c: &crate::api::ClientContext| c.is_valid());
 
-    let response = match action {
+    let mut response = match action {
         "ping" => json!({
             "ok": true,
             "pong": true,
@@ -1808,7 +1840,11 @@ pub(crate) fn handle_client(
                 .clone()
                 .unwrap_or_else(get_socket_path);
             let _ = fs::remove_file(&sock_path);
-            let _ = writeln!(stream, "{}", json!({ "ok": true }));
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({ "ok": true, "protocol_version": CURRENT_PROTOCOL_VERSION })
+            );
             let _ = stream.flush();
             state.shutdown.trigger();
             return Ok(());
@@ -2102,6 +2138,11 @@ pub(crate) fn handle_client(
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
+    if let Value::Object(ref mut map) = response {
+        map.entry("protocol_version".to_string())
+            .or_insert_with(|| json!(CURRENT_PROTOCOL_VERSION));
+    }
+
     if reads_plaintext
         && state.vault_mgr.cache_session().ok().is_none_or(|now| {
             !now.unlocked || session.is_none_or(|then| now.generation != then.generation)
@@ -2110,7 +2151,11 @@ pub(crate) fn handle_client(
         let _ = writeln!(
             stream,
             "{}",
-            json!({"ok":false,"error":"Vault session changed."})
+            json!({
+                "ok": false,
+                "error": "Vault session changed.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
     } else {
         let _ = writeln!(stream, "{}", response);
@@ -2574,15 +2619,14 @@ mod tests {
             ProtocolCheck::Compatible
         );
 
-        // Missing protocol_version defaults to 0 (legacy unversioned) -> Incompatible
+        // Missing protocol_version defaults to 0 (legacy unversioned) -> Compatible when MIN is 0
         let legacy = json!({ "ok": true, "commit": "old" });
+        assert_eq!(check_protocol_version(&legacy), ProtocolCheck::Compatible);
+
+        let explicit_zero = json!({ "ok": true, "protocol_version": 0 });
         assert_eq!(
-            check_protocol_version(&legacy),
-            ProtocolCheck::Incompatible {
-                running: 0,
-                min_supported: 1,
-                current: 1
-            }
+            check_protocol_version(&explicit_zero),
+            ProtocolCheck::Compatible
         );
 
         // Future protocol version 99 -> Incompatible
@@ -2591,10 +2635,154 @@ mod tests {
             check_protocol_version(&future),
             ProtocolCheck::Incompatible {
                 running: 99,
-                min_supported: 1,
+                min_supported: 0,
                 current: 1
             }
         );
+    }
+
+    #[test]
+    fn test_daemon_client_send_fail_closed_on_incompatible_protocol() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                // 1. Client sends ping -> respond with incompatible protocol_version: 99
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
+                )
+                .unwrap();
+
+                // 2. Client sends status -> mock responds with protocol_version: 99
+                let (mut stream2, _) = listener.accept().unwrap();
+                let mut line2 = String::new();
+                BufReader::new(stream2.try_clone().unwrap())
+                    .read_line(&mut line2)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line2).unwrap()["action"],
+                    "status"
+                );
+                writeln!(
+                    stream2,
+                    "{}",
+                    json!({ "ok": true, "unlocked": false, "protocol_version": 99 })
+                )
+                .unwrap();
+            })
+        };
+
+        let client = DaemonClient::new();
+        // Ping returns IncompatibleProtocol
+        let ping_res = client.send(&json!({ "action": "ping" }));
+        assert_eq!(
+            ping_res,
+            Err(DispatchError::IncompatibleProtocol {
+                running: 99,
+                min_supported: 0,
+                current: 1,
+            })
+        );
+
+        // Status response advertising protocol_version 99 also fails closed with IncompatibleProtocol
+        let status_res = client.send(&json!({ "action": "status" }));
+        assert_eq!(
+            status_res,
+            Err(DispatchError::IncompatibleProtocol {
+                running: 99,
+                min_supported: 0,
+                current: 1,
+            })
+        );
+
+        server.join().unwrap();
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                // 1. Client sends ping to legacy v0 daemon without protocol_version
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "pong": true, "unlocked": true, "version": "0.10.0" })
+                )
+                .unwrap();
+
+                // 2. Client sends status to legacy v0 daemon without protocol_version
+                let (mut stream2, _) = listener.accept().unwrap();
+                let mut line2 = String::new();
+                BufReader::new(stream2.try_clone().unwrap())
+                    .read_line(&mut line2)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line2).unwrap()["action"],
+                    "status"
+                );
+                writeln!(
+                    stream2,
+                    "{}",
+                    json!({ "ok": true, "is_unlocked": true, "unlocked": true })
+                )
+                .unwrap();
+            })
+        };
+
+        let client = DaemonClient::new();
+        // Ping succeeds and accepts unversioned legacy v0
+        let ping_res = client.send(&json!({ "action": "ping" })).unwrap();
+        assert_eq!(ping_res["ok"], true);
+        assert_eq!(ping_res["pong"], true);
+
+        // Status succeeds and accepts unversioned legacy v0
+        let status_res = client.send(&json!({ "action": "status" })).unwrap();
+        assert_eq!(status_res["ok"], true);
+        assert_eq!(status_res["is_unlocked"], true);
+
+        server.join().unwrap();
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 
     #[test]
@@ -4019,6 +4207,7 @@ exit $(cat {})
 
     #[test]
     fn test_daemon_client_builder_and_methods() {
+        let _lock = crate::env_lock();
         let default_client = DaemonClient::new();
         assert_eq!(default_client.socket_path(), get_socket_path());
         assert_eq!(

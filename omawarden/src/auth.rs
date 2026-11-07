@@ -454,7 +454,14 @@ impl AuthManager {
         }
         // Start once at the login entry point. The later context check must
         // observe a stopped/locked daemon, never restart it and sample anew.
-        let _ = crate::daemon::ensure_daemon_running();
+        if let Err(e @ crate::daemon::DispatchError::IncompatibleProtocol { .. }) =
+            crate::daemon::ensure_daemon_running()
+        {
+            return AuthResult {
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
         let login_context = match Self::daemon_unlock_context() {
             Ok(context) => context,
             Err(error) => {
@@ -762,7 +769,14 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        let _ = crate::daemon::ensure_daemon_running();
+        if let Err(e @ crate::daemon::DispatchError::IncompatibleProtocol { .. }) =
+            crate::daemon::ensure_daemon_running()
+        {
+            return AuthResult {
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
         let login_context = match Self::daemon_unlock_context() {
             Ok(context) => context,
             Err(error) => {
@@ -918,7 +932,14 @@ impl AuthManager {
 
     pub fn unlock(&self, password: &str) -> AuthResult {
         crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
-        let _ = crate::daemon::ensure_daemon_running();
+        if let Err(e @ crate::daemon::DispatchError::IncompatibleProtocol { .. }) =
+            crate::daemon::ensure_daemon_running()
+        {
+            return AuthResult {
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
         let storage = self.storage_mgr.load();
         let unlock_credentials = if storage.enc_user_key.is_some() {
             storage.check_unlock_credentials()
