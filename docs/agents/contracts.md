@@ -44,6 +44,12 @@ Daemon Unix Domain Socket requests and responses adhere to the same schema conve
 - Request: `{ "action": "<command_name>", ...args }`
 - Response: `{ "ok": true, ... }` or `{ "ok": false, "error": "<msg>" }`
 
+For `auth lock`, `ok: true` with `status: "locked"` confirms the vault lock.
+`epoch_advanced: false` and an optional `warning` describe incomplete shared
+epoch publication after that lock. Reserve `error` for unsuccessful operations.
+The overlay waits for both a successful JSON receipt and normal process exit
+before committing locked state, and refreshes auth status after failure.
+
 ---
 
 ## 2. Frontend (QML) Invocation & Error Rules

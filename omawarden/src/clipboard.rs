@@ -25,6 +25,8 @@ pub enum ClipboardScope {
 ///
 /// Offline copy authorization captures this value before reading the
 /// encrypted cache; the detached holder compares it again before publishing.
+/// Sampling uses the default runtime socket and releases its owner leases
+/// after this read. The holder reacquires them through publication acknowledgement.
 #[doc(hidden)]
 pub fn current_lock_epoch(cache: &Path) -> io::Result<u64> {
     let _daemon = crate::daemon::guard_cache_daemon(cache)?;

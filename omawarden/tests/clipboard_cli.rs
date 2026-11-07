@@ -502,7 +502,11 @@ fn epoch_write_failure_cannot_leave_a_stale_holder_authorized() {
     assert!(clip.paste().is_none());
     let reply: Value = serde_json::from_slice(&locked.stdout).unwrap();
     assert_eq!(reply["epoch_advanced"], false);
-    assert!(reply["error"]
+    assert!(
+        reply["error"].is_null(),
+        "a confirmed lock must reserve error for failure"
+    );
+    assert!(reply["warning"]
         .as_str()
         .unwrap()
         .contains("revocation is unconfirmed"));
@@ -769,6 +773,12 @@ fn unreachable_daemon_owner_blocks_offline_copy_and_local_lock_fallback() {
             !result.status.success(),
             "{action} treated a busy owner as absent"
         );
+        let reply: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(reply["ok"], false);
+        assert!(reply["warning"].is_null());
+        assert!(reply["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()));
         assert_eq!(clip.epoch(), 100);
         assert_eq!(
             serde_json::from_slice::<Value>(&fs::read(&cache).unwrap()).unwrap()["credential_id"],

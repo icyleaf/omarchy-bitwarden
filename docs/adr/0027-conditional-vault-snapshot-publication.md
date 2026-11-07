@@ -101,6 +101,15 @@ receipts and retry rules remain in
    fails authorization. An epoch-unaware daemon requires an explicit upgrade
    before it can authorize offline copies.
 
+   This cache-only clipboard path supports the default runtime socket paired
+   with its configured cache. Embedded hosts using a custom socket require a
+   client configured for that socket and remain outside this discovery path.
+   A busy cache owner prevents absence fallback when the default socket is
+   unreachable. Sampling releases its leases before password entry and
+   decryption. The detached
+   holder rechecks authority and retains newly acquired leases until clipboard
+   setup is acknowledged.
+
    Hard and soft lock advance the persisted runtime lock epoch before output
    cleanup, so an expired copy is rejected even when clipboard or preview
    cleanup stays pending. `auth lock` and `auth logout` advance the epoch
@@ -127,10 +136,13 @@ receipts and retry rules remain in
    `outputs_cleared`. A numeric epoch and `epoch_advanced: true` identify the
    durable transition. `null` and `epoch_advanced: false` report a locked vault
    whose new epoch could not be published. The CLI preserves confirmed lock
-   success while exposing that independent failure and its diagnostic. Direct
-   IPC callers apply the same owner checks before a local fallback. The epoch
-   associates a cleanup result with its transition for the pending-cleanup
-   follow-up.
+   success while exposing that independent outcome through `epoch_advanced`
+   and an optional `warning`. `error` describes an unsuccessful operation.
+   The overlay commits its locked state after a successful JSON receipt and
+   normal process exit, and refreshes auth status after an unsuccessful lock.
+   Direct IPC callers apply the same owner checks before a local fallback.
+   The epoch associates a cleanup result with its transition for the
+   pending-cleanup follow-up.
 
    The daemon and its helpers share the same validated runtime directory and
    Wayland session. A vault copy records a marker before setting the selection.

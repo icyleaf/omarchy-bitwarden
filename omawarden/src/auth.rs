@@ -144,6 +144,9 @@ pub struct AuthResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
     pub error: Option<String>,
+    /// Non-fatal diagnostics after a confirmed operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_required: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1062,7 +1065,7 @@ impl AuthManager {
             session: None,
             epoch_advanced: Some(epoch.is_ok()),
             lock_epoch: epoch.as_ref().ok().copied(),
-            error: epoch.err().map(|error| {
+            warning: epoch.err().map(|error| {
                 format!("Vault locked. Shared output revocation is unconfirmed. {error}")
             }),
             ..Default::default()
