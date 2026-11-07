@@ -85,6 +85,7 @@ impl Clipboard {
             epoch.to_string(),
         )
         .unwrap();
+        fs::write(self.0.path().join("omawarden.lock-epoch.lock"), [0]).unwrap();
     }
 
     fn epoch(&self) -> u64 {

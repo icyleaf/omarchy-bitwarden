@@ -410,6 +410,19 @@ impl VaultManager {
             *key = None;
         }
         drop(unlocked);
+        let _outputs = match crate::daemon::lock_session_outputs() {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault locked. Cannot secure output revocation. {error}"
+                );
+                return VaultLockOutcome {
+                    outputs_cleared: false,
+                    lock_epoch: None,
+                };
+            }
+        };
         // Advance before cleanup: a pending offline copy must be rejected even
         // when clipboard or preview revocation fails.
         #[cfg(test)]
@@ -429,7 +442,7 @@ impl VaultManager {
                 None
             }
         };
-        let outputs_cleared = match crate::clipboard::revoke_session_outputs() {
+        let outputs_cleared = match crate::clipboard::clear_session_outputs() {
             Ok(()) => true,
             Err(error) => {
                 crate::log_warn!(

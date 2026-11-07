@@ -1,7 +1,7 @@
 //! Durable cross-process epoch for lock transitions.
 //!
-//! Clipboard content, previews and copies served from the encrypted cache are
-//! authorized only while the vault is unlocked. Every lock transition advances
+//! Copies served from the encrypted cache capture their authorization before
+//! reading or decrypting the cache. Every lock transition advances
 //! a shared epoch: a process captures the value before reading the cache, and
 //! the detached holder re-reads it before publishing. Keeping the counter in
 //! the runtime directory instead of in a process means a daemon restart cannot
@@ -14,7 +14,8 @@
 //! file rotates to a fresh random value. All files are opened with
 //! `O_NOFOLLOW`, validated as regular files owned by the current UID, and the
 //! data file is replaced atomically with mode 0600 and fsynced together with
-//! its parent directory.
+//! its parent directory. Transitions invalidate the previous record first so
+//! failed publication cannot leave the old authorization usable.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -27,6 +28,8 @@ use crate::fs_util;
 
 const DATA_FILE: &str = "omawarden.lock-epoch";
 const GUARD_FILE: &str = "omawarden.lock-epoch.lock";
+// The stable guard is empty during a transition and one byte after publication.
+const PUBLISHED_GUARD_LEN: u64 = 1;
 /// Longest decimal representation of a `u64`; longer files are corrupt.
 const MAX_EPOCH_LEN: u64 = 20;
 const PRIVATE_MODE: u32 = 0o600;
@@ -44,12 +47,16 @@ impl LockEpoch {
 /// A handle to the epoch file in a runtime directory.
 pub(crate) struct LockEpochStore {
     runtime_dir: PathBuf,
+    #[cfg(test)]
+    before_rename: Option<fn(&Path)>,
 }
 
 impl LockEpochStore {
     pub(crate) fn new(runtime_dir: &Path) -> Self {
         Self {
             runtime_dir: runtime_dir.to_path_buf(),
+            #[cfg(test)]
+            before_rename: None,
         }
     }
 
@@ -59,16 +66,20 @@ impl LockEpochStore {
     /// Corrupt data is an error: the caller must not act on an epoch it could
     /// not read.
     pub(crate) fn current(&self) -> io::Result<LockEpoch> {
-        let _guard = self.lock_guard()?;
-        match self.read_locked()? {
-            Stored::Epoch(epoch) => Ok(LockEpoch(epoch)),
-            Stored::Missing => {
-                let epoch = random_epoch();
-                self.persist(epoch)?;
-                Ok(epoch)
-            }
-            Stored::Corrupt(reason) => Err(corrupt_error(reason)),
-        }
+        let guard = self.lock_guard()?;
+        let epoch = match self.read_locked()? {
+            Stored::Epoch(epoch) => match guard.metadata()?.len() {
+                PUBLISHED_GUARD_LEN => return Ok(LockEpoch(epoch)),
+                // Finish an interrupted transition or migrate an older guard
+                // by revoking its old value before authorizing another copy.
+                0 => next_epoch(epoch),
+                _ => return Err(corrupt_error("unexpected guard length")),
+            },
+            Stored::Missing => random_epoch(),
+            Stored::Corrupt(reason) => return Err(corrupt_error(reason)),
+        };
+        self.persist(epoch, &guard)?;
+        Ok(epoch)
     }
 
     /// Issues a new epoch that differs from every previously issued value.
@@ -77,14 +88,16 @@ impl LockEpochStore {
     /// `u64::MAX`), a missing file starts a random epoch, and a corrupt file is
     /// rotated to a random epoch.
     pub(crate) fn advance(&self) -> io::Result<LockEpoch> {
-        let _guard = self.lock_guard()?;
-        let next = match self.read_locked()? {
-            Stored::Epoch(epoch) => match epoch.checked_add(1) {
-                Some(next) => LockEpoch(next),
-                // There is no successor to `u64::MAX`; rotate in the random
-                // space rather than wrapping to zero.
-                None => random_epoch(),
-            },
+        let guard = self.lock_guard()?;
+        let previous = self.read_locked();
+        // Try both revocations even if one fails. The stable guard also marks
+        // an unfinished transition when the data file itself is inaccessible.
+        let guard_revoked = guard.set_len(0).and_then(|()| guard.sync_all());
+        let record_revoked = self.invalidate_current();
+        guard_revoked?;
+        record_revoked?;
+        let next = match previous? {
+            Stored::Epoch(epoch) => next_epoch(epoch),
             Stored::Missing => random_epoch(),
             Stored::Corrupt(reason) => {
                 crate::log_warn!(
@@ -95,8 +108,33 @@ impl LockEpochStore {
                 random_epoch()
             }
         };
-        self.persist(next)?;
+        self.persist(next, &guard)?;
         Ok(next)
+    }
+
+    fn invalidate_current(&self) -> io::Result<()> {
+        let invalidate = || {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(self.data_path())?;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.uid() != current_uid() {
+                return Err(corrupt_error("not an owned regular file"));
+            }
+            file.set_len(0)?;
+            file.sync_all()
+        };
+        match invalidate() {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            // A read-only file or symlink can still be revoked by removing
+            // its name from the private runtime directory.
+            Err(_) => {
+                fs::remove_file(self.data_path())?;
+                File::open(&self.runtime_dir)?.sync_all()
+            }
+        }
     }
 
     fn data_path(&self) -> PathBuf {
@@ -173,15 +211,21 @@ impl LockEpochStore {
     ///
     /// The staged file is fsynced *before* the rename, so a crash cannot leave
     /// the previous epoch in place after this transition returned.
-    fn persist(&self, epoch: LockEpoch) -> io::Result<()> {
+    fn persist(&self, epoch: LockEpoch, guard: &File) -> io::Result<()> {
         let path = self.data_path();
         let mut staged = tempfile::NamedTempFile::new_in(&self.runtime_dir)?;
         staged
             .as_file_mut()
             .write_all(epoch.0.to_string().as_bytes())?;
         staged.as_file().sync_all()?;
+        #[cfg(test)]
+        if let Some(before_rename) = self.before_rename {
+            before_rename(&self.runtime_dir);
+        }
         staged.persist(&path).map_err(|error| error.error)?;
-        File::open(&self.runtime_dir)?.sync_all()
+        File::open(&self.runtime_dir)?.sync_all()?;
+        guard.set_len(PUBLISHED_GUARD_LEN)?;
+        guard.sync_all()
     }
 }
 
@@ -205,6 +249,14 @@ fn random_epoch() -> LockEpoch {
         if candidate != 0 {
             return LockEpoch(candidate);
         }
+    }
+}
+
+fn next_epoch(epoch: u64) -> LockEpoch {
+    match epoch.checked_add(1) {
+        Some(next) => LockEpoch(next),
+        // Rotation draws below u64::MAX, so saturation cannot reuse its value.
+        None => random_epoch(),
     }
 }
 
@@ -359,6 +411,52 @@ mod tests {
         assert_ne!(rotated.value(), u64::MAX);
         assert_ne!(rotated.value(), 0);
         assert_eq!(store.current().unwrap(), rotated);
+    }
+
+    #[test]
+    fn failed_rename_cannot_restore_the_previous_authorization() {
+        let dir = tempdir().unwrap();
+        let mut store = store_in(&dir);
+        let previous = store.current().unwrap();
+        store.before_rename = Some(|parent| {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+        });
+
+        let failed = store.advance();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(failed.is_err(), "the read-only parent must reject rename");
+        assert!(
+            store.current().is_err(),
+            "a failed publication must revoke {previous:?}"
+        );
+        store.before_rename = None;
+        let recovered = store.advance().unwrap();
+        assert_ne!(recovered, previous);
+        assert_eq!(store.current().unwrap(), recovered);
+    }
+
+    #[test]
+    fn an_interrupted_transition_revokes_a_still_readable_old_record() {
+        let dir = tempdir().unwrap();
+        let store = store_in(&dir);
+        let previous = store.current().unwrap();
+        // Model a transition interrupted before it can alter the data file.
+        let guard = fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(GUARD_FILE))
+            .unwrap();
+        guard.set_len(0).unwrap();
+        guard.sync_all().unwrap();
+        assert_eq!(read_raw(&dir), previous.value().to_string());
+
+        let recovered = store.current().unwrap();
+
+        assert_ne!(
+            recovered, previous,
+            "an unfinished transition reused its old authorization"
+        );
+        assert_eq!(store.current().unwrap(), recovered);
     }
 
     #[test]
