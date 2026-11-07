@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,13 +15,31 @@ pub enum ClipboardScope {
     Cache {
         path: PathBuf,
         credential_id: String,
+        /// Lock transition that authorized this cache read. A later hard or
+        /// soft lock advances the shared epoch and invalidates the scope.
+        lock_epoch: u64,
     },
+}
+
+/// Read the shared epoch that every lock transition advances.
+///
+/// Offline copy authorization captures this value before reading the
+/// encrypted cache; the detached holder compares it again before publishing.
+/// Sampling uses the default runtime socket and releases its owner leases
+/// after this read. The holder reacquires them through publication acknowledgement.
+#[doc(hidden)]
+pub fn current_lock_epoch(cache: &Path) -> io::Result<u64> {
+    let _daemon = crate::daemon::guard_cache_daemon(cache)?;
+    crate::lock_epoch::store()
+        .current()
+        .map(|epoch| epoch.value())
 }
 
 #[doc(hidden)]
 pub struct ClipboardOutput {
     _output: File,
     _account: Option<File>,
+    _daemon: Option<crate::daemon::DaemonOwnerGuard>,
 }
 
 impl ClipboardScope {
@@ -31,19 +49,30 @@ impl ClipboardScope {
         if !wayland_configured()? {
             return Err(io::Error::other("No Wayland clipboard is configured"));
         }
-        let (output, account) = match self {
-            Self::Session(generation) => (crate::daemon::guard_session_output(*generation)?, None),
+        let (output, account, daemon) = match self {
+            Self::Session(generation) => (
+                crate::daemon::guard_session_output(*generation)?,
+                None,
+                None,
+            ),
             Self::Cache {
                 path,
                 credential_id,
+                lock_epoch,
             } => {
                 let storage = crate::storage::StorageManager::new(path.clone());
                 let account = storage.account_guard()?;
                 let output = crate::daemon::lock_session_outputs()?;
+                let daemon = crate::daemon::guard_cache_daemon(path)?;
                 if storage.load_existing()?.scoped_credential_id() != Some(credential_id) {
                     return Err(io::Error::other("Vault account changed. Retry the copy."));
                 }
-                (output, Some(account))
+                if crate::lock_epoch::store().current()?.value() != *lock_epoch {
+                    return Err(io::Error::other(
+                        "Vault was locked during the copy. Retry the copy.",
+                    ));
+                }
+                (output, Some(account), daemon)
             }
         };
         // Record possible exposure before contacting Wayland, even if the
@@ -58,6 +87,7 @@ impl ClipboardScope {
         Ok(ClipboardOutput {
             _output: output,
             _account: account,
+            _daemon: daemon,
         })
     }
 }
@@ -219,11 +249,13 @@ impl ClipboardManager {
             Some(ClipboardScope::Cache {
                 path,
                 credential_id,
+                lock_epoch,
             }) => {
                 worker
                     .arg("--cache-path")
                     .arg(path)
-                    .args(["--expected-credential-id", credential_id]);
+                    .args(["--expected-credential-id", credential_id])
+                    .args(["--expected-lock-epoch", &lock_epoch.to_string()]);
             }
             None => {}
         }

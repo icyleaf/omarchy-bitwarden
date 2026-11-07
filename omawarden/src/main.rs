@@ -134,6 +134,8 @@ enum Commands {
         cache_path: Option<PathBuf>,
         #[arg(long, requires = "cache_path")]
         expected_credential_id: Option<String>,
+        #[arg(long, requires = "cache_path")]
+        expected_lock_epoch: Option<u64>,
     },
     #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
@@ -575,17 +577,28 @@ fn main() -> ExitCode {
             expected_lock_generation,
             cache_path,
             expected_credential_id,
+            expected_lock_epoch,
         } => {
-            let scope = expected_lock_generation
-                .map(ClipboardScope::Session)
-                .or_else(|| {
-                    cache_path
-                        .zip(expected_credential_id)
-                        .map(|(path, credential_id)| ClipboardScope::Cache {
-                            path,
-                            credential_id,
-                        })
-                });
+            let scope = match (
+                expected_lock_generation,
+                cache_path,
+                expected_credential_id,
+                expected_lock_epoch,
+            ) {
+                (Some(generation), None, None, None) => Some(ClipboardScope::Session(generation)),
+                (None, Some(path), Some(credential_id), Some(lock_epoch)) => {
+                    Some(ClipboardScope::Cache {
+                        path,
+                        credential_id,
+                        lock_epoch,
+                    })
+                }
+                (None, None, None, None) => None,
+                _ => {
+                    eprintln!("Invalid clipboard holder scope");
+                    return ExitCode::FAILURE;
+                }
+            };
             match clipboard_holder::hold_selection(
                 &wl_copy,
                 std::time::Duration::from_secs(seconds),
@@ -1278,7 +1291,11 @@ fn main() -> ExitCode {
                 AuthAction::Lock => {
                     let res = auth_mgr.lock();
                     print_json_redacting_session(&res);
-                    ExitCode::SUCCESS
+                    if res.ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
                 }
                 AuthAction::Logout => {
                     let res = auth_mgr.logout();
@@ -1579,7 +1596,7 @@ fn main() -> ExitCode {
                 }
             };
 
-            let (item, scope) = match vault_output_item(&cfg, &query, true) {
+            let (item, scope) = match vault_output_item(&cfg, &query, true, true) {
                 Ok(Some(VaultOutputItem {
                     item,
                     scope: Some(scope),
@@ -2336,6 +2353,7 @@ fn vault_output_item(
     cfg: &Config,
     query: &str,
     touch: bool,
+    for_clipboard: bool,
 ) -> Result<Option<VaultOutputItem>, String> {
     let _ = ensure_daemon_running();
     let unlocked = send_daemon_request(&json!({ "action": "status" }))
@@ -2355,8 +2373,26 @@ fn vault_output_item(
             .map(|item| VaultOutputItem { item, scope }));
     }
 
-    let vault =
-        VaultManager::with_identity_url(&cfg.server_url, cfg.identity_url.as_deref(), None, None);
+    // Capture the shared epoch before the cache is read or decrypted. A lock
+    // that lands while the master password is prompted, or after decryption,
+    // makes the holder reject this copy instead of publishing stale plaintext.
+    let storage_mgr = StorageManager::default();
+    let lock_epoch = if for_clipboard {
+        Some(
+            omawarden::clipboard::current_lock_epoch(&storage_mgr.file_path).map_err(|error| {
+                format!("Could not verify the current vault lock state. {error}")
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let vault = VaultManager::with_identity_url(
+        &cfg.server_url,
+        cfg.identity_url.as_deref(),
+        Some(storage_mgr),
+        None,
+    );
     let storage = vault.storage_mgr.load();
     let key = ensure_unlocked_user_key(&vault, &storage)?;
     let query_lower = query.to_lowercase();
@@ -2375,12 +2411,15 @@ fn vault_output_item(
     });
     Ok(item.map(|item| VaultOutputItem {
         item,
-        scope: storage
-            .credential_id
-            .map(|credential_id| ClipboardScope::Cache {
-                path: vault.storage_mgr.file_path,
-                credential_id,
-            }),
+        scope: lock_epoch.and_then(|lock_epoch| {
+            storage
+                .credential_id
+                .map(|credential_id| ClipboardScope::Cache {
+                    path: vault.storage_mgr.file_path,
+                    credential_id,
+                    lock_epoch,
+                })
+        }),
     }))
 }
 
@@ -2407,8 +2446,11 @@ fn totp_output(
 ) -> Result<Option<TotpOutput>, String> {
     let unverified = || "Could not verify the clipboard source session.".to_string();
     if let Some(query) = query {
-        let Some(found) = vault_output_item(cfg, query, false).ok().flatten() else {
-            return Ok(TotpOutput::standalone(query));
+        let found = match vault_output_item(cfg, query, false, copy) {
+            Ok(Some(found)) => found,
+            Ok(None) => return Ok(TotpOutput::standalone(query)),
+            Err(error) if copy => return Err(error),
+            Err(_) => return Ok(TotpOutput::standalone(query)),
         };
         if copy && found.scope.is_none() {
             return Err(unverified());

@@ -91,6 +91,88 @@ pub fn guard_session_output(expected: u64) -> io::Result<fs::File> {
     Ok(gate)
 }
 
+pub(crate) struct DaemonOwnerGuard {
+    _socket: fs::File,
+    _cache: fs::File,
+}
+
+// Ping carries metadata only. Bound it separately from vault-data responses.
+const MAX_EPOCH_PING_BYTES: u64 = 16 * 1024;
+
+fn acquire_daemon_ownership(cache: &Path) -> io::Result<DaemonOwnerGuard> {
+    Ok(DaemonOwnerGuard {
+        _socket: lock_daemon_instance(&get_socket_path().with_extension("instance.lock"))?,
+        _cache: lock_daemon_instance(&cache.with_extension("daemon.lock"))?,
+    })
+}
+
+// Keep connection failures distinct from confirmed owner absence.
+fn existing_daemon_stream() -> io::Result<Option<UnixStream>> {
+    let path = get_socket_path();
+    validate_socket_path(&path)?;
+    let stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    verify_peer_credentials(&stream)?;
+    Ok(Some(stream))
+}
+
+/// Keep both owner leases while performing a local transition without a daemon.
+pub(crate) fn guard_absent_daemon(cache: &Path) -> io::Result<DaemonOwnerGuard> {
+    let owner = acquire_daemon_ownership(cache)?;
+    if existing_daemon_stream()?.is_some() {
+        return Err(io::Error::other(
+            "A live daemon must confirm the vault lock",
+        ));
+    }
+    Ok(owner)
+}
+
+/// Confirm shared-epoch support, or hold the leases proving the daemon absent.
+/// Call again under the output gate before publishing an offline value.
+pub(crate) fn guard_cache_daemon(cache: &Path) -> io::Result<Option<DaemonOwnerGuard>> {
+    let owner = match acquire_daemon_ownership(cache) {
+        Ok(owner) => Some(owner),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+        Err(error) => return Err(error),
+    };
+    let Some(mut stream) = existing_daemon_stream()? else {
+        return owner
+            .map(Some)
+            .ok_or_else(|| io::Error::other("Cannot confirm the daemon owner. Retry the copy."));
+    };
+    let timeout = Some(crate::clipboard::CLIPBOARD_SETUP_TIMEOUT);
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    // Publishers hold the output gate here. Ping must remain independent of
+    // both that gate and restore_guard, as output_generation is.
+    writeln!(stream, "{}", json!({"action": "ping"}))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .take(MAX_EPOCH_PING_BYTES)
+        .read_line(&mut response)?;
+    let reply: Value = serde_json::from_str(&response)?;
+    if reply["ok"] != true
+        || reply["pong"] != true
+        || reply["shared_lock_epoch"] != true
+        || check_protocol_version(&reply) != ProtocolCheck::Compatible
+    {
+        return Err(io::Error::other(
+            "The running daemon cannot authorize offline copies. Restart it with shared lock epoch support.",
+        ));
+    }
+    Ok(owner)
+}
+
 /// Validates that a socket file (and its parent directory) is owned by the current UID
 /// and is not a symlink to prevent cross-user socket hijacking or TOCTOU attacks.
 pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
@@ -1169,14 +1251,21 @@ impl DaemonState {
 
     /// Hard lock (ADR-0025). Returns whether output cleanup also succeeded.
     pub fn lock(&self) -> bool {
+        self.lock_with_epoch().0
+    }
+
+    /// Hard lock with the shared epoch advanced by this transition, when it
+    /// could be advanced. The IPC reply uses this to distinguish a completed
+    /// daemon transition from a client that must advance its local fallback.
+    pub(crate) fn lock_with_epoch(&self) -> (bool, Option<u64>) {
         let _restore = self
             .vault_mgr
             .restore_guard
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let outputs_cleared = self.vault_mgr.hard_lock_inner();
+        let outcome = self.vault_mgr.hard_lock_inner();
         self.reset_session_timers();
-        outputs_cleared
+        (outcome.outputs_cleared, outcome.lock_epoch)
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -1886,6 +1975,7 @@ pub(crate) fn handle_client_with_peer(
             "protocol_version": CURRENT_PROTOCOL_VERSION,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
+            "shared_lock_epoch": true,
             "unlock_context": state.vault_mgr.unlock_context(),
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
@@ -2049,8 +2139,14 @@ pub(crate) fn handle_client_with_peer(
             json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
-            let outputs_cleared = state.lock();
-            json!({ "ok": true, "status": "locked", "outputs_cleared": outputs_cleared })
+            let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+            json!({
+                "ok": true,
+                "status": "locked",
+                "outputs_cleared": outputs_cleared,
+                "epoch_advanced": lock_epoch.is_some(),
+                "lock_epoch": lock_epoch
+            })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
@@ -2303,6 +2399,95 @@ mod tests {
         state.lock();
         assert!(!state.vault_mgr.is_unlocked());
         assert_eq!(state.vault_mgr.decrypted_items.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_lock_ipc_reports_the_shared_epoch() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let config_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.set("OMAWARDEN_CONFIG_DIR", config_dir.path());
+        env.remove("WAYLAND_DISPLAY");
+        env.remove("WAYLAND_SOCKET");
+        std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "10").unwrap();
+
+        let mut vault = VaultManager::new(
+            "",
+            Some(StorageManager::new(runtime.path().join("data.json"))),
+            None,
+        );
+        vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        let mut state = DaemonState::new(StorageManager::new(runtime.path().join("data.json")), 15);
+        state.vault_mgr = Arc::new(vault);
+        let state = Arc::new(state);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handled = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let _ = handle_client(server, state);
+            })
+        };
+        writeln!(client, "{}", json!({"action": "lock"})).unwrap();
+        client.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        handled.join().unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["outputs_cleared"], true);
+        assert_eq!(reply["lock_epoch"], 11);
+        assert_eq!(
+            std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+            "11"
+        );
+    }
+
+    #[test]
+    fn test_lock_advances_epoch_even_when_cleanup_is_pending() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let config_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.set("OMAWARDEN_CONFIG_DIR", config_dir.path());
+        env.set("WAYLAND_DISPLAY", "fixture-wayland");
+        env.set(
+            "PATH",
+            format!("{}:/usr/bin:/bin", runtime.path().display()),
+        );
+
+        let wl_copy = runtime.path().join("wl-copy");
+        crate::write_test_executable(
+            &wl_copy,
+            "#!/bin/sh\n\
+             if [ \"${1:-}\" = --clear ]; then\n\
+               [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
+               exec /usr/bin/rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+             fi\n\
+             exec /usr/bin/cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+        );
+        std::fs::write(runtime.path().join("fail-clear"), "").unwrap();
+        std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "80").unwrap();
+
+        let mut vault = crate::vault::tests::seeded_vault(cache_dir.path(), "master-pw");
+        vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        vault.unlock("master-pw").unwrap();
+        let storage_mgr = vault.storage_mgr.clone();
+        let mut state = DaemonState::new(storage_mgr, 0);
+        state.vault_mgr = Arc::new(vault);
+
+        let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+        assert!(!outputs_cleared, "the failing clear must be reported");
+        assert_eq!(lock_epoch, Some(81));
+        assert_eq!(
+            std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+            "81"
+        );
     }
 
     #[test]
