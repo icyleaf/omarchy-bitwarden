@@ -833,3 +833,186 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
         assert_eq!(std::fs::read_to_string(&storage).unwrap(), before);
     }
 }
+
+#[test]
+fn a_held_offline_copy_is_rejected_after_a_lock_with_pending_cleanup() {
+    use std::fs::OpenOptions;
+    use std::process::Stdio;
+
+    let cli = std::path::Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let dir = tempfile::tempdir().unwrap();
+    let active = "11111111111111111111111111111111";
+    let cache = dir.path().join("data.json");
+    std::fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+    std::fs::write(
+        dir.path().join("wl-copy"),
+        "#!/bin/sh\n\
+             if [ \"${1:-}\" = --clear ]; then\n\
+               [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
+               exec /usr/bin/rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+             fi\n\
+             exec /usr/bin/cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        dir.path().join("wl-copy"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("fail-clear"), "").unwrap();
+    std::fs::write(dir.path().join("omawarden.lock-epoch"), "100").unwrap();
+
+    let command = || {
+        let mut cmd = Command::new(cli);
+        cmd.env_clear()
+            .env("HOME", dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+            .env("XDG_RUNTIME_DIR", dir.path())
+            .env("OMAWARDEN_DATA_DIR", dir.path())
+            .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("WAYLAND_DISPLAY", "fixture-wayland");
+        cmd
+    };
+    let socket = dir.path().join("omawarden.sock");
+    let _daemon = Daemon(
+        command()
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let _shutdown = DaemonSocket(socket.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !socket.exists() {
+        assert!(std::time::Instant::now() < deadline, "daemon did not start");
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let wl_copy = dir.path().join("wl-copy");
+    let holder_args = |epoch: &str| {
+        [
+            "clipboard-holder".to_string(),
+            "0".to_string(),
+            wl_copy.to_string_lossy().into_owned(),
+            "--cache-path".to_string(),
+            cache.to_string_lossy().into_owned(),
+            "--expected-credential-id".to_string(),
+            active.to_string(),
+            "--expected-lock-epoch".to_string(),
+            epoch.to_string(),
+        ]
+    };
+    let spawn_holder = |epoch: &str, text: &str| {
+        let mut child = command()
+            .args(holder_args(epoch))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        child
+    };
+
+    // Hold the account guard so the holder blocks before it revalidates
+    // the epoch. The daemon lock then revokes the session while cleanup
+    // fails; releasing the guard must not let the held copy publish.
+    let account_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("data.account.lock"))
+        .unwrap();
+    account_lock.lock().unwrap();
+    let mut held = spawn_holder("100", "held selection");
+    thread::sleep(Duration::from_millis(150));
+
+    let locked = ipc(&socket, json!({"action": "lock"}));
+    assert_eq!(locked["ok"], true);
+    assert_eq!(locked["outputs_cleared"], false);
+    assert_eq!(locked["lock_epoch"], 101);
+
+    drop(account_lock);
+    assert!(
+        !held.wait().unwrap().success(),
+        "a holder authorized before the lock must not publish after it"
+    );
+    assert!(!dir.path().join("selection").exists());
+
+    // A new authorization captured after the lock can publish.
+    let mut fresh = spawn_holder("101", "fresh selection");
+    assert!(fresh.wait().unwrap().success());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("selection")).unwrap(),
+        "fresh selection"
+    );
+}
+
+#[test]
+fn daemon_restart_preserves_the_shared_epoch() {
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("omawarden.lock-epoch"), "90").unwrap();
+    let command = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
+        cmd.env_clear()
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+            .env("XDG_RUNTIME_DIR", root)
+            .env("OMAWARDEN_DATA_DIR", root)
+            .env("OMAWARDEN_CONFIG_DIR", root);
+        cmd
+    };
+    let socket = root.join("omawarden.sock");
+    let mut first = Daemon(
+        command()
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "first daemon did not start");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("omawarden.lock-epoch")).unwrap(),
+        "90"
+    );
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
+    let _ = std::fs::remove_file(&socket);
+
+    let second = Daemon(
+        command()
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let _shutdown = DaemonSocket(socket.clone());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "second daemon did not start");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("omawarden.lock-epoch")).unwrap(),
+        "90",
+        "a daemon restart must not reset or re-mint the shared epoch"
+    );
+    drop(second);
+}

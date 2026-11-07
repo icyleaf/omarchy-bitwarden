@@ -15,7 +15,21 @@ pub enum ClipboardScope {
     Cache {
         path: PathBuf,
         credential_id: String,
+        /// Lock transition that authorized this cache read. A later hard or
+        /// soft lock advances the shared epoch and invalidates the scope.
+        lock_epoch: u64,
     },
+}
+
+/// Read the shared epoch that every lock transition advances.
+///
+/// Offline copy authorization captures this value before reading the
+/// encrypted cache; the detached holder compares it again before publishing.
+#[doc(hidden)]
+pub fn current_lock_epoch() -> io::Result<u64> {
+    crate::lock_epoch::store()
+        .current()
+        .map(|epoch| epoch.value())
 }
 
 #[doc(hidden)]
@@ -36,12 +50,18 @@ impl ClipboardScope {
             Self::Cache {
                 path,
                 credential_id,
+                lock_epoch,
             } => {
                 let storage = crate::storage::StorageManager::new(path.clone());
                 let account = storage.account_guard()?;
                 let output = crate::daemon::lock_session_outputs()?;
                 if storage.load_existing()?.scoped_credential_id() != Some(credential_id) {
                     return Err(io::Error::other("Vault account changed. Retry the copy."));
+                }
+                if crate::lock_epoch::store().current()?.value() != *lock_epoch {
+                    return Err(io::Error::other(
+                        "Vault was locked during the copy. Retry the copy.",
+                    ));
                 }
                 (output, Some(account))
             }
@@ -219,11 +239,13 @@ impl ClipboardManager {
             Some(ClipboardScope::Cache {
                 path,
                 credential_id,
+                lock_epoch,
             }) => {
                 worker
                     .arg("--cache-path")
                     .arg(path)
-                    .args(["--expected-credential-id", credential_id]);
+                    .args(["--expected-credential-id", credential_id])
+                    .args(["--expected-lock-epoch", &lock_epoch.to_string()]);
             }
             None => {}
         }

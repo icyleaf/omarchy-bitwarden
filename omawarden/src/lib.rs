@@ -12,6 +12,7 @@ pub mod generator;
 pub mod health;
 pub mod hook;
 pub mod keyring;
+mod lock_epoch;
 pub mod locked;
 pub mod logging;
 pub mod polkit;

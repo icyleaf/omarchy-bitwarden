@@ -84,11 +84,34 @@ receipts and retry rules remain in
    when changing accounts.
 
    Overlay copies, daemon-backed CLI copies and attachment outputs carry the
-   generation that supplied the plaintext. An offline CLI copy rechecks the
-   credential slot of the cache it decrypted. The detached holder revalidates
-   that authority under the output gate and keeps the gate until clipboard
-   setup completes. Attachment HTTP and decryption run outside the gate.
-   Previews are stored by credential slot, item and attachment ID.
+   generation that supplied the plaintext. An offline CLI copy captures the
+   shared lock epoch before it reads the encrypted cache, then rechecks the
+   credential slot and captured epoch under the account guard and output gate.
+   The detached holder repeats those checks before it starts the clipboard
+   provider and keeps the gate until clipboard setup completes, so a lock that
+   lands during the master-password prompt or decryption cannot revive the
+   copy. Attachment HTTP and decryption run outside the gate. Previews are
+   stored by credential slot, item and attachment ID.
+
+   Hard and soft lock advance the persisted runtime lock epoch before output
+   cleanup, so an expired copy is rejected even when clipboard or preview
+   cleanup stays pending. `auth lock` and `auth logout` advance the epoch
+   locally when the daemon is absent, is a legacy daemon without the epoch
+   reply field, or does not confirm the transition. A daemon restart never
+   resets or re-mints the epoch; a graceful stop is a lock transition and does
+   advance it. Quick unlock preserves the epoch. The epoch file contains no
+   secrets, is serialized across CLI and daemon processes, and readers fail
+   closed on corrupt data; a lock transition with corrupt data rotates to a
+   fresh epoch so an old authorization can never be reused.
+
+   A daemon `lock` reply carries `lock_epoch` alongside `outputs_cleared`:
+   a numeric value proves that transition advanced the shared epoch, an absent
+   field identifies a legacy daemon (the client must apply its local fallback),
+   and `null` means the daemon locked but could not durably advance the epoch.
+   Direct IPC callers compare the field with their local observation and apply
+   the same fallback. The epoch is metadata for associating a cleanup result
+   with its transition (used by the pending-cleanup follow-up); it does not
+   replace `outputs_cleared`.
 
    The daemon and its helpers share the same validated runtime directory and
    Wayland session. A vault copy records a marker before setting the selection.
@@ -137,3 +160,5 @@ responses, uncached receipts, bounded retries, remote deletion, and login failur
 [CLI tests](../../omawarden/tests/vault_sync_cli.rs) cover cold daemon login,
 same-server and cross-server account changes, locks on both sides of
 activation, and lost replies across daemon restart using isolated vaults.
+[Clipboard tests](../../omawarden/tests/clipboard_cli.rs) cover stale offline
+holders, lock fallback without a daemon, and the local logout transition.

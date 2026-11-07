@@ -1151,14 +1151,21 @@ impl DaemonState {
 
     /// Hard lock (ADR-0025). Returns whether output cleanup also succeeded.
     pub fn lock(&self) -> bool {
+        self.lock_with_epoch().0
+    }
+
+    /// Hard lock with the shared epoch advanced by this transition, when it
+    /// could be advanced. The IPC reply uses this to distinguish a completed
+    /// daemon transition from a client that must advance its local fallback.
+    pub(crate) fn lock_with_epoch(&self) -> (bool, Option<u64>) {
         let _restore = self
             .vault_mgr
             .restore_guard
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let outputs_cleared = self.vault_mgr.hard_lock_inner();
+        let outcome = self.vault_mgr.hard_lock_inner();
         self.reset_session_timers();
-        outputs_cleared
+        (outcome.outputs_cleared, outcome.lock_epoch)
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -1927,8 +1934,13 @@ pub(crate) fn handle_client(
             json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
-            let outputs_cleared = state.lock();
-            json!({ "ok": true, "status": "locked", "outputs_cleared": outputs_cleared })
+            let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+            json!({
+                "ok": true,
+                "status": "locked",
+                "outputs_cleared": outputs_cleared,
+                "lock_epoch": lock_epoch
+            })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
@@ -2181,6 +2193,95 @@ mod tests {
         state.lock();
         assert!(!state.vault_mgr.is_unlocked());
         assert_eq!(state.vault_mgr.decrypted_items.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_lock_ipc_reports_the_shared_epoch() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let config_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.set("OMAWARDEN_CONFIG_DIR", config_dir.path());
+        env.remove("WAYLAND_DISPLAY");
+        env.remove("WAYLAND_SOCKET");
+        std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "10").unwrap();
+
+        let mut vault = VaultManager::new(
+            "",
+            Some(StorageManager::new(runtime.path().join("data.json"))),
+            None,
+        );
+        vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        let mut state = DaemonState::new(StorageManager::new(runtime.path().join("data.json")), 15);
+        state.vault_mgr = Arc::new(vault);
+        let state = Arc::new(state);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handled = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let _ = handle_client(server, state);
+            })
+        };
+        writeln!(client, "{}", json!({"action": "lock"})).unwrap();
+        client.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        handled.join().unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["outputs_cleared"], true);
+        assert_eq!(reply["lock_epoch"], 11);
+        assert_eq!(
+            std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+            "11"
+        );
+    }
+
+    #[test]
+    fn test_lock_advances_epoch_even_when_cleanup_is_pending() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let config_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.set("OMAWARDEN_CONFIG_DIR", config_dir.path());
+        env.set("WAYLAND_DISPLAY", "fixture-wayland");
+        env.set(
+            "PATH",
+            format!("{}:/usr/bin:/bin", runtime.path().display()),
+        );
+
+        let wl_copy = runtime.path().join("wl-copy");
+        crate::write_test_executable(
+            &wl_copy,
+            "#!/bin/sh\n\
+             if [ \"${1:-}\" = --clear ]; then\n\
+               [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
+               exec /usr/bin/rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+             fi\n\
+             exec /usr/bin/cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+        );
+        std::fs::write(runtime.path().join("fail-clear"), "").unwrap();
+        std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "80").unwrap();
+
+        let mut vault = crate::vault::tests::seeded_vault(cache_dir.path(), "master-pw");
+        vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        vault.unlock("master-pw").unwrap();
+        let storage_mgr = vault.storage_mgr.clone();
+        let mut state = DaemonState::new(storage_mgr, 0);
+        state.vault_mgr = Arc::new(vault);
+
+        let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+        assert!(!outputs_cleared, "the failing clear must be reported");
+        assert_eq!(lock_epoch, Some(81));
+        assert_eq!(
+            std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+            "81"
+        );
     }
 
     #[test]

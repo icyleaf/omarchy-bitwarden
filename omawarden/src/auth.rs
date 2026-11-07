@@ -159,9 +159,41 @@ pub struct AuthManager {
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
     pub config_mgr: Option<ConfigManager>,
+    #[cfg(test)]
+    pub(crate) lock_epoch_dir: Option<std::path::PathBuf>,
+}
+
+/// The daemon reply proves it advanced the shared epoch only when it reports a
+/// successful lock and includes the transition's epoch. Older daemons omit the
+/// field, so the caller must apply the local fallback instead.
+fn lock_reply_advanced_shared_epoch(reply: Option<&serde_json::Value>) -> bool {
+    reply.is_some_and(|reply| {
+        reply["ok"] == true
+            && reply
+                .get("lock_epoch")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+    })
 }
 
 impl AuthManager {
+    fn advance_local_lock_epoch(&self, context: &str) {
+        #[cfg(test)]
+        let store = match self.lock_epoch_dir.as_deref() {
+            Some(dir) => crate::lock_epoch::LockEpochStore::new(dir),
+            None => crate::lock_epoch::store(),
+        };
+        #[cfg(not(test))]
+        let store = crate::lock_epoch::store();
+        if let Err(error) = store.advance() {
+            crate::log_warn!(
+                "omawarden:auth",
+                "{}: shared lock epoch could not be advanced locally. {error}",
+                context
+            );
+        }
+    }
+
     pub fn new(
         server_url: &str,
         storage_mgr: Option<StorageManager>,
@@ -207,6 +239,8 @@ impl AuthManager {
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
             config_mgr,
+            #[cfg(test)]
+            lock_epoch_dir: None,
         }
     }
 
@@ -982,10 +1016,16 @@ impl AuthManager {
         let reply = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
+        if !lock_reply_advanced_shared_epoch(reply.as_ref()) {
+            self.advance_local_lock_epoch("lock");
+        }
         self.keyring_mgr
             .for_storage(&storage)
             .clear_token(KIND_ACCESS_TOKEN);
-        if !reply.is_some_and(|reply| reply["outputs_cleared"] == true) {
+        if !reply
+            .as_ref()
+            .is_some_and(|reply| reply["outputs_cleared"] == true)
+        {
             if let Err(error) = crate::clipboard::revoke_session_outputs() {
                 crate::log_warn!(
                     "omawarden:auth",
@@ -1009,6 +1049,11 @@ impl AuthManager {
             // guard. Revoke A before they can see the signed-out cache.
             let locked =
                 crate::daemon::send_daemon_request(&serde_json::json!({ "action": "lock" }));
+            // Apply the hard-lock epoch transition before cache removal so a
+            // later cache failure cannot leave queued offline copies valid.
+            if !lock_reply_advanced_shared_epoch(locked.as_ref()) {
+                self.advance_local_lock_epoch("logout");
+            }
             // The explicit wipe also covers a daemon with a separate quick-unlock handler.
             let _ = crate::daemon::send_daemon_request(
                 &serde_json::json!({ "action": "wipe_quick_unlock" }),
@@ -1020,7 +1065,10 @@ impl AuthManager {
                 .stage_durable(&VaultStorage::default())?
                 .persist(&self.storage_mgr.file_path)
                 .map_err(|error| error.error)?;
-            let outputs = if locked.is_some_and(|reply| reply["outputs_cleared"] == true) {
+            let outputs = if locked
+                .as_ref()
+                .is_some_and(|reply| reply["outputs_cleared"] == true)
+            {
                 Ok(())
             } else {
                 crate::clipboard::revoke_session_outputs()
@@ -1318,6 +1366,7 @@ esac
 
     #[test]
     fn test_auth_manager_status_and_lock() {
+        let _environment = crate::env_lock();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_auth_data.json");
         let storage_mgr = StorageManager::new(storage_path);
@@ -1355,6 +1404,100 @@ esac
         let logout_res = auth_mgr.logout();
         assert!(logout_res.ok);
         assert_eq!(logout_res.status.as_deref(), Some("unauthenticated"));
+    }
+
+    fn read_lock_epoch(epoch_dir: &std::path::Path) -> String {
+        fs::read_to_string(epoch_dir.join("omawarden.lock-epoch")).unwrap()
+    }
+
+    #[test]
+    fn lock_without_daemon_advances_the_shared_epoch() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.remove("WAYLAND_DISPLAY");
+        env.remove("WAYLAND_SOCKET");
+        let dir = tempdir().unwrap();
+        let mut auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(StorageManager::new(dir.path().join("data.json"))),
+            Some(create_test_mock_keyring(dir.path())),
+        );
+        auth.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "40").unwrap();
+
+        let result = auth.lock();
+
+        assert!(result.ok);
+        assert_eq!(read_lock_epoch(epoch_dir.path()), "41");
+    }
+
+    #[test]
+    fn logout_advances_the_epoch_before_a_cache_removal_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        let dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let cache = cache_dir.path().join("data.json");
+        let active = "11111111111111111111111111111111";
+        fs::write(
+            &cache,
+            serde_json::json!({
+                "server_url": "https://fixture.invalid",
+                "user_email": "fixture@example.invalid",
+                "credential_id": active,
+                "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Make the cache readable and credential markers writable, but leave
+        // the parent without write permission so replacing data.json fails.
+        let credentials = cache.with_extension("credentials");
+        fs::create_dir(&credentials).unwrap();
+        for marker in [active, "legacy"] {
+            fs::write(credentials.join(marker), []).unwrap();
+        }
+        fs::write(cache_dir.path().join("data.account.lock"), []).unwrap();
+        let mut auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(StorageManager::new(cache)),
+            Some(create_test_mock_keyring(dir.path())),
+        );
+        auth.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "50").unwrap();
+        fs::set_permissions(cache_dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = auth.logout();
+
+        fs::set_permissions(cache_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!result.ok);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Could not complete logout")));
+        assert_eq!(read_lock_epoch(epoch_dir.path()), "51");
+    }
+
+    #[test]
+    fn daemon_lock_reply_must_carry_the_epoch_to_skip_the_local_fallback() {
+        assert!(!lock_reply_advanced_shared_epoch(None));
+        assert!(!lock_reply_advanced_shared_epoch(Some(
+            &serde_json::json!({"ok": true})
+        )));
+        assert!(!lock_reply_advanced_shared_epoch(Some(
+            &serde_json::json!({"ok": false, "lock_epoch": 7})
+        )));
+        assert!(lock_reply_advanced_shared_epoch(Some(
+            &serde_json::json!({"ok": true, "lock_epoch": 7})
+        )));
     }
 
     #[test]
