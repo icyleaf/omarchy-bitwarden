@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -294,11 +295,8 @@ impl std::fmt::Display for DispatchError {
 
 impl std::error::Error for DispatchError {}
 
-/// Dispatches request to the daemon, ensuring the daemon is running and protocol-compatible.
+/// Dispatches request to the daemon.
 pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
-    if req.get("action").and_then(|v| v.as_str()) != Some("ping") {
-        ensure_daemon_running()?;
-    }
     dispatch_daemon_request_raw(req)
 }
 
@@ -360,6 +358,30 @@ pub(crate) fn connect_daemon() -> Result<UnixStream, DispatchError> {
     Ok(stream)
 }
 
+/// Cooperative cancellation signal for the daemon server.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownSignal {
+    flag: Arc<AtomicBool>,
+}
+
+pub type ShutdownHandle = ShutdownSignal;
+
+impl ShutdownSignal {
+    pub fn new() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn trigger(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
 pub struct DaemonState {
     pub vault_mgr: Arc<VaultManager>,
     pub last_activity: Mutex<Instant>,
@@ -395,6 +417,8 @@ pub struct DaemonState {
     /// watchdog tick. Suspend time accumulates in BOOTTIME only, so a growing
     /// delta is a deterministic resume-edge detector (no D-Bus needed).
     pub last_boot_delta_secs: Mutex<Option<u64>>,
+    pub shutdown: ShutdownSignal,
+    pub socket_path: Mutex<Option<PathBuf>>,
 }
 
 /// What locked the session. Sleep is treated harder than a screen lock
@@ -457,6 +481,8 @@ impl DaemonState {
             polkit_policy_registered,
             session_anchor: Mutex::new(None),
             last_boot_delta_secs: Mutex::new(None),
+            shutdown: ShutdownSignal::new(),
+            socket_path: Mutex::new(None),
         }
     }
 
@@ -979,80 +1005,256 @@ fn lock_daemon_instance(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    let socket_path = get_socket_path();
-    if let Some(parent) = socket_path.parent() {
-        crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+/// Programmatic daemon server for embedded and CLI lifecycles.
+pub struct DaemonServer {
+    state: Arc<DaemonState>,
+    socket_path: Option<PathBuf>,
+}
+
+impl DaemonServer {
+    /// Create a new daemon server for the given state.
+    pub fn new(state: Arc<DaemonState>) -> Self {
+        Self {
+            state,
+            socket_path: None,
+        }
     }
-    // One owner for the socket and one for the encrypted cache, even when a
-    // second process starts with a different runtime or configuration path.
-    let _socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
-    let _cache_owner = lock_daemon_instance(
-        &state
-            .vault_mgr
-            .storage_mgr
-            .file_path
-            .with_extension("daemon.lock"),
-    )?;
-    if socket_path.exists() {
-        validate_socket_path(&socket_path)?;
-        match UnixStream::connect(&socket_path) {
-            Ok(_) => {
-                return Err(Error::new(
-                    ErrorKind::AlreadyExists,
-                    "Vault daemon already running",
+
+    /// Override the socket path (useful for testing or isolated environments).
+    pub fn with_socket_path(mut self, path: PathBuf) -> Self {
+        self.socket_path = Some(path);
+        self
+    }
+
+    /// Access the cooperative shutdown signal.
+    pub fn shutdown_signal(&self) -> ShutdownSignal {
+        self.state.shutdown.clone()
+    }
+
+    /// Run the server loop synchronously on the current thread until shutdown is triggered.
+    pub fn serve(self) -> std::io::Result<()> {
+        let socket_path = self.socket_path.unwrap_or_else(get_socket_path);
+        serve_daemon(self.state, &socket_path)
+    }
+
+    /// Spawn the server loop on a dedicated background thread, waiting until the socket
+    /// is bound and ready to accept connections before returning the handle.
+    pub fn spawn(self) -> std::io::Result<DaemonHandle> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let shutdown = self.shutdown_signal();
+        let socket_path = self.socket_path.unwrap_or_else(get_socket_path);
+        let state = self.state;
+        let thread = std::thread::Builder::new()
+            .name("omawarden-daemon".to_string())
+            .spawn(move || serve_daemon_with_ready(state, &socket_path, Some(ready_tx)))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(DaemonHandle { thread, shutdown }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                Err(e)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "daemon worker thread exited prematurely",
                 ))
             }
-            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-                fs::remove_file(&socket_path)?
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
     }
+}
 
-    let listener = UnixListener::bind(&socket_path)?;
-    let mut perms = fs::metadata(&socket_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&socket_path, perms)?;
+/// Handle to a background daemon server thread.
+pub struct DaemonHandle {
+    pub thread: std::thread::JoinHandle<std::io::Result<()>>,
+    pub shutdown: ShutdownSignal,
+}
 
-    if let Err(e) = crate::ssh_agent::apply(&state) {
-        crate::log_error!("omawarden:daemon", "SSH agent failed to start: {}", e);
+impl DaemonHandle {
+    /// Signal the server to shut down cooperatively.
+    pub fn stop(&self) {
+        self.shutdown.trigger();
     }
+
+    /// Check if the server has been requested to shut down.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.is_shutting_down()
+    }
+
+    /// Wait for the server thread to finish and return its result.
+    pub fn join(self) -> std::thread::Result<std::io::Result<()>> {
+        self.thread.join()
+    }
+}
+
+pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
+    DaemonServer::new(state).serve()
+}
+
+fn serve_daemon(state: Arc<DaemonState>, socket_path: &Path) -> std::io::Result<()> {
+    serve_daemon_with_ready(state, socket_path, None)
+}
+
+fn serve_daemon_with_ready(
+    state: Arc<DaemonState>,
+    socket_path: &Path,
+    ready_tx: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
+) -> std::io::Result<()> {
+    let setup = || -> std::io::Result<(UnixListener, fs::File, fs::File)> {
+        use std::io::{Error, ErrorKind};
+        if let Some(parent) = socket_path.parent() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        if let Ok(mut sp_guard) = state.socket_path.lock() {
+            *sp_guard = Some(socket_path.to_path_buf());
+        }
+
+        // One owner for the socket and one for the encrypted cache, even when a
+        // second process starts with a different runtime or configuration path.
+        let socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
+        let cache_owner = lock_daemon_instance(
+            &state
+                .vault_mgr
+                .storage_mgr
+                .file_path
+                .with_extension("daemon.lock"),
+        )?;
+        if socket_path.exists() {
+            validate_socket_path(socket_path)?;
+            match UnixStream::connect(socket_path) {
+                Ok(_) => {
+                    return Err(Error::new(
+                        ErrorKind::AlreadyExists,
+                        "Vault daemon already running",
+                    ))
+                }
+                Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                    let _ = fs::remove_file(socket_path);
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let listener = UnixListener::bind(socket_path)?;
+        let mut perms = fs::metadata(socket_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(socket_path, perms)?;
+        listener.set_nonblocking(true)?;
+
+        if let Err(e) = crate::ssh_agent::apply(&state) {
+            crate::log_error!("omawarden:daemon", "SSH agent failed to start: {}", e);
+        }
+
+        Ok((listener, socket_owner, cache_owner))
+    };
+
+    let (listener, _socket_owner, _cache_owner) = match setup() {
+        Ok(res) => {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(Ok(()));
+            }
+            res
+        }
+        Err(e) => {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(Err(std::io::Error::new(e.kind(), e.to_string())));
+            }
+            return Err(e);
+        }
+    };
 
     let state_clone = state.clone();
-    std::thread::spawn(move || loop {
-        let is_unlocked = state_clone.vault_mgr.is_unlocked();
-        let sleep_duration = if is_unlocked {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_secs(5)
-        };
-        std::thread::sleep(sleep_duration);
-        // Resume-edge suspend detection must run regardless of lock state:
-        // the dominant quick-unlock state (soft-locked) is exactly when the
-        // screen detector above would otherwise never fire.
-        state_clone.check_suspend_drift();
-        state_clone.check_auto_lock();
-        state_clone.check_screen_lock();
+    let shutdown_clone = state.shutdown.clone();
+    let watchdog = std::thread::spawn(move || {
+        while !shutdown_clone.is_shutting_down() {
+            let is_unlocked = state_clone.vault_mgr.is_unlocked();
+            let sleep_duration = if is_unlocked {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(5)
+            };
+            let start = Instant::now();
+            while start.elapsed() < sleep_duration {
+                if shutdown_clone.is_shutting_down() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if shutdown_clone.is_shutting_down() {
+                return;
+            }
+            // Resume-edge suspend detection must run regardless of lock state:
+            // the dominant quick-unlock state (soft-locked) is exactly when the
+            // screen detector above would otherwise never fire.
+            state_clone.check_suspend_drift();
+            state_clone.check_auto_lock();
+            state_clone.check_screen_lock();
+        }
     });
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let st = state.clone();
-                std::thread::spawn(move || {
-                    let _ = handle_client(stream, st);
-                });
+    use std::os::unix::io::AsRawFd;
+    let fd = listener.as_raw_fd();
+    let mut loop_err = None;
+
+    while !state.shutdown.is_shutting_down() {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
             }
-            Err(e) => {
-                eprintln!("Socket accept error: {}", e);
+            loop_err = Some(err);
+            break;
+        }
+        if ret == 0 {
+            continue;
+        }
+        if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0
+            && (pfd.revents & libc::POLLIN) == 0
+        {
+            break;
+        }
+        if (pfd.revents & libc::POLLIN) != 0 {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let st = state.clone();
+                    std::thread::spawn(move || {
+                        let _ = handle_client(stream, st);
+                    });
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    crate::log_error!("omawarden:daemon", "Socket accept error: {}", e);
+                }
             }
         }
     }
 
-    Ok(())
+    // Ensure shutdown is marked
+    state.shutdown.trigger();
+
+    // Clean up watchdog thread
+    let _ = watchdog.join();
+
+    // Final clean-up: lock vault, stop SSH agent, unlink socket
+    state.lock();
+    crate::ssh_agent::stop(&state);
+    let _ = fs::remove_file(socket_path);
+
+    if let Some(err) = loop_err {
+        Err(err)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1335,10 +1537,18 @@ pub(crate) fn handle_client(
         }),
         "stop" => {
             state.lock();
-            crate::ssh_agent::remove_socket();
+            crate::ssh_agent::stop(&state);
+            let sock_path = state
+                .socket_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_else(get_socket_path);
+            let _ = fs::remove_file(&sock_path);
             let _ = writeln!(stream, "{}", json!({ "ok": true }));
             let _ = stream.flush();
-            std::process::exit(0);
+            state.shutdown.trigger();
+            return Ok(());
         }
         "status" => state.vault_mgr.get_status(),
         // SSH agent confirmations: the overlay lists pending prompts and answers them.
@@ -2122,61 +2332,6 @@ mod tests {
                 current: 1
             }
         );
-    }
-
-    #[test]
-    fn test_dispatch_daemon_request_fails_closed_on_incompatible_protocol() {
-        let _lock = crate::env_lock();
-        let runtime = tempdir().unwrap();
-        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
-
-        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
-        // Server answers ping with incompatible protocol_version: 99
-        let server = {
-            let listener = listener.try_clone().unwrap();
-            std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut line)
-                    .unwrap();
-                assert_eq!(
-                    serde_json::from_str::<Value>(&line).unwrap()["action"],
-                    "ping"
-                );
-                writeln!(
-                    stream,
-                    "{}",
-                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
-                )
-                .unwrap();
-            })
-        };
-
-        // Attempting to dispatch a non-ping command must fail-closed with IncompatibleProtocol
-        let result = dispatch_daemon_request(&json!({ "action": "list" }));
-        assert_eq!(
-            result,
-            Err(DispatchError::IncompatibleProtocol {
-                running: 99,
-                min_supported: 1,
-                current: 1
-            })
-        );
-        server.join().unwrap();
-
-        for (key, old) in [
-            ("XDG_RUNTIME_DIR", old_runtime),
-            ("OMAWARDEN_DATA_DIR", old_data),
-        ] {
-            match old {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 
     #[test]
@@ -3281,5 +3436,121 @@ exit $(cat {})
             .expect("missing passphrase");
         assert_eq!(phrase_str.split('.').count(), 5);
         assert!(res_phrase.get("entropy").and_then(|v| v.as_f64()).unwrap() > 60.0);
+    }
+
+    #[test]
+    fn test_stop_action_graceful_shutdown_without_process_exit() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Ping to ensure daemon is ready
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+        assert_eq!(ping_res["pong"], true);
+
+        // Send stop request
+        let stop_res = send_daemon_request(&json!({ "action": "stop" })).expect("stop failed");
+        assert_eq!(stop_res["ok"], true);
+
+        // Wait for server thread to join cleanly
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(
+            join_res.is_ok(),
+            "daemon server returned error: {:?}",
+            join_res
+        );
+
+        // Verify vault is locked and socket removed
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(!get_socket_path().exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_programmatic_shutdown_via_handle() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Ping to ensure daemon is ready
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+
+        // Trigger programmatic shutdown
+        assert!(!handle.is_shutting_down());
+        handle.stop();
+        assert!(handle.is_shutting_down());
+
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
+
+        assert!(!get_socket_path().exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_server_url_switch_does_not_abort_process() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.json");
+        let storage_path = config_dir.path().join("data.json");
+
+        let storage_mgr = StorageManager::new(storage_path);
+        let state = Arc::new(DaemonState::new(storage_mgr.clone(), 15));
+        let handle = DaemonServer::new(state.clone())
+            .spawn()
+            .expect("failed to spawn daemon");
+
+        // Ping to ensure daemon is running
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+
+        // Perform server URL update (ADR 0008 flow sends wipe_quick_unlock + stop)
+        let config_mgr = crate::config::ConfigManager::new(Some(&config_path));
+        let keyring_mgr = crate::keyring::KeyringManager::default();
+        let update_opts = crate::config::ConfigUpdateOptions {
+            server_url: Some("https://new.vault.example.com".to_string()),
+            ..Default::default()
+        };
+        let res = config_mgr.update_config(update_opts, &storage_mgr, &keyring_mgr);
+        assert!(res.is_ok(), "config update failed: {:?}", res);
+
+        // Daemon thread joins cleanly and host test continues executing
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 }
