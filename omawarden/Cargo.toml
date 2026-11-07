@@ -24,7 +24,7 @@ aes = "0.8"
 cbc = "0.1"
 pbkdf2 = "0.12"
 argon2 = "0.6"
-hkdf = "0.12"
+hkdf = "0.13"
 subtle = "2.6"
 rsa = { version = "0.9", features = ["sha2", "sha1"] }
 pkcs8 = { version = "0.11", features = ["std"] }
