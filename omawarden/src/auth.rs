@@ -226,6 +226,7 @@ impl AuthManager {
             Err(DispatchError::IncompatibleProtocol { .. }) => {
                 Err("Incompatible daemon protocol version. Restart the daemon to sign in.")
             }
+            Err(DispatchError::LaunchFailed(_)) => Err("Cannot start the daemon before login."),
         }
     }
 

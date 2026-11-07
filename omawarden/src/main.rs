@@ -1254,6 +1254,10 @@ fn main() -> ExitCode {
                             "ok": false,
                             "error": format!("Incompatible daemon protocol version {running} (supported: {min_supported}..={current}). Please restart the daemon.")
                         }),
+                        Err(omawarden::daemon::DispatchError::LaunchFailed(msg)) => json!({
+                            "ok": false,
+                            "error": format!("Could not start the daemon: {msg}")
+                        }),
                     };
                     let ok = resp_val["ok"].as_bool().unwrap_or(false);
                     println!("{}", serde_json::to_string_pretty(&resp_val).unwrap());
@@ -2159,6 +2163,7 @@ fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
         DispatchError::IncompatibleProtocol { .. } => {
             reject("Daemon protocol version is incompatible with this client.")
         }
+        DispatchError::LaunchFailed(msg) => reject(&format!("Could not start the daemon: {msg}")),
     })?;
     if reply["ok"] == false {
         return Err(reply);

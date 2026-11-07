@@ -190,7 +190,161 @@ pub fn check_protocol_version(ping: &Value) -> ProtocolCheck {
     }
 }
 
+/// Execution strategy for resolving and launching the standalone daemon binary.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DaemonLaunchStrategy {
+    /// Automatic resolution:
+    /// 1. `OMA_DAEMON_BIN` environment variable (if set and pointing to an existing file).
+    /// 2. `env::current_exe()` if its file stem is "omawarden".
+    /// 3. Lookup "omawarden" in system PATH via `which::which("omawarden")`.
+    #[default]
+    Auto,
+    /// Explicit executable path to the standalone omawarden binary.
+    Explicit(PathBuf),
+    /// In-process daemon host: external process spawning is disabled because
+    /// the host application manages the daemon server lifecycle directly in-process.
+    InProcess,
+    /// Daemon launching is disabled. If no daemon is already active, callers fail closed.
+    Disabled,
+}
+
+static LAUNCH_STRATEGY: Mutex<Option<DaemonLaunchStrategy>> = Mutex::new(None);
+
+/// Sets the process-global daemon launch strategy.
+pub fn set_daemon_launch_strategy(strategy: DaemonLaunchStrategy) {
+    let mut lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    *lock = Some(strategy);
+}
+
+/// Clears any configured process-global daemon launch strategy, reverting to default (`Auto`).
+pub fn reset_daemon_launch_strategy() {
+    let mut lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    *lock = None;
+}
+
+/// Resolves the effective daemon launch strategy from process configuration or environment.
+pub fn daemon_launch_strategy() -> DaemonLaunchStrategy {
+    let lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref strategy) = *lock {
+        return strategy.clone();
+    }
+    drop(lock);
+
+    if let Ok(bin) = env::var("OMA_DAEMON_BIN") {
+        let trimmed = bin.trim();
+        if !trimmed.is_empty() {
+            return DaemonLaunchStrategy::Explicit(PathBuf::from(trimmed));
+        }
+    }
+
+    if let Ok(strat) = env::var("OMA_DAEMON_LAUNCH_STRATEGY") {
+        let trimmed = strat.trim();
+        match trimmed.to_lowercase().as_str() {
+            "disabled" | "none" | "off" | "false" => return DaemonLaunchStrategy::Disabled,
+            "in-process" | "inprocess" | "host" => return DaemonLaunchStrategy::InProcess,
+            "auto" | "system" | "system-cli" | "system_cli" | "cli" => {
+                return DaemonLaunchStrategy::Auto;
+            }
+            _ if !trimmed.is_empty() => {
+                return DaemonLaunchStrategy::Explicit(PathBuf::from(trimmed));
+            }
+            _ => {}
+        }
+    }
+
+    DaemonLaunchStrategy::Auto
+}
+
+/// Verifies whether the path represents the canonical `omawarden` CLI binary by file stem.
+pub fn is_omawarden_binary(path: &Path) -> bool {
+    path.file_stem().is_some_and(|stem| stem == "omawarden")
+}
+
+/// Resolves the path to the standalone `omawarden` binary using the active launch strategy.
+pub fn resolve_daemon_binary() -> io::Result<PathBuf> {
+    resolve_daemon_binary_with_strategy(&daemon_launch_strategy())
+}
+
+/// Resolves the path to the standalone `omawarden` binary using a specific strategy.
+pub fn resolve_daemon_binary_with_strategy(strategy: &DaemonLaunchStrategy) -> io::Result<PathBuf> {
+    resolve_daemon_binary_custom(strategy, env::current_exe().ok().as_deref(), |name| {
+        which::which(name)
+    })
+}
+
+pub(crate) fn resolve_daemon_binary_custom<F>(
+    strategy: &DaemonLaunchStrategy,
+    current_exe: Option<&Path>,
+    which_lookup: F,
+) -> io::Result<PathBuf>
+where
+    F: Fn(&str) -> Result<PathBuf, which::Error>,
+{
+    match strategy {
+        DaemonLaunchStrategy::Explicit(path) => {
+            if path.is_file() {
+                Ok(path.clone())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Configured daemon binary '{}' does not exist or is not a file",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+        DaemonLaunchStrategy::Disabled => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Daemon launching is disabled",
+        )),
+        DaemonLaunchStrategy::InProcess => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "External daemon launching is disabled for in-process host",
+        )),
+        DaemonLaunchStrategy::Auto => {
+            if let Ok(bin) = env::var("OMA_DAEMON_BIN") {
+                let trimmed = bin.trim();
+                if !trimmed.is_empty() {
+                    let path = PathBuf::from(trimmed);
+                    if path.is_file() {
+                        return Ok(path);
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "OMA_DAEMON_BIN '{}' does not exist or is not a file",
+                                path.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            if let Some(exe) = current_exe {
+                if is_omawarden_binary(exe) {
+                    return Ok(exe.to_path_buf());
+                }
+            }
+
+            match which_lookup("omawarden") {
+                Ok(path) => Ok(path),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Could not locate 'omawarden' standalone executable in current binary or PATH",
+                )),
+            }
+        }
+    }
+}
+
 pub fn ensure_daemon_running() -> Result<(), DispatchError> {
+    ensure_daemon_running_with_strategy(&daemon_launch_strategy())
+}
+
+pub fn ensure_daemon_running_with_strategy(
+    strategy: &DaemonLaunchStrategy,
+) -> Result<(), DispatchError> {
     if let Some(resp) = send_daemon_request_raw(&json!({ "action": "ping" })) {
         match check_protocol_version(&resp) {
             ProtocolCheck::Compatible => {
@@ -221,40 +375,56 @@ pub fn ensure_daemon_running() -> Result<(), DispatchError> {
         }
     }
 
-    if let Ok(exe_path) = env::current_exe() {
-        let cfg = crate::config::ConfigManager::default().load();
-        let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
-            cfg.auto_lock_minutes as u64
-        } else {
-            15
-        };
-
-        let mut cmd = Command::new(exe_path);
-        cmd.arg("daemon")
-            .arg("--auto-lock")
-            .arg(auto_lock_mins.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
+    let exe_path = match resolve_daemon_binary_with_strategy(strategy) {
+        Ok(path) => path,
+        Err(e) => {
+            crate::log_error!("omawarden:daemon", "Refusing to spawn daemon: {}", e);
+            return Err(DispatchError::LaunchFailed(e.to_string()));
         }
+    };
 
-        let _ = cmd.spawn();
+    let cfg = crate::config::ConfigManager::default().load();
+    let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
+        cfg.auto_lock_minutes as u64
+    } else {
+        15
+    };
 
-        for _ in 0..30 {
-            std::thread::sleep(Duration::from_millis(20));
-            if send_daemon_request_raw(&json!({ "action": "ping" })).is_some() {
-                break;
-            }
+    let mut cmd = Command::new(&exe_path);
+    cmd.arg("daemon")
+        .arg("--auto-lock")
+        .arg(auto_lock_mins.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    if let Err(e) = cmd.spawn() {
+        crate::log_error!(
+            "omawarden:daemon",
+            "Failed to spawn daemon process '{}': {}",
+            exe_path.display(),
+            e
+        );
+        return Err(DispatchError::LaunchFailed(e.to_string()));
+    }
+
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(20));
+        if send_daemon_request_raw(&json!({ "action": "ping" })).is_some() {
+            return Ok(());
         }
     }
 
-    Ok(())
+    Err(DispatchError::LaunchFailed(
+        "Daemon process spawned but did not respond to ping within 600ms".to_string(),
+    ))
 }
 
 pub fn send_daemon_request(req: &Value) -> Option<Value> {
@@ -274,6 +444,7 @@ pub enum DispatchError {
         min_supported: u32,
         current: u32,
     },
+    LaunchFailed(String),
 }
 
 impl std::fmt::Display for DispatchError {
@@ -289,6 +460,7 @@ impl std::fmt::Display for DispatchError {
                 f,
                 "Incompatible daemon protocol version {running} (supported: {min_supported}..={current}). Please restart the daemon."
             ),
+            Self::LaunchFailed(msg) => write!(f, "Failed to launch daemon: {msg}"),
         }
     }
 }
@@ -3547,6 +3719,206 @@ exit $(cat {})
         // Daemon thread joins cleanly and host test continues executing
         let join_res = handle.join().expect("daemon thread panicked");
         assert!(join_res.is_ok());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_is_omawarden_binary() {
+        assert!(is_omawarden_binary(Path::new("/usr/bin/omawarden")));
+        assert!(is_omawarden_binary(Path::new("/usr/local/bin/omawarden")));
+        assert!(is_omawarden_binary(Path::new("omawarden")));
+        assert!(is_omawarden_binary(Path::new("omawarden.exe")));
+        assert!(is_omawarden_binary(Path::new("/opt/bin/omawarden.exe")));
+
+        assert!(!is_omawarden_binary(Path::new(
+            "/usr/bin/nsh-app-omawarden-app"
+        )));
+        assert!(!is_omawarden_binary(Path::new("/usr/bin/omawarden-app")));
+        assert!(!is_omawarden_binary(Path::new(
+            "/target/debug/deps/omawarden-f3624269721e171b"
+        )));
+        assert!(!is_omawarden_binary(Path::new("/bin/bash")));
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_foreign_host_resolves_path() {
+        let foreign_exe = Path::new("/usr/bin/nsh-app-omawarden-app");
+        let canonical_cli = PathBuf::from("/usr/bin/omawarden");
+
+        let res =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Auto, Some(foreign_exe), |name| {
+                if name == "omawarden" {
+                    Ok(canonical_cli.clone())
+                } else {
+                    Err(which::Error::CannotFindBinaryPath)
+                }
+            });
+
+        assert_eq!(res.unwrap(), canonical_cli);
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_foreign_host_not_found_fails_cleanly() {
+        let foreign_exe = Path::new("/usr/bin/nsh-app-omawarden-app");
+
+        let res =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Auto, Some(foreign_exe), |_| {
+                Err(which::Error::CannotFindBinaryPath)
+            });
+
+        let err = res.expect_err("foreign host should fail when omawarden is not in PATH");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("Could not locate 'omawarden'"));
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_strategies() {
+        // Disabled strategy
+        let dis_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Disabled,
+            Some(Path::new("/usr/bin/omawarden")),
+            |_| Ok(PathBuf::from("/usr/bin/omawarden")),
+        );
+        assert_eq!(dis_res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        // InProcess strategy
+        let inp_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::InProcess,
+            Some(Path::new("/usr/bin/omawarden")),
+            |_| Ok(PathBuf::from("/usr/bin/omawarden")),
+        );
+        assert_eq!(inp_res.unwrap_err().kind(), io::ErrorKind::Unsupported);
+
+        // Explicit strategy - existing file
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let exp_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Explicit(tmp.path().to_path_buf()),
+            None,
+            |_| Err(which::Error::CannotFindBinaryPath),
+        );
+        assert_eq!(exp_res.unwrap(), tmp.path());
+
+        // Explicit strategy - missing file
+        let missing = PathBuf::from("/tmp/nonexistent-omawarden-binary-for-test");
+        let exp_missing =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Explicit(missing), None, |_| {
+                Err(which::Error::CannotFindBinaryPath)
+            });
+        assert_eq!(exp_missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_daemon_launch_strategy_env_and_global_config() {
+        let _lock = crate::env_lock();
+        reset_daemon_launch_strategy();
+
+        // 1. Programmatic global setting
+        set_daemon_launch_strategy(DaemonLaunchStrategy::Disabled);
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Disabled);
+
+        set_daemon_launch_strategy(DaemonLaunchStrategy::InProcess);
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::InProcess);
+
+        reset_daemon_launch_strategy();
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
+
+        // 2. OMA_DAEMON_LAUNCH_STRATEGY env keywords
+        let old_strat = env::var_os("OMA_DAEMON_LAUNCH_STRATEGY");
+        let old_bin = env::var_os("OMA_DAEMON_BIN");
+        env::remove_var("OMA_DAEMON_BIN");
+
+        for val in &["system", "system-cli", "cli", "auto"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
+        }
+
+        for val in &["disabled", "none", "off", "false"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Disabled);
+        }
+
+        for val in &["in-process", "inprocess", "host"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::InProcess);
+        }
+
+        // Explicit path with uppercase preserving
+        env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", "/Opt/OmaWarden/omawarden");
+        assert_eq!(
+            daemon_launch_strategy(),
+            DaemonLaunchStrategy::Explicit(PathBuf::from("/Opt/OmaWarden/omawarden"))
+        );
+
+        // OMA_DAEMON_BIN overrides OMA_DAEMON_LAUNCH_STRATEGY
+        env::set_var("OMA_DAEMON_BIN", "/Custom/Bin/omawarden");
+        assert_eq!(
+            daemon_launch_strategy(),
+            DaemonLaunchStrategy::Explicit(PathBuf::from("/Custom/Bin/omawarden"))
+        );
+
+        match old_strat {
+            Some(v) => env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", v),
+            None => env::remove_var("OMA_DAEMON_LAUNCH_STRATEGY"),
+        }
+        match old_bin {
+            Some(v) => env::set_var("OMA_DAEMON_BIN", v),
+            None => env::remove_var("OMA_DAEMON_BIN"),
+        }
+        reset_daemon_launch_strategy();
+    }
+
+    #[test]
+    fn test_ensure_daemon_running_in_foreign_host_refuses_to_spawn_foreign_host() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        // Ensure no daemon is running at this socket
+        assert!(!get_socket_path().exists());
+
+        // Create a simulated foreign host executable (e.g. nsh-app-omawarden-app)
+        // that writes a sentinel file if ever invoked with arguments.
+        let host_dir = tempdir().unwrap();
+        let sentinel_path = host_dir.path().join("sentinel.txt");
+        let foreign_host_path = host_dir.path().join("nsh-app-omawarden-app");
+        let script = format!(
+            "#!/bin/sh\necho 'invoked' > {}\nexit 0\n",
+            sentinel_path.display()
+        );
+        fs::write(&foreign_host_path, script).unwrap();
+        fs::set_permissions(&foreign_host_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 1. Resolution inside simulated foreign host refuses to return the foreign host executable
+        let res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Auto,
+            Some(&foreign_host_path),
+            |_| Err(which::Error::CannotFindBinaryPath),
+        );
+        let err = res.expect_err("foreign host should never be returned as daemon executable");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        // Verify the simulated foreign host binary was never executed
+        assert!(
+            !sentinel_path.exists(),
+            "foreign host binary must not be invoked during resolution"
+        );
+
+        // 2. Calling with Disabled strategy fails closed immediately without spawning
+        let res = ensure_daemon_running_with_strategy(&DaemonLaunchStrategy::Disabled);
+        match res {
+            Err(DispatchError::LaunchFailed(msg)) => {
+                assert!(msg.contains("disabled"));
+            }
+            other => panic!("expected LaunchFailed error, got: {:?}", other),
+        }
+
+        assert!(!get_socket_path().exists());
+        assert!(!sentinel_path.exists());
 
         match old_runtime {
             Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
