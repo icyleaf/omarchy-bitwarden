@@ -19,8 +19,16 @@ The system FreeDesktop Secret Service store used to persist tokens and credentia
 _Avoid_: Keychain, token cache, credential store
 
 **Clipboard Guard**:
-The ephemeral Wayland clipboard manager that enforces automatic time-to-live clearing of copied secrets.
+The ephemeral clipboard subsystem that enforces automatic time-to-live clearing and secure revocation of copied secrets across supported display and OS clipboard providers.
 _Avoid_: Clipboard manager, clipboard watcher
+
+**Clipboard Provider**:
+A platform-specific clipboard backend adapter responsible for low-level clipboard copy, clear, and availability checks.
+_Avoid_: Clipboard backend, clipboard wrapper, clipboard helper
+
+**Daemon Protocol**:
+The framed JSON wire interface exposed over the local Unix domain socket by Omawarden, versioned with a monotonically increasing integer (`protocol_version`) to govern compatibility between clients and the resident daemon independently of build commit hashes.
+_Avoid_: Socket API, daemon version, API version
 
 ### Vault & Cryptography
 

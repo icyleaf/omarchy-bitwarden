@@ -97,7 +97,8 @@ impl Drop for TestDaemon {
     fn drop(&mut self) {
         let socket = self.runtime.path().join("omawarden.sock");
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _wake = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        self.state.shutdown.trigger();
+        let _ = std::os::unix::net::UnixStream::connect(socket);
         self.worker.take().unwrap().join().unwrap();
         match self.previous_runtime.take() {
             Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),

@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -151,53 +152,381 @@ pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// What to do about a running daemon built from a different commit.
-#[derive(Debug, PartialEq)]
-enum DaemonCheck {
-    UpToDate,
-    /// Mismatched but unlocked: replacing it would lock the vault and drop
-    /// the SSH agent socket mid-use, so leave it until it locks.
-    Defer,
-    Replace,
+/// The monotonically increasing integer version of the Daemon Protocol wire format.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+
+/// The minimum protocol version this client/server understands.
+/// Version 0 represents legacy unversioned daemons.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 0;
+
+/// The result of checking protocol version compatibility against the wire handshake.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProtocolCheck {
+    Compatible,
+    Incompatible {
+        running: u32,
+        min_supported: u32,
+        current: u32,
+    },
 }
 
-fn check_running_daemon(ping: &Value, our_commit: &str) -> DaemonCheck {
-    let running_commit = ping.get("commit").and_then(|v| v.as_str()).unwrap_or("");
-    if running_commit == our_commit {
-        DaemonCheck::UpToDate
-    } else if ping.get("unlocked").and_then(|v| v.as_bool()) == Some(true) {
-        DaemonCheck::Defer
+/// Evaluates daemon protocol version from a ping response.
+///
+/// Missing or malformed `protocol_version` fields are treated as legacy version 0.
+pub fn check_protocol_version(ping: &Value) -> ProtocolCheck {
+    let running = ping
+        .get("protocol_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    if (MIN_SUPPORTED_PROTOCOL_VERSION..=CURRENT_PROTOCOL_VERSION).contains(&running) {
+        ProtocolCheck::Compatible
     } else {
-        DaemonCheck::Replace
+        ProtocolCheck::Incompatible {
+            running,
+            min_supported: MIN_SUPPORTED_PROTOCOL_VERSION,
+            current: CURRENT_PROTOCOL_VERSION,
+        }
     }
 }
 
-pub fn ensure_daemon_running() {
-    if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
-        let check = check_running_daemon(&resp, env!("GIT_HASH"));
-        if check == DaemonCheck::UpToDate {
-            return;
+/// Execution strategy for resolving and launching the standalone daemon binary.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DaemonLaunchStrategy {
+    /// Automatic resolution:
+    /// 1. `OMA_DAEMON_BIN` environment variable (if set and pointing to an existing file).
+    /// 2. `env::current_exe()` if its file stem is "omawarden".
+    /// 3. Lookup "omawarden" in system PATH via `which::which("omawarden")`.
+    #[default]
+    Auto,
+    /// Explicit executable path to the standalone omawarden binary.
+    Explicit(PathBuf),
+    /// In-process daemon host: external process spawning is disabled because
+    /// the host application manages the daemon server lifecycle directly in-process.
+    InProcess,
+    /// Daemon launching is disabled. If no daemon is already active, callers fail closed.
+    Disabled,
+}
+
+static LAUNCH_STRATEGY: Mutex<Option<DaemonLaunchStrategy>> = Mutex::new(None);
+
+/// Sets the process-global daemon launch strategy.
+pub fn set_daemon_launch_strategy(strategy: DaemonLaunchStrategy) {
+    let mut lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    *lock = Some(strategy);
+}
+
+/// Clears any configured process-global daemon launch strategy, reverting to default (`Auto`).
+pub fn reset_daemon_launch_strategy() {
+    let mut lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    *lock = None;
+}
+
+/// Resolves the effective daemon launch strategy from process configuration or environment.
+pub fn daemon_launch_strategy() -> DaemonLaunchStrategy {
+    let lock = LAUNCH_STRATEGY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref strategy) = *lock {
+        return strategy.clone();
+    }
+    drop(lock);
+
+    if let Ok(bin) = env::var("OMA_DAEMON_BIN") {
+        let trimmed = bin.trim();
+        if !trimmed.is_empty() {
+            return DaemonLaunchStrategy::Explicit(PathBuf::from(trimmed));
         }
-        // An older build may still hold plaintext from an unscoped login.
-        // Replace it when upgrading that cache to the sign-in requirement.
-        if check == DaemonCheck::Defer
-            && StorageManager::default()
-                .load()
-                .scoped_credential_id()
-                .is_some()
-        {
-            crate::log_info!(
-                "omawarden:daemon",
-                "Running daemon is from another build but the vault is unlocked; keeping it until it locks"
-            );
-            return;
-        }
-        // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
-        let _ = send_daemon_request(&json!({ "action": "stop" }));
-        std::thread::sleep(Duration::from_millis(50));
     }
 
-    if let Ok(exe_path) = env::current_exe() {
+    if let Ok(strat) = env::var("OMA_DAEMON_LAUNCH_STRATEGY") {
+        let trimmed = strat.trim();
+        match trimmed.to_lowercase().as_str() {
+            "disabled" | "none" | "off" | "false" => return DaemonLaunchStrategy::Disabled,
+            "in-process" | "inprocess" | "host" => return DaemonLaunchStrategy::InProcess,
+            "auto" | "system" | "system-cli" | "system_cli" | "cli" => {
+                return DaemonLaunchStrategy::Auto;
+            }
+            _ if !trimmed.is_empty() => {
+                return DaemonLaunchStrategy::Explicit(PathBuf::from(trimmed));
+            }
+            _ => {}
+        }
+    }
+
+    DaemonLaunchStrategy::Auto
+}
+
+/// Verifies whether the path represents the canonical `omawarden` CLI binary by file stem.
+pub fn is_omawarden_binary(path: &Path) -> bool {
+    path.file_stem().is_some_and(|stem| stem == "omawarden")
+}
+
+/// Resolves the path to the standalone `omawarden` binary using the active launch strategy.
+pub fn resolve_daemon_binary() -> io::Result<PathBuf> {
+    resolve_daemon_binary_with_strategy(&daemon_launch_strategy())
+}
+
+/// Resolves the path to the standalone `omawarden` binary using a specific strategy.
+pub fn resolve_daemon_binary_with_strategy(strategy: &DaemonLaunchStrategy) -> io::Result<PathBuf> {
+    resolve_daemon_binary_custom(strategy, env::current_exe().ok().as_deref(), |name| {
+        if cfg!(test) {
+            // Tests never launch system binaries from PATH to avoid polluting the host
+            // or interfering with isolated test environments.
+            Err(which::Error::CannotFindBinaryPath)
+        } else {
+            which::which(name)
+        }
+    })
+}
+
+pub(crate) fn resolve_daemon_binary_custom<F>(
+    strategy: &DaemonLaunchStrategy,
+    current_exe: Option<&Path>,
+    which_lookup: F,
+) -> io::Result<PathBuf>
+where
+    F: Fn(&str) -> Result<PathBuf, which::Error>,
+{
+    match strategy {
+        DaemonLaunchStrategy::Explicit(path) => {
+            if path.is_file() {
+                Ok(path.clone())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Configured daemon binary '{}' does not exist or is not a file",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+        DaemonLaunchStrategy::Disabled => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Daemon launching is disabled",
+        )),
+        DaemonLaunchStrategy::InProcess => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "External daemon launching is disabled for in-process host",
+        )),
+        DaemonLaunchStrategy::Auto => {
+            if let Ok(bin) = env::var("OMA_DAEMON_BIN") {
+                let trimmed = bin.trim();
+                if !trimmed.is_empty() {
+                    let path = PathBuf::from(trimmed);
+                    if path.is_file() {
+                        return Ok(path);
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "OMA_DAEMON_BIN '{}' does not exist or is not a file",
+                                path.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            if let Some(exe) = current_exe {
+                if is_omawarden_binary(exe) {
+                    return Ok(exe.to_path_buf());
+                }
+            }
+
+            match which_lookup("omawarden") {
+                Ok(path) => Ok(path),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Could not locate 'omawarden' standalone executable in current binary or PATH",
+                )),
+            }
+        }
+    }
+}
+
+/// Unified client interface for communicating with the `omawarden` daemon.
+///
+/// Encapsulates Unix Domain Socket connection, peer UID security verification (`SO_PEERCRED`),
+/// framed JSON protocol message transmission, and automatic lifecycle/protocol management.
+#[derive(Debug, Clone)]
+pub struct DaemonClient {
+    socket_path: PathBuf,
+    launch_strategy: DaemonLaunchStrategy,
+    timeout: Option<Duration>,
+}
+
+impl Default for DaemonClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DaemonClient {
+    /// Creates a new `DaemonClient` using the default runtime socket path and active launch strategy.
+    pub fn new() -> Self {
+        Self {
+            socket_path: get_socket_path(),
+            launch_strategy: daemon_launch_strategy(),
+            timeout: Some(Duration::from_secs(60)),
+        }
+    }
+
+    /// Configures an explicit socket path for the client.
+    pub fn with_socket_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.socket_path = path.into();
+        self
+    }
+
+    /// Configures an explicit launch strategy for the client.
+    pub fn with_launch_strategy(mut self, strategy: DaemonLaunchStrategy) -> Self {
+        self.launch_strategy = strategy;
+        self
+    }
+
+    /// Configures an explicit communication timeout for client socket read/write operations.
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Returns the target socket path.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Returns the active launch strategy.
+    pub fn launch_strategy(&self) -> &DaemonLaunchStrategy {
+        &self.launch_strategy
+    }
+
+    /// Returns the configured socket read/write timeout.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Connects to the daemon socket, enforcing security checks and mutual `SO_PEERCRED` validation.
+    pub fn connect(&self) -> Result<UnixStream, DispatchError> {
+        if !self.socket_path.exists() {
+            return Err(DispatchError::NotSent);
+        }
+
+        if let Err(e) = validate_socket_path(&self.socket_path) {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Refusing to connect to socket {}: {}",
+                self.socket_path.display(),
+                e
+            );
+            return Err(DispatchError::NotSent);
+        }
+
+        let stream = UnixStream::connect(&self.socket_path).map_err(|_| DispatchError::NotSent)?;
+
+        if let Some(timeout) = self.timeout {
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+        }
+
+        // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
+        if let Err(e) = verify_peer_credentials(&stream) {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Refusing to send request: server peer UID verification failed: {}",
+                e
+            );
+            return Err(DispatchError::NotSent);
+        }
+
+        Ok(stream)
+    }
+
+    /// Sends a raw JSON request to the daemon without automatic client context or protocol checks.
+    pub fn send_raw(&self, req: &Value) -> Result<Value, DispatchError> {
+        let mut stream = self.connect()?;
+        let payload = format!("{}\n", req);
+        stream
+            .write_all(payload.as_bytes())
+            .map_err(|_| DispatchError::Unconfirmed)?;
+        stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response_line = zeroize::Zeroizing::new(String::new());
+        reader
+            .read_line(&mut response_line)
+            .map_err(|_| DispatchError::Unconfirmed)?;
+
+        serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
+    }
+
+    /// Sends a request with automatic client context attachment and data-plane protocol validation.
+    pub fn send(&self, req: &Value) -> Result<Value, DispatchError> {
+        let is_ping = req.get("action").and_then(|a| a.as_str()) == Some("ping");
+        let mut payload_val = req.clone();
+        if let Value::Object(ref mut map) = payload_val {
+            if !map.contains_key("client") {
+                if let Some(ctx) = crate::api::resolve_effective_client_context(None) {
+                    map.insert("client".to_string(), json!(ctx));
+                }
+            }
+        }
+        let resp = self.send_raw(&payload_val)?;
+        if is_ping || resp.get("protocol_version").is_some() {
+            match check_protocol_version(&resp) {
+                ProtocolCheck::Compatible => Ok(resp),
+                ProtocolCheck::Incompatible {
+                    running,
+                    min_supported,
+                    current,
+                } => Err(DispatchError::IncompatibleProtocol {
+                    running,
+                    min_supported,
+                    current,
+                }),
+            }
+        } else {
+            Ok(resp)
+        }
+    }
+
+    /// Pings the daemon and validates protocol compatibility.
+    pub fn ping(&self) -> Result<Value, DispatchError> {
+        let resp = self.send_raw(&json!({ "action": "ping" }))?;
+        match check_protocol_version(&resp) {
+            ProtocolCheck::Compatible => Ok(resp),
+            ProtocolCheck::Incompatible {
+                running,
+                min_supported,
+                current,
+            } => Err(DispatchError::IncompatibleProtocol {
+                running,
+                min_supported,
+                current,
+            }),
+        }
+    }
+
+    /// Ensures the daemon is running, spawning it via the configured strategy if necessary.
+    pub fn ensure_running(&self) -> Result<(), DispatchError> {
+        match self.ping() {
+            Ok(_) => return Ok(()),
+            Err(e @ DispatchError::IncompatibleProtocol { .. }) => {
+                crate::log_error!(
+                    "omawarden:daemon",
+                    "Running daemon protocol version is incompatible with client. Restart daemon explicitly."
+                );
+                return Err(e);
+            }
+            Err(_) => {}
+        }
+
+        let exe_path = match resolve_daemon_binary_with_strategy(&self.launch_strategy) {
+            Ok(path) => path,
+            Err(e) => {
+                crate::log_error!("omawarden:daemon", "Refusing to spawn daemon: {}", e);
+                return Err(DispatchError::LaunchFailed(e.to_string()));
+            }
+        };
+
         let cfg = crate::config::ConfigManager::default().load();
         let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
             cfg.auto_lock_minutes as u64
@@ -205,7 +534,7 @@ pub fn ensure_daemon_running() {
             15
         };
 
-        let mut cmd = Command::new(exe_path);
+        let mut cmd = Command::new(&exe_path);
         cmd.arg("daemon")
             .arg("--auto-lock")
             .arg(auto_lock_mins.to_string())
@@ -220,83 +549,119 @@ pub fn ensure_daemon_running() {
             });
         }
 
-        let _ = cmd.spawn();
+        if let Err(e) = cmd.spawn() {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Failed to spawn daemon process '{}': {}",
+                exe_path.display(),
+                e
+            );
+            return Err(DispatchError::LaunchFailed(e.to_string()));
+        }
 
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(20));
-            if send_daemon_request(&json!({ "action": "ping" })).is_some() {
-                break;
+            match self.ping() {
+                Ok(_) => return Ok(()),
+                Err(e @ DispatchError::IncompatibleProtocol { .. }) => return Err(e),
+                Err(_) => {}
             }
         }
+
+        Err(DispatchError::LaunchFailed(
+            "Daemon process spawned but did not respond to ping within 600ms".to_string(),
+        ))
     }
+}
+
+pub fn ensure_daemon_running() -> Result<(), DispatchError> {
+    DaemonClient::new().ensure_running()
+}
+
+pub fn ensure_daemon_running_with_strategy(
+    strategy: &DaemonLaunchStrategy,
+) -> Result<(), DispatchError> {
+    DaemonClient::new()
+        .with_launch_strategy(strategy.clone())
+        .ensure_running()
 }
 
 pub fn send_daemon_request(req: &Value) -> Option<Value> {
-    dispatch_daemon_request(req).ok()
+    DaemonClient::new().send(req).ok()
 }
 
-#[derive(Debug)]
+pub(crate) fn send_daemon_request_raw(req: &Value) -> Option<Value> {
+    DaemonClient::new().send_raw(req).ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchError {
     NotSent,
     Unconfirmed,
+    IncompatibleProtocol {
+        running: u32,
+        min_supported: u32,
+        current: u32,
+    },
+    LaunchFailed(String),
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(f, "Could not send the request to the daemon."),
+            Self::Unconfirmed => write!(f, "Daemon request unconfirmed."),
+            Self::IncompatibleProtocol {
+                running,
+                min_supported,
+                current,
+            } => write!(
+                f,
+                "Incompatible daemon protocol version {running} (supported: {min_supported}..={current}). Please restart the daemon."
+            ),
+            Self::LaunchFailed(msg) => write!(f, "Failed to launch daemon: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+/// Dispatches request to the daemon.
+pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
+    DaemonClient::new().send(req)
 }
 
 /// Preserve the dispatch boundary for callers performing a non-idempotent write.
-pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
-    let mut stream = connect_daemon()?;
-    let mut payload_val = req.clone();
-    if let Value::Object(ref mut map) = payload_val {
-        if !map.contains_key("client") {
-            if let Some(ctx) = crate::api::resolve_effective_client_context(None) {
-                map.insert("client".to_string(), json!(ctx));
-            }
-        }
-    }
-
-    let payload = format!("{}\n", payload_val);
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|_| DispatchError::Unconfirmed)?;
-    stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
-
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|_| DispatchError::Unconfirmed)?;
-
-    serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
+pub fn dispatch_daemon_request_raw(req: &Value) -> Result<Value, DispatchError> {
+    DaemonClient::new().send_raw(req)
 }
 
 pub(crate) fn connect_daemon() -> Result<UnixStream, DispatchError> {
-    let socket_path = get_socket_path();
-    if !socket_path.exists() {
-        return Err(DispatchError::NotSent);
+    DaemonClient::new().connect()
+}
+
+/// Cooperative cancellation signal for the daemon server.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownSignal {
+    flag: Arc<AtomicBool>,
+}
+
+pub type ShutdownHandle = ShutdownSignal;
+
+impl ShutdownSignal {
+    pub fn new() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+        }
     }
 
-    if let Err(e) = validate_socket_path(&socket_path) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to connect to socket {}: {}",
-            socket_path.display(),
-            e
-        );
-        return Err(DispatchError::NotSent);
+    pub fn trigger(&self) {
+        self.flag.store(true, Ordering::SeqCst);
     }
 
-    let stream = UnixStream::connect(&socket_path).map_err(|_| DispatchError::NotSent)?;
-
-    // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
-    if let Err(e) = verify_peer_credentials(&stream) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to send request: server peer UID verification failed: {}",
-            e
-        );
-        return Err(DispatchError::NotSent);
+    pub fn is_shutting_down(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
     }
-
-    Ok(stream)
 }
 
 pub struct DaemonState {
@@ -334,6 +699,8 @@ pub struct DaemonState {
     /// watchdog tick. Suspend time accumulates in BOOTTIME only, so a growing
     /// delta is a deterministic resume-edge detector (no D-Bus needed).
     pub last_boot_delta_secs: Mutex<Option<u64>>,
+    pub shutdown: ShutdownSignal,
+    pub socket_path: Mutex<Option<PathBuf>>,
 }
 
 /// What locked the session. Sleep is treated harder than a screen lock
@@ -396,6 +763,8 @@ impl DaemonState {
             polkit_policy_registered,
             session_anchor: Mutex::new(None),
             last_boot_delta_secs: Mutex::new(None),
+            shutdown: ShutdownSignal::new(),
+            socket_path: Mutex::new(None),
         }
     }
 
@@ -918,80 +1287,256 @@ fn lock_daemon_instance(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    let socket_path = get_socket_path();
-    if let Some(parent) = socket_path.parent() {
-        crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+/// Programmatic daemon server for embedded and CLI lifecycles.
+pub struct DaemonServer {
+    state: Arc<DaemonState>,
+    socket_path: Option<PathBuf>,
+}
+
+impl DaemonServer {
+    /// Create a new daemon server for the given state.
+    pub fn new(state: Arc<DaemonState>) -> Self {
+        Self {
+            state,
+            socket_path: None,
+        }
     }
-    // One owner for the socket and one for the encrypted cache, even when a
-    // second process starts with a different runtime or configuration path.
-    let _socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
-    let _cache_owner = lock_daemon_instance(
-        &state
-            .vault_mgr
-            .storage_mgr
-            .file_path
-            .with_extension("daemon.lock"),
-    )?;
-    if socket_path.exists() {
-        validate_socket_path(&socket_path)?;
-        match UnixStream::connect(&socket_path) {
-            Ok(_) => {
-                return Err(Error::new(
-                    ErrorKind::AlreadyExists,
-                    "Vault daemon already running",
+
+    /// Override the socket path (useful for testing or isolated environments).
+    pub fn with_socket_path(mut self, path: PathBuf) -> Self {
+        self.socket_path = Some(path);
+        self
+    }
+
+    /// Access the cooperative shutdown signal.
+    pub fn shutdown_signal(&self) -> ShutdownSignal {
+        self.state.shutdown.clone()
+    }
+
+    /// Run the server loop synchronously on the current thread until shutdown is triggered.
+    pub fn serve(self) -> std::io::Result<()> {
+        let socket_path = self.socket_path.unwrap_or_else(get_socket_path);
+        serve_daemon(self.state, &socket_path)
+    }
+
+    /// Spawn the server loop on a dedicated background thread, waiting until the socket
+    /// is bound and ready to accept connections before returning the handle.
+    pub fn spawn(self) -> std::io::Result<DaemonHandle> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let shutdown = self.shutdown_signal();
+        let socket_path = self.socket_path.unwrap_or_else(get_socket_path);
+        let state = self.state;
+        let thread = std::thread::Builder::new()
+            .name("omawarden-daemon".to_string())
+            .spawn(move || serve_daemon_with_ready(state, &socket_path, Some(ready_tx)))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(DaemonHandle { thread, shutdown }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                Err(e)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "daemon worker thread exited prematurely",
                 ))
             }
-            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-                fs::remove_file(&socket_path)?
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
     }
+}
 
-    let listener = UnixListener::bind(&socket_path)?;
-    let mut perms = fs::metadata(&socket_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&socket_path, perms)?;
+/// Handle to a background daemon server thread.
+pub struct DaemonHandle {
+    pub thread: std::thread::JoinHandle<std::io::Result<()>>,
+    pub shutdown: ShutdownSignal,
+}
 
-    if let Err(e) = crate::ssh_agent::apply(&state) {
-        crate::log_error!("omawarden:daemon", "SSH agent failed to start: {}", e);
+impl DaemonHandle {
+    /// Signal the server to shut down cooperatively.
+    pub fn stop(&self) {
+        self.shutdown.trigger();
     }
+
+    /// Check if the server has been requested to shut down.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.is_shutting_down()
+    }
+
+    /// Wait for the server thread to finish and return its result.
+    pub fn join(self) -> std::thread::Result<std::io::Result<()>> {
+        self.thread.join()
+    }
+}
+
+pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
+    DaemonServer::new(state).serve()
+}
+
+fn serve_daemon(state: Arc<DaemonState>, socket_path: &Path) -> std::io::Result<()> {
+    serve_daemon_with_ready(state, socket_path, None)
+}
+
+fn serve_daemon_with_ready(
+    state: Arc<DaemonState>,
+    socket_path: &Path,
+    ready_tx: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
+) -> std::io::Result<()> {
+    let setup = || -> std::io::Result<(UnixListener, fs::File, fs::File)> {
+        use std::io::{Error, ErrorKind};
+        if let Some(parent) = socket_path.parent() {
+            crate::fs_util::create_secure_dir_all(parent, 0o700)?;
+        }
+        if let Ok(mut sp_guard) = state.socket_path.lock() {
+            *sp_guard = Some(socket_path.to_path_buf());
+        }
+
+        // One owner for the socket and one for the encrypted cache, even when a
+        // second process starts with a different runtime or configuration path.
+        let socket_owner = lock_daemon_instance(&socket_path.with_extension("instance.lock"))?;
+        let cache_owner = lock_daemon_instance(
+            &state
+                .vault_mgr
+                .storage_mgr
+                .file_path
+                .with_extension("daemon.lock"),
+        )?;
+        if socket_path.exists() {
+            validate_socket_path(socket_path)?;
+            match UnixStream::connect(socket_path) {
+                Ok(_) => {
+                    return Err(Error::new(
+                        ErrorKind::AlreadyExists,
+                        "Vault daemon already running",
+                    ))
+                }
+                Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                    let _ = fs::remove_file(socket_path);
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let listener = UnixListener::bind(socket_path)?;
+        let mut perms = fs::metadata(socket_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(socket_path, perms)?;
+        listener.set_nonblocking(true)?;
+
+        if let Err(e) = crate::ssh_agent::apply(&state) {
+            crate::log_error!("omawarden:daemon", "SSH agent failed to start: {}", e);
+        }
+
+        Ok((listener, socket_owner, cache_owner))
+    };
+
+    let (listener, _socket_owner, _cache_owner) = match setup() {
+        Ok(res) => {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(Ok(()));
+            }
+            res
+        }
+        Err(e) => {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(Err(std::io::Error::new(e.kind(), e.to_string())));
+            }
+            return Err(e);
+        }
+    };
 
     let state_clone = state.clone();
-    std::thread::spawn(move || loop {
-        let is_unlocked = state_clone.vault_mgr.is_unlocked();
-        let sleep_duration = if is_unlocked {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_secs(5)
-        };
-        std::thread::sleep(sleep_duration);
-        // Resume-edge suspend detection must run regardless of lock state:
-        // the dominant quick-unlock state (soft-locked) is exactly when the
-        // screen detector above would otherwise never fire.
-        state_clone.check_suspend_drift();
-        state_clone.check_auto_lock();
-        state_clone.check_screen_lock();
+    let shutdown_clone = state.shutdown.clone();
+    let watchdog = std::thread::spawn(move || {
+        while !shutdown_clone.is_shutting_down() {
+            let is_unlocked = state_clone.vault_mgr.is_unlocked();
+            let sleep_duration = if is_unlocked {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(5)
+            };
+            let start = Instant::now();
+            while start.elapsed() < sleep_duration {
+                if shutdown_clone.is_shutting_down() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if shutdown_clone.is_shutting_down() {
+                return;
+            }
+            // Resume-edge suspend detection must run regardless of lock state:
+            // the dominant quick-unlock state (soft-locked) is exactly when the
+            // screen detector above would otherwise never fire.
+            state_clone.check_suspend_drift();
+            state_clone.check_auto_lock();
+            state_clone.check_screen_lock();
+        }
     });
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let st = state.clone();
-                std::thread::spawn(move || {
-                    let _ = handle_client(stream, st);
-                });
+    use std::os::unix::io::AsRawFd;
+    let fd = listener.as_raw_fd();
+    let mut loop_err = None;
+
+    while !state.shutdown.is_shutting_down() {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
             }
-            Err(e) => {
-                eprintln!("Socket accept error: {}", e);
+            loop_err = Some(err);
+            break;
+        }
+        if ret == 0 {
+            continue;
+        }
+        if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0
+            && (pfd.revents & libc::POLLIN) == 0
+        {
+            break;
+        }
+        if (pfd.revents & libc::POLLIN) != 0 {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let st = state.clone();
+                    std::thread::spawn(move || {
+                        let _ = handle_client(stream, st);
+                    });
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    crate::log_error!("omawarden:daemon", "Socket accept error: {}", e);
+                }
             }
         }
     }
 
-    Ok(())
+    // Ensure shutdown is marked
+    state.shutdown.trigger();
+
+    // Clean up watchdog thread
+    let _ = watchdog.join();
+
+    // Final clean-up: lock vault, stop SSH agent, unlink socket
+    state.lock();
+    crate::ssh_agent::stop(&state);
+    let _ = fs::remove_file(socket_path);
+
+    if let Some(err) = loop_err {
+        Err(err)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1220,14 +1765,23 @@ pub(crate) fn handle_client(
             writeln!(
                 stream,
                 "{}",
-                json!({"ok": false, "outcome": "rejected", "error": "Unlock the vault before creating a cipher."})
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before creating a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
             )?;
             return Ok(());
         }
         let _ = writeln!(
             stream,
             "{}",
-            json!({ "ok": false, "error": "Vault is locked. Please unlock the vault first." })
+            json!({
+                "ok": false,
+                "error": "Vault is locked. Please unlock the vault first.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
         return Ok(());
     }
@@ -1239,7 +1793,11 @@ pub(crate) fn handle_client(
         return writeln!(
             stream,
             "{}",
-            json!({"ok":false,"error":"Vault session changed."})
+            json!({
+                "ok": false,
+                "error": "Vault session changed.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
     }
 
@@ -1252,10 +1810,11 @@ pub(crate) fn handle_client(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .filter(|c: &crate::api::ClientContext| c.is_valid());
 
-    let response = match action {
+    let mut response = match action {
         "ping" => json!({
             "ok": true,
             "pong": true,
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
             "unlock_context": state.vault_mgr.unlock_context(),
@@ -1273,10 +1832,22 @@ pub(crate) fn handle_client(
         }),
         "stop" => {
             state.lock();
-            crate::ssh_agent::remove_socket();
-            let _ = writeln!(stream, "{}", json!({ "ok": true }));
+            crate::ssh_agent::stop(&state);
+            let sock_path = state
+                .socket_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_else(get_socket_path);
+            let _ = fs::remove_file(&sock_path);
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({ "ok": true, "protocol_version": CURRENT_PROTOCOL_VERSION })
+            );
             let _ = stream.flush();
-            std::process::exit(0);
+            state.shutdown.trigger();
+            return Ok(());
         }
         "status" => state.vault_mgr.get_status(),
         // SSH agent confirmations: the overlay lists pending prompts and answers them.
@@ -1567,6 +2138,11 @@ pub(crate) fn handle_client(
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
+    if let Value::Object(ref mut map) = response {
+        map.entry("protocol_version".to_string())
+            .or_insert_with(|| json!(CURRENT_PROTOCOL_VERSION));
+    }
+
     if reads_plaintext
         && state.vault_mgr.cache_session().ok().is_none_or(|now| {
             !now.unlocked || session.is_none_or(|then| now.generation != then.generation)
@@ -1575,7 +2151,11 @@ pub(crate) fn handle_client(
         let _ = writeln!(
             stream,
             "{}",
-            json!({"ok":false,"error":"Vault session changed."})
+            json!({
+                "ok": false,
+                "error": "Vault session changed.",
+                "protocol_version": CURRENT_PROTOCOL_VERSION
+            })
         );
     } else {
         let _ = writeln!(stream, "{}", response);
@@ -1908,8 +2488,10 @@ mod tests {
         // show it.
         let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
         for reply in [
-            json!({ "ok": true, "commit": env!("GIT_HASH"), "unlocked": false }),
-            json!({ "ok": true, "commit": "another-build", "unlocked": true }),
+            json!({ "ok": true, "protocol_version": 1, "commit": env!("GIT_HASH"), "unlocked": false }),
+            json!({ "ok": true, "protocol_version": 1, "commit": "another-build", "unlocked": true }),
+            // ADR-0028: matching protocol version 1 is kept even when locked and commit differs!
+            json!({ "ok": true, "protocol_version": 1, "commit": "foreign-commit", "unlocked": false }),
         ] {
             let server = {
                 let listener = listener.try_clone().unwrap();
@@ -1927,7 +2509,7 @@ mod tests {
                     writeln!(stream, "{reply}").unwrap();
                 })
             };
-            ensure_daemon_running();
+            let _ = ensure_daemon_running();
             server.join().unwrap();
         }
 
@@ -1943,31 +2525,264 @@ mod tests {
     }
 
     #[test]
-    fn test_outdated_daemon_is_only_replaced_while_locked() {
-        let ping = |commit: &str, unlocked: Option<bool>| {
-            let mut v = json!({ "ok": true, "commit": commit });
-            if let Some(u) = unlocked {
-                v["unlocked"] = json!(u);
-            }
-            v
+    fn test_incompatible_protocol_version_fails_closed_without_stop() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        // Server answers ping with incompatible protocol_version: 99
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
+                )
+                .unwrap();
+                // Ensure no stop request is transmitted
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                let mut next_line = String::new();
+                let read_res = BufReader::new(stream).read_line(&mut next_line);
+                if let Ok(n) = read_res {
+                    if n > 0 {
+                        assert_ne!(
+                            serde_json::from_str::<Value>(&next_line).unwrap()["action"],
+                            "stop",
+                            "Incompatible protocol version must NOT trigger stop action"
+                        );
+                    }
+                }
+            })
         };
+
+        let _ = ensure_daemon_running();
+        server.join().unwrap();
+
+        for (key, old) in [
+            ("XDG_RUNTIME_DIR", old_runtime),
+            ("OMAWARDEN_DATA_DIR", old_data),
+        ] {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ping_advertises_protocol_version_1() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client(server, st);
+        });
+        let payload = format!("{}\n", json!({ "action": "ping" }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(
-            check_running_daemon(&ping("abc", Some(true)), "abc"),
-            DaemonCheck::UpToDate
+            resp.get("protocol_version").and_then(Value::as_u64),
+            Some(CURRENT_PROTOCOL_VERSION as u64)
         );
+    }
+
+    #[test]
+    fn test_protocol_version_negotiation() {
+        let compatible = json!({ "ok": true, "protocol_version": 1 });
         assert_eq!(
-            check_running_daemon(&ping("old", Some(true)), "abc"),
-            DaemonCheck::Defer
+            check_protocol_version(&compatible),
+            ProtocolCheck::Compatible
         );
+
+        // Missing protocol_version defaults to 0 (legacy unversioned) -> Compatible when MIN is 0
+        let legacy = json!({ "ok": true, "commit": "old" });
+        assert_eq!(check_protocol_version(&legacy), ProtocolCheck::Compatible);
+
+        let explicit_zero = json!({ "ok": true, "protocol_version": 0 });
         assert_eq!(
-            check_running_daemon(&ping("old", Some(false)), "abc"),
-            DaemonCheck::Replace
+            check_protocol_version(&explicit_zero),
+            ProtocolCheck::Compatible
         );
-        // Daemons predating the field are replaced as before.
+
+        // Future protocol version 99 -> Incompatible
+        let future = json!({ "ok": true, "protocol_version": 99 });
         assert_eq!(
-            check_running_daemon(&ping("old", None), "abc"),
-            DaemonCheck::Replace
+            check_protocol_version(&future),
+            ProtocolCheck::Incompatible {
+                running: 99,
+                min_supported: 0,
+                current: 1
+            }
         );
+    }
+
+    #[test]
+    fn test_daemon_client_send_fail_closed_on_incompatible_protocol() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                // 1. Client sends ping -> respond with incompatible protocol_version: 99
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "protocol_version": 99, "commit": "future" })
+                )
+                .unwrap();
+
+                // 2. Client sends status -> mock responds with protocol_version: 99
+                let (mut stream2, _) = listener.accept().unwrap();
+                let mut line2 = String::new();
+                BufReader::new(stream2.try_clone().unwrap())
+                    .read_line(&mut line2)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line2).unwrap()["action"],
+                    "status"
+                );
+                writeln!(
+                    stream2,
+                    "{}",
+                    json!({ "ok": true, "unlocked": false, "protocol_version": 99 })
+                )
+                .unwrap();
+            })
+        };
+
+        let client = DaemonClient::new();
+        // Ping returns IncompatibleProtocol
+        let ping_res = client.send(&json!({ "action": "ping" }));
+        assert_eq!(
+            ping_res,
+            Err(DispatchError::IncompatibleProtocol {
+                running: 99,
+                min_supported: 0,
+                current: 1,
+            })
+        );
+
+        // Status response advertising protocol_version 99 also fails closed with IncompatibleProtocol
+        let status_res = client.send(&json!({ "action": "status" }));
+        assert_eq!(
+            status_res,
+            Err(DispatchError::IncompatibleProtocol {
+                running: 99,
+                min_supported: 0,
+                current: 1,
+            })
+        );
+
+        server.join().unwrap();
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
+        let server = {
+            let listener = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                // 1. Client sends ping to legacy v0 daemon without protocol_version
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "ping"
+                );
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "ok": true, "pong": true, "unlocked": true, "version": "0.10.0" })
+                )
+                .unwrap();
+
+                // 2. Client sends status to legacy v0 daemon without protocol_version
+                let (mut stream2, _) = listener.accept().unwrap();
+                let mut line2 = String::new();
+                BufReader::new(stream2.try_clone().unwrap())
+                    .read_line(&mut line2)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line2).unwrap()["action"],
+                    "status"
+                );
+                writeln!(
+                    stream2,
+                    "{}",
+                    json!({ "ok": true, "is_unlocked": true, "unlocked": true })
+                )
+                .unwrap();
+            })
+        };
+
+        let client = DaemonClient::new();
+        // Ping succeeds and accepts unversioned legacy v0
+        let ping_res = client.send(&json!({ "action": "ping" })).unwrap();
+        assert_eq!(ping_res["ok"], true);
+        assert_eq!(ping_res["pong"], true);
+
+        // Status succeeds and accepts unversioned legacy v0
+        let status_res = client.send(&json!({ "action": "status" })).unwrap();
+        assert_eq!(status_res["ok"], true);
+        assert_eq!(status_res["is_unlocked"], true);
+
+        server.join().unwrap();
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 
     #[test]
@@ -3072,5 +3887,416 @@ exit $(cat {})
             .expect("missing passphrase");
         assert_eq!(phrase_str.split('.').count(), 5);
         assert!(res_phrase.get("entropy").and_then(|v| v.as_f64()).unwrap() > 60.0);
+    }
+
+    #[test]
+    fn test_stop_action_graceful_shutdown_without_process_exit() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Ping to ensure daemon is ready
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+        assert_eq!(ping_res["pong"], true);
+
+        // Send stop request
+        let stop_res = send_daemon_request(&json!({ "action": "stop" })).expect("stop failed");
+        assert_eq!(stop_res["ok"], true);
+
+        // Wait for server thread to join cleanly
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(
+            join_res.is_ok(),
+            "daemon server returned error: {:?}",
+            join_res
+        );
+
+        // Verify vault is locked and socket removed
+        assert!(!state.vault_mgr.is_unlocked());
+        assert!(!get_socket_path().exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_programmatic_shutdown_via_handle() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Ping to ensure daemon is ready
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+
+        // Trigger programmatic shutdown
+        assert!(!handle.is_shutting_down());
+        handle.stop();
+        assert!(handle.is_shutting_down());
+
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
+
+        assert!(!get_socket_path().exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_server_url_switch_does_not_abort_process() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.json");
+        let storage_path = config_dir.path().join("data.json");
+
+        let storage_mgr = StorageManager::new(storage_path);
+        let state = Arc::new(DaemonState::new(storage_mgr.clone(), 15));
+        let handle = DaemonServer::new(state.clone())
+            .spawn()
+            .expect("failed to spawn daemon");
+
+        // Ping to ensure daemon is running
+        let ping_res = send_daemon_request(&json!({ "action": "ping" })).expect("ping failed");
+        assert_eq!(ping_res["ok"], true);
+
+        // Perform server URL update (ADR 0008 flow sends wipe_quick_unlock + stop)
+        let config_mgr = crate::config::ConfigManager::new(Some(&config_path));
+        let keyring_mgr = crate::keyring::KeyringManager::default();
+        let update_opts = crate::config::ConfigUpdateOptions {
+            server_url: Some("https://new.vault.example.com".to_string()),
+            ..Default::default()
+        };
+        let res = config_mgr.update_config(update_opts, &storage_mgr, &keyring_mgr);
+        assert!(res.is_ok(), "config update failed: {:?}", res);
+
+        // Daemon thread joins cleanly and host test continues executing
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_is_omawarden_binary() {
+        assert!(is_omawarden_binary(Path::new("/usr/bin/omawarden")));
+        assert!(is_omawarden_binary(Path::new("/usr/local/bin/omawarden")));
+        assert!(is_omawarden_binary(Path::new("omawarden")));
+        assert!(is_omawarden_binary(Path::new("omawarden.exe")));
+        assert!(is_omawarden_binary(Path::new("/opt/bin/omawarden.exe")));
+
+        assert!(!is_omawarden_binary(Path::new(
+            "/usr/bin/nsh-app-omawarden-app"
+        )));
+        assert!(!is_omawarden_binary(Path::new("/usr/bin/omawarden-app")));
+        assert!(!is_omawarden_binary(Path::new(
+            "/target/debug/deps/omawarden-f3624269721e171b"
+        )));
+        assert!(!is_omawarden_binary(Path::new("/bin/bash")));
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_foreign_host_resolves_path() {
+        let foreign_exe = Path::new("/usr/bin/nsh-app-omawarden-app");
+        let canonical_cli = PathBuf::from("/usr/bin/omawarden");
+
+        let res =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Auto, Some(foreign_exe), |name| {
+                if name == "omawarden" {
+                    Ok(canonical_cli.clone())
+                } else {
+                    Err(which::Error::CannotFindBinaryPath)
+                }
+            });
+
+        assert_eq!(res.unwrap(), canonical_cli);
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_foreign_host_not_found_fails_cleanly() {
+        let foreign_exe = Path::new("/usr/bin/nsh-app-omawarden-app");
+
+        let res =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Auto, Some(foreign_exe), |_| {
+                Err(which::Error::CannotFindBinaryPath)
+            });
+
+        let err = res.expect_err("foreign host should fail when omawarden is not in PATH");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("Could not locate 'omawarden'"));
+    }
+
+    #[test]
+    fn test_resolve_daemon_binary_strategies() {
+        // Disabled strategy
+        let dis_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Disabled,
+            Some(Path::new("/usr/bin/omawarden")),
+            |_| Ok(PathBuf::from("/usr/bin/omawarden")),
+        );
+        assert_eq!(dis_res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        // InProcess strategy
+        let inp_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::InProcess,
+            Some(Path::new("/usr/bin/omawarden")),
+            |_| Ok(PathBuf::from("/usr/bin/omawarden")),
+        );
+        assert_eq!(inp_res.unwrap_err().kind(), io::ErrorKind::Unsupported);
+
+        // Explicit strategy - existing file
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let exp_res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Explicit(tmp.path().to_path_buf()),
+            None,
+            |_| Err(which::Error::CannotFindBinaryPath),
+        );
+        assert_eq!(exp_res.unwrap(), tmp.path());
+
+        // Explicit strategy - missing file
+        let missing = PathBuf::from("/tmp/nonexistent-omawarden-binary-for-test");
+        let exp_missing =
+            resolve_daemon_binary_custom(&DaemonLaunchStrategy::Explicit(missing), None, |_| {
+                Err(which::Error::CannotFindBinaryPath)
+            });
+        assert_eq!(exp_missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_daemon_launch_strategy_env_and_global_config() {
+        let _lock = crate::env_lock();
+        reset_daemon_launch_strategy();
+
+        // 1. Programmatic global setting
+        set_daemon_launch_strategy(DaemonLaunchStrategy::Disabled);
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Disabled);
+
+        set_daemon_launch_strategy(DaemonLaunchStrategy::InProcess);
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::InProcess);
+
+        reset_daemon_launch_strategy();
+        assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
+
+        // 2. OMA_DAEMON_LAUNCH_STRATEGY env keywords
+        let old_strat = env::var_os("OMA_DAEMON_LAUNCH_STRATEGY");
+        let old_bin = env::var_os("OMA_DAEMON_BIN");
+        env::remove_var("OMA_DAEMON_BIN");
+
+        for val in &["system", "system-cli", "cli", "auto"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
+        }
+
+        for val in &["disabled", "none", "off", "false"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Disabled);
+        }
+
+        for val in &["in-process", "inprocess", "host"] {
+            env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+            assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::InProcess);
+        }
+
+        // Explicit path with uppercase preserving
+        env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", "/Opt/OmaWarden/omawarden");
+        assert_eq!(
+            daemon_launch_strategy(),
+            DaemonLaunchStrategy::Explicit(PathBuf::from("/Opt/OmaWarden/omawarden"))
+        );
+
+        // OMA_DAEMON_BIN overrides OMA_DAEMON_LAUNCH_STRATEGY
+        env::set_var("OMA_DAEMON_BIN", "/Custom/Bin/omawarden");
+        assert_eq!(
+            daemon_launch_strategy(),
+            DaemonLaunchStrategy::Explicit(PathBuf::from("/Custom/Bin/omawarden"))
+        );
+
+        match old_strat {
+            Some(v) => env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", v),
+            None => env::remove_var("OMA_DAEMON_LAUNCH_STRATEGY"),
+        }
+        match old_bin {
+            Some(v) => env::set_var("OMA_DAEMON_BIN", v),
+            None => env::remove_var("OMA_DAEMON_BIN"),
+        }
+        reset_daemon_launch_strategy();
+    }
+
+    #[test]
+    fn test_ensure_daemon_running_in_foreign_host_refuses_to_spawn_foreign_host() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        // Ensure no daemon is running at this socket
+        assert!(!get_socket_path().exists());
+
+        // Create a simulated foreign host executable (e.g. nsh-app-omawarden-app)
+        // that writes a sentinel file if ever invoked with arguments.
+        let host_dir = tempdir().unwrap();
+        let sentinel_path = host_dir.path().join("sentinel.txt");
+        let foreign_host_path = host_dir.path().join("nsh-app-omawarden-app");
+        let script = format!(
+            "#!/bin/sh\necho 'invoked' > {}\nexit 0\n",
+            sentinel_path.display()
+        );
+        fs::write(&foreign_host_path, script).unwrap();
+        fs::set_permissions(&foreign_host_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 1. Resolution inside simulated foreign host refuses to return the foreign host executable
+        let res = resolve_daemon_binary_custom(
+            &DaemonLaunchStrategy::Auto,
+            Some(&foreign_host_path),
+            |_| Err(which::Error::CannotFindBinaryPath),
+        );
+        let err = res.expect_err("foreign host should never be returned as daemon executable");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        // Verify the simulated foreign host binary was never executed
+        assert!(
+            !sentinel_path.exists(),
+            "foreign host binary must not be invoked during resolution"
+        );
+
+        // 2. Calling with Disabled strategy fails closed immediately without spawning
+        let res = ensure_daemon_running_with_strategy(&DaemonLaunchStrategy::Disabled);
+        match res {
+            Err(DispatchError::LaunchFailed(msg)) => {
+                assert!(msg.contains("disabled"));
+            }
+            other => panic!("expected LaunchFailed error, got: {:?}", other),
+        }
+
+        assert!(!get_socket_path().exists());
+        assert!(!sentinel_path.exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_client_builder_and_methods() {
+        let _lock = crate::env_lock();
+        let default_client = DaemonClient::new();
+        assert_eq!(default_client.socket_path(), get_socket_path());
+        assert_eq!(
+            default_client.launch_strategy(),
+            &DaemonLaunchStrategy::Auto
+        );
+
+        let custom_path = PathBuf::from("/tmp/custom_omawarden.sock");
+        let custom_client = DaemonClient::new()
+            .with_socket_path(&custom_path)
+            .with_launch_strategy(DaemonLaunchStrategy::InProcess)
+            .with_timeout(Some(Duration::from_secs(5)));
+
+        assert_eq!(custom_client.socket_path(), custom_path);
+        assert_eq!(
+            custom_client.launch_strategy(),
+            &DaemonLaunchStrategy::InProcess
+        );
+        assert_eq!(custom_client.timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(custom_client.with_timeout(None).timeout(), None);
+
+        // Connect on non-existent socket returns NotSent
+        let missing_client =
+            DaemonClient::new().with_socket_path("/tmp/nonexistent-omawarden.sock");
+        assert_eq!(
+            missing_client.connect().unwrap_err(),
+            DispatchError::NotSent
+        );
+    }
+
+    #[test]
+    fn test_multi_client_differing_commits_coexistence() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Client 1: Simulating omawarden-app built from commit "commit-app-v1"
+        let app_client = DaemonClient::new();
+        assert_eq!(app_client.ping().unwrap()["ok"], true);
+        let app_ping = app_client
+            .send(&json!({
+                "action": "ping",
+                "client": { "name": "omawarden-app", "version": "1.0.0", "commit": "commit-app-v1" }
+            }))
+            .expect("app client ping failed");
+        assert_eq!(app_ping["ok"], true);
+        assert_eq!(app_ping["protocol_version"], 1);
+
+        // Client 2: Simulating Overlay CLI built from commit "commit-cli-v2"
+        let cli_client = DaemonClient::new();
+        let cli_ping = cli_client
+            .send(&json!({
+                "action": "ping",
+                "client": { "name": "omawarden-cli", "version": "0.11.0", "commit": "commit-cli-v2" }
+            }))
+            .expect("cli client ping failed");
+        assert_eq!(cli_ping["ok"], true);
+        assert_eq!(cli_ping["protocol_version"], 1);
+
+        // Both clients can query status without stopping or replacing the server
+        let app_status = app_client
+            .send(&json!({ "action": "status" }))
+            .expect("app client status failed");
+        assert_eq!(app_status["ok"], true);
+
+        let cli_status = cli_client
+            .send(&json!({ "action": "status" }))
+            .expect("cli client status failed");
+        assert_eq!(cli_status["ok"], true);
+
+        // Daemon server is still alive and handling requests
+        assert!(!handle.is_shutting_down());
+
+        // Clean programmatic shutdown at end of test
+        handle.stop();
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 }

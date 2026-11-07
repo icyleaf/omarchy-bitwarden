@@ -504,6 +504,11 @@ pub fn is_running(state: &DaemonState) -> bool {
     state.ssh_agent.running.load(Ordering::SeqCst)
 }
 
+pub fn stop(state: &DaemonState) {
+    state.ssh_agent.running.store(false, Ordering::SeqCst);
+    remove_socket();
+}
+
 /// Bind the agent socket and serve it on background threads.
 pub fn spawn(state: Arc<DaemonState>) -> std::io::Result<()> {
     let path = socket_path();

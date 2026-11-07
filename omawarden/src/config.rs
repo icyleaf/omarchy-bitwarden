@@ -293,10 +293,11 @@ impl ConfigManager {
             // retained quick-unlock key. Send the explicit wipe before the
             // daemon stop (whose own lock also wipes): the request is the
             // contract the ADR names, independent of the stop handler.
-            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+            let _ = crate::daemon::send_daemon_request_raw(&serde_json::json!({
                 "action": "wipe_quick_unlock"
             }));
-            let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
+            let _ =
+                crate::daemon::send_daemon_request_raw(&serde_json::json!({ "action": "stop" }));
             let (outputs, retired) = {
                 let _account = storage_mgr.account_guard()?;
                 let current = storage_mgr.cache_snapshot()?;
