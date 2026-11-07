@@ -35,6 +35,21 @@ This design rested on the assumption that the CLI and the daemon are always buil
    - `ensure_daemon_running()` validates whether `current_exe()` is indeed named `omawarden`.
    - If invoked from within a non-omawarden host process, it resolves the canonical `omawarden` binary through system `PATH` (or explicit environment configuration), and refuses to spawn the current executable as a daemon.
 
+5. **Daemon Stop Authorization & Dual-Tier Trust Boundaries**:
+   - **In-Process Daemon Authorization (Host-Guarded Boundary)**:
+     - When the daemon is hosted in-process inside an external application (`DaemonServer::in_process(true)` or non-omawarden binary), its lifecycle is owned exclusively by the host process.
+     - The daemon inspects caller PID via Linux `SO_PEERCRED`. If the caller's PID does not match the daemon's own process ID (`peer_pid != std::process::id()`), the `stop` request is **strictly rejected** (even if `admin: true` is supplied), returning:
+       `{ "ok": false, "error": "Access denied: cannot terminate in-process daemon hosted by an external application" }`.
+   - **Standalone Daemon Authorization (Same-UID Explicit-Intent Boundary)**:
+     - Standalone daemons serve all clients operating under the user's desktop UID.
+     - Within this same-UID boundary, normal cooperative clients (e.g., sync routines, search queries, TOTP generation) never request daemon shutdown.
+     - To prevent accidental termination by cooperative callers, external clients MUST supply explicit administrative authorization (`{"action": "stop", "admin": true}`). Unprivileged requests without `admin: true` are rejected with:
+       `{ "ok": false, "error": "Access denied: stopping the daemon requires explicit administrative authorization (admin: true)" }`.
+     - The dedicated administrative CLI (`omawarden daemon stop` / `--stop`) explicitly satisfies this authorization contract by sending `admin: true`.
+   - **Fail-Closed & State Preservation Guarantee**:
+     - If the kernel peer PID cannot be determined (e.g., non-Linux platform or kernel error), `peer_pid` evaluates to `None`, enforcing fail-closed rejection for external in-process stops and requiring `admin: true` for standalone stops.
+     - Upon any rejected `stop` request, the daemon listener, vault session state, and SSH agent socket remain completely unperturbed and fully usable.
+
 ## Consequences
 
 ### Positive
