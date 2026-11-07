@@ -268,7 +268,13 @@ pub fn resolve_daemon_binary() -> io::Result<PathBuf> {
 /// Resolves the path to the standalone `omawarden` binary using a specific strategy.
 pub fn resolve_daemon_binary_with_strategy(strategy: &DaemonLaunchStrategy) -> io::Result<PathBuf> {
     resolve_daemon_binary_custom(strategy, env::current_exe().ok().as_deref(), |name| {
-        which::which(name)
+        if cfg!(test) {
+            // Tests never launch system binaries from PATH to avoid polluting the host
+            // or interfering with isolated test environments.
+            Err(which::Error::CannotFindBinaryPath)
+        } else {
+            which::which(name)
+        }
     })
 }
 
@@ -338,101 +344,235 @@ where
     }
 }
 
+/// Unified client interface for communicating with the `omawarden` daemon.
+///
+/// Encapsulates Unix Domain Socket connection, peer UID security verification (`SO_PEERCRED`),
+/// framed JSON protocol message transmission, and automatic lifecycle/protocol management.
+#[derive(Debug, Clone)]
+pub struct DaemonClient {
+    socket_path: PathBuf,
+    launch_strategy: DaemonLaunchStrategy,
+    timeout: Option<Duration>,
+}
+
+impl Default for DaemonClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DaemonClient {
+    /// Creates a new `DaemonClient` using the default runtime socket path and active launch strategy.
+    pub fn new() -> Self {
+        Self {
+            socket_path: get_socket_path(),
+            launch_strategy: daemon_launch_strategy(),
+            timeout: Some(Duration::from_secs(15)),
+        }
+    }
+
+    /// Configures an explicit socket path for the client.
+    pub fn with_socket_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.socket_path = path.into();
+        self
+    }
+
+    /// Configures an explicit launch strategy for the client.
+    pub fn with_launch_strategy(mut self, strategy: DaemonLaunchStrategy) -> Self {
+        self.launch_strategy = strategy;
+        self
+    }
+
+    /// Configures an explicit communication timeout for client socket read/write operations.
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Returns the target socket path.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Returns the active launch strategy.
+    pub fn launch_strategy(&self) -> &DaemonLaunchStrategy {
+        &self.launch_strategy
+    }
+
+    /// Returns the configured socket read/write timeout.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Connects to the daemon socket, enforcing security checks and mutual `SO_PEERCRED` validation.
+    pub fn connect(&self) -> Result<UnixStream, DispatchError> {
+        if !self.socket_path.exists() {
+            return Err(DispatchError::NotSent);
+        }
+
+        if let Err(e) = validate_socket_path(&self.socket_path) {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Refusing to connect to socket {}: {}",
+                self.socket_path.display(),
+                e
+            );
+            return Err(DispatchError::NotSent);
+        }
+
+        let stream = UnixStream::connect(&self.socket_path).map_err(|_| DispatchError::NotSent)?;
+
+        if let Some(timeout) = self.timeout {
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+        }
+
+        // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
+        if let Err(e) = verify_peer_credentials(&stream) {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Refusing to send request: server peer UID verification failed: {}",
+                e
+            );
+            return Err(DispatchError::NotSent);
+        }
+
+        Ok(stream)
+    }
+
+    /// Sends a raw JSON request to the daemon without automatic client context or protocol checks.
+    pub fn send_raw(&self, req: &Value) -> Result<Value, DispatchError> {
+        let mut stream = self.connect()?;
+        let payload = format!("{}\n", req);
+        stream
+            .write_all(payload.as_bytes())
+            .map_err(|_| DispatchError::Unconfirmed)?;
+        stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .map_err(|_| DispatchError::Unconfirmed)?;
+
+        serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
+    }
+
+    /// Sends a request with automatic client context attachment.
+    pub fn send(&self, req: &Value) -> Result<Value, DispatchError> {
+        let mut payload_val = req.clone();
+        if let Value::Object(ref mut map) = payload_val {
+            if !map.contains_key("client") {
+                if let Some(ctx) = crate::api::resolve_effective_client_context(None) {
+                    map.insert("client".to_string(), json!(ctx));
+                }
+            }
+        }
+        self.send_raw(&payload_val)
+    }
+
+    /// Pings the daemon and validates protocol compatibility.
+    pub fn ping(&self) -> Result<Value, DispatchError> {
+        let resp = self.send_raw(&json!({ "action": "ping" }))?;
+        match check_protocol_version(&resp) {
+            ProtocolCheck::Compatible => Ok(resp),
+            ProtocolCheck::Incompatible {
+                running,
+                min_supported,
+                current,
+            } => Err(DispatchError::IncompatibleProtocol {
+                running,
+                min_supported,
+                current,
+            }),
+        }
+    }
+
+    /// Ensures the daemon is running, spawning it via the configured strategy if necessary.
+    pub fn ensure_running(&self) -> Result<(), DispatchError> {
+        match self.ping() {
+            Ok(_) => return Ok(()),
+            Err(e @ DispatchError::IncompatibleProtocol { .. }) => {
+                crate::log_error!(
+                    "omawarden:daemon",
+                    "Running daemon protocol version is incompatible with client. Restart daemon explicitly."
+                );
+                return Err(e);
+            }
+            Err(_) => {}
+        }
+
+        let exe_path = match resolve_daemon_binary_with_strategy(&self.launch_strategy) {
+            Ok(path) => path,
+            Err(e) => {
+                crate::log_error!("omawarden:daemon", "Refusing to spawn daemon: {}", e);
+                return Err(DispatchError::LaunchFailed(e.to_string()));
+            }
+        };
+
+        let cfg = crate::config::ConfigManager::default().load();
+        let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
+            cfg.auto_lock_minutes as u64
+        } else {
+            15
+        };
+
+        let mut cmd = Command::new(&exe_path);
+        cmd.arg("daemon")
+            .arg("--auto-lock")
+            .arg(auto_lock_mins.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        if let Err(e) = cmd.spawn() {
+            crate::log_error!(
+                "omawarden:daemon",
+                "Failed to spawn daemon process '{}': {}",
+                exe_path.display(),
+                e
+            );
+            return Err(DispatchError::LaunchFailed(e.to_string()));
+        }
+
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(20));
+            if self.send_raw(&json!({ "action": "ping" })).is_ok() {
+                return Ok(());
+            }
+        }
+
+        Err(DispatchError::LaunchFailed(
+            "Daemon process spawned but did not respond to ping within 600ms".to_string(),
+        ))
+    }
+}
+
 pub fn ensure_daemon_running() -> Result<(), DispatchError> {
-    ensure_daemon_running_with_strategy(&daemon_launch_strategy())
+    DaemonClient::new().ensure_running()
 }
 
 pub fn ensure_daemon_running_with_strategy(
     strategy: &DaemonLaunchStrategy,
 ) -> Result<(), DispatchError> {
-    if let Some(resp) = send_daemon_request_raw(&json!({ "action": "ping" })) {
-        match check_protocol_version(&resp) {
-            ProtocolCheck::Compatible => {
-                // ADR-0028: Protocol version is compatible. Commit hash differences
-                // are purely informational and must NOT cause the daemon to be stopped.
-                return Ok(());
-            }
-            ProtocolCheck::Incompatible {
-                running,
-                min_supported,
-                current,
-            } => {
-                // ADR-0028: Incompatible protocol version. Fail closed immediately with
-                // an explicit error log and strictly avoid sending {"action": "stop"}.
-                crate::log_error!(
-                    "omawarden:daemon",
-                    "Running daemon protocol version {} is incompatible with client (supported: {}..={}). Restart daemon explicitly.",
-                    running,
-                    min_supported,
-                    current
-                );
-                return Err(DispatchError::IncompatibleProtocol {
-                    running,
-                    min_supported,
-                    current,
-                });
-            }
-        }
-    }
-
-    let exe_path = match resolve_daemon_binary_with_strategy(strategy) {
-        Ok(path) => path,
-        Err(e) => {
-            crate::log_error!("omawarden:daemon", "Refusing to spawn daemon: {}", e);
-            return Err(DispatchError::LaunchFailed(e.to_string()));
-        }
-    };
-
-    let cfg = crate::config::ConfigManager::default().load();
-    let auto_lock_mins = if cfg.auto_lock_minutes >= 0 {
-        cfg.auto_lock_minutes as u64
-    } else {
-        15
-    };
-
-    let mut cmd = Command::new(&exe_path);
-    cmd.arg("daemon")
-        .arg("--auto-lock")
-        .arg(auto_lock_mins.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-
-    if let Err(e) = cmd.spawn() {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Failed to spawn daemon process '{}': {}",
-            exe_path.display(),
-            e
-        );
-        return Err(DispatchError::LaunchFailed(e.to_string()));
-    }
-
-    for _ in 0..30 {
-        std::thread::sleep(Duration::from_millis(20));
-        if send_daemon_request_raw(&json!({ "action": "ping" })).is_some() {
-            return Ok(());
-        }
-    }
-
-    Err(DispatchError::LaunchFailed(
-        "Daemon process spawned but did not respond to ping within 600ms".to_string(),
-    ))
+    DaemonClient::new()
+        .with_launch_strategy(strategy.clone())
+        .ensure_running()
 }
 
 pub fn send_daemon_request(req: &Value) -> Option<Value> {
-    dispatch_daemon_request(req).ok()
+    DaemonClient::new().send(req).ok()
 }
 
 pub(crate) fn send_daemon_request_raw(req: &Value) -> Option<Value> {
-    dispatch_daemon_request_raw(req).ok()
+    DaemonClient::new().send_raw(req).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,65 +609,16 @@ impl std::error::Error for DispatchError {}
 
 /// Dispatches request to the daemon.
 pub fn dispatch_daemon_request(req: &Value) -> Result<Value, DispatchError> {
-    dispatch_daemon_request_raw(req)
+    DaemonClient::new().send(req)
 }
 
 /// Preserve the dispatch boundary for callers performing a non-idempotent write.
 pub fn dispatch_daemon_request_raw(req: &Value) -> Result<Value, DispatchError> {
-    let mut stream = connect_daemon()?;
-    let mut payload_val = req.clone();
-    if let Value::Object(ref mut map) = payload_val {
-        if !map.contains_key("client") {
-            if let Some(ctx) = crate::api::resolve_effective_client_context(None) {
-                map.insert("client".to_string(), json!(ctx));
-            }
-        }
-    }
-
-    let payload = format!("{}\n", payload_val);
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|_| DispatchError::Unconfirmed)?;
-    stream.flush().map_err(|_| DispatchError::Unconfirmed)?;
-
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|_| DispatchError::Unconfirmed)?;
-
-    serde_json::from_str(&response_line).map_err(|_| DispatchError::Unconfirmed)
+    DaemonClient::new().send_raw(req)
 }
 
 pub(crate) fn connect_daemon() -> Result<UnixStream, DispatchError> {
-    let socket_path = get_socket_path();
-    if !socket_path.exists() {
-        return Err(DispatchError::NotSent);
-    }
-
-    if let Err(e) = validate_socket_path(&socket_path) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to connect to socket {}: {}",
-            socket_path.display(),
-            e
-        );
-        return Err(DispatchError::NotSent);
-    }
-
-    let stream = UnixStream::connect(&socket_path).map_err(|_| DispatchError::NotSent)?;
-
-    // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
-    if let Err(e) = verify_peer_credentials(&stream) {
-        crate::log_error!(
-            "omawarden:daemon",
-            "Refusing to send request: server peer UID verification failed: {}",
-            e
-        );
-        return Err(DispatchError::NotSent);
-    }
-
-    Ok(stream)
+    DaemonClient::new().connect()
 }
 
 /// Cooperative cancellation signal for the daemon server.
@@ -3919,6 +4010,100 @@ exit $(cat {})
 
         assert!(!get_socket_path().exists());
         assert!(!sentinel_path.exists());
+
+        match old_runtime {
+            Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_client_builder_and_methods() {
+        let default_client = DaemonClient::new();
+        assert_eq!(default_client.socket_path(), get_socket_path());
+        assert_eq!(
+            default_client.launch_strategy(),
+            &DaemonLaunchStrategy::Auto
+        );
+
+        let custom_path = PathBuf::from("/tmp/custom_omawarden.sock");
+        let custom_client = DaemonClient::new()
+            .with_socket_path(&custom_path)
+            .with_launch_strategy(DaemonLaunchStrategy::InProcess)
+            .with_timeout(Some(Duration::from_secs(5)));
+
+        assert_eq!(custom_client.socket_path(), custom_path);
+        assert_eq!(
+            custom_client.launch_strategy(),
+            &DaemonLaunchStrategy::InProcess
+        );
+        assert_eq!(custom_client.timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(custom_client.with_timeout(None).timeout(), None);
+
+        // Connect on non-existent socket returns NotSent
+        let missing_client =
+            DaemonClient::new().with_socket_path("/tmp/nonexistent-omawarden.sock");
+        assert_eq!(
+            missing_client.connect().unwrap_err(),
+            DispatchError::NotSent
+        );
+    }
+
+    #[test]
+    fn test_multi_client_differing_commits_coexistence() {
+        let _lock = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let old_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let storage_dir = tempdir().unwrap();
+        let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+        let server = DaemonServer::new(state.clone());
+        let handle = server.spawn().expect("failed to spawn daemon server");
+
+        // Client 1: Simulating omawarden-app built from commit "commit-app-v1"
+        let app_client = DaemonClient::new();
+        assert_eq!(app_client.ping().unwrap()["ok"], true);
+        let app_ping = app_client
+            .send(&json!({
+                "action": "ping",
+                "client": { "name": "omawarden-app", "version": "1.0.0", "commit": "commit-app-v1" }
+            }))
+            .expect("app client ping failed");
+        assert_eq!(app_ping["ok"], true);
+        assert_eq!(app_ping["protocol_version"], 1);
+
+        // Client 2: Simulating Overlay CLI built from commit "commit-cli-v2"
+        let cli_client = DaemonClient::new();
+        let cli_ping = cli_client
+            .send(&json!({
+                "action": "ping",
+                "client": { "name": "omawarden-cli", "version": "0.11.0", "commit": "commit-cli-v2" }
+            }))
+            .expect("cli client ping failed");
+        assert_eq!(cli_ping["ok"], true);
+        assert_eq!(cli_ping["protocol_version"], 1);
+
+        // Both clients can query status without stopping or replacing the server
+        let app_status = app_client
+            .send(&json!({ "action": "status" }))
+            .expect("app client status failed");
+        assert_eq!(app_status["ok"], true);
+
+        let cli_status = cli_client
+            .send(&json!({ "action": "status" }))
+            .expect("cli client status failed");
+        assert_eq!(cli_status["ok"], true);
+
+        // Daemon server is still alive and handling requests
+        assert!(!handle.is_shutting_down());
+
+        // Clean programmatic shutdown at end of test
+        handle.stop();
+        let join_res = handle.join().expect("daemon thread panicked");
+        assert!(join_res.is_ok());
 
         match old_runtime {
             Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
