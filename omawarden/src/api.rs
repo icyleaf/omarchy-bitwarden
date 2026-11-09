@@ -1405,6 +1405,34 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    pub fn update_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        payload: &Value,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}", self.urls.api_url, id);
+        let mut resp = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Update cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
     pub fn delete_cipher(
         &self,
         access_token: &str,
@@ -4171,6 +4199,122 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
 
         let hard_res = client.delete_cipher("test-token", "uuid-2", true);
         assert!(hard_res.is_ok());
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_update_cipher_http_calls_and_concurrency_conflict() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_url = format!("http://{}", addr);
+
+        let client = BitwardenApiClient::for_cipher_write(&server_url, None).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            // Call 1: Success 200 OK
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+
+            let mut has_auth = false;
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if line
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth = true;
+                }
+                if let Some(val) = line.to_lowercase().strip_prefix("content-length:") {
+                    content_length = val.trim().parse().unwrap();
+                }
+            }
+            assert!(has_auth);
+            assert!(content_length > 0);
+
+            let mut body_bytes = vec![0u8; content_length];
+            reader.read_exact(&mut body_bytes).unwrap();
+            let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(body_json["id"], "uuid-edit");
+            assert_eq!(body_json["lastKnownRevisionDate"], "2026-11-09T00:00:00Z");
+
+            let body_str = "{\"id\":\"uuid-edit\",\"name\":\"EncName\",\"type\":1,\"notes\":null}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body_str.len(),
+                body_str
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            // Call 2: 409 Conflict
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&mut stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            assert!(line2.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+            let conflict_body = "{\"error\":\"revision conflict\"}";
+            let conflict_resp = format!(
+                "HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                conflict_body.len(),
+                conflict_body
+            );
+            stream2.write_all(conflict_resp.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+
+            // Call 3: 400 Bad Request with revision mismatch
+            let (mut stream3, _) = listener.accept().unwrap();
+            let mut reader3 = BufReader::new(&mut stream3);
+            let mut line3 = String::new();
+            reader3.read_line(&mut line3).unwrap();
+            assert!(line3.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+            let bad_req_body = "{\"message\":\"revision date mismatch\"}";
+            let bad_req_resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                bad_req_body.len(),
+                bad_req_body
+            );
+            stream3.write_all(bad_req_resp.as_bytes()).unwrap();
+            stream3.flush().unwrap();
+        });
+
+        let payload = serde_json::json!({
+            "id": "uuid-edit",
+            "name": "EncName",
+            "type": 1,
+            "lastKnownRevisionDate": "2026-11-09T00:00:00Z"
+        });
+
+        // 1. Success
+        let res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(res.is_ok());
+        let res_val = res.unwrap();
+        assert_eq!(res_val["id"], "uuid-edit");
+
+        // 2. 409 Conflict
+        let conflict_res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(matches!(
+            conflict_res,
+            Err(ApiError::HttpStatus(reqwest::StatusCode::CONFLICT, _))
+        ));
+
+        // 3. 400 Bad Request with revision
+        let bad_req_res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(matches!(
+            bad_req_res,
+            Err(ApiError::HttpStatus(reqwest::StatusCode::BAD_REQUEST, ref msg)) if msg.contains("revision date mismatch")
+        ));
 
         handle.join().unwrap();
     }

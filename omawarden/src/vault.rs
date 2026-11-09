@@ -1467,7 +1467,44 @@ impl VaultManager {
             ));
         }
 
-        // 3. Substring (fuzzy) match (case-insensitive)
+        // 3. ID prefix match (unique prefix, at least 4 characters)
+        let is_id_prefix_match = |item_id: &str, target_val: &str| -> bool {
+            if target_val.len() < 4 {
+                return false;
+            }
+            if item_id
+                .to_lowercase()
+                .starts_with(&target_val.to_lowercase())
+            {
+                return true;
+            }
+            let stripped_target: String = target_val.chars().filter(|&c| c != '-').collect();
+            let stripped_id: String = item_id.chars().filter(|&c| c != '-').collect();
+            if stripped_target.len() >= 4
+                && stripped_id
+                    .to_lowercase()
+                    .starts_with(&stripped_target.to_lowercase())
+            {
+                return true;
+            }
+            false
+        };
+
+        let id_prefix_matches: Vec<_> = items
+            .iter()
+            .filter(|i| is_id_prefix_match(&i.id, trimmed))
+            .collect();
+        if id_prefix_matches.len() == 1 {
+            return Ok((*id_prefix_matches[0]).clone());
+        }
+        if id_prefix_matches.len() > 1 {
+            return Err(format!(
+                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
+                target
+            ));
+        }
+
+        // 4. Substring (fuzzy) match (case-insensitive)
         let lower = trimmed.to_lowercase();
         let sub_matches: Vec<_> = items
             .iter()
@@ -2684,12 +2721,12 @@ pub(crate) mod tests {
                 "type": 1,
             }),
             json!({
-                "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "id": "cccc1111-cccc-cccc-cccc-cccccccccccc",
                 "name": "Duplicate Name",
                 "type": 1,
             }),
             json!({
-                "id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "id": "cccc2222-dddd-dddd-dddd-dddddddddddd",
                 "name": "Duplicate Name",
                 "type": 1,
             }),
@@ -2715,25 +2752,36 @@ pub(crate) mod tests {
         let found_name = vault_mgr.resolve_cipher_target("github account").unwrap();
         assert_eq!(found_name.id, "c7694fca-443b-417f-94ad-7be20b694406");
 
-        // 4. Substring (fuzzy) match
+        // 4. Unique ID prefix match (with and without hyphens)
+        let found_prefix = vault_mgr.resolve_cipher_target("c7694fca").unwrap();
+        assert_eq!(found_prefix.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        let found_prefix_uuid = vault_mgr.resolve_cipher_target("c7694fca-443b").unwrap();
+        assert_eq!(found_prefix_uuid.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 5. Substring (fuzzy) match
         let found_sub = vault_mgr.resolve_cipher_target("gitlab").unwrap();
         assert_eq!(found_sub.id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
-        // 5. Ambiguous exact name match fails closed
+        // 6. Ambiguous exact name match fails closed
         let err_ambig_exact = vault_mgr
             .resolve_cipher_target("Duplicate Name")
             .unwrap_err();
         assert!(err_ambig_exact.contains("Multiple ciphers matched 'Duplicate Name'"));
 
-        // 6. Ambiguous substring match fails closed ("git" matches GitHub Account and GitLab Personal)
+        // 7. Ambiguous ID prefix match fails closed
+        let err_ambig_prefix = vault_mgr.resolve_cipher_target("cccc").unwrap_err();
+        assert!(err_ambig_prefix.contains("Multiple ciphers matched 'cccc'"));
+
+        // 8. Ambiguous substring match fails closed ("git" matches GitHub Account and GitLab Personal)
         let err_ambig_sub = vault_mgr.resolve_cipher_target("git").unwrap_err();
         assert!(err_ambig_sub.contains("Multiple ciphers matched 'git'"));
 
-        // 7. Not found fails closed
+        // 9. Not found fails closed
         let err_not_found = vault_mgr.resolve_cipher_target("nonexistent").unwrap_err();
         assert_eq!(err_not_found, "Cipher 'nonexistent' not found in vault.");
 
-        // 8. Empty target fails closed
+        // 10. Empty target fails closed
         let err_empty = vault_mgr.resolve_cipher_target("   ").unwrap_err();
         assert_eq!(err_empty, "Target cipher cannot be empty.");
     }

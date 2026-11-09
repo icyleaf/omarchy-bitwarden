@@ -125,6 +125,7 @@ fn test_should_touch_activity_classification() {
         "search",
         "ssh_key_create",
         "cipher_create",
+        "cipher_update",
         "cipher_delete",
         "cipher_resolve",
         "get_item",
@@ -2361,6 +2362,23 @@ fn test_daemon_cipher_resolve_and_delete_privileged_gating() {
     assert_eq!(
         res_delete_locked["error"],
         "Unlock the vault before deleting a cipher."
+    );
+
+    let res_update_locked = send_req(json!({ "action": "cipher_update", "id": "uuid-1" }));
+    assert_eq!(res_update_locked["ok"], false);
+    assert_eq!(res_update_locked["outcome"], "rejected");
+    assert_eq!(
+        res_update_locked["error"],
+        "Unlock the vault before editing a cipher."
+    );
+
+    let res_resolve_edit_locked =
+        send_req(json!({ "action": "cipher_resolve", "target": "site", "purpose": "edit" }));
+    assert_eq!(res_resolve_edit_locked["ok"], false);
+    assert_eq!(res_resolve_edit_locked["outcome"], "rejected");
+    assert_eq!(
+        res_resolve_edit_locked["error"],
+        "Unlock the vault before editing a cipher."
     );
 
     // 2. Unlocked: cipher_resolve returns redacted metadata (no credentials)
