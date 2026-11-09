@@ -24,7 +24,8 @@ jobs:
         run: |
           COMMIT_MSG=$(git log -1 --pretty=%s)
           echo "Commit message: $COMMIT_MSG"
-          if echo "$COMMIT_MSG" | grep -Eq '^bump:'; then
+          # Only clean, non-dev bumps trigger a release PR to main
+          if echo "$COMMIT_MSG" | grep -Eq '^bump:' && ! echo "$COMMIT_MSG" | grep -Eq '(-dev|\.dev)'; then
             echo "is_bump=true" >> $GITHUB_OUTPUT
             echo "bump_title=$COMMIT_MSG" >> $GITHUB_OUTPUT
           else

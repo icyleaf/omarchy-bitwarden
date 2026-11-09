@@ -21,6 +21,7 @@ Item {
   property string latestReleaseNotes: ""
   property string latestReleaseUrl: ""
   property string latestReleaseTitle: ""
+  property string overlayVersion: ""
   property bool showReleaseNotes: false
   property bool isCheckingUpdate: false
   property string updateCheckStatus: ""
@@ -209,6 +210,25 @@ Item {
           font.pixelSize: Style.font.subtitle
           font.weight: Font.DemiBold
         }
+        Rectangle {
+          objectName: "overlayDevBadge"
+          visible: Boolean(settingsRoot.overlayVersion && (settingsRoot.overlayVersion.indexOf("-dev") !== -1 || settingsRoot.overlayVersion.indexOf(".dev") !== -1))
+          implicitHeight: 16
+          implicitWidth: overlayDevBadgeText.implicitWidth + 8
+          radius: 3
+          color: StatusPalette.tint(StatusPalette.warn, 0.2)
+          border.color: StatusPalette.tint(StatusPalette.warn, 0.4)
+          border.width: 1
+
+          Text {
+            id: overlayDevBadgeText
+            anchors.centerIn: parent
+            text: "DEV"
+            color: StatusPalette.warn
+            font.pixelSize: Style.fontPx(0.75)
+            font.weight: Font.DemiBold
+          }
+        }
       }
 
       Item { Layout.fillWidth: true }
@@ -391,6 +411,27 @@ Item {
                   text: "Engine: " + (!engineBadgeBox.isInstalled ? "Missing" : (settingsRoot.cliHealth.version || "Ready"))
                   color: settingsRoot.foreground
                   font.pixelSize: Style.font.caption
+                }
+
+                // Dev Engine Badge
+                Rectangle {
+                  objectName: "engineDevBadge"
+                  visible: engineBadgeBox.isInstalled && Boolean(settingsRoot.cliHealth && settingsRoot.cliHealth.version && (settingsRoot.cliHealth.version.indexOf("-dev") !== -1 || settingsRoot.cliHealth.version.indexOf(".dev") !== -1))
+                  implicitHeight: 16
+                  implicitWidth: engineDevBadgeText.implicitWidth + 8
+                  radius: 3
+                  color: StatusPalette.tint(StatusPalette.warn, 0.2)
+                  border.color: StatusPalette.tint(StatusPalette.warn, 0.4)
+                  border.width: 1
+
+                  Text {
+                    id: engineDevBadgeText
+                    anchors.centerIn: parent
+                    text: "DEV"
+                    color: StatusPalette.warn
+                    font.pixelSize: Style.fontPx(0.75)
+                    font.weight: Font.DemiBold
+                  }
                 }
 
                 // Source badge (AUR vs System)
