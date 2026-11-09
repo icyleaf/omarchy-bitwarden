@@ -427,6 +427,54 @@ enum VaultAction {
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
+    #[command(about = "Edit an existing vault cipher")]
+    Edit {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target cipher name or 32-character / UUID ID to edit"
+        )]
+        target: String,
+        #[arg(long, help = "New name for the cipher")]
+        name: Option<String>,
+        #[arg(long, help = "New username for login cipher")]
+        username: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "password_stdin",
+            help = "New password for login cipher"
+        )]
+        password: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "password",
+            help = "Read new password from standard input"
+        )]
+        password_stdin: bool,
+        #[arg(
+            long,
+            conflicts_with = "notes_stdin",
+            help = "New notes for the cipher"
+        )]
+        notes: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "notes",
+            help = "Read new notes from standard input"
+        )]
+        notes_stdin: bool,
+        #[arg(long, help = "New URI for login cipher")]
+        uri: Option<String>,
+        #[arg(long, help = "Folder ID for the cipher")]
+        folder_id: Option<String>,
+        #[arg(
+            long,
+            value_parser = parse_cli_bool,
+            help = "Favorite status (true/false)"
+        )]
+        favorite: Option<bool>,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1915,6 +1963,7 @@ fn main() -> ExitCode {
                     let mut resolve_req = json!({
                         "action": "cipher_resolve",
                         "target": target,
+                        "purpose": "delete",
                     });
                     if let Some(ref ctx) = client_ctx {
                         resolve_req["client"] = json!(ctx);
@@ -2021,6 +2070,189 @@ fn main() -> ExitCode {
                                 .get("error")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("Failed to delete cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                VaultAction::Edit {
+                    target,
+                    name,
+                    username,
+                    password,
+                    password_stdin,
+                    notes,
+                    notes_stdin,
+                    uri,
+                    folder_id,
+                    favorite,
+                    json,
+                } => {
+                    if name.is_none()
+                        && username.is_none()
+                        && password.is_none()
+                        && !password_stdin
+                        && notes.is_none()
+                        && !notes_stdin
+                        && uri.is_none()
+                        && folder_id.is_none()
+                        && favorite.is_none()
+                    {
+                        let err_msg = "No fields specified to edit. Provide at least one field to update (e.g. --password).";
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": err_msg,
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: {}", err_msg);
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    let mut resolve_req = json!({
+                        "action": "cipher_resolve",
+                        "target": target,
+                        "purpose": "edit",
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        resolve_req["client"] = json!(ctx);
+                    }
+
+                    let resolved = match submit_cipher_mutation(&resolve_req) {
+                        Ok(res) => res["item"].clone(),
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to resolve cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+                    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+                    let item_type = resolved["type"].as_str().unwrap_or("");
+
+                    if resolved
+                        .get("organization_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Organization ciphers are read-only.",
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Organization ciphers are read-only.");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    if (username.is_some() || password.is_some() || password_stdin || uri.is_some())
+                        && item_type != "login"
+                    {
+                        let err_msg =
+                            "Username, password, and URI can only be updated on login ciphers.";
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": err_msg,
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: {}", err_msg);
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let password_val = if password_stdin {
+                        let mut buf = zeroize::Zeroizing::new(String::new());
+                        io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                        let trimmed = buf.trim_end_matches(['\r', '\n']);
+                        Some(zeroize::Zeroizing::new(trimmed.to_string()))
+                    } else {
+                        password.map(zeroize::Zeroizing::new)
+                    };
+
+                    let notes_val = if notes_stdin {
+                        let mut buf = zeroize::Zeroizing::new(String::new());
+                        io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                        let trimmed = buf.trim_end_matches(['\r', '\n']);
+                        Some(zeroize::Zeroizing::new(trimmed.to_string()))
+                    } else {
+                        notes.map(zeroize::Zeroizing::new)
+                    };
+
+                    let mut daemon_req = json!({
+                        "action": "cipher_update",
+                        "id": item_id,
+                        "name": name,
+                        "username": username,
+                        "password": password_val.as_deref(),
+                        "notes": notes_val.as_deref(),
+                        "uri": uri,
+                        "folder_id": folder_id,
+                        "favorite": favorite,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or(item_id.as_str());
+                                let name = receipt["item"]["name"]
+                                    .as_str()
+                                    .unwrap_or(item_name.as_str());
+                                println!("Updated cipher \"{}\" ({}).", name, id);
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to update cipher");
                             if json {
                                 println!(
                                     "{}",
@@ -2846,7 +3078,12 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
                 .is_some_and(|r| r["ok"] == true)
         {
             let verb = match request.get("action").and_then(|a| a.as_str()) {
-                Some("cipher_delete") | Some("cipher_resolve") => "deleting",
+                Some("cipher_delete") => "deleting",
+                Some("cipher_update") => "editing",
+                Some("cipher_resolve") => match request.get("purpose").and_then(Value::as_str) {
+                    Some("edit") | Some("editing") => "editing",
+                    _ => "deleting",
+                },
                 _ => "creating",
             };
             return Err(reject(&format!("Unlock the vault before {verb} a cipher.")));
@@ -3574,6 +3811,90 @@ mod tests {
                 assert_eq!(target, "target-remove");
             }
             _ => panic!("Expected VaultAction::Delete for alias remove"),
+        }
+    }
+
+    #[test]
+    fn test_cli_vault_edit_flags() {
+        let cli = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "my-target",
+            "--name",
+            "new-name",
+            "--username",
+            "new-user",
+            "--password",
+            "new-pass",
+            "--notes",
+            "new-notes",
+            "--uri",
+            "https://new.uri",
+            "--folder-id",
+            "folder-123",
+            "--favorite",
+            "true",
+            "--json",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Edit {
+                        target,
+                        name,
+                        username,
+                        password,
+                        password_stdin,
+                        notes,
+                        notes_stdin,
+                        uri,
+                        folder_id,
+                        favorite,
+                        json,
+                    },
+            } => {
+                assert_eq!(target, "my-target");
+                assert_eq!(name.as_deref(), Some("new-name"));
+                assert_eq!(username.as_deref(), Some("new-user"));
+                assert_eq!(password.as_deref(), Some("new-pass"));
+                assert!(!password_stdin);
+                assert_eq!(notes.as_deref(), Some("new-notes"));
+                assert!(!notes_stdin);
+                assert_eq!(uri.as_deref(), Some("https://new.uri"));
+                assert_eq!(folder_id.as_deref(), Some("folder-123"));
+                assert_eq!(favorite, Some(true));
+                assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Edit"),
+        }
+
+        // Stdin flags
+        let cli_stdin = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "my-target",
+            "--password-stdin",
+            "--notes-stdin",
+        ])
+        .unwrap();
+
+        match cli_stdin.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Edit {
+                        password_stdin,
+                        notes_stdin,
+                        ..
+                    },
+            } => {
+                assert!(password_stdin);
+                assert!(notes_stdin);
+            }
+            _ => panic!("Expected VaultAction::Edit"),
         }
     }
 }

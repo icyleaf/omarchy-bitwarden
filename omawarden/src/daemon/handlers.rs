@@ -72,6 +72,7 @@ pub fn handle_client_with_peer(
             "ssh_key_create"
                 | "ssh_key_create_v2"
                 | "cipher_create"
+                | "cipher_update"
                 | "cipher_delete"
                 | "cipher_resolve"
                 | "sync"
@@ -92,7 +93,20 @@ pub fn handle_client_with_peer(
             )?;
             return Ok(());
         }
-        if action == "cipher_delete" || action == "cipher_resolve" {
+        if action == "cipher_update" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before editing a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
+        if action == "cipher_delete" {
             writeln!(
                 stream,
                 "{}",
@@ -100,6 +114,23 @@ pub fn handle_client_with_peer(
                     "ok": false,
                     "outcome": "rejected",
                     "error": "Unlock the vault before deleting a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
+        if action == "cipher_resolve" {
+            let verb = match req.get("purpose").and_then(Value::as_str) {
+                Some("edit") | Some("editing") => "editing",
+                _ => "deleting",
+            };
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": format!("Unlock the vault before {verb} a cipher."),
                     "protocol_version": CURRENT_PROTOCOL_VERSION
                 })
             )?;
@@ -334,6 +365,10 @@ pub fn handle_client_with_peer(
             Err(error) => error.response(),
         },
         "cipher_create" => match state.vault_mgr.create_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "cipher_update" => match state.vault_mgr.update_cipher(req, client_context.as_ref()) {
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },
