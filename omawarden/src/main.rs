@@ -440,16 +440,28 @@ enum VaultAction {
         username: Option<String>,
         #[arg(
             long,
-            conflicts_with = "password_stdin",
+            conflicts_with_all = ["password_stdin", "generate_password", "generate_passphrase"],
             help = "New password for login cipher"
         )]
         password: Option<String>,
         #[arg(
             long,
-            conflicts_with = "password",
+            conflicts_with_all = ["password", "generate_password", "generate_passphrase"],
             help = "Read new password from standard input"
         )]
         password_stdin: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["password", "password_stdin", "generate_passphrase"],
+            help = "Automatically generate a new 16-character high-entropy password"
+        )]
+        generate_password: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["password", "password_stdin", "generate_password"],
+            help = "Automatically generate a new 4-word Diceware passphrase"
+        )]
+        generate_passphrase: bool,
         #[arg(
             long,
             conflicts_with = "notes_stdin",
@@ -487,16 +499,28 @@ enum CreateItemAction {
         username: String,
         #[arg(
             long,
-            required_unless_present = "password_stdin",
+            conflicts_with_all = ["password_stdin", "generate_password", "generate_passphrase"],
             help = "Password (prefer --password-stdin in automation/pipelines)"
         )]
         password: Option<String>,
         #[arg(
             long,
-            conflicts_with = "password",
+            conflicts_with_all = ["password", "generate_password", "generate_passphrase"],
             help = "Read password from standard input"
         )]
         password_stdin: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["password", "password_stdin", "generate_passphrase"],
+            help = "Automatically generate a 16-character high-entropy password"
+        )]
+        generate_password: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["password", "password_stdin", "generate_password"],
+            help = "Automatically generate a 4-word Diceware passphrase"
+        )]
+        generate_passphrase: bool,
         #[arg(long, help = "Optional notes")]
         notes: Option<String>,
         #[arg(long, help = "Optional URI")]
@@ -1689,6 +1713,8 @@ fn main() -> ExitCode {
                             username,
                             password,
                             password_stdin,
+                            generate_password,
+                            generate_passphrase,
                             notes,
                             uri,
                             folder_id,
@@ -1717,14 +1743,85 @@ fn main() -> ExitCode {
                                 return ExitCode::FAILURE;
                             }
 
-                            let password_val = if password_stdin {
+                            let password_val = if generate_password {
+                                let opts = omawarden::generator::PasswordOptions {
+                                    length: 16,
+                                    ..Default::default()
+                                };
+                                let pwd = match omawarden::generator::generate_password(&opts) {
+                                    Ok(s) => s.value.clone(),
+                                    Err(e) => {
+                                        eprintln!("Error generating password: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+                                zeroize::Zeroizing::new(pwd)
+                            } else if generate_passphrase {
+                                let opts = omawarden::generator::PassphraseOptions::default();
+                                let pass = match omawarden::generator::generate_passphrase(&opts) {
+                                    Ok(s) => s.value.clone(),
+                                    Err(e) => {
+                                        eprintln!("Error generating passphrase: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+                                zeroize::Zeroizing::new(pass)
+                            } else if password_stdin {
                                 let mut buf = String::new();
                                 io::stdin().read_to_string(&mut buf).unwrap_or_default();
                                 zeroize::Zeroizing::new(
                                     buf.trim_end_matches(['\r', '\n']).to_string(),
                                 )
+                            } else if let Some(p) = password {
+                                zeroize::Zeroizing::new(p)
                             } else {
-                                zeroize::Zeroizing::new(password.unwrap_or_default())
+                                let is_interactive = (io::stdin().is_terminal()
+                                    || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                                    && !json;
+                                if !is_interactive {
+                                    let err_msg = "Password is required. Provide --password, --password-stdin, --generate-password, or run interactively in a terminal.";
+                                    if json {
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": err_msg,
+                                            }))
+                                            .unwrap()
+                                        );
+                                    } else {
+                                        eprintln!("Error: {err_msg}");
+                                    }
+                                    return ExitCode::FAILURE;
+                                }
+
+                                let prompt_msg = "Enter password (or press Enter to generate): ";
+                                let entered = if io::stdin().is_terminal() {
+                                    rpassword::prompt_password(prompt_msg).unwrap_or_default()
+                                } else {
+                                    eprint!("{prompt_msg}");
+                                    let _ = io::stderr().flush();
+                                    let mut buf = String::new();
+                                    let _ = io::stdin().read_line(&mut buf);
+                                    buf.trim_end_matches(['\r', '\n']).to_string()
+                                };
+
+                                if entered.trim().is_empty() {
+                                    let opts = omawarden::generator::PasswordOptions {
+                                        length: 16,
+                                        ..Default::default()
+                                    };
+                                    let pwd = match omawarden::generator::generate_password(&opts) {
+                                        Ok(s) => s.value.clone(),
+                                        Err(e) => {
+                                            eprintln!("Error generating password: {e}");
+                                            return ExitCode::FAILURE;
+                                        }
+                                    };
+                                    zeroize::Zeroizing::new(pwd)
+                                } else {
+                                    zeroize::Zeroizing::new(entered)
+                                }
                             };
 
                             let req = json!({
@@ -1960,36 +2057,20 @@ fn main() -> ExitCode {
                     json,
                 } => {
                     let client_ctx = omawarden::api::resolve_effective_client_context(None);
-                    let mut resolve_req = json!({
-                        "action": "cipher_resolve",
-                        "target": target,
-                        "purpose": "delete",
-                    });
-                    if let Some(ref ctx) = client_ctx {
-                        resolve_req["client"] = json!(ctx);
-                    }
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !yes
+                        && !json;
 
-                    let resolved = match submit_cipher_mutation(&resolve_req) {
-                        Ok(res) => res["item"].clone(),
-                        Err(error) => {
-                            let err_msg = error
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Failed to resolve cipher");
-                            if json {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({
-                                        "ok": false,
-                                        "error": err_msg,
-                                    }))
-                                    .unwrap()
-                                );
-                            } else {
-                                eprintln!("Error: {}", err_msg);
-                            }
-                            return ExitCode::FAILURE;
-                        }
+                    let resolved = match resolve_target_cipher(
+                        &target,
+                        "delete",
+                        client_ctx.as_ref(),
+                        is_interactive,
+                        json,
+                    ) {
+                        Ok(item) => item,
+                        Err(code) => return code,
                     };
 
                     let item_id = resolved["id"].as_str().unwrap_or("").to_string();
@@ -2015,10 +2096,6 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
-                    let is_interactive = (std::io::stdin().is_terminal()
-                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
-                        && !yes
-                        && !json;
                     if is_interactive {
                         let action_verb = if permanent {
                             "Permanently delete"
@@ -2092,6 +2169,8 @@ fn main() -> ExitCode {
                     username,
                     password,
                     password_stdin,
+                    generate_password,
+                    generate_passphrase,
                     notes,
                     notes_stdin,
                     uri,
@@ -2099,17 +2178,24 @@ fn main() -> ExitCode {
                     favorite,
                     json,
                 } => {
-                    if name.is_none()
-                        && username.is_none()
-                        && password.is_none()
-                        && !password_stdin
-                        && notes.is_none()
-                        && !notes_stdin
-                        && uri.is_none()
-                        && folder_id.is_none()
-                        && favorite.is_none()
-                    {
-                        let err_msg = "No fields specified to edit. Provide at least one field to update (e.g. --password).";
+                    let has_field_flags = name.is_some()
+                        || username.is_some()
+                        || password.is_some()
+                        || password_stdin
+                        || generate_password
+                        || generate_passphrase
+                        || notes.is_some()
+                        || notes_stdin
+                        || uri.is_some()
+                        || folder_id.is_some()
+                        || favorite.is_some();
+
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !json;
+
+                    if !has_field_flags && !is_interactive {
+                        let err_msg = "No fields specified to edit. Provide at least one field to update (e.g. --password) or run in an interactive terminal to use $EDITOR.";
                         if json {
                             println!(
                                 "{}",
@@ -2120,42 +2206,22 @@ fn main() -> ExitCode {
                                 .unwrap()
                             );
                         } else {
-                            eprintln!("Error: {}", err_msg);
+                            eprintln!("Error: {err_msg}");
                         }
                         return ExitCode::FAILURE;
                     }
 
                     let client_ctx = omawarden::api::resolve_effective_client_context(None);
-                    let mut resolve_req = json!({
-                        "action": "cipher_resolve",
-                        "target": target,
-                        "purpose": "edit",
-                    });
-                    if let Some(ref ctx) = client_ctx {
-                        resolve_req["client"] = json!(ctx);
-                    }
 
-                    let resolved = match submit_cipher_mutation(&resolve_req) {
-                        Ok(res) => res["item"].clone(),
-                        Err(error) => {
-                            let err_msg = error
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Failed to resolve cipher");
-                            if json {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&json!({
-                                        "ok": false,
-                                        "error": err_msg,
-                                    }))
-                                    .unwrap()
-                                );
-                            } else {
-                                eprintln!("Error: {}", err_msg);
-                            }
-                            return ExitCode::FAILURE;
-                        }
+                    let resolved = match resolve_target_cipher(
+                        &target,
+                        "edit",
+                        client_ctx.as_ref(),
+                        is_interactive,
+                        json,
+                    ) {
+                        Ok(item) => item,
+                        Err(code) => return code,
                     };
 
                     let item_id = resolved["id"].as_str().unwrap_or("").to_string();
@@ -2182,7 +2248,16 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
-                    if (username.is_some() || password.is_some() || password_stdin || uri.is_some())
+                    if !has_field_flags {
+                        return handle_editor_edit(&cfg, &resolved, client_ctx.as_ref());
+                    }
+
+                    if (username.is_some()
+                        || password.is_some()
+                        || password_stdin
+                        || generate_password
+                        || generate_passphrase
+                        || uri.is_some())
                         && item_type != "login"
                     {
                         let err_msg =
@@ -2202,7 +2277,30 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
-                    let password_val = if password_stdin {
+                    let password_val = if generate_password {
+                        let opts = omawarden::generator::PasswordOptions {
+                            length: 16,
+                            ..Default::default()
+                        };
+                        let pwd = match omawarden::generator::generate_password(&opts) {
+                            Ok(s) => s.value.clone(),
+                            Err(e) => {
+                                eprintln!("Error generating password: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                        Some(zeroize::Zeroizing::new(pwd))
+                    } else if generate_passphrase {
+                        let opts = omawarden::generator::PassphraseOptions::default();
+                        let pass = match omawarden::generator::generate_passphrase(&opts) {
+                            Ok(s) => s.value.clone(),
+                            Err(e) => {
+                                eprintln!("Error generating passphrase: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                        Some(zeroize::Zeroizing::new(pass))
+                    } else if password_stdin {
                         let mut buf = zeroize::Zeroizing::new(String::new());
                         io::stdin().read_to_string(&mut buf).unwrap_or_default();
                         let trimmed = buf.trim_end_matches(['\r', '\n']);
@@ -3186,6 +3284,506 @@ fn vault_output_item(
     }))
 }
 
+fn prompt_candidate_selection(candidates: &[Value], target: &str) -> Option<Value> {
+    eprintln!("Multiple ciphers matched '{}':", target);
+    for (idx, item) in candidates.iter().enumerate() {
+        let num = idx + 1;
+        let name = item["name"].as_str().unwrap_or("unnamed");
+        let item_type = item["type"].as_str().unwrap_or("unknown");
+        let id = item["id"].as_str().unwrap_or("");
+        let sub = item
+            .get("sub_title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        if let Some(sub) = sub {
+            eprintln!("  {num}) {name} ({item_type} - {sub}) [{id}]");
+        } else {
+            eprintln!("  {num}) {name} ({item_type}) [{id}]");
+        }
+    }
+    eprint!(
+        "Select cipher [1-{}] (or 'q' to cancel): ",
+        candidates.len()
+    );
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return None;
+    }
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+        return None;
+    }
+    if let Ok(choice) = trimmed.parse::<usize>() {
+        if (1..=candidates.len()).contains(&choice) {
+            return Some(candidates[choice - 1].clone());
+        }
+    }
+    eprintln!("Invalid selection.");
+    None
+}
+
+fn resolve_target_cipher(
+    target: &str,
+    purpose: &str,
+    client_ctx: Option<&omawarden::api::ClientContext>,
+    is_interactive: bool,
+    json: bool,
+) -> Result<Value, ExitCode> {
+    let mut resolve_req = json!({
+        "action": "cipher_resolve",
+        "target": target,
+        "purpose": purpose,
+    });
+    if let Some(ctx) = client_ctx {
+        resolve_req["client"] = json!(ctx);
+    }
+
+    match submit_cipher_mutation(&resolve_req) {
+        Ok(res) => Ok(res["item"].clone()),
+        Err(err_obj) => {
+            if err_obj.get("ambiguous") == Some(&Value::Bool(true)) {
+                if is_interactive {
+                    let candidates = err_obj.get("candidates").and_then(Value::as_array);
+                    if let Some(candidates) = candidates {
+                        if let Some(selected) = prompt_candidate_selection(candidates, target) {
+                            return Ok(selected);
+                        }
+                    }
+                    eprintln!("Selection cancelled.");
+                    return Err(ExitCode::FAILURE);
+                } else {
+                    let err_msg = err_obj
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Multiple ciphers matched query.");
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": err_msg,
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("Error: {err_msg}");
+                    }
+                    return Err(ExitCode::FAILURE);
+                }
+            }
+
+            let err_msg = err_obj
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Failed to resolve cipher");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": err_msg,
+                    }))
+                    .unwrap()
+                );
+            } else {
+                eprintln!("Error: {err_msg}");
+            }
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+#[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct ParsedEditorCipher {
+    name: String,
+    username: Option<String>,
+    password: Option<String>,
+    uri: Option<String>,
+    folder_id: Option<String>,
+    favorite: bool,
+    notes: String,
+}
+
+fn format_editor_template(
+    item_id: &str,
+    item_name: &str,
+    item_type: &str,
+    item_details: Option<&VaultItem>,
+) -> zeroize::Zeroizing<String> {
+    use std::fmt::Write as _;
+    let mut out = zeroize::Zeroizing::new(String::new());
+    let _ = writeln!(out, "# Editing {item_type} cipher: {item_name} ({item_id})");
+    out.push_str("# Lines starting with '#' before the notes section are ignored.\n");
+    out.push_str(
+        "# Save and exit the editor to apply changes, or exit without changes to abort.\n\n",
+    );
+
+    let _ = writeln!(out, "Name: {item_name}");
+    if item_type == "login" {
+        let username = item_details
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("username"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let password = item_details
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("password"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let uri = item_details
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("uris"))
+            .and_then(Value::as_array)
+            .and_then(|uris| uris.first())
+            .and_then(|u| u.get("uri"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let _ = writeln!(out, "Username: {username}");
+        let _ = writeln!(out, "Password: {password}");
+        let _ = writeln!(out, "URI: {uri}");
+    }
+    let folder_id = item_details
+        .and_then(|i| i.folder_id.as_deref())
+        .unwrap_or("");
+    let favorite = item_details.map(|i| i.favorite).unwrap_or(false);
+    let _ = writeln!(out, "Folder: {folder_id}");
+    let _ = writeln!(out, "Favorite: {favorite}\n");
+    out.push_str("# Notes (everything below this line is treated as notes):\n");
+    if let Some(notes) = item_details.and_then(|i| i.notes.as_deref()) {
+        out.push_str(notes);
+    }
+    out
+}
+
+fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorCipher, String> {
+    let mut in_notes = false;
+    let mut notes_lines = Vec::new();
+
+    let mut name = String::new();
+    let mut username = String::new();
+    let mut password = String::new();
+    let mut uri = String::new();
+    let mut folder_id = String::new();
+    let mut favorite = false;
+
+    for line in content.lines() {
+        if in_notes {
+            notes_lines.push(line);
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.starts_with("# Notes") {
+            in_notes = true;
+            continue;
+        }
+
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some((key, val)) = line.split_once(':') {
+            let key = key.trim().to_lowercase();
+            let val = val.trim();
+            match key.as_str() {
+                "name" => name = val.to_string(),
+                "username" => username = val.to_string(),
+                "password" => password = val.to_string(),
+                "uri" => uri = val.to_string(),
+                "folder" | "folder_id" | "folder id" => folder_id = val.to_string(),
+                "favorite" => {
+                    favorite =
+                        parse_cli_bool(val).map_err(|e| format!("Invalid favorite value: {e}"))?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let notes = notes_lines.join("\n");
+    let folder_opt = if folder_id.is_empty() {
+        None
+    } else {
+        Some(folder_id)
+    };
+
+    Ok(ParsedEditorCipher {
+        name,
+        username: if item_type == "login" {
+            Some(username)
+        } else {
+            None
+        },
+        password: if item_type == "login" {
+            Some(password)
+        } else {
+            None
+        },
+        uri: if item_type == "login" {
+            Some(uri)
+        } else {
+            None
+        },
+        folder_id: folder_opt,
+        favorite,
+        notes,
+    })
+}
+
+fn spawn_editor(path: &std::path::Path) -> Result<std::process::ExitStatus, std::io::Error> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| {
+            if which::which("nano").is_ok() {
+                "nano".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Editor not set",
+        ));
+    }
+
+    let mut cmd = std::process::Command::new(parts[0]);
+    for arg in &parts[1..] {
+        cmd.arg(arg);
+    }
+    cmd.arg(path);
+    cmd.status()
+}
+
+fn securely_wipe_and_remove(mut temp: tempfile::NamedTempFile) {
+    use std::io::Seek;
+    let path = temp.path().to_path_buf();
+
+    // 1. Wipe the open file handle starting from offset 0
+    if let Ok(meta) = temp.as_file().metadata() {
+        let len = (meta.len() as usize).max(4096);
+        let zeroes = vec![0u8; len];
+        if temp.as_file_mut().seek(std::io::SeekFrom::Start(0)).is_ok() {
+            let _ = temp.as_file_mut().write_all(&zeroes);
+            let _ = temp.as_file_mut().flush();
+            let _ = temp.as_file().sync_all();
+        }
+    }
+
+    // 2. Also re-open path directly in case editor performed atomic save (new inode)
+    if path.exists() {
+        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            if let Ok(meta) = file.metadata() {
+                let len = (meta.len() as usize).max(4096);
+                let zeroes = vec![0u8; len];
+                let _ = file.write_all(&zeroes);
+                let _ = file.flush();
+                let _ = file.sync_all();
+            }
+        }
+    }
+
+    // 3. Close handle and delete from disk
+    let _ = temp.close();
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+fn handle_editor_edit(
+    cfg: &Config,
+    resolved: &Value,
+    client_ctx: Option<&omawarden::api::ClientContext>,
+) -> ExitCode {
+    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+    let item_type = resolved["type"].as_str().unwrap_or("login");
+
+    let full_item = vault_output_item(cfg, &item_id, false)
+        .ok()
+        .flatten()
+        .map(|o| o.item);
+
+    let initial_template =
+        format_editor_template(&item_id, &item_name, item_type, full_item.as_ref());
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("omawarden-edit-").suffix(".txt");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+
+    let mut temp_file = match builder.tempfile() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error: Failed to create temporary file for editor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(e) = temp_file.write_all(initial_template.as_bytes()) {
+        securely_wipe_and_remove(temp_file);
+        eprintln!("Error: Failed to write to temporary file: {e}");
+        return ExitCode::FAILURE;
+    }
+    let _ = temp_file.flush();
+
+    let status = match spawn_editor(temp_file.path()) {
+        Ok(s) => s,
+        Err(e) => {
+            securely_wipe_and_remove(temp_file);
+            eprintln!("Error: Failed to launch editor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !status.success() {
+        securely_wipe_and_remove(temp_file);
+        eprintln!("Editor exited with non-zero status.");
+        return ExitCode::FAILURE;
+    }
+
+    let edited_content = match std::fs::read_to_string(temp_file.path()) {
+        Ok(c) => zeroize::Zeroizing::new(c),
+        Err(e) => {
+            securely_wipe_and_remove(temp_file);
+            eprintln!("Error: Failed to read edited temporary file: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    securely_wipe_and_remove(temp_file);
+
+    let parsed = match parse_editor_template(&edited_content, item_type) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if parsed.name.trim().is_empty() {
+        eprintln!("Error: Cipher name cannot be empty.");
+        return ExitCode::FAILURE;
+    }
+
+    let orig_name = &item_name;
+    let orig_notes = full_item
+        .as_ref()
+        .and_then(|i| i.notes.as_deref())
+        .unwrap_or("");
+    let orig_favorite = full_item.as_ref().map(|i| i.favorite).unwrap_or(false);
+    let orig_folder_id = full_item.as_ref().and_then(|i| i.folder_id.as_deref());
+
+    let (orig_user, orig_pass, orig_uri) = if item_type == "login" {
+        let u = full_item
+            .as_ref()
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("username"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let p = full_item
+            .as_ref()
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("password"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let uri = full_item
+            .as_ref()
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("uris"))
+            .and_then(Value::as_array)
+            .and_then(|uris| uris.first())
+            .and_then(|u| u.get("uri"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        (u, p, uri)
+    } else {
+        ("", "", "")
+    };
+
+    let name_changed = parsed.name != *orig_name;
+    let username_changed =
+        item_type == "login" && parsed.username.as_deref().unwrap_or("") != orig_user;
+    let password_changed =
+        item_type == "login" && parsed.password.as_deref().unwrap_or("") != orig_pass;
+    let uri_changed = item_type == "login" && parsed.uri.as_deref().unwrap_or("") != orig_uri;
+    let folder_changed = parsed.folder_id.as_deref() != orig_folder_id;
+    let favorite_changed = parsed.favorite != orig_favorite;
+    let notes_changed =
+        parsed.notes.trim_end_matches(['\r', '\n']) != orig_notes.trim_end_matches(['\r', '\n']);
+
+    if !name_changed
+        && !username_changed
+        && !password_changed
+        && !uri_changed
+        && !folder_changed
+        && !favorite_changed
+        && !notes_changed
+    {
+        println!("No changes made.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut daemon_req = json!({
+        "action": "cipher_update",
+        "id": item_id,
+    });
+    if name_changed {
+        daemon_req["name"] = json!(parsed.name);
+    }
+    if username_changed {
+        daemon_req["username"] = json!(parsed.username);
+    }
+    if password_changed {
+        daemon_req["password"] = json!(parsed.password);
+    }
+    if uri_changed {
+        daemon_req["uri"] = json!(parsed.uri);
+    }
+    if folder_changed {
+        daemon_req["folder_id"] = json!(parsed.folder_id.as_deref().unwrap_or(""));
+    }
+    if favorite_changed {
+        daemon_req["favorite"] = json!(parsed.favorite);
+    }
+    if notes_changed {
+        daemon_req["notes"] = json!(parsed.notes.trim_end_matches(['\r', '\n']));
+    }
+    if let Some(ctx) = client_ctx {
+        daemon_req["client"] = json!(ctx);
+    }
+
+    match submit_cipher_mutation(&daemon_req) {
+        Ok(receipt) => {
+            let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
+            let name = receipt["item"]["name"].as_str().unwrap_or(&parsed.name);
+            println!("Updated cipher \"{}\" ({}).", name, id);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let err_msg = error
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Failed to update cipher");
+            eprintln!("Error: {}", err_msg);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 struct TotpOutput {
     result: TotpResult,
     item: Option<(String, String)>,
@@ -3848,6 +4446,8 @@ mod tests {
                         username,
                         password,
                         password_stdin,
+                        generate_password,
+                        generate_passphrase,
                         notes,
                         notes_stdin,
                         uri,
@@ -3861,12 +4461,61 @@ mod tests {
                 assert_eq!(username.as_deref(), Some("new-user"));
                 assert_eq!(password.as_deref(), Some("new-pass"));
                 assert!(!password_stdin);
+                assert!(!generate_password);
+                assert!(!generate_passphrase);
                 assert_eq!(notes.as_deref(), Some("new-notes"));
                 assert!(!notes_stdin);
                 assert_eq!(uri.as_deref(), Some("https://new.uri"));
                 assert_eq!(folder_id.as_deref(), Some("folder-123"));
                 assert_eq!(favorite, Some(true));
                 assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Edit"),
+        }
+
+        // Generator flags
+        let cli_gen_pwd = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "my-target",
+            "--generate-password",
+        ])
+        .unwrap();
+        match cli_gen_pwd.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Edit {
+                        generate_password,
+                        generate_passphrase,
+                        ..
+                    },
+            } => {
+                assert!(generate_password);
+                assert!(!generate_passphrase);
+            }
+            _ => panic!("Expected VaultAction::Edit"),
+        }
+
+        let cli_gen_passphrase = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "my-target",
+            "--generate-passphrase",
+        ])
+        .unwrap();
+        match cli_gen_passphrase.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Edit {
+                        generate_password,
+                        generate_passphrase,
+                        ..
+                    },
+            } => {
+                assert!(!generate_password);
+                assert!(generate_passphrase);
             }
             _ => panic!("Expected VaultAction::Edit"),
         }
@@ -3896,5 +4545,82 @@ mod tests {
             }
             _ => panic!("Expected VaultAction::Edit"),
         }
+    }
+
+    #[test]
+    fn test_format_editor_template_login() {
+        let details = VaultItem {
+            id: "uuid-1".into(),
+            type_name: "login".into(),
+            name: "GitHub".into(),
+            notes: Some("Special note".into()),
+            favorite: true,
+            folder_id: Some("folder-1".into()),
+            login: Some(json!({
+                "username": "octocat",
+                "password": "supersecret",
+                "uris": [{"uri": "https://github.com"}]
+            })),
+            ..Default::default()
+        };
+        let tpl = format_editor_template("uuid-1", "GitHub", "login", Some(&details));
+        assert!(tpl.contains("Name: GitHub"));
+        assert!(tpl.contains("Username: octocat"));
+        assert!(tpl.contains("Password: supersecret"));
+        assert!(tpl.contains("URI: https://github.com"));
+        assert!(tpl.contains("Folder: folder-1"));
+        assert!(tpl.contains("Favorite: true"));
+        assert!(tpl.contains("Special note"));
+    }
+
+    #[test]
+    fn test_parse_editor_template_valid() {
+        let content = "\
+# Comment
+Name: Updated Name
+Username: updated_user
+Password: new_password
+URI: https://example.com/updated
+Folder: folder-2
+Favorite: true
+
+# Notes (everything below this line is treated as notes):
+Note line 1
+Note line 2 with: colons and # symbols
+";
+        let parsed = parse_editor_template(content, "login").unwrap();
+        assert_eq!(parsed.name, "Updated Name");
+        assert_eq!(parsed.username.as_deref(), Some("updated_user"));
+        assert_eq!(parsed.password.as_deref(), Some("new_password"));
+        assert_eq!(parsed.uri.as_deref(), Some("https://example.com/updated"));
+        assert_eq!(parsed.folder_id.as_deref(), Some("folder-2"));
+        assert!(parsed.favorite);
+        assert_eq!(
+            parsed.notes,
+            "Note line 1\nNote line 2 with: colons and # symbols"
+        );
+    }
+
+    #[test]
+    fn test_parse_editor_template_rejects_invalid_favorite() {
+        let content = "Name: Foo\nFavorite: not_a_bool\n# Notes:\n";
+        let res = parse_editor_template(content, "login");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Invalid favorite value"));
+    }
+
+    #[test]
+    fn test_securely_wipe_and_remove() {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("test-wipe-").suffix(".txt");
+        let mut temp = builder.tempfile().unwrap();
+        let path = temp.path().to_path_buf();
+        temp.write_all(b"SUPER_SECRET_PLAINTEXT_PASSWORD_12345")
+            .unwrap();
+        temp.flush().unwrap();
+
+        securely_wipe_and_remove(temp);
+
+        assert!(!path.exists());
     }
 }

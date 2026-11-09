@@ -1648,7 +1648,7 @@ fn test_delete_cipher_ambiguous_fails_closed() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("Multiple ciphers matched 'AWS'. Specify by ID or narrower name."),
+        stderr.contains("Multiple ciphers matched 'AWS':"),
         "Unexpected error: {stderr}"
     );
 }
@@ -2087,7 +2087,7 @@ fn test_edit_cipher_no_fields_specified_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains(
-            "No fields specified to edit. Provide at least one field to update (e.g. --password)."
+            "No fields specified to edit. Provide at least one field to update (e.g. --password) or run in an interactive terminal to use $EDITOR."
         ),
         "Unexpected error output: {stderr}"
     );
@@ -2725,4 +2725,698 @@ fn test_edit_cipher_conflicting_flags_rejected() {
         .output()
         .unwrap();
     assert!(!out2.status.success());
+}
+
+#[test]
+fn test_create_login_cipher_generate_password_flag() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Gen Pass Site",
+            "--username",
+            "octocat",
+            "--generate-password",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_pwd = payload["login"]["password"].as_str().unwrap();
+        let decrypted_pwd = EncString::parse(enc_pwd)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(decrypted_pwd.len(), 16);
+        assert!(decrypted_pwd.chars().any(|c| c.is_ascii_uppercase()));
+        assert!(decrypted_pwd.chars().any(|c| c.is_ascii_lowercase()));
+        assert!(decrypted_pwd.chars().any(|c| c.is_ascii_digit()));
+
+        let resp_body = json!({
+            "id": "gen-pwd-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": null,
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(posted);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Created login cipher \"Gen Pass Site\" (gen-pwd-uuid)."));
+}
+
+#[test]
+fn test_create_login_cipher_generate_passphrase_flag() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Gen Phrase Site",
+            "--username",
+            "octocat",
+            "--generate-passphrase",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_pwd = payload["login"]["password"].as_str().unwrap();
+        let decrypted_pwd = EncString::parse(enc_pwd)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        let words: Vec<&str> = decrypted_pwd.split('-').collect();
+        assert_eq!(words.len(), 4, "Expected 4 words, got {decrypted_pwd}");
+
+        let resp_body = json!({
+            "id": "gen-phrase-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": null,
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(posted);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Created login cipher \"Gen Phrase Site\" (gen-phrase-uuid)."));
+}
+
+#[test]
+fn test_create_login_cipher_interactive_enter_generates_password() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Prompt Site",
+            "--username",
+            "octocat",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // User presses enter (empty input) to trigger generator
+    {
+        let mut stdin = cli.stdin.take().unwrap();
+        stdin.write_all(b"\n").unwrap();
+    }
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_pwd = payload["login"]["password"].as_str().unwrap();
+        let decrypted_pwd = EncString::parse(enc_pwd)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(decrypted_pwd.len(), 16);
+
+        let resp_body = json!({
+            "id": "prompt-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": null,
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(posted);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Enter password (or press Enter to generate): "));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Created login cipher \"Prompt Site\" (prompt-uuid)."));
+}
+
+#[test]
+fn test_create_login_cipher_non_interactive_without_password_fails_closed() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let out = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Fail Site",
+            "--username",
+            "octocat",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Password is required. Provide --password, --password-stdin, --generate-password, or run interactively in a terminal."));
+}
+
+#[test]
+fn test_edit_cipher_generate_password_flag() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "55555555-5555-5555-5555-555555555555";
+    let cipher_name = "Site To Gen Pwd";
+    add_cipher_to_cache(dir, &user_key, cipher_id, cipher_name, "olduser");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args(["vault", "edit", cipher_name, "--generate-password"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_pwd = payload["login"]["password"].as_str().unwrap();
+        let decrypted_pwd = EncString::parse(enc_pwd)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(decrypted_pwd.len(), 16);
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": null,
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T01:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(received);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("Updated cipher \"{cipher_name}\" ({cipher_id}).")));
+}
+
+#[test]
+fn test_edit_cipher_in_editor() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "66666666-6666-6666-6666-666666666666";
+    let cipher_name = "Editor Test Site";
+    add_cipher_to_cache(dir, &user_key, cipher_id, cipher_name, "editor_old");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Create a mock editor script that changes Username: editor_old to Username: editor_new
+    let editor_script = dir.join("mock_editor.sh");
+    fs::write(
+        &editor_script,
+        "#!/bin/sh\nif [ -x /usr/bin/sed ]; then /usr/bin/sed -i 's/Username: editor_old/Username: editor_new/' \"$1\"; else /bin/sed -i 's/Username: editor_old/Username: editor_new/' \"$1\"; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut cli = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_user = payload["login"]["username"].as_str().unwrap();
+        let decrypted_user = EncString::parse(enc_user)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(decrypted_user, "editor_new");
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": null,
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T01:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(received);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("Updated cipher \"{cipher_name}\" ({cipher_id}).")));
+}
+
+#[test]
+fn test_edit_cipher_in_editor_no_changes() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "77777777-7777-7777-7777-777777777777";
+    let cipher_name = "Editor No Change Site";
+    add_cipher_to_cache(dir, &user_key, cipher_id, cipher_name, "user_unchanged");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Mock editor that exits without making changes
+    let editor_script = dir.join("mock_editor_noop.sh");
+    fs::write(&editor_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let out = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_name])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("No changes made."));
+}
+
+#[test]
+fn test_disambiguation_interactive_selection() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher1_id = "88888888-1111-1111-1111-111111111111";
+    let cipher2_id = "88888888-2222-2222-2222-222222222222";
+    let cipher_name = "Ambiguous Duplicate";
+    add_cipher_to_cache(dir, &user_key, cipher1_id, cipher_name, "candidate_one");
+    add_cipher_to_cache(dir, &user_key, cipher2_id, cipher_name, "candidate_two");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "delete", cipher_name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Select candidate 1, then confirm deletion with 'y'
+    {
+        let mut stdin = cli.stdin.take().unwrap();
+        stdin.write_all(b"1\ny\n").unwrap();
+    }
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher1_id}/delete"));
+        received = true;
+
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(received);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Multiple ciphers matched 'Ambiguous Duplicate':"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("Deleted cipher \"{cipher_name}\" ({cipher1_id}).")));
+}
+
+#[test]
+fn test_disambiguation_non_interactive_fails_closed_with_ids() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher1_id = "99999999-1111-1111-1111-111111111111";
+    let cipher2_id = "99999999-2222-2222-2222-222222222222";
+    let cipher_name = "Ambiguous Duplicate NonInteractive";
+    add_cipher_to_cache(dir, &user_key, cipher1_id, cipher_name, "candidate_one");
+    add_cipher_to_cache(dir, &user_key, cipher2_id, cipher_name, "candidate_two");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let out = make_command(dir)
+        .args(["vault", "edit", cipher_name, "--password", "newsecret"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Multiple ciphers matched '{cipher_name}': [{cipher1_id}, {cipher2_id}]. Specify by ID or narrower name.")));
 }

@@ -11,7 +11,7 @@ use crate::crypto::{
 use crate::keyring::KeyringManager;
 use crate::storage::{StorageManager, VaultStorage};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SshMetadata {
     pub is_ssh_key: bool,
     pub key_type: String,
@@ -21,7 +21,7 @@ pub struct SshMetadata {
     pub passphrase: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct VaultItem {
     pub id: String,
     pub name: String,
@@ -58,6 +58,13 @@ pub struct VaultItem {
     #[serde(default)]
     pub attachments: Vec<Value>,
     pub search_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum CipherTargetResolution {
+    Exact(Box<VaultItem>),
+    Ambiguous(Vec<VaultItem>),
+    NotFound(String),
 }
 
 pub fn is_fuzzy_match(pattern: &str, text: &str) -> bool {
@@ -1414,7 +1421,10 @@ impl VaultManager {
         None
     }
 
-    pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
+    pub fn resolve_cipher_target_candidates(
+        &self,
+        target: &str,
+    ) -> Result<CipherTargetResolution, String> {
         let trimmed = target.trim();
         if trimmed.is_empty() {
             return Err("Target cipher cannot be empty.".to_string());
@@ -1441,30 +1451,30 @@ impl VaultManager {
         let id_matches: Vec<_> = items
             .iter()
             .filter(|i| is_id_match(&i.id, trimmed))
+            .cloned()
             .collect();
         if id_matches.len() == 1 {
-            return Ok((*id_matches[0]).clone());
+            return Ok(CipherTargetResolution::Exact(Box::new(
+                id_matches[0].clone(),
+            )));
         }
         if id_matches.len() > 1 {
-            return Err(format!(
-                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
-                target
-            ));
+            return Ok(CipherTargetResolution::Ambiguous(id_matches));
         }
 
         // 2. Exact Name match (case-insensitive)
         let exact_name_matches: Vec<_> = items
             .iter()
             .filter(|i| i.name.eq_ignore_ascii_case(trimmed))
+            .cloned()
             .collect();
         if exact_name_matches.len() == 1 {
-            return Ok((*exact_name_matches[0]).clone());
+            return Ok(CipherTargetResolution::Exact(Box::new(
+                exact_name_matches[0].clone(),
+            )));
         }
         if exact_name_matches.len() > 1 {
-            return Err(format!(
-                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
-                target
-            ));
+            return Ok(CipherTargetResolution::Ambiguous(exact_name_matches));
         }
 
         // 3. ID prefix match (unique prefix, at least 4 characters)
@@ -1493,15 +1503,15 @@ impl VaultManager {
         let id_prefix_matches: Vec<_> = items
             .iter()
             .filter(|i| is_id_prefix_match(&i.id, trimmed))
+            .cloned()
             .collect();
         if id_prefix_matches.len() == 1 {
-            return Ok((*id_prefix_matches[0]).clone());
+            return Ok(CipherTargetResolution::Exact(Box::new(
+                id_prefix_matches[0].clone(),
+            )));
         }
         if id_prefix_matches.len() > 1 {
-            return Err(format!(
-                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
-                target
-            ));
+            return Ok(CipherTargetResolution::Ambiguous(id_prefix_matches));
         }
 
         // 4. Substring (fuzzy) match (case-insensitive)
@@ -1509,18 +1519,36 @@ impl VaultManager {
         let sub_matches: Vec<_> = items
             .iter()
             .filter(|i| i.name.to_lowercase().contains(&lower))
+            .cloned()
             .collect();
         if sub_matches.len() == 1 {
-            return Ok((*sub_matches[0]).clone());
+            return Ok(CipherTargetResolution::Exact(Box::new(
+                sub_matches[0].clone(),
+            )));
         }
         if sub_matches.len() > 1 {
-            return Err(format!(
-                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
-                target
-            ));
+            return Ok(CipherTargetResolution::Ambiguous(sub_matches));
         }
 
-        Err(format!("Cipher '{}' not found in vault.", target))
+        Ok(CipherTargetResolution::NotFound(format!(
+            "Cipher '{}' not found in vault.",
+            target
+        )))
+    }
+
+    pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
+        match self.resolve_cipher_target_candidates(target)? {
+            CipherTargetResolution::Exact(item) => Ok(*item),
+            CipherTargetResolution::Ambiguous(candidates) => {
+                let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+                Err(format!(
+                    "Multiple ciphers matched '{}': [{}]. Specify by ID or narrower name.",
+                    target,
+                    ids.join(", ")
+                ))
+            }
+            CipherTargetResolution::NotFound(err) => Err(err),
+        }
     }
 
     pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
@@ -2784,6 +2812,37 @@ pub(crate) mod tests {
         // 10. Empty target fails closed
         let err_empty = vault_mgr.resolve_cipher_target("   ").unwrap_err();
         assert_eq!(err_empty, "Target cipher cannot be empty.");
+
+        // 11. Direct verify CipherTargetResolution variants
+        match vault_mgr
+            .resolve_cipher_target_candidates("GitHub Account")
+            .unwrap()
+        {
+            CipherTargetResolution::Exact(item) => {
+                assert_eq!(item.id, "c7694fca-443b-417f-94ad-7be20b694406");
+            }
+            _ => panic!("Expected Exact"),
+        }
+
+        match vault_mgr
+            .resolve_cipher_target_candidates("Duplicate Name")
+            .unwrap()
+        {
+            CipherTargetResolution::Ambiguous(candidates) => {
+                assert_eq!(candidates.len(), 2);
+            }
+            _ => panic!("Expected Ambiguous"),
+        }
+
+        match vault_mgr
+            .resolve_cipher_target_candidates("does-not-exist")
+            .unwrap()
+        {
+            CipherTargetResolution::NotFound(msg) => {
+                assert!(msg.contains("not found in vault"));
+            }
+            _ => panic!("Expected NotFound"),
+        }
     }
 
     #[test]
