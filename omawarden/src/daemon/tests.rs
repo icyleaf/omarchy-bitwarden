@@ -124,6 +124,7 @@ fn test_should_touch_activity_classification() {
         "list",
         "search",
         "ssh_key_create",
+        "cipher_create",
         "get_item",
         "get_ssh_key",
         "get_attachment_key",

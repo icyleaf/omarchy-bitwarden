@@ -373,10 +373,51 @@ enum VaultAction {
     },
     #[command(about = "Search vault items")]
     Search {
-        #[arg(long, default_value = "")]
+        #[arg(value_name = "QUERY", default_value = "")]
         query: String,
+        #[arg(
+            long = "query",
+            help = "Search query string (alternative to positional argument)"
+        )]
+        query_flag: Option<String>,
         #[arg(long = "filter")]
         category: Option<String>,
+    },
+    #[command(about = "Create a new vault cipher")]
+    Create {
+        #[command(subcommand)]
+        item: CreateItemAction,
+        #[arg(long, global = true, help = "Output structured JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CreateItemAction {
+    #[command(about = "Create a new Login cipher")]
+    Login {
+        #[arg(long, help = "Name of the login cipher")]
+        name: String,
+        #[arg(long, help = "Username")]
+        username: String,
+        #[arg(
+            long,
+            required_unless_present = "password_stdin",
+            help = "Password (prefer --password-stdin in automation/pipelines)"
+        )]
+        password: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "password",
+            help = "Read password from standard input"
+        )]
+        password_stdin: bool,
+        #[arg(long, help = "Optional notes")]
+        notes: Option<String>,
+        #[arg(long, help = "Optional URI")]
+        uri: Option<String>,
+        #[arg(long, help = "Optional folder ID")]
+        folder_id: Option<String>,
     },
 }
 
@@ -1432,7 +1473,16 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
                 }
-                VaultAction::Search { query, category } => {
+                VaultAction::Search {
+                    query,
+                    query_flag,
+                    category,
+                } => {
+                    let query = if query.is_empty() {
+                        query_flag.unwrap_or(query)
+                    } else {
+                        query
+                    };
                     if let Err(e @ omawarden::daemon::DispatchError::IncompatibleProtocol { .. }) =
                         omawarden::daemon::ensure_daemon_running()
                     {
@@ -1495,6 +1545,76 @@ fn main() -> ExitCode {
                     let results = vault_mgr.search_items(&query, category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
+                }
+                VaultAction::Create { item, json } => {
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    match item {
+                        CreateItemAction::Login {
+                            name,
+                            username,
+                            password,
+                            password_stdin,
+                            notes,
+                            uri,
+                            folder_id,
+                        } => {
+                            let password_val = if password_stdin {
+                                let mut buf = String::new();
+                                io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                                buf.trim_end_matches(['\r', '\n']).to_string()
+                            } else {
+                                password.unwrap_or_default()
+                            };
+
+                            let mut daemon_req = json!({
+                                "action": "cipher_create",
+                                "cipher_type": "login",
+                                "name": name,
+                                "username": username,
+                                "password": password_val,
+                                "notes": notes,
+                                "uri": uri,
+                                "folder_id": folder_id,
+                            });
+                            if let Some(ref ctx) = client_ctx {
+                                daemon_req["client"] = json!(ctx);
+                            }
+                            match submit_cipher_mutation(&daemon_req) {
+                                Ok(receipt) => {
+                                    if json {
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&receipt).unwrap()
+                                        );
+                                    } else {
+                                        let id =
+                                            receipt["item"]["id"].as_str().unwrap_or("unknown");
+                                        println!("Created login cipher \"{}\" ({}).", name, id);
+                                    }
+                                    ExitCode::SUCCESS
+                                }
+                                Err(error) => {
+                                    let err_msg = error
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Failed to create cipher");
+                                    if json {
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&json!({
+                                                "ok": false,
+                                                "error": err_msg,
+                                            }))
+                                            .unwrap()
+                                        );
+                                    } else {
+                                        eprintln!("Error: {}", err_msg);
+                                    }
+                                    ExitCode::FAILURE
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2281,6 +2401,45 @@ fn main() -> ExitCode {
     }
 }
 
+fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
+    use omawarden::daemon::{dispatch_daemon_request, DispatchError};
+    let reject = |reason: &str| json!({"ok":false, "outcome":"rejected", "error":reason});
+    let ping = match dispatch_daemon_request(&json!({"action":"ping"})) {
+        Ok(p) => p,
+        Err(DispatchError::IncompatibleProtocol { .. }) => {
+            return Err(reject(
+                "Daemon protocol version is incompatible with this client.",
+            ));
+        }
+        Err(_) => return Err(reject("Daemon unavailable.")),
+    };
+    if ping["unlocked"] != true {
+        let (password, ..) = read_auth_payload();
+        if password.is_empty()
+            || !send_daemon_request(&json!({"action":"unlock","password":password}))
+                .is_some_and(|r| r["ok"] == true)
+        {
+            return Err(reject("Unlock the vault before creating a cipher."));
+        }
+    }
+    let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the mutation. Sync the vault before trying again."});
+    let reply = dispatch_daemon_request(request).map_err(|e| match e {
+        DispatchError::NotSent => reject("Could not send the request to the daemon."),
+        DispatchError::Unconfirmed => unknown(),
+        DispatchError::IncompatibleProtocol { .. } => {
+            reject("Daemon protocol version is incompatible with this client.")
+        }
+        DispatchError::LaunchFailed(msg) => reject(&format!("Could not start the daemon: {msg}")),
+    })?;
+    if reply["ok"] == false {
+        return Err(reply);
+    }
+    if reply["ok"] != true || reply["item"]["id"].as_str().is_none_or(str::is_empty) {
+        return Err(unknown());
+    }
+    Ok(reply)
+}
+
 /// Unlock before dispatch when a caller provides the master password on stdin.
 /// Once dispatched, a missing reply cannot justify another create.
 fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
@@ -2300,31 +2459,7 @@ fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
             "Lock the vault and restart the daemon to enable safe cipher writes.",
         ));
     }
-    if ping["unlocked"] != true {
-        let (password, ..) = read_auth_payload();
-        if password.is_empty()
-            || !send_daemon_request(&json!({"action":"unlock","password":password}))
-                .is_some_and(|r| r["ok"] == true)
-        {
-            return Err(reject("Unlock the vault before creating a cipher."));
-        }
-    }
-    let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the write. Sync the vault before trying again."});
-    let reply = dispatch_daemon_request(request).map_err(|e| match e {
-        DispatchError::NotSent => reject("Could not send the request to the daemon."),
-        DispatchError::Unconfirmed => unknown(),
-        DispatchError::IncompatibleProtocol { .. } => {
-            reject("Daemon protocol version is incompatible with this client.")
-        }
-        DispatchError::LaunchFailed(msg) => reject(&format!("Could not start the daemon: {msg}")),
-    })?;
-    if reply["ok"] == false {
-        return Err(reply);
-    }
-    if reply["ok"] != true || reply["item"]["id"].as_str().is_none_or(str::is_empty) {
-        return Err(unknown());
-    }
-    Ok(reply)
+    submit_cipher_mutation(request)
 }
 
 struct VaultOutputItem {
