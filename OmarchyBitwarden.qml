@@ -2611,6 +2611,7 @@ Item {
             latestReleaseNotes: root.latestReleaseNotes
             latestReleaseUrl: root.latestReleaseUrl
             latestReleaseTitle: root.latestReleaseTitle
+            overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
             isCheckingUpdate: root.isCheckingUpdate
             updateCheckStatus: root.updateCheckStatus
             fontFamily: root.fontFamily
