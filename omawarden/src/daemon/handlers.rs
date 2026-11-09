@@ -67,11 +67,14 @@ pub fn handle_client_with_peer(
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()));
     let is_privileged = reads_plaintext
-        || matches!(action, "ssh_key_create" | "ssh_key_create_v2" | "sync")
+        || matches!(
+            action,
+            "ssh_key_create" | "ssh_key_create_v2" | "cipher_create" | "sync"
+        )
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
 
     if is_privileged && !is_unlocked {
-        if action == "ssh_key_create_v2" {
+        if action == "ssh_key_create_v2" || action == "cipher_create" {
             writeln!(
                 stream,
                 "{}",
@@ -309,6 +312,10 @@ pub fn handle_client_with_peer(
             json!({"ok":false, "outcome":"rejected", "error":"Update the CLI to create SSH keys safely."})
         }
         "ssh_key_create_v2" => match state.vault_mgr.write_ssh_key(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "cipher_create" => match state.vault_mgr.create_cipher(req, client_context.as_ref()) {
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },
