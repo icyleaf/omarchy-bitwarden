@@ -1404,6 +1404,41 @@ impl BitwardenApiClient {
 
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
+
+    pub fn delete_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        permanent: bool,
+    ) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = if permanent {
+            format!("{}/ciphers/{}", self.urls.api_url, id)
+        } else {
+            format!("{}/ciphers/{}/delete", self.urls.api_url, id)
+        };
+        let req = if permanent {
+            client.delete(&url)
+        } else {
+            client.put(&url).header("Content-Length", "0")
+        };
+        let mut resp = req
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Delete cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 pub fn decrypt_cipher_string(
@@ -4059,5 +4094,84 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
             .unwrap_err()
             .to_string()
             .contains("No recognized private key found"));
+    }
+
+    #[test]
+    fn test_delete_cipher_soft_and_permanent_http_calls() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_url = format!("http://{}", addr);
+
+        let client = BitwardenApiClient::for_cipher_write(&server_url, None).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("PUT /api/ciphers/uuid-1/delete HTTP/1.1"));
+
+            let mut has_auth = false;
+            let mut has_cl_zero = false;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if line
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth = true;
+                }
+                if line.to_lowercase().starts_with("content-length: 0") {
+                    has_cl_zero = true;
+                }
+            }
+            assert!(has_auth);
+            assert!(has_cl_zero);
+
+            let response = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}";
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&mut stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            assert!(line2.starts_with("DELETE /api/ciphers/uuid-2 HTTP/1.1"));
+
+            let mut has_auth2 = false;
+            loop {
+                line2.clear();
+                reader2.read_line(&mut line2).unwrap();
+                if line2 == "\r\n" {
+                    break;
+                }
+                if line2
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth2 = true;
+                }
+            }
+            assert!(has_auth2);
+
+            let response2 = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}";
+            stream2.write_all(response2.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+        });
+
+        let soft_res = client.delete_cipher("test-token", "uuid-1", false);
+        assert!(soft_res.is_ok());
+
+        let hard_res = client.delete_cipher("test-token", "uuid-2", true);
+        assert!(hard_res.is_ok());
+
+        handle.join().unwrap();
     }
 }

@@ -12,6 +12,7 @@ pub(crate) struct CacheSession {
 pub(crate) enum IndexUpdate {
     Replace(Vec<VaultItem>),
     Upsert(Box<VaultItem>),
+    Remove(String),
     CiphertextOnly,
 }
 
@@ -102,6 +103,9 @@ impl VaultManager {
             IndexUpdate::Upsert(item) => {
                 items.retain(|cached| cached.id != item.id);
                 items.push(*item);
+            }
+            IndexUpdate::Remove(id) => {
+                items.retain(|cached| cached.id != id);
             }
             IndexUpdate::CiphertextOnly => {}
         }

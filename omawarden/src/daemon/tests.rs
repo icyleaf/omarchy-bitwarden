@@ -125,6 +125,8 @@ fn test_should_touch_activity_classification() {
         "search",
         "ssh_key_create",
         "cipher_create",
+        "cipher_delete",
+        "cipher_resolve",
         "get_item",
         "get_ssh_key",
         "get_attachment_key",
@@ -2317,4 +2319,82 @@ fn test_multi_client_differing_commits_coexistence() {
     handle.stop();
     let join_res = handle.join().expect("daemon thread panicked");
     assert!(join_res.is_ok());
+}
+
+#[test]
+fn test_daemon_cipher_resolve_and_delete_privileged_gating() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("daemon_data.json");
+    let storage_mgr = StorageManager::new(path);
+    let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+    let send_req = |req: Value| -> Value {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client(server, st);
+        });
+        let payload = format!("{}\n", req);
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+
+    // 1. Locked: cipher_resolve & cipher_delete must fail closed
+    *state.vault_mgr.is_unlocked.write().unwrap() = false;
+    let res_resolve_locked = send_req(json!({ "action": "cipher_resolve", "target": "site" }));
+    assert_eq!(res_resolve_locked["ok"], false);
+    assert_eq!(res_resolve_locked["outcome"], "rejected");
+    assert_eq!(
+        res_resolve_locked["error"],
+        "Unlock the vault before deleting a cipher."
+    );
+
+    let res_delete_locked = send_req(json!({ "action": "cipher_delete", "id": "uuid-1" }));
+    assert_eq!(res_delete_locked["ok"], false);
+    assert_eq!(res_delete_locked["outcome"], "rejected");
+    assert_eq!(
+        res_delete_locked["error"],
+        "Unlock the vault before deleting a cipher."
+    );
+
+    // 2. Unlocked: cipher_resolve returns redacted metadata (no credentials)
+    *state.vault_mgr.is_unlocked.write().unwrap() = true;
+    let raw_item = json!({
+        "id": "cipher-uuid-9999",
+        "name": "Secret Bank Account",
+        "type": 1,
+        "login": {
+            "username": "user",
+            "password": "plaintext_password_that_must_not_leak",
+            "totp": "seed123"
+        }
+    });
+    let items = state.vault_mgr.parse_raw_items(&[raw_item]);
+    *state.vault_mgr.decrypted_items.write().unwrap() = items;
+
+    let res_resolve_ok =
+        send_req(json!({ "action": "cipher_resolve", "target": "Secret Bank Account" }));
+    assert_eq!(res_resolve_ok["ok"], true);
+    let resolved_item = &res_resolve_ok["item"];
+    assert_eq!(resolved_item["id"], "cipher-uuid-9999");
+    assert_eq!(resolved_item["name"], "Secret Bank Account");
+    assert_eq!(resolved_item["type"], "login");
+    // Verify password, totp, and login details are NOT exposed over IPC
+    assert!(resolved_item.get("login").is_none());
+    assert!(resolved_item.get("password").is_none());
+
+    // 3. Unlocked: cipher_resolve for nonexistent returns error
+    let res_resolve_not_found =
+        send_req(json!({ "action": "cipher_resolve", "target": "Nonexistent" }));
+    assert_eq!(res_resolve_not_found["ok"], false);
+    assert_eq!(
+        res_resolve_not_found["error"],
+        "Cipher 'Nonexistent' not found in vault."
+    );
 }

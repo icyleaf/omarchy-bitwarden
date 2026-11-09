@@ -402,6 +402,31 @@ enum VaultAction {
         #[arg(long, global = true, help = "Output structured JSON")]
         json: bool,
     },
+    #[command(
+        about = "Delete a cipher from the vault",
+        alias = "remove",
+        alias = "rm"
+    )]
+    Delete {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target cipher name or 32-character / UUID ID to delete"
+        )]
+        target: String,
+        #[arg(
+            long,
+            help = "Permanently delete the cipher instead of soft-deleting (moving to trash)"
+        )]
+        permanent: bool,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip confirmation prompt in interactive terminals"
+        )]
+        yes: bool,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1880,6 +1905,138 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                VaultAction::Delete {
+                    target,
+                    permanent,
+                    yes,
+                    json,
+                } => {
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    let mut resolve_req = json!({
+                        "action": "cipher_resolve",
+                        "target": target,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        resolve_req["client"] = json!(ctx);
+                    }
+
+                    let resolved = match submit_cipher_mutation(&resolve_req) {
+                        Ok(res) => res["item"].clone(),
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to resolve cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            return ExitCode::FAILURE;
+                        }
+                    };
+
+                    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+                    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+
+                    if resolved
+                        .get("organization_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Organization ciphers are read-only.",
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Organization ciphers are read-only.");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !yes
+                        && !json;
+                    if is_interactive {
+                        let action_verb = if permanent {
+                            "Permanently delete"
+                        } else {
+                            "Delete"
+                        };
+                        eprint!("{action_verb} item '{item_name}'? [y/N] ");
+                        let _ = io::stderr().flush();
+                        let mut input = String::new();
+                        if io::stdin().read_line(&mut input).is_err() {
+                            eprintln!("Deletion aborted.");
+                            return ExitCode::FAILURE;
+                        }
+                        let trimmed = input.trim();
+                        if !trimmed.eq_ignore_ascii_case("y")
+                            && !trimmed.eq_ignore_ascii_case("yes")
+                        {
+                            eprintln!("Deletion aborted.");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+
+                    let mut daemon_req = json!({
+                        "action": "cipher_delete",
+                        "id": item_id,
+                        "permanent": permanent,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
+                                let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
+                                if permanent {
+                                    println!("Permanently deleted cipher \"{}\" ({}).", name, id);
+                                } else {
+                                    println!("Deleted cipher \"{}\" ({}).", name, id);
+                                }
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to delete cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
             }
         }
 
@@ -2688,7 +2845,11 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
             || !send_daemon_request(&json!({"action":"unlock","password":password}))
                 .is_some_and(|r| r["ok"] == true)
         {
-            return Err(reject("Unlock the vault before creating a cipher."));
+            let verb = match request.get("action").and_then(|a| a.as_str()) {
+                Some("cipher_delete") | Some("cipher_resolve") => "deleting",
+                _ => "creating",
+            };
+            return Err(reject(&format!("Unlock the vault before {verb} a cipher.")));
         }
     }
     let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the mutation. Sync the vault before trying again."});
@@ -3336,6 +3497,83 @@ mod tests {
                 assert!(capitalize);
             }
             _ => panic!("Expected Commands::Generate"),
+        }
+    }
+
+    #[test]
+    fn test_cli_vault_delete_flags_and_aliases() {
+        // Default delete
+        let cli = Cli::try_parse_from(["omawarden", "vault", "delete", "my-target"]).unwrap();
+        match cli.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Delete {
+                        target,
+                        permanent,
+                        yes,
+                        json,
+                    },
+            } => {
+                assert_eq!(target, "my-target");
+                assert!(!permanent);
+                assert!(!yes);
+                assert!(!json);
+            }
+            _ => panic!("Expected VaultAction::Delete"),
+        }
+
+        // Flags: --permanent, -y, --json
+        let cli_flags = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "delete",
+            "target-uuid",
+            "--permanent",
+            "-y",
+            "--json",
+        ])
+        .unwrap();
+        match cli_flags.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Delete {
+                        target,
+                        permanent,
+                        yes,
+                        json,
+                    },
+            } => {
+                assert_eq!(target, "target-uuid");
+                assert!(permanent);
+                assert!(yes);
+                assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Delete"),
+        }
+
+        // Alias: rm
+        let cli_rm =
+            Cli::try_parse_from(["omawarden", "vault", "rm", "target-rm", "--yes"]).unwrap();
+        match cli_rm.command {
+            Commands::Vault {
+                action: VaultAction::Delete { target, yes, .. },
+            } => {
+                assert_eq!(target, "target-rm");
+                assert!(yes);
+            }
+            _ => panic!("Expected VaultAction::Delete for alias rm"),
+        }
+
+        // Alias: remove
+        let cli_remove =
+            Cli::try_parse_from(["omawarden", "vault", "remove", "target-remove"]).unwrap();
+        match cli_remove.command {
+            Commands::Vault {
+                action: VaultAction::Delete { target, .. },
+            } => {
+                assert_eq!(target, "target-remove");
+            }
+            _ => panic!("Expected VaultAction::Delete for alias remove"),
         }
     }
 }

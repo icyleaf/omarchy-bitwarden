@@ -1414,6 +1414,78 @@ impl VaultManager {
         None
     }
 
+    pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err("Target cipher cannot be empty.".to_string());
+        }
+
+        let items = self.get_items();
+
+        // 1. Exact ID or 32-character hex ID match
+        let is_id_match = |item_id: &str, target_val: &str| -> bool {
+            if item_id.eq_ignore_ascii_case(target_val) {
+                return true;
+            }
+            if target_val.len() == 32 && item_id.len() == 36 && !target_val.contains('-') {
+                let stripped: String = item_id.chars().filter(|&c| c != '-').collect();
+                return stripped.eq_ignore_ascii_case(target_val);
+            }
+            if target_val.len() == 36 && item_id.len() == 32 && target_val.contains('-') {
+                let stripped: String = target_val.chars().filter(|&c| c != '-').collect();
+                return item_id.eq_ignore_ascii_case(&stripped);
+            }
+            false
+        };
+
+        let id_matches: Vec<_> = items
+            .iter()
+            .filter(|i| is_id_match(&i.id, trimmed))
+            .collect();
+        if id_matches.len() == 1 {
+            return Ok((*id_matches[0]).clone());
+        }
+        if id_matches.len() > 1 {
+            return Err(format!(
+                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
+                target
+            ));
+        }
+
+        // 2. Exact Name match (case-insensitive)
+        let exact_name_matches: Vec<_> = items
+            .iter()
+            .filter(|i| i.name.eq_ignore_ascii_case(trimmed))
+            .collect();
+        if exact_name_matches.len() == 1 {
+            return Ok((*exact_name_matches[0]).clone());
+        }
+        if exact_name_matches.len() > 1 {
+            return Err(format!(
+                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
+                target
+            ));
+        }
+
+        // 3. Substring (fuzzy) match (case-insensitive)
+        let lower = trimmed.to_lowercase();
+        let sub_matches: Vec<_> = items
+            .iter()
+            .filter(|i| i.name.to_lowercase().contains(&lower))
+            .collect();
+        if sub_matches.len() == 1 {
+            return Ok((*sub_matches[0]).clone());
+        }
+        if sub_matches.len() > 1 {
+            return Err(format!(
+                "Multiple ciphers matched '{}'. Specify by ID or narrower name.",
+                target
+            ));
+        }
+
+        Err(format!("Cipher '{}' not found in vault.", target))
+    }
+
     pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
         self.find_item(id_or_name, Some("ssh_key"))
     }
@@ -2596,6 +2668,74 @@ pub(crate) mod tests {
 
         let not_found_cat = vault_mgr.find_item("Deploy Key", Some("login"));
         assert!(not_found_cat.is_none());
+    }
+
+    #[test]
+    fn test_resolve_cipher_target() {
+        let raw_items = vec![
+            json!({
+                "id": "c7694fca-443b-417f-94ad-7be20b694406",
+                "name": "GitHub Account",
+                "type": 1,
+            }),
+            json!({
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "name": "GitLab Personal",
+                "type": 1,
+            }),
+            json!({
+                "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "name": "Duplicate Name",
+                "type": 1,
+            }),
+            json!({
+                "id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "name": "Duplicate Name",
+                "type": 1,
+            }),
+        ];
+        let vault_mgr = VaultManager::new("http://127.0.0.1:9", None, None);
+        let items = vault_mgr.parse_raw_items(&raw_items);
+        *vault_mgr.decrypted_items.write().unwrap() = items;
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        // 1. Exact 36-char UUID match
+        let found = vault_mgr
+            .resolve_cipher_target("c7694fca-443b-417f-94ad-7be20b694406")
+            .unwrap();
+        assert_eq!(found.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 2. 32-char hex match (without hyphens)
+        let found_hex = vault_mgr
+            .resolve_cipher_target("c7694fca443b417f94ad7be20b694406")
+            .unwrap();
+        assert_eq!(found_hex.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 3. Exact name match (case-insensitive)
+        let found_name = vault_mgr.resolve_cipher_target("github account").unwrap();
+        assert_eq!(found_name.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 4. Substring (fuzzy) match
+        let found_sub = vault_mgr.resolve_cipher_target("gitlab").unwrap();
+        assert_eq!(found_sub.id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+
+        // 5. Ambiguous exact name match fails closed
+        let err_ambig_exact = vault_mgr
+            .resolve_cipher_target("Duplicate Name")
+            .unwrap_err();
+        assert!(err_ambig_exact.contains("Multiple ciphers matched 'Duplicate Name'"));
+
+        // 6. Ambiguous substring match fails closed ("git" matches GitHub Account and GitLab Personal)
+        let err_ambig_sub = vault_mgr.resolve_cipher_target("git").unwrap_err();
+        assert!(err_ambig_sub.contains("Multiple ciphers matched 'git'"));
+
+        // 7. Not found fails closed
+        let err_not_found = vault_mgr.resolve_cipher_target("nonexistent").unwrap_err();
+        assert_eq!(err_not_found, "Cipher 'nonexistent' not found in vault.");
+
+        // 8. Empty target fails closed
+        let err_empty = vault_mgr.resolve_cipher_target("   ").unwrap_err();
+        assert_eq!(err_empty, "Target cipher cannot be empty.");
     }
 
     #[test]
