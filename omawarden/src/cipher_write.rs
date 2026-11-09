@@ -10,24 +10,58 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use zeroize::ZeroizeOnDrop;
 
+#[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
+#[serde(untagged)]
+pub(crate) enum LoginUriDraft {
+    Plain(String),
+    Object { uri: String },
+}
+
+impl LoginUriDraft {
+    pub(crate) fn uri(&self) -> &str {
+        match self {
+            Self::Plain(s) => s.as_str(),
+            Self::Object { uri } => uri.as_str(),
+        }
+    }
+}
+
 #[derive(Deserialize, ZeroizeOnDrop, Default)]
 pub(crate) struct LoginDraft {
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) uri: Option<String>,
-    pub(crate) uris: Option<Vec<String>>,
+    pub(crate) uris: Option<Vec<LoginUriDraft>>,
     pub(crate) totp: Option<String>,
+}
+
+#[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
+#[serde(untagged)]
+pub(crate) enum CipherTypeField {
+    Numeric(u32),
+    Named(String),
 }
 
 #[derive(Deserialize, ZeroizeOnDrop)]
 pub(crate) struct CipherCreateDraft {
+    #[serde(default, rename = "type")]
+    pub(crate) raw_type: Option<CipherTypeField>,
     #[serde(default)]
     pub(crate) cipher_type: Option<String>,
-    #[serde(rename = "type")]
-    pub(crate) numeric_type: Option<u32>,
     pub(crate) name: String,
     pub(crate) notes: Option<String>,
     pub(crate) folder_id: Option<String>,
+    #[serde(rename = "folderId")]
+    pub(crate) folder_id_camel: Option<String>,
+    pub(crate) organization_id: Option<String>,
+    #[serde(rename = "organizationId")]
+    pub(crate) organization_id_camel: Option<String>,
+    pub(crate) collection_id: Option<String>,
+    #[serde(rename = "collectionId")]
+    pub(crate) collection_id_camel: Option<String>,
+    pub(crate) collection_ids: Option<Vec<String>>,
+    #[serde(rename = "collectionIds")]
+    pub(crate) collection_ids_camel: Option<Vec<String>>,
     pub(crate) favorite: Option<bool>,
     pub(crate) login: Option<LoginDraft>,
     pub(crate) username: Option<String>,
@@ -49,6 +83,41 @@ impl VaultManager {
         let mut payload = {
             let draft: CipherCreateDraft = serde_json::from_value(request)
                 .map_err(|_| WriteError::Rejected("Invalid cipher fields.".into()))?;
+            let has_org = draft
+                .organization_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some()
+                || draft
+                    .organization_id_camel
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .is_some();
+            let has_col_single = draft
+                .collection_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some()
+                || draft
+                    .collection_id_camel
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .is_some();
+            let has_cols = draft
+                .collection_ids
+                .as_ref()
+                .filter(|c| !c.is_empty())
+                .is_some()
+                || draft
+                    .collection_ids_camel
+                    .as_ref()
+                    .filter(|c| !c.is_empty())
+                    .is_some();
+            if has_org || has_col_single || has_cols {
+                return Err(WriteError::Rejected(
+                    "Organization ciphers are read-only.".into(),
+                ));
+            }
             let unlocked = self
                 .is_unlocked
                 .read()
@@ -198,11 +267,48 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         .filter(|s| !s.is_empty())
         .map(encrypt)
         .transpose()?;
-    let folder_id = draft.folder_id.clone();
+    let folder_id = draft
+        .folder_id
+        .clone()
+        .or_else(|| draft.folder_id_camel.clone());
     let favorite = draft.favorite.unwrap_or(false);
 
-    let is_note = draft.numeric_type == Some(2) || draft.cipher_type.as_deref() == Some("note");
-    if is_note {
+    enum ResolvedType {
+        Login,
+        Note,
+    }
+
+    let resolved_type = match (&draft.raw_type, &draft.cipher_type) {
+        (Some(CipherTypeField::Numeric(1)), _) => ResolvedType::Login,
+        (Some(CipherTypeField::Numeric(2)), _) => ResolvedType::Note,
+        (Some(CipherTypeField::Numeric(other)), _) => {
+            return Err(format!(
+                "Unsupported cipher type {other}. Only login (type 1) and secure note (type 2) ciphers are supported."
+            ));
+        }
+        (Some(CipherTypeField::Named(name)), _) | (None, Some(name)) => {
+            match name.to_lowercase().as_str() {
+                "login" => ResolvedType::Login,
+                "note" | "secure_note" | "securenote" => ResolvedType::Note,
+                other => {
+                    return Err(format!(
+                        "Unsupported cipher type '{other}'. Only login (type 1) and secure note (type 2) ciphers are supported."
+                    ));
+                }
+            }
+        }
+        (None, None) => {
+            if draft.login.is_some() || draft.username.is_some() || draft.password.is_some() {
+                ResolvedType::Login
+            } else if draft.notes.is_some() {
+                ResolvedType::Note
+            } else {
+                ResolvedType::Login
+            }
+        }
+    };
+
+    if matches!(resolved_type, ResolvedType::Note) {
         return Ok(json!({
             "type": 2,
             "folderId": folder_id,
@@ -255,9 +361,10 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
     }
     if let Some(extra_uris) = draft.login.as_ref().and_then(|l| l.uris.as_deref()) {
         for u in extra_uris {
-            if !u.is_empty() {
+            let uri_str = u.uri();
+            if !uri_str.is_empty() {
                 uris_list.push(json!({
-                    "uri": encrypt(u)?,
+                    "uri": encrypt(uri_str)?,
                     "match": null
                 }));
             }

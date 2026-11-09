@@ -475,3 +475,599 @@ fn test_create_login_cipher_json_mode_and_password_stdin() {
     assert_eq!(stdout_json["outcome"], "saved");
     assert_eq!(stdout_json["item"]["id"], "json-cipher-uuid-9999");
 }
+
+#[test]
+fn test_create_note_cipher_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "note",
+            "--name",
+            "Wifi Password",
+            "--notes",
+            "SuperSecret",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], 2);
+
+        let decrypt = |v: &Value| -> String {
+            let enc_str = v.as_str().expect("must be string");
+            EncString::parse(enc_str)
+                .unwrap()
+                .decrypt_string(&user_key)
+                .unwrap()
+        };
+
+        assert_eq!(decrypt(&payload["name"]), "Wifi Password");
+        assert_eq!(decrypt(&payload["notes"]), "SuperSecret");
+
+        let resp_body = json!({
+            "id": "note-cipher-uuid-5678",
+            "organizationId": null,
+            "folderId": null,
+            "type": 2,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "secureNote": { "type": 0 },
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success(), "CLI exit status failed");
+    assert!(posted, "Bitwarden API POST was not received");
+    let cli_stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        cli_stdout.contains("Created note cipher \"Wifi Password\" (note-cipher-uuid-5678)."),
+        "Unexpected CLI confirmation output: {cli_stdout}"
+    );
+
+    // Verify discoverability via positional search
+    let search_output = make_command(dir)
+        .args(["vault", "search", "Wifi Password"])
+        .output()
+        .unwrap();
+    assert!(search_output.status.success());
+    let stdout = String::from_utf8_lossy(&search_output.stdout);
+    assert!(stdout.contains("Wifi Password"));
+
+    // Verify discoverability via vault list
+    let list_output = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(list_output.status.success());
+    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(list_stdout.contains("Wifi Password"));
+}
+
+#[test]
+fn test_create_cipher_from_stdin_and_from_json() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // 1. Test via stdin
+    let raw_payload = json!({
+        "type": 2,
+        "name": "Note From Stdin",
+        "notes": "Stdin Secret Content"
+    });
+
+    let mut cli_stdin = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli_stdin.stdin.take().unwrap();
+        stdin.write_all(raw_payload.to_string().as_bytes()).unwrap();
+    }
+
+    let mut posted_stdin = false;
+    while cli_stdin.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted_stdin = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], 2);
+
+        let decrypt = |v: &Value| -> String {
+            let enc_str = v.as_str().expect("must be string");
+            EncString::parse(enc_str)
+                .unwrap()
+                .decrypt_string(&user_key)
+                .unwrap()
+        };
+
+        assert_eq!(decrypt(&payload["name"]), "Note From Stdin");
+        assert_eq!(decrypt(&payload["notes"]), "Stdin Secret Content");
+
+        let resp_body = json!({
+            "id": "stdin-note-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 2,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "secureNote": { "type": 0 },
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out_stdin = cli_stdin.wait_with_output().unwrap();
+    assert!(out_stdin.status.success());
+    assert!(posted_stdin);
+
+    // 2. Test via --from-json
+    let json_file = dir.join("item.json");
+    let file_payload = json!({
+        "type": 2,
+        "name": "Note From File",
+        "notes": "File Secret Content"
+    });
+    std::fs::write(&json_file, file_payload.to_string()).unwrap();
+
+    let mut cli_file = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "--from-json",
+            json_file.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted_file = false;
+    while cli_file.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted_file = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], 2);
+
+        let resp_body = json!({
+            "id": "file-note-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 2,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "secureNote": { "type": 0 },
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out_file = cli_file.wait_with_output().unwrap();
+    assert!(out_file.status.success());
+    assert!(posted_file);
+}
+
+#[test]
+fn test_create_cipher_organization_scope_rejected() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Reject organizationId
+    let mut cli_org = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli_org.stdin.take().unwrap();
+        stdin
+            .write_all(
+                json!({
+                    "type": 2,
+                    "name": "Org Note",
+                    "organizationId": "some-org-id"
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    let out_org = cli_org.wait_with_output().unwrap();
+    assert!(!out_org.status.success());
+    let stderr_org = String::from_utf8_lossy(&out_org.stderr);
+    assert!(
+        stderr_org.contains("Organization ciphers are read-only"),
+        "Unexpected error: {stderr_org}"
+    );
+
+    // Reject collectionIds
+    let mut cli_col = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli_col.stdin.take().unwrap();
+        stdin
+            .write_all(
+                json!({
+                    "type": 2,
+                    "name": "Col Note",
+                    "collectionIds": ["some-col-id"]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    let out_col = cli_col.wait_with_output().unwrap();
+    assert!(!out_col.status.success());
+    let stderr_col = String::from_utf8_lossy(&out_col.stderr);
+    assert!(
+        stderr_col.contains("Organization ciphers are read-only"),
+        "Unexpected error: {stderr_col}"
+    );
+
+    // Reject collectionId as singular string
+    let mut cli_col_single = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli_col_single.stdin.take().unwrap();
+        stdin
+            .write_all(
+                json!({
+                    "type": 2,
+                    "name": "Col Note Single",
+                    "collectionId": "single-col-id"
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    let out_col_single = cli_col_single.wait_with_output().unwrap();
+    assert!(!out_col_single.status.success());
+    let stderr_col_single = String::from_utf8_lossy(&out_col_single.stderr);
+    assert!(
+        stderr_col_single.contains("Organization ciphers are read-only"),
+        "Unexpected error: {stderr_col_single}"
+    );
+
+    // Reject CLI flags --organization-id and --collection-id
+    let out_cli_flags = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "note",
+            "--name",
+            "CLI Org Note",
+            "--notes",
+            "Secret",
+            "--organization-id",
+            "cli-org-id",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out_cli_flags.status.success());
+    let stderr_cli = String::from_utf8_lossy(&out_cli_flags.stderr);
+    assert!(
+        stderr_cli.contains("Organization ciphers are read-only"),
+        "Unexpected error: {stderr_cli}"
+    );
+}
+
+#[test]
+fn test_create_cipher_unsupported_type_rejected() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Passing type 3 (Card) must be explicitly rejected, not coerced into login
+    let mut cli_card = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli_card.stdin.take().unwrap();
+        stdin
+            .write_all(
+                json!({
+                    "type": 3,
+                    "name": "Card Item",
+                    "notes": "Card Secret"
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    let out_card = cli_card.wait_with_output().unwrap();
+    assert!(!out_card.status.success());
+    let stderr_card = String::from_utf8_lossy(&out_card.stderr);
+    assert!(
+        stderr_card.contains("Unsupported cipher type"),
+        "Unexpected error: {stderr_card}"
+    );
+}
+
+#[test]
+fn test_create_cipher_string_type_and_bitwarden_uris_format() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Test standard Bitwarden export with object uris array and string type
+    let mut cli = make_command(dir)
+        .args(["vault", "create", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = cli.stdin.take().unwrap();
+        stdin
+            .write_all(
+                json!({
+                    "type": "login",
+                    "name": "Exported Item",
+                    "login": {
+                        "username": "exportuser",
+                        "password": "exportpass",
+                        "uris": [
+                            {"uri": "https://service.com", "match": null}
+                        ]
+                    }
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], 1);
+
+        let enc_uri = payload["login"]["uris"][0]["uri"].as_str().unwrap();
+        let decrypted_uri = EncString::parse(enc_uri)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(decrypted_uri, "https://service.com");
+
+        let resp_body = json!({
+            "id": "export-item-uuid",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success(), "CLI exit status failed");
+    assert!(posted, "Bitwarden API POST was not received");
+}
