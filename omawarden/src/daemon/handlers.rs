@@ -378,8 +378,8 @@ pub fn handle_client_with_peer(
         },
         "cipher_resolve" => {
             let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            match state.vault_mgr.resolve_cipher_target(target) {
-                Ok(item) => json!({
+            match state.vault_mgr.resolve_cipher_target_candidates(target) {
+                Ok(crate::vault::CipherTargetResolution::Exact(item)) => json!({
                     "ok": true,
                     "item": {
                         "id": item.id,
@@ -388,6 +388,37 @@ pub fn handle_client_with_peer(
                         "organization_id": item.organization_id,
                     }
                 }),
+                Ok(crate::vault::CipherTargetResolution::Ambiguous(candidates)) => {
+                    let candidate_items: Vec<Value> = candidates
+                        .into_iter()
+                        .map(|item| {
+                            json!({
+                                "id": item.id,
+                                "name": item.name,
+                                "type": item.type_name,
+                                "sub_title": item.sub_title,
+                                "organization_id": item.organization_id,
+                            })
+                        })
+                        .collect();
+                    let ids: Vec<&str> = candidate_items
+                        .iter()
+                        .filter_map(|c| c["id"].as_str())
+                        .collect();
+                    json!({
+                        "ok": false,
+                        "ambiguous": true,
+                        "candidates": candidate_items,
+                        "error": format!(
+                            "Multiple ciphers matched '{}': [{}]. Specify by ID or narrower name.",
+                            target,
+                            ids.join(", ")
+                        ),
+                    })
+                }
+                Ok(crate::vault::CipherTargetResolution::NotFound(err)) => {
+                    json!({ "ok": false, "error": err })
+                }
                 Err(err) => json!({ "ok": false, "error": err }),
             }
         }
