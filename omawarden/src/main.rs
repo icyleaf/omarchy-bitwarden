@@ -386,7 +386,19 @@ enum VaultAction {
     #[command(about = "Create a new vault cipher")]
     Create {
         #[command(subcommand)]
-        item: CreateItemAction,
+        item: Option<CreateItemAction>,
+        #[arg(
+            long,
+            conflicts_with = "stdin",
+            help = "Path to JSON file containing cipher payload"
+        )]
+        from_json: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "from_json",
+            help = "Read cipher payload JSON from standard input"
+        )]
+        stdin: bool,
         #[arg(long, global = true, help = "Output structured JSON")]
         json: bool,
     },
@@ -418,6 +430,33 @@ enum CreateItemAction {
         uri: Option<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
+        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        organization_id: Option<String>,
+        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
+        collection_id: Option<String>,
+    },
+    #[command(about = "Create a new Secure Note cipher", alias = "secure-note")]
+    Note {
+        #[arg(long, help = "Name of the secure note")]
+        name: String,
+        #[arg(
+            long,
+            required_unless_present = "notes_stdin",
+            help = "Content of the secure note (prefer --notes-stdin for sensitive data)"
+        )]
+        notes: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "notes",
+            help = "Read note content from standard input"
+        )]
+        notes_stdin: bool,
+        #[arg(long, help = "Optional folder ID")]
+        folder_id: Option<String>,
+        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        organization_id: Option<String>,
+        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
+        collection_id: Option<String>,
     },
 }
 
@@ -1546,10 +1585,33 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
                 }
-                VaultAction::Create { item, json } => {
+                VaultAction::Create {
+                    item,
+                    from_json,
+                    stdin,
+                    json,
+                } => {
+                    if item.is_some() && (stdin || from_json.is_some()) {
+                        let err_msg =
+                            "Cannot combine a cipher type subcommand with --stdin or --from-json.";
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": err_msg,
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: {err_msg}");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
                     let client_ctx = omawarden::api::resolve_effective_client_context(None);
-                    match item {
-                        CreateItemAction::Login {
+                    let (mut daemon_req, label, cipher_name) = match item {
+                        Some(CreateItemAction::Login {
                             name,
                             username,
                             password,
@@ -1557,47 +1619,150 @@ fn main() -> ExitCode {
                             notes,
                             uri,
                             folder_id,
-                        } => {
+                            organization_id,
+                            collection_id,
+                        }) => {
+                            if organization_id
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
+                            {
+                                let err_msg = "Organization ciphers are read-only.";
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string_pretty(&json!({
+                                            "ok": false,
+                                            "error": err_msg,
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {err_msg}");
+                                }
+                                return ExitCode::FAILURE;
+                            }
+
                             let password_val = if password_stdin {
                                 let mut buf = String::new();
                                 io::stdin().read_to_string(&mut buf).unwrap_or_default();
-                                buf.trim_end_matches(['\r', '\n']).to_string()
+                                zeroize::Zeroizing::new(
+                                    buf.trim_end_matches(['\r', '\n']).to_string(),
+                                )
                             } else {
-                                password.unwrap_or_default()
+                                zeroize::Zeroizing::new(password.unwrap_or_default())
                             };
 
-                            let mut daemon_req = json!({
+                            let req = json!({
                                 "action": "cipher_create",
                                 "cipher_type": "login",
                                 "name": name,
                                 "username": username,
-                                "password": password_val,
+                                "password": *password_val,
                                 "notes": notes,
                                 "uri": uri,
                                 "folder_id": folder_id,
                             });
-                            if let Some(ref ctx) = client_ctx {
-                                daemon_req["client"] = json!(ctx);
-                            }
-                            match submit_cipher_mutation(&daemon_req) {
-                                Ok(receipt) => {
-                                    if json {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&receipt).unwrap()
-                                        );
-                                    } else {
-                                        let id =
-                                            receipt["item"]["id"].as_str().unwrap_or("unknown");
-                                        println!("Created login cipher \"{}\" ({}).", name, id);
-                                    }
-                                    ExitCode::SUCCESS
+                            (req, "login cipher", name)
+                        }
+                        Some(CreateItemAction::Note {
+                            name,
+                            notes,
+                            notes_stdin,
+                            folder_id,
+                            organization_id,
+                            collection_id,
+                        }) => {
+                            if organization_id
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
+                            {
+                                let err_msg = "Organization ciphers are read-only.";
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string_pretty(&json!({
+                                            "ok": false,
+                                            "error": err_msg,
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {err_msg}");
                                 }
-                                Err(error) => {
-                                    let err_msg = error
-                                        .get("error")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Failed to create cipher");
+                                return ExitCode::FAILURE;
+                            }
+
+                            let notes_val = if notes_stdin {
+                                let mut buf = String::new();
+                                io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                                zeroize::Zeroizing::new(
+                                    buf.trim_end_matches(['\r', '\n']).to_string(),
+                                )
+                            } else {
+                                zeroize::Zeroizing::new(notes.unwrap_or_default())
+                            };
+
+                            let req = json!({
+                                "action": "cipher_create",
+                                "type": 2,
+                                "cipher_type": "note",
+                                "name": name,
+                                "notes": *notes_val,
+                                "folder_id": folder_id,
+                            });
+                            (req, "note cipher", name)
+                        }
+                        None => {
+                            let raw_json = if stdin {
+                                let mut buf = String::new();
+                                io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                                zeroize::Zeroizing::new(buf)
+                            } else if let Some(path) = from_json {
+                                match std::fs::read_to_string(&path) {
+                                    Ok(content) => zeroize::Zeroizing::new(content),
+                                    Err(err) => {
+                                        let err_msg =
+                                            format!("Cannot read file '{}': {err}", path.display());
+                                        if json {
+                                            println!(
+                                                "{}",
+                                                serde_json::to_string_pretty(&json!({
+                                                    "ok": false,
+                                                    "error": err_msg,
+                                                }))
+                                                .unwrap()
+                                            );
+                                        } else {
+                                            eprintln!("Error: {err_msg}");
+                                        }
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            } else {
+                                let err_msg = "Specify a cipher type subcommand (e.g. 'login', 'note') or pass --stdin / --from-json.";
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string_pretty(&json!({
+                                            "ok": false,
+                                            "error": err_msg,
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {err_msg}");
+                                }
+                                return ExitCode::FAILURE;
+                            };
+
+                            let mut val: Value = match serde_json::from_str(&raw_json) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    let err_msg = format!("Invalid JSON payload: {err}");
                                     if json {
                                         println!(
                                             "{}",
@@ -1608,11 +1773,110 @@ fn main() -> ExitCode {
                                             .unwrap()
                                         );
                                     } else {
-                                        eprintln!("Error: {}", err_msg);
+                                        eprintln!("Error: {err_msg}");
                                     }
-                                    ExitCode::FAILURE
+                                    return ExitCode::FAILURE;
                                 }
+                            };
+
+                            let has_org = val
+                                .get("organizationId")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                                || val
+                                    .get("organization_id")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .is_some();
+                            let has_cols = val
+                                .get("collectionIds")
+                                .and_then(|v| v.as_array())
+                                .filter(|a| !a.is_empty())
+                                .is_some()
+                                || val
+                                    .get("collection_ids")
+                                    .and_then(|v| v.as_array())
+                                    .filter(|a| !a.is_empty())
+                                    .is_some()
+                                || val
+                                    .get("collectionIds")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .is_some()
+                                || val
+                                    .get("collection_ids")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .is_some()
+                                || val
+                                    .get("collectionId")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .is_some()
+                                || val
+                                    .get("collection_id")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .is_some();
+                            if has_org || has_cols {
+                                let err_msg = "Organization ciphers are read-only.";
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string_pretty(&json!({
+                                            "ok": false,
+                                            "error": err_msg,
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {err_msg}");
+                                }
+                                return ExitCode::FAILURE;
                             }
+
+                            val["action"] = json!("cipher_create");
+                            let name = val
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unnamed")
+                                .to_string();
+                            (val, "cipher", name)
+                        }
+                    };
+
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or("unknown");
+                                println!("Created {} \"{}\" ({}).", label, cipher_name, id);
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to create cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            ExitCode::FAILURE
                         }
                     }
                 }
@@ -2404,6 +2668,11 @@ fn main() -> ExitCode {
 fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
     use omawarden::daemon::{dispatch_daemon_request, DispatchError};
     let reject = |reason: &str| json!({"ok":false, "outcome":"rejected", "error":reason});
+    if let Err(e @ DispatchError::IncompatibleProtocol { .. }) =
+        omawarden::daemon::ensure_daemon_running()
+    {
+        return Err(reject(&e.to_string()));
+    }
     let ping = match dispatch_daemon_request(&json!({"action":"ping"})) {
         Ok(p) => p,
         Err(DispatchError::IncompatibleProtocol { .. }) => {
