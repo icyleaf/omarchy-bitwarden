@@ -69,7 +69,12 @@ pub fn handle_client_with_peer(
     let is_privileged = reads_plaintext
         || matches!(
             action,
-            "ssh_key_create" | "ssh_key_create_v2" | "cipher_create" | "sync"
+            "ssh_key_create"
+                | "ssh_key_create_v2"
+                | "cipher_create"
+                | "cipher_delete"
+                | "cipher_resolve"
+                | "sync"
         )
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
 
@@ -82,6 +87,19 @@ pub fn handle_client_with_peer(
                     "ok": false,
                     "outcome": "rejected",
                     "error": "Unlock the vault before creating a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
+        if action == "cipher_delete" || action == "cipher_resolve" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before deleting a cipher.",
                     "protocol_version": CURRENT_PROTOCOL_VERSION
                 })
             )?;
@@ -319,6 +337,25 @@ pub fn handle_client_with_peer(
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },
+        "cipher_delete" => match state.vault_mgr.delete_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "cipher_resolve" => {
+            let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            match state.vault_mgr.resolve_cipher_target(target) {
+                Ok(item) => json!({
+                    "ok": true,
+                    "item": {
+                        "id": item.id,
+                        "name": item.name,
+                        "type": item.type_name,
+                        "organization_id": item.organization_id,
+                    }
+                }),
+                Err(err) => json!({ "ok": false, "error": err }),
+            }
+        }
         "get_item" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());

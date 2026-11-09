@@ -631,6 +631,8 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "ssh_key_create"
             | "ssh_key_create_v2"
             | "cipher_create"
+            | "cipher_delete"
+            | "cipher_resolve"
             | "get_item"
             | "get_ssh_key"
             | "get_attachment_key"

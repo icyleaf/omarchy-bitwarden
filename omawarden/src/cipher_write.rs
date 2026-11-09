@@ -252,6 +252,174 @@ impl VaultManager {
         .ok()?;
         Some(())
     }
+
+    pub(crate) fn delete_cipher(
+        &self,
+        request: Value,
+        context: Option<&ClientContext>,
+    ) -> Result<Value, WriteError> {
+        let generation = self.lock_generation();
+        let storage = self
+            .storage_mgr
+            .load_existing()
+            .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
+
+        let permanent = request
+            .get("permanent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let (target_id, target_name) = {
+            let unlocked = self
+                .is_unlocked
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            let active = self
+                .storage
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            if !*unlocked
+                || generation != self.lock_generation()
+                || !active.same_active_slot(&storage)
+            {
+                return Err(WriteError::Rejected("Vault session changed.".into()));
+            }
+
+            let resolved_item = if let Some(id) = request
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                self.resolve_cipher_target(id)
+                    .map_err(WriteError::Rejected)?
+            } else if let Some(target) = request
+                .get("target")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                self.resolve_cipher_target(target)
+                    .map_err(WriteError::Rejected)?
+            } else {
+                return Err(WriteError::Rejected("Missing cipher target.".into()));
+            };
+
+            if resolved_item
+                .organization_id
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(WriteError::Rejected(
+                    "Organization ciphers are read-only.".into(),
+                ));
+            }
+
+            (resolved_item.id, resolved_item.name)
+        };
+
+        let server = if storage.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &storage.server_url
+        };
+        let client = BitwardenApiClient::for_cipher_write(server, context).map_err(|_| {
+            WriteError::Rejected("Could not initialize the cipher HTTP client.".into())
+        })?;
+        let token = self.keyring_mgr.for_storage(&storage).access_token();
+        let renew = || self.renew_for_account(&storage, context, generation);
+        let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
+            Some(t) => t,
+            None => renew()?,
+        };
+        let mut renewed_after_rejection = false;
+        let _pending = self
+            .storage_mgr
+            .begin_cipher_write()
+            .map_err(|e| e.to_string())?;
+        loop {
+            let claims = crate::auth::jwt_claims(&token);
+            let subject = claims
+                .as_ref()
+                .and_then(|c| c["sub"].as_str())
+                .filter(|s| !s.is_empty());
+            let stored = storage.user_id.as_deref().filter(|s| !s.is_empty());
+            if stored.zip(subject).is_some_and(|(a, b)| a != b) {
+                return Err(WriteError::Rejected(
+                    "Credential belongs to a different account.".into(),
+                ));
+            }
+
+            let same_account = self
+                .storage_mgr
+                .load_existing()
+                .is_ok_and(|s| s.same_active_slot(&storage));
+            let current = self
+                .is_unlocked
+                .read()
+                .is_ok_and(|unlocked| *unlocked && self.lock_generation() == generation);
+            if !same_account || !current {
+                return Err(WriteError::Rejected(
+                    "Session changed before deleting the cipher.".into(),
+                ));
+            }
+
+            match client.delete_cipher(&token, &target_id, permanent) {
+                Err(ApiError::HttpStatus(reqwest::StatusCode::UNAUTHORIZED, _))
+                    if !renewed_after_rejection =>
+                {
+                    renewed_after_rejection = true;
+                    token = renew()?;
+                }
+                result => {
+                    result.map_err(|e| match e {
+                        ApiError::HttpStatus(status, msg) => WriteError::Rejected(format!(
+                            "Server rejected deletion (HTTP {status}): {msg}"
+                        )),
+                        other => {
+                            WriteError::Rejected(format!("Server communication failed: {other}"))
+                        }
+                    })?;
+                    break;
+                }
+            }
+        }
+
+        let receipt = json!({
+            "id": target_id,
+            "name": target_name,
+            "permanent": permanent,
+        });
+        let cached = self
+            .cache_deleted_cipher(&storage, generation, &target_id)
+            .is_some();
+        Ok(
+            json!({"ok": true, "outcome": if cached { "deleted" } else { "deleted_needs_sync" }, "item": receipt}),
+        )
+    }
+
+    fn cache_deleted_cipher(
+        &self,
+        account: &VaultStorage,
+        generation: u64,
+        id: &str,
+    ) -> Option<()> {
+        let base = self.storage_mgr.cache_snapshot().ok()?;
+        if !base.storage.same_active_slot(account) {
+            return None;
+        }
+        let mut updated = base.storage.clone();
+        updated.ciphers.retain(|c| c["id"] != id);
+        self.commit_cache(
+            &base,
+            updated,
+            IndexUpdate::Remove(id.to_string()),
+            CacheSession {
+                generation,
+                unlocked: true,
+            },
+        )
+        .ok()?;
+        Some(())
+    }
 }
 
 fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result<Value, String> {
