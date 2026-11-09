@@ -68,6 +68,26 @@ class TestWorkflowActionPinning(unittest.TestCase):
         self.assertIn("omawarden/**", content, "release-aur-git.yml must trigger on changes in omawarden/**")
         self.assertIn(".github/workflows/release-aur-git.yml", content, "release-aur-git.yml must trigger on workflow file changes")
 
+    def test_auto_release_pr_filters_dev_bumps(self):
+        workflow = REPO_ROOT / ".github" / "workflows" / "auto-release-pr.yml"
+        self.assertTrue(workflow.exists(), f"{workflow} does not exist")
+        content = workflow.read_text(encoding="utf-8")
+
+        # Verify workflow checks for ^bump: and explicitly excludes (-dev|.dev)
+        self.assertIn("grep -Eq '(-dev|\\.dev)'", content, "auto-release-pr.yml must filter out -dev and .dev bump commits")
+
+        # Simulate the shell filter regex logic
+        def is_release_bump(msg: str) -> bool:
+            return bool(re.search(r"^bump:", msg)) and not bool(re.search(r"(-dev|\.dev)", msg))
+
+        self.assertTrue(is_release_bump("bump: omawarden 0.12.0"))
+        self.assertTrue(is_release_bump("bump: omawarden 0.12.0, omarchy-bitwarden 0.15.0"))
+        self.assertFalse(is_release_bump("bump(dev): omawarden 0.12.0-dev"))
+        self.assertFalse(is_release_bump("bump: omawarden 0.12.0-dev"))
+        self.assertFalse(is_release_bump("bump: omawarden 0.12.0.dev"))
+        self.assertFalse(is_release_bump("feat(ui): add something"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

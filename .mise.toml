@@ -86,6 +86,11 @@ TARGET="${usage_target}"
 V1="${usage_version}"
 V2="${usage_plugin_version:-}"
 
+if [[ "$V1" == *"-dev"* || "$V1" == *".dev"* || "${V2:-}" == *"-dev"* || "${V2:-}" == *".dev"* ]]; then
+  echo "Error: 'mise run bump' is for formal releases. For development pre-release bumps, use: mise run bump-dev"
+  exit 1
+fi
+
 BUMP_CLI=false
 BUMP_PLUGIN=false
 CLI_VER=""
@@ -113,6 +118,80 @@ case "$TARGET" in
 esac
 
 COMMIT_MSG="bump:"
+
+if [ "$BUMP_CLI" = true ]; then
+  echo "Bumping omawarden to $CLI_VER..."
+  sed -i -E "s/^version = .*/version = \"$CLI_VER\"/" omawarden/Cargo.toml
+  (cd omawarden && cargo check --quiet)
+  git add omawarden/Cargo.toml omawarden/Cargo.lock
+  COMMIT_MSG="$COMMIT_MSG omawarden $CLI_VER"
+fi
+
+if [ "$BUMP_PLUGIN" = true ]; then
+  echo "Bumping omarchy-bitwarden plugin to $PLUGIN_VER..."
+  sed -i -E "s/\"version\": .*/\"version\": \"$PLUGIN_VER\",/" manifest.json
+  git add manifest.json
+  if [ "$BUMP_CLI" = true ]; then
+    COMMIT_MSG="$COMMIT_MSG, omarchy-bitwarden $PLUGIN_VER"
+  else
+    COMMIT_MSG="$COMMIT_MSG omarchy-bitwarden $PLUGIN_VER"
+  fi
+fi
+
+git commit -m "$COMMIT_MSG"
+echo "Successfully created commit: $COMMIT_MSG"
+'''
+
+[tasks.bump-dev]
+description = "Bump component versions to pre-release dev versions and create a bump(dev) commit"
+usage = '''
+arg "<target>" help="Target component (cli, plugin, all)" {
+  choices "cli" "plugin" "all"
+}
+arg "<version>" help="Development version for target or cli_version when all (e.g. 0.12.0-dev)"
+arg "[plugin_version]" help="Plugin development version when using all (e.g. 0.15.0-dev)"
+'''
+run = '''
+TARGET="${usage_target}"
+V1="${usage_version}"
+V2="${usage_plugin_version:-}"
+
+ensure_dev() {
+  local ver="$1"
+  if [[ "$ver" != *"-dev"* && "$ver" != *".dev"* ]]; then
+    echo "${ver}-dev"
+  else
+    echo "${ver}"
+  fi
+}
+
+BUMP_CLI=false
+BUMP_PLUGIN=false
+CLI_VER=""
+PLUGIN_VER=""
+
+case "$TARGET" in
+  cli)
+    BUMP_CLI=true
+    CLI_VER=$(ensure_dev "$V1")
+    ;;
+  plugin)
+    BUMP_PLUGIN=true
+    PLUGIN_VER=$(ensure_dev "$V1")
+    ;;
+  all)
+    if [ -z "$V2" ]; then
+      echo "Error: Both cli and plugin versions required for 'all'. Example: mise run bump-dev all 0.12.0-dev 0.15.0-dev"
+      exit 1
+    fi
+    BUMP_CLI=true
+    CLI_VER=$(ensure_dev "$V1")
+    BUMP_PLUGIN=true
+    PLUGIN_VER=$(ensure_dev "$V2")
+    ;;
+esac
+
+COMMIT_MSG="bump(dev):"
 
 if [ "$BUMP_CLI" = true ]; then
   echo "Bumping omawarden to $CLI_VER..."
