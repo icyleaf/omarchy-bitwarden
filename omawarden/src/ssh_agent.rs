@@ -484,11 +484,40 @@ impl Host for DaemonState {
 /// Start or stop the agent to match the `ssh_agent_enabled` setting, without
 /// restarting the daemon (which would lock the vault).
 pub fn apply(state: &Arc<DaemonState>) -> std::io::Result<bool> {
+    apply_with_options(state, false)
+}
+
+/// Start or stop the agent with optional capability gating bypass.
+pub fn apply_with_options(
+    state: &Arc<DaemonState>,
+    ignore_server_capabilities: bool,
+) -> std::io::Result<bool> {
     let enabled = crate::config::ConfigManager::default()
         .load()
         .ssh_agent_enabled;
     let running = state.ssh_agent.running.load(Ordering::SeqCst);
     if enabled && !running {
+        let server = {
+            let account = state.vault_mgr.storage.read().ok();
+            if let Some(acc) = account.as_ref().filter(|a| !a.server_url.is_empty()) {
+                acc.server_url.clone()
+            } else if !state.vault_mgr.server_url.is_empty() {
+                state.vault_mgr.server_url.clone()
+            } else {
+                crate::config::ConfigManager::default().load().server_url
+            }
+        };
+        if let Err(e) = crate::capabilities::check_feature_gating(
+            &server,
+            "ssh-key-vault-item",
+            ignore_server_capabilities,
+        ) {
+            crate::log_warn!("omawarden:ssh-agent", "Refusing to launch SSH agent: {}", e);
+            return Err(std::io::Error::other(format!(
+                "Refusing to launch SSH agent: {}",
+                e
+            )));
+        }
         spawn(state.clone())?;
     } else if !enabled && running {
         // An unlinked socket can't be connected to; the idle accept thread

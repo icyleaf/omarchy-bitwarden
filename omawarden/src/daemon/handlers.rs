@@ -266,10 +266,16 @@ pub fn handle_client_with_peer(
         }
         "status" => state.vault_mgr.get_status(),
         // SSH agent confirmations: the overlay lists pending prompts and answers them.
-        "ssh_agent_apply" => match crate::ssh_agent::apply(&state) {
-            Ok(_) => json!({ "ok": true, "running": crate::ssh_agent::is_running(&state) }),
-            Err(e) => json!({ "ok": false, "error": format!("SSH agent: {e}") }),
-        },
+        "ssh_agent_apply" => {
+            let ignore_caps = req
+                .get("ignore_server_capabilities")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match crate::ssh_agent::apply_with_options(&state, ignore_caps) {
+                Ok(_) => json!({ "ok": true, "running": crate::ssh_agent::is_running(&state) }),
+                Err(e) => json!({ "ok": false, "error": format!("SSH agent: {e}") }),
+            }
+        }
         "ssh_agent_status" => json!({
             "ok": true,
             "running": crate::ssh_agent::is_running(&state),
