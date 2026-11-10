@@ -46,7 +46,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
                     server_url: server_url.to_string(),
                     server_reachable: false,
                     keyring_available: which::which("secret-tool").is_ok(),
-                    clipboard_available: which::which("wl-copy").is_ok(),
+                    clipboard_available: crate::clipboard::ClipboardGuard::default().is_available(),
                     error: Some(format!("Client mTLS certificate error: {}", e)),
                 };
             }
@@ -87,8 +87,10 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
     // 2. Check Keyring (secret-tool)
     let keyring_available = which::which("secret-tool").is_ok();
 
-    // 3. Check Wayland clipboard (wl-copy)
-    let clipboard_available = which::which("wl-copy").is_ok();
+    // 3. Check clipboard provider
+    let clipboard = crate::clipboard::ClipboardGuard::default();
+    let clipboard_available = clipboard.is_available();
+    let clipboard_err = clipboard.unavailable_reason();
 
     let all_ok = server_reachable && keyring_available && clipboard_available;
 
@@ -115,7 +117,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         } else if !keyring_available {
             Some("Linux Secret Service (secret-tool) is not available.".to_string())
         } else if !clipboard_available {
-            Some("Wayland clipboard utility (wl-copy) not found.".to_string())
+            clipboard_err
         } else {
             None
         },
