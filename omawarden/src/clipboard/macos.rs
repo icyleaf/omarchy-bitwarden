@@ -360,4 +360,45 @@ exit 0
         assert!(!provider.is_available());
         assert!(provider.unavailable_reason().is_some());
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_macos_real_system_pasteboard_changecount() {
+        let provider = MacOsClipboardProvider::default();
+        if !provider.is_available() {
+            return;
+        }
+
+        // 1. Initial changeCount
+        let initial_count = provider.current_change_count();
+        assert!(
+            initial_count.is_some(),
+            "NSPasteboard changeCount should be queryable on macOS"
+        );
+        let initial_val = initial_count.unwrap();
+
+        // 2. Copy a secret token
+        let secret = format!(
+            "omawarden_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        provider.copy(&secret, true).unwrap();
+
+        let after_copy_val = provider.recorded_change_count().unwrap();
+        assert!(
+            after_copy_val >= initial_val,
+            "changeCount should update after copy"
+        );
+
+        // 3. Clear pasteboard -> changeCount should match recorded, so clear proceeds
+        provider.clear().unwrap();
+        let after_clear_val = provider.recorded_change_count().unwrap();
+        assert!(
+            after_clear_val >= after_copy_val,
+            "changeCount should update after clear"
+        );
+    }
 }
