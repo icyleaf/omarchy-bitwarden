@@ -614,6 +614,28 @@ impl DaemonState {
         let res = self.vault_mgr.sync_with_client(client_context);
         if res.is_ok() {
             self.touch_activity();
+
+            // Trigger non-blocking background capability discovery (ADR-0031)
+            let server = {
+                let account = self.vault_mgr.storage.read().unwrap();
+                if account.server_url.is_empty() {
+                    self.vault_mgr.server_url.clone()
+                } else {
+                    account.server_url.clone()
+                }
+            };
+            let bg_ctx = client_context.cloned();
+            std::thread::Builder::new()
+                .name("capability-discovery".to_string())
+                .spawn(move || {
+                    let _ = crate::capabilities::get_or_discover_capabilities(
+                        &server,
+                        true,
+                        bg_ctx.as_ref(),
+                        None,
+                    );
+                })
+                .ok();
         }
         res
     }

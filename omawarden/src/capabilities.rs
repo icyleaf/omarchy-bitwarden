@@ -17,6 +17,17 @@ pub enum FeatureStatus {
     Deprecated,
 }
 
+impl FeatureStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Disabled => "disabled",
+            Self::Unsupported => "unsupported",
+            Self::Deprecated => "deprecated",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FeatureCategory {
