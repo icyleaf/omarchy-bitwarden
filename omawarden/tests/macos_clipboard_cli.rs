@@ -74,19 +74,21 @@ fn test_macos_clipboard_holder_with_explicit_provider() {
         .env("OMAWARDEN_CONFIG_DIR", fixture.dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"macos_fixture_token")
-        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"macos_fixture_token").unwrap();
+    drop(stdin);
 
-    // The holder immediately writes content to pbcopy
-    std::thread::sleep(Duration::from_millis(200));
+    // Read the 1-byte handshake sent by clipboard-holder
+    let mut stdout = child.stdout.take().unwrap();
+    let mut handshake = [0u8; 1];
+    use std::io::Read;
+    let _ = stdout.read_exact(&mut handshake);
+
+    std::thread::sleep(Duration::from_millis(100));
     assert_eq!(fixture.read_clipboard(), "macos_fixture_token");
 
     // After 1.5s, the holder TTL timer triggers clear
