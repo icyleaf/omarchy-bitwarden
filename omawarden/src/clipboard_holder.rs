@@ -47,7 +47,9 @@ pub(super) fn hold_selection(
                     return;
                 }
                 std::thread::sleep(timeout);
-                let _ = expiry_provider.clear();
+                if !expiry_provider.monitors_selection() {
+                    let _ = expiry_provider.clear();
+                }
             }
             revoke();
         })?;

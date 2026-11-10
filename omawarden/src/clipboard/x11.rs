@@ -51,7 +51,7 @@ impl ClipboardProvider for X11ClipboardProvider {
     }
 
     fn monitors_selection(&self) -> bool {
-        false
+        true
     }
 
     fn binary_path(&self) -> Option<PathBuf> {
