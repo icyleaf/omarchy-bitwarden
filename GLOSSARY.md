@@ -72,6 +72,14 @@ _Avoid_: Profile, personal info
 An encrypted arbitrary text note cipher.
 _Avoid_: Note, text file, memo
 
+**Custom Field**:
+An arbitrary user-defined key-value attribute attached to a vault cipher, categorized as Text, Hidden (masked secret), Boolean (toggle), or Linked.
+_Avoid_: Extra property, custom property, metadata field, user attribute
+
+**Login URI**:
+A website or service uniform resource identifier associated with a Login cipher, evaluated against target application domains or hosts using configured match detection rules.
+_Avoid_: Website URL, login URL, web link, target address
+
 **SSH Key**:
 An OpenSSH cryptographic keypair cipher (Type 5) containing private key, public key, and SHA256 fingerprint.
 _Avoid_: Keyfile, SSH credential
