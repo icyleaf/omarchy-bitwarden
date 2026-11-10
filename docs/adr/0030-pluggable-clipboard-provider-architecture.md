@@ -36,6 +36,7 @@ We decouple the clipboard subsystem into a two-tier architecture:
 - Providers report whether they monitor selection takeovers via `monitors_selection()`.
 - **Wayland (`WlClipboardProvider`)**: Returns `monitors_selection() = true`. The holder adopts child processes (`PR_SET_CHILD_SUBREAPER`) and reaps `wl-copy` upon selection loss via `waitpid`, releasing holds and session locks early.
 - **Timer-Driven Providers (`MacOsClipboardProvider`, `X11ClipboardProvider`, `MockClipboardProvider`)**: The holder parks and relies on the expiry timer thread to call `provider.clear()` followed by process group cleanup.
+- **macOS Scheme A Selection Protection**: On macOS (`MacOsClipboardProvider`), `pbcopy` writes to the centralized pasteboard and exits immediately. To prevent clobbering replacement clipboard selections upon TTL expiry, `MacOsClipboardProvider` tracks `[NSPasteboard generalPasteboard].changeCount`. If `changeCount` increments after Omawarden's copy, the TTL expiry clearing step is safely skipped.
 
 ### 3. Resolution Chain & Overrides
 - Resolves providers in the following precedence order:
