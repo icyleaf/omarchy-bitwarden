@@ -170,8 +170,10 @@ enum Commands {
     },
     #[command(name = "ssh-agent", about = "SSH agent backed by the vault's SSH keys")]
     SshAgent {
+        #[arg(long, alias = "force", help = "Bypass server capability gating checks")]
+        ignore_server_capabilities: bool,
         #[command(subcommand)]
-        action: SshAgentAction,
+        action: Option<SshAgentAction>,
     },
     #[command(about = "Manage or run omawarden background daemon")]
     Daemon {
@@ -265,6 +267,11 @@ enum ServerAction {
 enum SshAgentAction {
     #[command(about = "Show whether the agent is enabled and running, and its socket (JSON)")]
     Status,
+    #[command(about = "Start the SSH agent")]
+    Start {
+        #[arg(long, alias = "force", help = "Bypass server capability gating checks")]
+        ignore_server_capabilities: bool,
+    },
     #[command(about = "List signatures waiting for confirmation (JSON)")]
     Pending,
     #[command(about = "Answer a pending confirmation")]
@@ -623,6 +630,8 @@ enum SshKeyAction {
         folder: Option<String>,
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        #[arg(long, alias = "force", help = "Bypass server capability gating checks")]
+        ignore_server_capabilities: bool,
     },
     #[command(about = "Import an existing SSH private key file or STDIN into Bitwarden")]
     Import {
@@ -638,6 +647,8 @@ enum SshKeyAction {
         notes: Option<String>,
         #[arg(long)]
         folder: Option<String>,
+        #[arg(long, alias = "force", help = "Bypass server capability gating checks")]
+        ignore_server_capabilities: bool,
     },
     #[command(about = "Export an SSH key to local file or standard output")]
     Export {
@@ -1108,38 +1119,90 @@ fn main() -> ExitCode {
             }
         },
 
-        Commands::SshAgent { action } => {
-            let request = match action {
-                SshAgentAction::Status => json!({ "action": "ssh_agent_status" }),
-                SshAgentAction::Pending => json!({ "action": "ssh_agent_pending" }),
-                SshAgentAction::Reply { id, allow, deny: _ } => {
-                    json!({ "action": "ssh_agent_reply", "id": id, "approve": allow })
+        Commands::SshAgent {
+            ignore_server_capabilities,
+            action,
+        } => match action {
+            None | Some(SshAgentAction::Start { .. }) => {
+                let bypass = ignore_server_capabilities
+                    || matches!(
+                        action,
+                        Some(SshAgentAction::Start {
+                            ignore_server_capabilities: true
+                        })
+                    );
+
+                if let Err(e) = omawarden::capabilities::check_feature_gating(
+                    &cfg.server_url,
+                    "ssh-key-vault-item",
+                    bypass,
+                ) {
+                    let err_msg = format!("Refusing to launch SSH agent: {e}");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": false,
+                            "error": err_msg,
+                        }))
+                        .unwrap()
+                    );
+                    return ExitCode::FAILURE;
                 }
-            };
-            let _ = ensure_daemon_running();
-            match send_daemon_request(&request) {
-                Some(mut resp) => {
-                    if let Some(obj) = resp.as_object_mut() {
-                        obj.insert("enabled".into(), json!(cfg.ssh_agent_enabled));
-                        obj.insert("confirm".into(), json!(cfg.ssh_agent_confirm));
+
+                let _ = ensure_daemon_running();
+                let request = json!({
+                    "action": "ssh_agent_apply",
+                    "ignore_server_capabilities": bypass
+                });
+                match send_daemon_request(&request) {
+                    Some(resp) => {
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
                     }
-                    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
-                    let delivered = resp
-                        .get("delivered")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) && delivered {
-                        ExitCode::SUCCESS
-                    } else {
+                    None => {
+                        eprintln!("The omawarden daemon is not responding.");
                         ExitCode::FAILURE
                     }
                 }
-                None => {
-                    eprintln!("The omawarden daemon is not responding.");
-                    ExitCode::FAILURE
+            }
+            Some(sub_action) => {
+                let request = match sub_action {
+                    SshAgentAction::Status => json!({ "action": "ssh_agent_status" }),
+                    SshAgentAction::Pending => json!({ "action": "ssh_agent_pending" }),
+                    SshAgentAction::Reply { id, allow, deny: _ } => {
+                        json!({ "action": "ssh_agent_reply", "id": id, "approve": allow })
+                    }
+                    SshAgentAction::Start { .. } => unreachable!(),
+                };
+                let _ = ensure_daemon_running();
+                match send_daemon_request(&request) {
+                    Some(mut resp) => {
+                        if let Some(obj) = resp.as_object_mut() {
+                            obj.insert("enabled".into(), json!(cfg.ssh_agent_enabled));
+                            obj.insert("confirm".into(), json!(cfg.ssh_agent_confirm));
+                        }
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        let delivered = resp
+                            .get("delivered")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) && delivered {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::FAILURE
+                        }
+                    }
+                    None => {
+                        eprintln!("The omawarden daemon is not responding.");
+                        ExitCode::FAILURE
+                    }
                 }
             }
-        }
+        },
 
         Commands::Health => {
             let status = check_system_health(&cfg.server_url);
@@ -2854,7 +2917,21 @@ fn main() -> ExitCode {
                     notes,
                     folder,
                     out_dir,
+                    ignore_server_capabilities,
                 } => {
+                    if let Err(e) = omawarden::capabilities::check_feature_gating(
+                        &cfg.server_url,
+                        "ssh-key-vault-item",
+                        ignore_server_capabilities,
+                    ) {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                .unwrap()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
                     let _ = omawarden::daemon::ensure_daemon_running();
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
@@ -2930,7 +3007,21 @@ fn main() -> ExitCode {
                     stdin,
                     notes,
                     folder,
+                    ignore_server_capabilities,
                 } => {
+                    if let Err(e) = omawarden::capabilities::check_feature_gating(
+                        &cfg.server_url,
+                        "ssh-key-vault-item",
+                        ignore_server_capabilities,
+                    ) {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({ "ok": false, "error": e }))
+                                .unwrap()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
                     let _ = omawarden::daemon::ensure_daemon_running();
                     let raw_priv = if stdin || private_key.is_none() {
                         let mut buffer = String::new();

@@ -87,7 +87,14 @@ const KNOWN_FEATURES: &[KnownFeatureSpec] = &[
     },
 ];
 
-pub fn evaluate_matrix(feature_states: &HashMap<String, Value>) -> Vec<FeatureEvaluation> {
+pub fn evaluate_matrix(
+    server_url: Option<&str>,
+    feature_states: &HashMap<String, Value>,
+) -> Vec<FeatureEvaluation> {
+    let is_cloud = server_url
+        .map(|u| crate::api::EnvironmentUrls::resolve(u, None).is_cloud)
+        .unwrap_or(false);
+
     let mut matrix = Vec::new();
     let mut recognized_keys = std::collections::HashSet::new();
 
@@ -98,15 +105,22 @@ pub fn evaluate_matrix(feature_states: &HashMap<String, Value>) -> Vec<FeatureEv
             recognized_keys.insert(alias.to_string());
         }
 
-        let is_active = feature_states
+        let explicit_status = feature_states
             .get(spec.name)
             .or_else(|| {
                 spec.aliases
                     .iter()
                     .find_map(|alias| feature_states.get(*alias))
             })
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .and_then(Value::as_bool);
+
+        let is_active = match explicit_status {
+            Some(active) => active,
+            None => {
+                // Official Bitwarden cloud natively supports GA features like ssh-key-vault-item
+                is_cloud && spec.name == "ssh-key-vault-item"
+            }
+        };
 
         matrix.push(FeatureEvaluation {
             name: spec.name.to_string(),
@@ -289,7 +303,7 @@ pub fn discover_capabilities(
     }
 
     let cached_at = Utc::now().to_rfc3339();
-    let matrix = evaluate_matrix(&feature_states);
+    let matrix = evaluate_matrix(Some(server_url), &feature_states);
 
     let caps = ServerCapabilities {
         server_url: server_url.to_string(),
@@ -330,6 +344,42 @@ pub fn get_or_discover_capabilities(
     }
 }
 
+/// Check whether an upstream feature is supported based on cached server capabilities
+/// or a best-effort check. If the feature is explicitly disabled or unsupported,
+/// returns an actionable `Err(String)` unless `ignore_server_capabilities` is true.
+pub fn check_feature_gating(
+    server_url: &str,
+    feature_name: &str,
+    ignore_server_capabilities: bool,
+) -> Result<(), String> {
+    if ignore_server_capabilities {
+        return Ok(());
+    }
+
+    let caps = load_cached_capabilities_for(Some(server_url))
+        .or_else(|| get_or_discover_capabilities(server_url, false, None, None).ok());
+
+    if let Some(c) = caps {
+        if let Some(eval) = c.matrix.iter().find(|m| m.name == feature_name) {
+            if eval.status == FeatureStatus::Disabled || eval.status == FeatureStatus::Unsupported {
+                let status_str = eval.status.as_str();
+                let recommendation = if feature_name == "ssh-key-vault-item" {
+                    " For Vaultwarden self-hosters: enable SSH Key vault storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item in your server environment."
+                } else if feature_name == "ssh-agent-v2" {
+                    " For Vaultwarden self-hosters: enable modern agent support by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your server environment."
+                } else {
+                    ""
+                };
+                return Err(format!(
+                    "Upstream server does not support '{feature_name}' (feature status: {status_str}).{recommendation} Use --ignore-server-capabilities to bypass this check."
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,7 +392,7 @@ mod tests {
         states.insert("ssh-agent".to_string(), Value::Bool(true));
         states.insert("future-experimental-flag".to_string(), Value::Bool(true));
 
-        let matrix = evaluate_matrix(&states);
+        let matrix = evaluate_matrix(None, &states);
 
         let v2 = matrix.iter().find(|m| m.name == "ssh-agent-v2").unwrap();
         assert_eq!(v2.status, FeatureStatus::Supported);
@@ -362,6 +412,37 @@ mod tests {
             .find(|m| m.name == "future-experimental-flag")
             .unwrap();
         assert_eq!(future.status, FeatureStatus::Unsupported);
+    }
+
+    #[test]
+    fn test_evaluate_matrix_cloud_vs_self_hosted_defaults() {
+        let empty_states = HashMap::new();
+
+        // 1. Official Bitwarden cloud defaults ssh-key-vault-item to Supported
+        let cloud_matrix = evaluate_matrix(Some("https://vault.bitwarden.com"), &empty_states);
+        let cloud_ssh_key = cloud_matrix
+            .iter()
+            .find(|m| m.name == "ssh-key-vault-item")
+            .unwrap();
+        assert_eq!(cloud_ssh_key.status, FeatureStatus::Supported);
+
+        // 2. Non-cloud self-hosted (Vaultwarden) defaults unconfigured flag to Disabled
+        let self_hosted_matrix = evaluate_matrix(Some("https://vaultwarden.local"), &empty_states);
+        let sh_ssh_key = self_hosted_matrix
+            .iter()
+            .find(|m| m.name == "ssh-key-vault-item")
+            .unwrap();
+        assert_eq!(sh_ssh_key.status, FeatureStatus::Disabled);
+
+        // 3. Explicit false on cloud or self-hosted is respected
+        let mut explicit_false = HashMap::new();
+        explicit_false.insert("ssh-key-vault-item".to_string(), Value::Bool(false));
+        let matrix_false = evaluate_matrix(Some("https://vault.bitwarden.com"), &explicit_false);
+        let false_key = matrix_false
+            .iter()
+            .find(|m| m.name == "ssh-key-vault-item")
+            .unwrap();
+        assert_eq!(false_key.status, FeatureStatus::Disabled);
     }
 
     #[test]
