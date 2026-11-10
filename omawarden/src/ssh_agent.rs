@@ -1069,6 +1069,7 @@ struct Peer {
 }
 
 impl Peer {
+    #[cfg(target_os = "linux")]
     fn of(stream: &UnixStream) -> Peer {
         let mut cred = libc::ucred {
             pid: 0,
@@ -1092,6 +1093,11 @@ impl Peer {
         } else {
             Peer::default()
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn of(_stream: &UnixStream) -> Peer {
+        Peer::default()
     }
 
     fn from_pid(pid: i32) -> Peer {
