@@ -103,24 +103,7 @@ impl VaultManager {
                 IndexUpdate::CiphertextOnly
             };
             match self.commit_cache(&base, updated, index, session) {
-                Ok(()) => {
-                    // Trigger non-blocking background capability discovery (ADR-0031)
-                    let bg_server = server.to_string();
-                    let bg_ctx = context.cloned();
-                    std::thread::Builder::new()
-                        .name("capability-discovery".to_string())
-                        .spawn(move || {
-                            let _ = crate::capabilities::get_or_discover_capabilities(
-                                &bg_server,
-                                true,
-                                bg_ctx.as_ref(),
-                                None,
-                            );
-                        })
-                        .ok();
-
-                    return Ok(count);
-                }
+                Ok(()) => return Ok(count),
                 Err(CacheCommitError::Conflict) if attempt == 0 => continue,
                 Err(error) => return Err(error.to_string()),
             }
