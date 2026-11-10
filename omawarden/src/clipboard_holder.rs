@@ -51,6 +51,7 @@ pub(super) fn hold_selection(
     // wl-copy exits its launcher only after synchronizing the selection with
     // the compositor. Bound setup as well as the life of a timed selection.
     let mut command = Command::new(wl_copy);
+    command.args(["--type", "text/plain"]);
     if sensitive {
         command.arg("--sensitive");
     }

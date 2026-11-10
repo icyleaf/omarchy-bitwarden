@@ -15,6 +15,7 @@ const WL_COPY: &str = r#"#!/bin/sh
 set -eu
 cd "$XDG_RUNTIME_DIR"
 if [ "${1:-}" = --clear ]; then rm -f selection; exit; fi
+echo "$*" >> "$XDG_RUNTIME_DIR/args.log"
 value=$(mktemp "$PWD/source.XXXXXX")
 cat > "$value"
 exec 9<"$value"
@@ -76,6 +77,15 @@ impl Clipboard {
             Err(std::fs::TryLockError::WouldBlock) => Some(fs::read_to_string(selection).unwrap()),
             Ok(()) => None,
             Err(err) => panic!("could not check clipboard owner: {err}"),
+        }
+    }
+
+    fn recorded_args(&self) -> Vec<String> {
+        let args_file = self.0.path().join("args.log");
+        if let Ok(content) = fs::read_to_string(&args_file) {
+            content.lines().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
         }
     }
 }
@@ -281,4 +291,40 @@ fn offline_clipboard_holder_rejects_a_replaced_slot_and_logout_clears_without_da
     );
     assert!(clip.paste().is_none());
     assert!(!runtime.join("omawarden.clipboard.pending").exists());
+}
+
+#[test]
+fn clipboard_forces_text_plain_mime_type_for_pem_and_all_content() {
+    let clip = Clipboard::new();
+    let pem_content =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n";
+    assert!(clip.copy(pem_content, "5").status.success());
+    assert_eq!(clip.paste().as_deref(), Some(pem_content));
+    let args = clip.recorded_args();
+    assert!(
+        args.iter().any(|line| line.contains("--type text/plain")),
+        "wl-copy must be invoked with --type text/plain, got: {:?}",
+        args
+    );
+}
+
+#[test]
+fn clipboard_without_expiry_forces_text_plain_mime_type() {
+    let clip = Clipboard::new();
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    assert!(clip
+        .run(
+            cli,
+            &["copy", "--stdin", "--timeout", "0"],
+            "unexpired text"
+        )
+        .status
+        .success());
+    assert_eq!(clip.paste().as_deref(), Some("unexpired text"));
+    let args = clip.recorded_args();
+    assert!(
+        args.iter().any(|line| line.contains("--type text/plain")),
+        "wl-copy must be invoked with --type text/plain for unexpired copies, got: {:?}",
+        args
+    );
 }
