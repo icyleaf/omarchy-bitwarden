@@ -1069,6 +1069,7 @@ struct Peer {
 }
 
 impl Peer {
+    #[cfg(target_os = "linux")]
     fn of(stream: &UnixStream) -> Peer {
         let mut cred = libc::ucred {
             pid: 0,
@@ -1092,6 +1093,11 @@ impl Peer {
         } else {
             Peer::default()
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn of(_stream: &UnixStream) -> Peer {
+        Peer::default()
     }
 
     fn from_pid(pid: i32) -> Peer {
@@ -1130,6 +1136,7 @@ impl Peer {
     /// scoped to it, so approving `ssh` in a terminal doesn't approve every
     /// other program that runs `ssh`. Read from `exe` links, which a process
     /// can't rename.
+    #[allow(dead_code)]
     fn find_app(&self) -> String {
         let mut next = self.parent();
         for _ in 0..16 {
@@ -1182,6 +1189,7 @@ impl Peer {
     }
 }
 
+#[allow(dead_code)]
 fn is_wrapper(exe: &str) -> bool {
     let name = Path::new(exe)
         .file_name()
