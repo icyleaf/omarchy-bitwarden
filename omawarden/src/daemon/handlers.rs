@@ -608,6 +608,32 @@ pub fn handle_client_with_peer(
                 json!({ "ok": true, "auto_lock_minutes": mins })
             }
         }
+        "server_capabilities" => {
+            let refresh = req.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            let cfg = crate::config::ConfigManager::default().load();
+            let caps = crate::capabilities::get_or_discover_capabilities(
+                &cfg.server_url,
+                refresh,
+                client_context.as_ref(),
+                Some(&cfg),
+            );
+
+            match caps {
+                Ok(c) => json!({
+                    "ok": true,
+                    "server_url": c.server_url,
+                    "server_version": c.server_version,
+                    "git_hash": c.git_hash,
+                    "cached_at": c.cached_at,
+                    "feature_states": c.feature_states,
+                    "matrix": c.matrix,
+                }),
+                Err(err) => json!({
+                    "ok": false,
+                    "error": err,
+                }),
+            }
+        }
         other => json!({ "ok": false, "error": format!("Unknown action: {}", other) }),
     };
 
