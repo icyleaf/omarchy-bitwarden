@@ -3,7 +3,7 @@ mod clipboard_holder;
 use clap::{Parser, Subcommand};
 use omawarden::attachment::get_attachment;
 use omawarden::auth::AuthManager;
-use omawarden::clipboard::{ClipboardManager, ClipboardScope};
+use omawarden::clipboard::{ClipboardGuard, ClipboardScope};
 use omawarden::config::{Config, ConfigManager, ConfigUpdateOptions};
 use omawarden::daemon::{
     ensure_daemon_running, run_daemon_server, send_daemon_request, DaemonState,
@@ -93,13 +93,11 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
-    #[command(
-        about = "Wayland clipboard operations (copy vault item field, pipe stdin, or clear)"
-    )]
+    #[command(about = "Clipboard operations (copy vault item field, pipe stdin, or clear)")]
     Copy {
         #[arg(index = 1, help = "Vault item ID or name query")]
         query: Option<String>,
-        #[arg(long, help = "Clear Wayland clipboard immediately")]
+        #[arg(long, help = "Clear clipboard immediately")]
         clear: bool,
         #[arg(long, help = "Read text to copy from standard input")]
         stdin: bool,
@@ -125,7 +123,10 @@ enum Commands {
     #[command(hide = true)]
     ClipboardHolder {
         seconds: u64,
-        wl_copy: PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        binary_path: Option<PathBuf>,
         #[arg(long)]
         public: bool,
         #[arg(long, conflicts_with = "cache_path")]
@@ -134,6 +135,8 @@ enum Commands {
         cache_path: Option<PathBuf>,
         #[arg(long, requires = "cache_path")]
         expected_credential_id: Option<String>,
+        #[arg(index = 2)]
+        legacy_path: Option<PathBuf>,
     },
     #[command(about = "Generate TOTP verification code from vault item ID/name, or via STDIN")]
     Totp {
@@ -229,7 +232,7 @@ enum Commands {
         #[arg(
             short = 'c',
             long,
-            help = "Copy generated secret to Wayland clipboard with auto-clear"
+            help = "Copy generated secret to clipboard with auto-clear"
         )]
         copy: bool,
         #[arg(long, help = "Output generated secret as JSON")]
@@ -747,12 +750,17 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::ClipboardHolder {
             seconds,
-            wl_copy,
+            provider,
+            binary_path,
             public,
             expected_lock_generation,
             cache_path,
             expected_credential_id,
+            legacy_path,
         } => {
+            let active_path = binary_path.as_deref().or(legacy_path.as_deref());
+            let resolved_provider =
+                omawarden::clipboard::resolve_provider(provider.as_deref(), active_path);
             let scope = expected_lock_generation
                 .map(ClipboardScope::Session)
                 .or_else(|| {
@@ -764,7 +772,7 @@ fn main() -> ExitCode {
                         })
                 });
             match clipboard_holder::hold_selection(
-                &wl_copy,
+                resolved_provider,
                 std::time::Duration::from_secs(seconds),
                 !public,
                 scope.as_ref(),
@@ -2384,13 +2392,16 @@ fn main() -> ExitCode {
             timeout,
             expected_lock_generation,
         } => {
-            let clip_mgr = ClipboardManager::default();
-            if !clip_mgr.is_available() {
+            let guard = ClipboardGuard::default();
+            if !guard.is_available() {
+                let err_msg = guard
+                    .unavailable_reason()
+                    .unwrap_or_else(|| "Clipboard utility not found.".to_string());
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "ok": false,
-                        "error": "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
+                        "error": err_msg
                     }))
                     .unwrap()
                 );
@@ -2398,7 +2409,7 @@ fn main() -> ExitCode {
             }
 
             if clear {
-                let ok = clip_mgr.clear();
+                let ok = guard.clear();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({ "ok": ok })).unwrap()
@@ -2415,9 +2426,9 @@ fn main() -> ExitCode {
                 let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
                 let ok = match expected_lock_generation {
                     Some(generation) => {
-                        clip_mgr.copy_in_session(&text_val, sensitive, timeout_val, generation)
+                        guard.copy_in_session(&text_val, sensitive, timeout_val, generation)
                     }
-                    None => clip_mgr.copy(&text_val, sensitive, timeout_val),
+                    None => guard.copy(&text_val, sensitive, timeout_val),
                 };
                 println!(
                     "{}",
@@ -2604,7 +2615,7 @@ fn main() -> ExitCode {
             }
 
             let timeout_val = timeout.unwrap_or(cfg.clipboard_clear_seconds);
-            let ok = clip_mgr.copy_vault_output(&text_to_copy, is_sensitive, timeout_val, &scope);
+            let ok = guard.copy_vault_output(&text_to_copy, is_sensitive, timeout_val, &scope);
             if ok {
                 println!(
                     "{}",
@@ -2653,7 +2664,7 @@ fn main() -> ExitCode {
             };
             let res = output.result;
             if copy {
-                let clipboard = ClipboardManager::default();
+                let clipboard = ClipboardGuard::default();
                 let copied = match output.scope {
                     Some(scope) => clipboard.copy_vault_output(&res.code, true, 30, &scope),
                     None => clipboard.copy(&res.code, true, 30),
@@ -3096,7 +3107,7 @@ fn main() -> ExitCode {
                 }
             };
 
-            let clip_mgr = ClipboardManager::default();
+            let guard = ClipboardGuard::default();
             let mut copied = false;
             if copy {
                 let timeout = if cfg.clipboard_clear_seconds > 0 {
@@ -3104,7 +3115,7 @@ fn main() -> ExitCode {
                 } else {
                     30
                 };
-                if clip_mgr.copy(&secret.value, true, timeout) {
+                if guard.copy(&secret.value, true, timeout) {
                     copied = true;
                     if !json {
                         println!(

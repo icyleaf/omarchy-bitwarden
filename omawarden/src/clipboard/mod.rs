@@ -1,9 +1,22 @@
+pub mod macos;
+pub mod mock;
+pub mod provider;
+pub mod wayland;
+pub mod x11;
+
+pub use macos::MacOsClipboardProvider;
+pub use mock::MockClipboardProvider;
+pub use provider::{resolve_provider, ClipboardProvider, UnavailableClipboardProvider};
+pub use wayland::WlClipboardProvider;
+pub use x11::X11ClipboardProvider;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[doc(hidden)]
 pub const CLIPBOARD_SETUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -25,11 +38,24 @@ pub struct ClipboardOutput {
 }
 
 impl ClipboardScope {
-    /// Revalidate the source in the detached holder, before it starts wl-copy.
+    /// Revalidate the source in the detached holder, before it writes to the clipboard.
     #[doc(hidden)]
     pub fn begin_output(&self) -> io::Result<ClipboardOutput> {
-        if !wayland_configured()? {
-            return Err(io::Error::other("No Wayland clipboard is configured"));
+        self.begin_output_with_provider(&*resolve_provider(None, None))
+    }
+
+    /// Revalidate the source in the detached holder with an explicit provider.
+    #[doc(hidden)]
+    pub fn begin_output_with_provider(
+        &self,
+        provider: &dyn ClipboardProvider,
+    ) -> io::Result<ClipboardOutput> {
+        if !provider.is_configured()? {
+            return Err(io::Error::other(
+                provider
+                    .unavailable_reason()
+                    .unwrap_or_else(|| "No clipboard provider is configured".to_string()),
+            ));
         }
         let (output, account) = match self {
             Self::Session(generation) => (crate::daemon::guard_session_output(*generation)?, None),
@@ -46,7 +72,7 @@ impl ClipboardScope {
                 (output, Some(account))
             }
         };
-        // Record possible exposure before contacting Wayland, even if the
+        // Record possible exposure before contacting the provider, even if the
         // holder or daemon dies before the copy can be acknowledged.
         OpenOptions::new()
             .create(true)
@@ -62,11 +88,11 @@ impl ClipboardScope {
     }
 }
 
-fn clipboard_marker() -> PathBuf {
+pub(crate) fn clipboard_marker() -> PathBuf {
     crate::daemon::get_socket_path().with_extension("clipboard.pending")
 }
 
-fn wayland_configured() -> io::Result<bool> {
+pub(crate) fn wayland_configured() -> io::Result<bool> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("WAYLAND_SOCKET").is_some()
     {
         return Ok(true);
@@ -90,14 +116,15 @@ pub(crate) fn clear_session_outputs() -> io::Result<()> {
             format!("Attachment preview cleanup failed. {error}"),
         )
     });
-    let clipboard = ClipboardManager::default()
+    let guard = ClipboardGuard::default();
+    let prefix = if guard.provider().name() == "wayland" {
+        "Wayland clipboard cleanup failed."
+    } else {
+        "Clipboard cleanup failed."
+    };
+    let clipboard = guard
         .clear_session_selection()
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("Wayland clipboard cleanup failed. {error}"),
-            )
-        });
+        .map_err(|error| io::Error::new(error.kind(), format!("{prefix} {error}")));
     previews.and(clipboard)
 }
 
@@ -106,27 +133,64 @@ pub(crate) fn revoke_session_outputs() -> io::Result<()> {
     clear_session_outputs()
 }
 
-#[derive(Debug, Clone)]
-pub struct ClipboardManager {
-    pub wl_copy_path: String,
+/// The ephemeral clipboard subsystem that enforces automatic time-to-live
+/// clearing and secure revocation of copied secrets across supported
+/// display and OS clipboard providers.
+#[derive(Clone)]
+pub struct ClipboardGuard {
+    provider: Arc<dyn ClipboardProvider>,
 }
 
-impl Default for ClipboardManager {
+/// Backward compatibility alias for `ClipboardGuard`.
+pub type ClipboardManager = ClipboardGuard;
+
+impl Default for ClipboardGuard {
     fn default() -> Self {
-        Self::new("wl-copy")
+        Self::with_provider(resolve_provider(None, None))
     }
 }
 
-impl ClipboardManager {
-    pub fn new(wl_copy_path: &str) -> Self {
-        let path = which::which(wl_copy_path)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| wl_copy_path.to_owned());
-        Self { wl_copy_path: path }
+impl std::fmt::Debug for ClipboardGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardGuard")
+            .field("provider", &self.provider.name())
+            .field("is_available", &self.provider.is_available())
+            .finish()
+    }
+}
+
+impl ClipboardGuard {
+    /// Constructs a `ClipboardGuard` using a legacy `wl-copy` path string or provider name.
+    pub fn new(path_or_provider: &str) -> Self {
+        let path = Path::new(path_or_provider);
+        if path.is_absolute()
+            || path_or_provider.contains('/')
+            || path_or_provider.contains("wl-copy")
+        {
+            Self::with_provider(Arc::new(WlClipboardProvider::new(path_or_provider)))
+        } else {
+            Self::with_provider(resolve_provider(Some(path_or_provider), None))
+        }
     }
 
+    /// Constructs a `ClipboardGuard` with an explicit `ClipboardProvider` implementation.
+    pub fn with_provider(provider: Arc<dyn ClipboardProvider>) -> Self {
+        Self { provider }
+    }
+
+    /// Accesses the underlying active provider.
+    pub fn provider(&self) -> &Arc<dyn ClipboardProvider> {
+        &self.provider
+    }
+
+    /// Checks if the underlying active provider is available.
     pub fn is_available(&self) -> bool {
-        which::which(&self.wl_copy_path).is_ok()
+        self.provider.is_available()
+    }
+
+    /// Diagnostic error/warning message if unavailable.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.provider.unavailable_reason()
     }
 
     pub fn copy(&self, text: &str, sensitive: bool, timeout_seconds: i64) -> bool {
@@ -178,7 +242,8 @@ impl ClipboardManager {
             Ok(true) => {
                 crate::log_info!(
                     "omawarden:clipboard",
-                    "Copied content to clipboard (sensitive: {}, ttl: {}s)",
+                    "Copied content to clipboard via '{}' (sensitive: {}, ttl: {}s)",
+                    self.provider.name(),
                     sensitive,
                     timeout_seconds.max(0)
                 );
@@ -186,7 +251,11 @@ impl ClipboardManager {
             }
             Ok(false) => false,
             Err(err) => {
-                crate::log_error!("omawarden:clipboard", "Clipboard copy failed: {err}");
+                crate::log_error!(
+                    "omawarden:clipboard",
+                    "Clipboard copy failed via '{}': {err}",
+                    self.provider.name()
+                );
                 false
             }
         }
@@ -205,10 +274,16 @@ impl ClipboardManager {
         worker
             .arg("clipboard-holder")
             .arg(seconds.to_string())
-            .arg(&self.wl_copy_path)
+            .arg("--provider")
+            .arg(self.provider.name())
             .stdin(input)
             .stdout(ack)
             .stderr(Stdio::null());
+
+        if let Some(binary_path) = self.provider.binary_path() {
+            worker.arg("--binary-path").arg(binary_path);
+        }
+
         if !sensitive {
             worker.arg("--public");
         }
@@ -241,24 +316,7 @@ impl ClipboardManager {
     }
 
     fn copy_without_expiry(&self, text: &str, sensitive: bool) -> io::Result<bool> {
-        let mut cmd = Command::new(&self.wl_copy_path);
-        cmd.args(["--type", "text/plain"]);
-        if sensitive {
-            cmd.arg("--sensitive");
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let written = child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(text.as_bytes());
-        let status = child.wait()?;
-        written?;
-        Ok(status.success())
+        self.provider.copy(text, sensitive).map(|()| true)
     }
 
     pub fn clear(&self) -> bool {
@@ -276,44 +334,19 @@ impl ClipboardManager {
 
     /// Clear under the output gate when a desktop or a previous export is known.
     pub(crate) fn clear_session_selection(&self) -> io::Result<()> {
-        if clipboard_marker().try_exists()? || wayland_configured()? {
+        if clipboard_marker().try_exists()? || self.provider.is_configured()? {
             self.clear_confirmed()?;
         }
         Ok(())
     }
 
     fn clear_confirmed(&self) -> io::Result<()> {
-        if !self.clear_selection()? {
-            return Err(io::Error::other("wl-copy --clear failed"));
+        if let Err(err) = self.provider.clear() {
+            return Err(io::Error::other(format!("Provider clear failed: {err}")));
         }
         match fs::remove_file(clipboard_marker()) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             result => result,
-        }
-    }
-
-    fn clear_selection(&self) -> io::Result<bool> {
-        let mut child = Command::new(&self.wl_copy_path)
-            .arg("--clear")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let deadline = Instant::now() + CLIPBOARD_SETUP_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Ok(status.success()),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                result => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(result.err().unwrap_or_else(|| {
-                        io::Error::new(io::ErrorKind::TimedOut, "wl-copy --clear timed out")
-                    }));
-                }
-            }
         }
     }
 }
@@ -321,68 +354,96 @@ impl ClipboardManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     #[test]
-    fn test_mock_clipboard_copy_and_clear() {
-        let dir = tempdir().unwrap();
-        let clip_file = dir.path().join("clipboard.txt");
-        let args_file = dir.path().join("args.txt");
-        let mock_wl = dir.path().join("mock-wl-copy");
+    fn test_mock_provider_unit() {
+        let mock = Arc::new(MockClipboardProvider::new());
+        let guard = ClipboardGuard::with_provider(mock.clone());
 
-        let script = format!(
-            r#"#!/bin/sh
-CF="{}"
-AF="{}"
-echo "$*" > "$AF"
-if [ "$1" = "--clear" ]; then
-    rm -f "$CF"
-    exit 0
-else
-    cat > "$CF"
-    exit 0
-fi
-"#,
-            clip_file.display(),
-            args_file.display()
-        );
+        assert!(guard.is_available());
+        assert_eq!(guard.provider().name(), "mock");
 
-        crate::write_test_executable(&mock_wl, script);
+        assert!(guard.copy("unit-test-secret", true, 0));
+        assert_eq!(mock.last_copied().as_deref(), Some("unit-test-secret"));
+        assert!(mock.is_sensitive());
+        assert!(!mock.was_cleared());
 
-        let mgr = ClipboardManager::new(mock_wl.to_str().unwrap());
+        assert!(guard.clear());
+        assert!(mock.was_cleared());
+        assert_eq!(mock.last_copied(), None);
+    }
 
-        // Copy sensitive text -> should pass --sensitive
-        assert!(mgr.copy("super_secret_password", true, 0));
-        assert_eq!(
-            fs::read_to_string(&clip_file).unwrap(),
-            "super_secret_password"
-        );
-        let args = fs::read_to_string(&args_file).unwrap();
-        assert!(args.contains("--sensitive"));
+    #[test]
+    fn test_mock_clipboard_unavailable() {
+        let mock = Arc::new(MockClipboardProvider::new());
+        mock.set_available(false);
+        let guard = ClipboardGuard::with_provider(mock.clone());
 
-        // Copy non-sensitive text -> should NOT pass --sensitive
-        assert!(mgr.copy("public_username", false, 0));
-        assert_eq!(fs::read_to_string(&clip_file).unwrap(), "public_username");
-        let args_non_sensitive = fs::read_to_string(&args_file).unwrap();
-        assert!(!args_non_sensitive.contains("--sensitive"));
+        assert!(!guard.is_available());
+        assert!(!guard.copy("secret", false, 0));
+        assert!(!guard.clear());
+    }
 
-        // Copy multi-line report
-        let multiline_report = "### Title\n\n- item 1\n- item 2\n```\nlog 1\n```\n";
-        assert!(mgr.copy(multiline_report, false, 0));
-        assert_eq!(fs::read_to_string(&clip_file).unwrap(), multiline_report);
+    #[test]
+    fn test_provider_resolution() {
+        let _guard = crate::env_lock();
+        std::env::set_var("OMA_CLIPBOARD_PROVIDER", "mock");
+        let provider = resolve_provider(None, None);
+        assert_eq!(provider.name(), "mock");
+        std::env::remove_var("OMA_CLIPBOARD_PROVIDER");
 
-        // Clear clipboard
-        assert!(mgr.clear());
-        assert!(!clip_file.exists());
-        let clear_args = fs::read_to_string(&args_file).unwrap();
-        assert!(clear_args.contains("--clear"));
+        let p_x11 = resolve_provider(Some("x11"), None);
+        assert_eq!(p_x11.name(), "x11");
+
+        let p_mac = resolve_provider(Some("macos"), None);
+        assert_eq!(p_mac.name(), "macos");
+
+        let p_unknown = resolve_provider(Some("nonexistent_provider"), None);
+        assert_eq!(p_unknown.name(), "unavailable");
+        assert!(!p_unknown.is_available());
+        assert!(p_unknown.unavailable_reason().is_some());
+    }
+
+    #[test]
+    fn test_mock_provider_metrics() {
+        let mock = Arc::new(MockClipboardProvider::new());
+        assert_eq!(mock.copy_count(), 0);
+        assert_eq!(mock.clear_count(), 0);
+
+        mock.copy("test", false).unwrap();
+        assert_eq!(mock.copy_count(), 1);
+
+        mock.clear().unwrap();
+        assert_eq!(mock.clear_count(), 1);
     }
 
     #[test]
     fn test_non_existent_wl_copy() {
         let mgr = ClipboardManager::new("non_existent_wl_copy_bin_12345");
-        assert!(!mgr.copy("text", false, 0));
-        assert!(!mgr.clear());
+        assert!(!mgr.is_available());
+        assert!(mgr.unavailable_reason().is_some());
+    }
+
+    #[test]
+    fn test_mock_clipboard_copy_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock_wl = dir.path().join("mock-wl-copy");
+
+        let script = r#"#!/bin/sh
+if [ "$1" = "--clear" ]; then
+    exit 0
+fi
+exit 0
+"#;
+        crate::write_test_executable(&mock_wl, script);
+
+        let mgr = ClipboardManager::new(mock_wl.to_str().unwrap());
+        assert!(mgr.is_available());
+
+        let res = mgr.copy("my_secret_token", false, 0);
+        assert!(res, "ClipboardManager copy should succeed with mock script");
+
+        let res_clear = mgr.clear();
+        assert!(res_clear, "ClipboardManager clear should succeed");
     }
 }

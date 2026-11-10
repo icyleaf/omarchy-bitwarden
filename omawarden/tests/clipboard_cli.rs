@@ -328,3 +328,82 @@ fn clipboard_without_expiry_forces_text_plain_mime_type() {
         args
     );
 }
+
+#[test]
+fn clipboard_holder_supports_explicit_provider_and_binary_path() {
+    let clip = Clipboard::new();
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let wl_copy = clip.0.path().join("wl-copy");
+
+    assert!(clip
+        .run(
+            cli,
+            &[
+                "clipboard-holder",
+                "0",
+                "--provider",
+                "wayland",
+                "--binary-path",
+                wl_copy.to_str().unwrap(),
+                "--public",
+            ],
+            "provider explicit text"
+        )
+        .status
+        .success());
+    assert_eq!(clip.paste().as_deref(), Some("provider explicit text"));
+}
+
+#[test]
+fn clipboard_provider_env_override() {
+    let clip = Clipboard::new();
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let wl_copy = clip.0.path().join("wl-copy");
+
+    let dir = clip.0.path();
+    let mut child = Command::new(cli)
+        .args(["copy", "--stdin", "--timeout", "0"])
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("XDG_CONFIG_HOME", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("HOME", dir)
+        .env("OMA_CLIPBOARD_PROVIDER", "wayland")
+        .env("OMA_WL_COPY_PATH", &wl_copy)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"env-routed text").unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(clip.paste().as_deref(), Some("env-routed text"));
+}
+
+#[test]
+fn clipboard_provider_env_override_mock() {
+    let clip = Clipboard::new();
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let dir = clip.0.path();
+
+    let mut child = Command::new(cli)
+        .args(["copy", "--stdin", "--timeout", "0"])
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("XDG_CONFIG_HOME", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("HOME", dir)
+        .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"mock text").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+}
