@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -94,6 +94,7 @@ fn test_macos_clipboard_holder_with_explicit_provider() {
     // After 1.5s, the holder TTL timer triggers clear
     std::thread::sleep(Duration::from_millis(1500));
     assert!(fixture.read_clipboard().is_empty());
+    let _ = child.wait();
 }
 
 #[test]
@@ -124,7 +125,12 @@ fn test_macos_real_cli_copy_and_pasteboard() {
         .spawn()
         .unwrap();
 
-    child.stdin.take().unwrap().write_all(token.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(token.as_bytes())
+        .unwrap();
     let status = child.wait().unwrap();
     assert!(status.success());
 

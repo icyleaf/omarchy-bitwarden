@@ -1136,6 +1136,7 @@ impl Peer {
     /// scoped to it, so approving `ssh` in a terminal doesn't approve every
     /// other program that runs `ssh`. Read from `exe` links, which a process
     /// can't rename.
+    #[allow(dead_code)]
     fn find_app(&self) -> String {
         let mut next = self.parent();
         for _ in 0..16 {
@@ -1188,6 +1189,7 @@ impl Peer {
     }
 }
 
+#[allow(dead_code)]
 fn is_wrapper(exe: &str) -> bool {
     let name = Path::new(exe)
         .file_name()
