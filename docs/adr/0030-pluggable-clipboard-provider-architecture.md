@@ -34,8 +34,8 @@ We decouple the clipboard subsystem into a two-tier architecture:
 
 ### 2. Selection-Monitoring vs. Timer-Driven Lifecycles
 - Providers report whether they monitor selection takeovers via `monitors_selection()`.
-- **Wayland (`WlClipboardProvider`)**: Returns `monitors_selection() = true`. The holder adopts child processes (`PR_SET_CHILD_SUBREAPER`) and reaps `wl-copy` upon selection loss via `waitpid`, releasing holds and session locks early.
-- **Timer-Driven Providers (`MacOsClipboardProvider`, `X11ClipboardProvider`, `MockClipboardProvider`)**: The holder parks and relies on the expiry timer thread to call `provider.clear()` followed by process group cleanup.
+- **Selection-Monitoring Providers (`WlClipboardProvider`, `X11ClipboardProvider`)**: Both Wayland (`wl-copy`) and X11 (`xclip`) act as persistent selection owners that fork into the background and terminate when another application acquires the selection (`SelectionClear`). The holder adopts child processes (`PR_SET_CHILD_SUBREAPER`) and reaps the forked provider upon selection loss via `waitpid`, releasing holds and session locks early. On TTL expiration, the holder terminates its own process group (`revoke()`) without acquiring a fresh empty selection, ensuring newer external selections are never overwritten.
+- **Timer-Driven Providers (`MacOsClipboardProvider`, `MockClipboardProvider`)**: For platforms with centralized pasteboard architectures where writers terminate immediately (e.g. macOS `pbcopy`), the holder tracks pasteboard state changes (`changeCount`) or parks until the expiry timer triggers.
 - **macOS Scheme A Selection Protection**: On macOS (`MacOsClipboardProvider`), `pbcopy` writes to the centralized pasteboard and exits immediately. To prevent clobbering replacement clipboard selections upon TTL expiry, `MacOsClipboardProvider` tracks `[NSPasteboard generalPasteboard].changeCount`. If `changeCount` increments after Omawarden's copy, the TTL expiry clearing step is safely skipped.
 
 ### 3. Resolution Chain & Overrides
