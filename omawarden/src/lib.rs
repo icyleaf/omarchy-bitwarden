@@ -2,6 +2,7 @@ mod account_activation;
 pub mod api;
 pub mod attachment;
 pub mod auth;
+pub mod capabilities;
 mod cipher_write;
 pub mod clipboard;
 pub mod config;

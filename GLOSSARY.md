@@ -30,6 +30,14 @@ _Avoid_: Clipboard backend, clipboard wrapper, clipboard helper
 The framed JSON wire interface exposed over the local Unix domain socket by Omawarden, versioned with a monotonically increasing integer (`protocol_version`) to govern compatibility between clients and the resident daemon independently of build commit hashes.
 _Avoid_: Socket API, daemon version, API version
 
+**Capability Discovery**:
+The background interrogation of the upstream server's `/api/config` and `/api/version` endpoints during sync and initialization to detect server versions, active feature flags, and API deprecations without blocking core vault operations.
+_Avoid_: Feature probing, version sniffing, server polling
+
+**Server Capability Matrix**:
+The declarative specification in Omawarden mapping upstream Bitwarden and Vaultwarden feature flags (`featureStates`) and API versions to local engine capabilities, feature gates, and deprecation statuses.
+_Avoid_: Feature checklist, server flag list, compat table
+
 ### Vault & Cryptography
 
 **Vault**:

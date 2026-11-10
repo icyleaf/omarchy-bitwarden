@@ -775,7 +775,7 @@ pub fn build_http_client_for_url_with_config(
         .map_err(ApiError::from)
 }
 
-fn http_client_builder(
+pub(crate) fn http_client_builder(
     timeout: Duration,
     client_context: Option<&ClientContext>,
     target_url: Option<&str>,
