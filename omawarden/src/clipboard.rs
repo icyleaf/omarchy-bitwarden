@@ -242,6 +242,7 @@ impl ClipboardManager {
 
     fn copy_without_expiry(&self, text: &str, sensitive: bool) -> io::Result<bool> {
         let mut cmd = Command::new(&self.wl_copy_path);
+        cmd.args(["--type", "text/plain"]);
         if sensitive {
             cmd.arg("--sensitive");
         }
