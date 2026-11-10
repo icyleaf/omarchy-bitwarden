@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpstreamCapabilitiesReport {
+    pub server_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_hash: Option<String>,
+    pub ssh_agent_v2_status: String,
+    pub ssh_key_vault_item_status: String,
+    pub details: Vec<String>,
+    pub recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthStatus {
     pub installed: bool,
     pub ok: bool,
@@ -15,6 +28,8 @@ pub struct HealthStatus {
     pub keyring_available: bool,
     pub clipboard_available: bool,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_capabilities: Option<UpstreamCapabilitiesReport>,
 }
 
 pub fn check_system_health(server_url: &str) -> HealthStatus {
@@ -48,6 +63,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
                     keyring_available: which::which("secret-tool").is_ok(),
                     clipboard_available: crate::clipboard::ClipboardGuard::default().is_available(),
                     error: Some(format!("Client mTLS certificate error: {}", e)),
+                    upstream_capabilities: None,
                 };
             }
         };
@@ -92,6 +108,72 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
     let clipboard_available = clipboard.is_available();
     let clipboard_err = clipboard.unavailable_reason();
 
+    // 4. Query / evaluate upstream capabilities
+    let upstream_capabilities = if server_reachable {
+        let caps =
+            crate::capabilities::get_or_discover_capabilities(server_url, false, None, None).ok();
+
+        caps.map(|c| {
+            let mut details = Vec::new();
+            let mut recommendations = Vec::new();
+
+            let ssh_agent_v2_status = c
+                .matrix
+                .iter()
+                .find(|m| m.name == "ssh-agent-v2")
+                .map(|m| m.status.as_str().to_string())
+                .unwrap_or_else(|| "disabled".to_string());
+
+            let ssh_key_status = c
+                .matrix
+                .iter()
+                .find(|m| m.name == "ssh-key-vault-item")
+                .map(|m| m.status.as_str().to_string())
+                .unwrap_or_else(|| "disabled".to_string());
+
+            if ssh_agent_v2_status == "supported" {
+                details.push("[OK] Upstream ssh-agent-v2 enabled".to_string());
+            } else {
+                details.push("[INFO] Upstream ssh-agent-v2 is not enabled (optional)".to_string());
+            }
+
+            if ssh_key_status == "supported" {
+                details.push("[OK] Upstream ssh-key-vault-item enabled".to_string());
+            } else {
+                details.push("[INFO] Upstream ssh-key-vault-item is not enabled (optional)".to_string());
+            }
+
+            if ssh_agent_v2_status != "supported" && ssh_key_status != "supported" {
+                recommendations.push(
+                    "For Vaultwarden self-hosters: enable modern agent and SSH key storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                        .to_string(),
+                );
+            } else if ssh_agent_v2_status != "supported" {
+                recommendations.push(
+                    "For Vaultwarden self-hosters: enable modern agent support by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                        .to_string(),
+                );
+            } else if ssh_key_status != "supported" {
+                recommendations.push(
+                    "For Vaultwarden self-hosters: enable SSH Key vault storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item in your environment."
+                        .to_string(),
+                );
+            }
+
+            UpstreamCapabilitiesReport {
+                server_url: c.server_url,
+                server_version: c.server_version,
+                git_hash: c.git_hash,
+                ssh_agent_v2_status,
+                ssh_key_vault_item_status: ssh_key_status,
+                details,
+                recommendations,
+            }
+        })
+    } else {
+        None
+    };
+
     let all_ok = server_reachable && keyring_available && clipboard_available;
 
     HealthStatus {
@@ -121,6 +203,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         } else {
             None
         },
+        upstream_capabilities,
     }
 }
 

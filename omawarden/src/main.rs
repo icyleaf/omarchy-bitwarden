@@ -78,6 +78,11 @@ enum Commands {
     },
     #[command(about = "Check CLI health and installation")]
     Health,
+    #[command(about = "Run system health and upstream server capability diagnostics")]
+    Doctor {
+        #[arg(long, help = "Output diagnostics in JSON format")]
+        json: bool,
+    },
     #[command(about = "Manage Bitwarden authentication and vault sessions")]
     Auth {
         #[command(subcommand)]
@@ -1140,6 +1145,89 @@ fn main() -> ExitCode {
             let status = check_system_health(&cfg.server_url);
             println!("{}", serde_json::to_string_pretty(&status).unwrap());
             ExitCode::SUCCESS
+        }
+
+        Commands::Doctor { json } => {
+            let status = check_system_health(&cfg.server_url);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status).unwrap());
+            } else {
+                println!("System Diagnostics:");
+                let ver_str = status.version.as_deref().unwrap_or("unknown");
+                let commit_str = status
+                    .commit
+                    .as_deref()
+                    .map(|c| format!(" (commit {})", c))
+                    .unwrap_or_default();
+                println!("  CLI Version:        v{}{}", ver_str, commit_str);
+                println!(
+                    "  Keyring:            {}",
+                    if status.keyring_available {
+                        "[OK] Available (secret-tool)"
+                    } else {
+                        "[FAIL] Unavailable"
+                    }
+                );
+                println!(
+                    "  Clipboard Guard:    {}",
+                    if status.clipboard_available {
+                        "[OK] Available"
+                    } else {
+                        "[FAIL] Unavailable"
+                    }
+                );
+
+                println!("\nUpstream Capabilities:");
+                println!("  Server URL:         {}", status.server_url);
+                println!(
+                    "  Server Reachable:   {}",
+                    if status.server_reachable {
+                        "[OK] Yes"
+                    } else {
+                        "[FAIL] No"
+                    }
+                );
+
+                if let Some(ref caps) = status.upstream_capabilities {
+                    if let Some(ref v) = caps.server_version {
+                        println!("  Server Version:     {}", v);
+                    }
+                    if let Some(ref g) = caps.git_hash {
+                        println!("  Git Hash:           {}", g);
+                    }
+                    println!("  Features:");
+                    for detail in &caps.details {
+                        println!("    - {}", detail);
+                    }
+                    if !caps.recommendations.is_empty() {
+                        println!("  Recommendations:");
+                        for rec in &caps.recommendations {
+                            println!("    - {}", rec);
+                        }
+                    }
+                } else if !status.server_reachable {
+                    println!("  Capabilities:       [--] Skipped (server unreachable)");
+                } else {
+                    println!("  Capabilities:       [--] Detection failed or unavailable");
+                }
+
+                println!(
+                    "\nHealth Verdict:       {}",
+                    if status.ok {
+                        "[OK] All checks passed."
+                    } else {
+                        "[WARN] Some health checks failed or degraded."
+                    }
+                );
+                if let Some(ref err) = status.error {
+                    println!("  Failure Reason:     {}", err);
+                }
+            }
+            if status.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
 
         Commands::Auth { action } => {
