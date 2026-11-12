@@ -369,7 +369,7 @@ omawarden server capabilities --refresh
 | `>= 1.28.0` | **最低基线**:支持 Argon2id KDF 与现代 identity prelogin |
 | `< 1.28.0` | 不受支持:`omawarden doctor` 会提示服务端低于最低基线 |
 
-`omawarden` 会同时捕获嵌套的服务端身份(`server.name` / `server.version`)与顶层 Bitwarden 兼容版本(`version`)。当上游 `featureStates` 未包含 `ssh-key-vault-item` 时,矩阵会依据服务端类型与版本求值:
+`omawarden` 会从 `/api/config` 捕获嵌套的服务端身份(`server.name`)与顶层 Bitwarden 兼容版本(`version`)。由于 Vaultwarden 自 `1.32.1` 起不再在嵌套的 `server.version` 中报告自身发布版本,Vaultwarden 的发布版本改为通过按 flavor 门控的 `GET /api/version` 探测获取(官方 Bitwarden 的该接口返回日历式版本,绝不会被记录为 vendor 版本)。当上游 `featureStates` 未包含 `ssh-key-vault-item` 时,矩阵会依据服务端类型与版本求值:
 
 | 服务端 | 版本分级 | `ssh-key-vault-item`(标志缺失时) |
 | --- | --- | --- |

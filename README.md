@@ -369,7 +369,7 @@ omawarden server capabilities --refresh
 | `>= 1.28.0` | **Minimum baseline**: Argon2id KDF and modern identity prelogin |
 | `< 1.28.0` | Unsupported: `omawarden doctor` warns that the server is below the minimum baseline |
 
-Both the nested server identity (`server.name` / `server.version`) and the Bitwarden compatibility version (`version`) are captured. When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
+Both the nested server identity (`server.name`) and the Bitwarden compatibility version (`version`) are captured from `/api/config`. Because Vaultwarden stopped emitting its release version in the nested `server.version` after `1.32.1`, the Vaultwarden release is read from a flavor-gated `GET /api/version` probe (on official Bitwarden that endpoint carries a calendar-style version and is never recorded as a vendor version). When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
 
 | Server | Tier | `ssh-key-vault-item` (flag absent) |
 | --- | --- | --- |
