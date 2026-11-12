@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-Bitwarden identity and vault servers (including compatible implementations like Vaultwarden) expose unauthenticated configuration metadata through `/api/config` and `/api/version`. This payload includes the server's semantic version, Git commit hash, and a dictionary of active feature flags (`featureStates`).
+Bitwarden identity and vault servers (including compatible implementations like Vaultwarden) expose unauthenticated metadata through `/api/config` and `/api/version`. `/api/config` returns the Bitwarden compatibility version, Git commit hash, nested server identity, and a dictionary of active feature flags (`featureStates`); `/api/version` reports the running server's own version, whose format is flavor-dependent.
 
 The official Bitwarden ecosystem leverages `featureStates` to dynamically toggle experimental or evolving capabilities across clients—notably `ssh-key-vault-item` (Cipher Type 5), `ssh-agent` (v1 agent prototype), and `ssh-agent-v2` (modern SSH Agent protocol overhaul with robust signature negotiation and caller process inspection). Self-hosted Vaultwarden instances configure these flags via `EXPERIMENTAL_CLIENT_FEATURE_FLAGS`.
 
@@ -18,15 +18,26 @@ Previously, Omawarden relied solely on a static compile-time constant (`BITWARDE
 We establish an end-to-end subsystem for server capability discovery, declarative feature evaluation, and diagnostic reporting:
 
 ### 1. Capability Discovery Lifecycle
-- **Discovery Endpoint**: Interrogate `GET /api/config` and fallback to `GET /api/version` on the configured server base URL.
+- **Discovery Endpoint**: Interrogate `GET /api/config` for the Bitwarden compatibility version (`version` -> `server_version`), `gitHash`, nested `server.name` (`server_name`), and `featureStates`. Additionally probe `GET /api/version` for the Vaultwarden vendor release when the server is recognized as Vaultwarden (see §1.1).
 - **Trigger Points**:
   - Automatically during full vault synchronization (`omawarden sync`), updating cached capabilities without failing the core sync if `/api/config` is unavailable or returns non-200.
   - Explicitly upon demand via CLI (`omawarden server capabilities --refresh`) or daemon IPC.
-- **Nested Server Metadata Extraction**: Alongside the top-level Bitwarden compatibility version (`version` -> `server_version`) and `gitHash`, discovery captures the optional nested `server` object (`server.name` -> `server_name`, `server.version` -> `server_vendor_version`) so Vaultwarden instances can be distinguished from official Bitwarden deployments and their real release version identified.
+- **Nested Server Metadata Extraction**: Discovery captures the optional nested `server.name` -> `server_name` so Vaultwarden instances can be distinguished from official Bitwarden deployments. The top-level `version` -> `server_version` remains the Bitwarden compatibility version.
 - **Persistence & Offline Access**:
   - Store discovered non-sensitive server metadata in `$XDG_DATA_HOME/omawarden/server_capabilities.json` (`0600` permissions).
   - `server_name` and `server_vendor_version` are optional and default to `None`; caches written by older builds without these keys deserialize cleanly via `#[serde(default)]`.
+  - The cache is keyed to the canonical API base **including its path**, not merely the origin, so distinct deployments that share scheme and host (e.g. `/old` and `/new`) do not collide on a single cache entry.
   - This enables offline inspection by `omawarden doctor` and CLI queries without blocking on network I/O or requiring unlocked vault state.
+
+#### 1.1 Vendor-version provenance
+
+The Vaultwarden release version (`server_vendor_version`) is sourced from `GET /api/version`, **not** from the nested `server.version` field of `/api/config`:
+
+- Vaultwarden emitted a nested `server.version` only in `1.31.0 ..= 1.32.0` and removed it in `1.32.1`; it is absent from every later release (verified through `1.37.5`). Official Bitwarden never emits it. Reading `server.version` would therefore leave `server_vendor_version` empty on exactly the releases the Vaultwarden version tiers care about.
+- `GET /api/version` returns the running server's own version. On Vaultwarden that is its release tag (e.g. `1.37.4`), which is the value recorded as `server_vendor_version`.
+- The probe is **flavor-gated**: it is consulted only for servers classified as Vaultwarden. On official Bitwarden the version signal is a calendar-style version (e.g. `2026.10`) in a different namespace, and must never be recorded as a Vaultwarden vendor version.
+- The probe is best-effort: it shares the discovery HTTP timeout budget, and a failure or non-200 response preserves `featureStates`, `server_name`, `server_version`, and `git_hash` rather than failing discovery.
+- A calendar-shaped compatibility version alone cannot establish the server flavor, which is why flavor classification keys off `server.name` and the resolved cloud origin rather than the version string alone.
 
 ### 2. Declarative Server Capability Matrix & Cascading Feature Gating
 Omawarden maintains a structured capability matrix registering known upstream feature flags, version thresholds, and **cascading feature dependencies**:
@@ -112,7 +123,7 @@ Official Bitwarden Cloud (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self
       ]
     }
     ```
-    `server_name` and `server_vendor_version` are optional and omitted when the upstream server does not report a nested `server` object.
+    `server_name` is omitted when `/api/config` does not report a nested `server` object; `server_vendor_version` is omitted when the `/api/version` probe is unavailable or the server is not classified as Vaultwarden. Both are optional and default to `None`.
 - **CLI Subcommand**:
   - `omawarden server capabilities [--refresh] [--json]`
   - Interactive mode prints a clean summary of server identity, compatibility version, vendor version, active features, and recommendations.
@@ -125,5 +136,5 @@ Official Bitwarden Cloud (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self
   - Clear, non-intimidating guidance for self-hosters to enable modern features like `ssh-agent-v2`.
   - Zero disruption to core vault operations and zero plain secret exposure (only public server metadata is probed and cached).
 - **Trade-off**:
-  - Adds one lightweight, non-blocking HTTP GET to the sync lifecycle.
+  - Adds one lightweight, non-blocking HTTP GET to the sync lifecycle, plus a second `/api/version` probe for servers classified as Vaultwarden.
   - Requires maintaining the known capability matrix in Omawarden as upstream Bitwarden evolves new flags.
