@@ -26,6 +26,17 @@ impl LoginUriDraft {
     }
 }
 
+/// Wire representation of a Bitwarden custom field. `type` maps to `0`
+/// (Text), `1` (Hidden), `2` (Boolean) or `3` (Linked); both `name` and
+/// `value` are encrypted with the cipher key before they leave the daemon.
+#[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
+pub(crate) struct CipherFieldDraft {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    #[serde(default, rename = "type")]
+    pub(crate) field_type: u32,
+}
+
 #[derive(Deserialize, ZeroizeOnDrop, Default)]
 pub(crate) struct LoginDraft {
     pub(crate) username: Option<String>,
@@ -68,6 +79,7 @@ pub(crate) struct CipherCreateDraft {
     pub(crate) password: Option<String>,
     pub(crate) uri: Option<String>,
     pub(crate) uris: Option<Vec<LoginUriDraft>>,
+    pub(crate) fields: Option<Vec<CipherFieldDraft>>,
 }
 
 #[derive(Deserialize, ZeroizeOnDrop, Default)]
@@ -792,6 +804,11 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         .or_else(|| draft.folder_id_camel.clone());
     let favorite = draft.favorite.unwrap_or(false);
 
+    let encrypted_fields = match draft.fields.as_deref() {
+        Some(fields) => Some(encrypt_cipher_fields(key, fields)?),
+        None => None,
+    };
+
     enum ResolvedType {
         Login,
         Note,
@@ -828,7 +845,7 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
     };
 
     if matches!(resolved_type, ResolvedType::Note) {
-        return Ok(json!({
+        let mut payload = json!({
             "type": 2,
             "folderId": folder_id,
             "organizationId": null,
@@ -837,7 +854,11 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
             "name": name,
             "notes": notes,
             "secureNote": { "type": 0 }
-        }));
+        });
+        if let Some(ref fields) = encrypted_fields {
+            payload["fields"] = json!(fields);
+        }
+        return Ok(payload);
     }
 
     let username = draft
@@ -895,7 +916,7 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         }
     }
 
-    Ok(json!({
+    let mut payload = json!({
         "type": 1,
         "folderId": folder_id,
         "organizationId": null,
@@ -910,5 +931,30 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
             "uris": uris_list,
             "autofillOnPageLoad": null
         }
-    }))
+    });
+    if let Some(ref fields) = encrypted_fields {
+        payload["fields"] = json!(fields);
+    }
+    Ok(payload)
+}
+
+/// Encrypt the `name` and `value` of every custom field with the cipher's
+/// symmetric key. Plaintext field data must never cross the HTTP boundary.
+fn encrypt_cipher_fields(
+    key: &SymmetricCryptoKey,
+    fields: &[CipherFieldDraft],
+) -> Result<Vec<Value>, String> {
+    let mut encrypted = Vec::with_capacity(fields.len());
+    for field in fields {
+        encrypted.push(json!({
+            "name": key
+                .encrypt_string(&field.name)
+                .map_err(|_| "Could not encrypt custom field name.".to_string())?,
+            "value": key
+                .encrypt_string(&field.value)
+                .map_err(|_| "Could not encrypt custom field value.".to_string())?,
+            "type": field.field_type,
+        }));
+    }
+    Ok(encrypted)
 }

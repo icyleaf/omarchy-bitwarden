@@ -39,6 +39,56 @@ fn parse_cli_bool(v: &str) -> Result<bool, String> {
     }
 }
 
+/// Parse one `NAME=VALUE` custom field declaration, rejecting a missing
+/// separator or an empty name before the payload reaches the daemon.
+fn parse_custom_field_name_value(raw: &str) -> Result<(String, String), String> {
+    let Some((name, value)) = raw.split_once('=') else {
+        return Err(format!(
+            "Invalid custom field '{raw}': expected NAME=VALUE."
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!(
+            "Invalid custom field '{raw}': name cannot be empty."
+        ));
+    }
+    Ok((name.to_string(), value.to_string()))
+}
+
+/// Build the encrypted-ready `fields` array (plaintext, encrypted by the
+/// daemon) from the repeatable typed field flags. Text fields map to type 0,
+/// hidden fields to type 1 and boolean fields to type 2.
+fn build_custom_fields(
+    fields: &[String],
+    hidden_fields: &[String],
+    bool_fields: &[String],
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    for raw in fields {
+        let (name, value) = parse_custom_field_name_value(raw)?;
+        out.push(json!({ "name": name, "value": value, "type": 0 }));
+    }
+    for raw in hidden_fields {
+        let (name, value) = parse_custom_field_name_value(raw)?;
+        out.push(json!({ "name": name, "value": value, "type": 1 }));
+    }
+    for raw in bool_fields {
+        let (name, value) = parse_custom_field_name_value(raw)?;
+        let canonical = match value.to_lowercase().as_str() {
+            "true" => "true",
+            "false" => "false",
+            other => {
+                return Err(format!(
+                    "Invalid boolean value '{other}' for custom field '{name}': expected true or false."
+                ));
+            }
+        };
+        out.push(json!({ "name": name, "value": canonical, "type": 2 }));
+    }
+    Ok(out)
+}
+
 /// Auth output can carry a raw access token in `session`. Piped callers (the
 /// QML helper) depend on it; an interactive terminal would only leave it
 /// behind in scrollback, so redact it there.
@@ -577,6 +627,27 @@ enum CreateItemAction {
             help = "Optional URI (repeatable for multiple URLs)"
         )]
         uris: Vec<String>,
+        #[arg(
+            long = "field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Text custom field (repeatable)"
+        )]
+        fields: Vec<String>,
+        #[arg(
+            long = "hidden-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Hidden custom field (repeatable)"
+        )]
+        hidden_fields: Vec<String>,
+        #[arg(
+            long = "bool-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=true|false",
+            help = "Boolean custom field (repeatable)"
+        )]
+        bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
         #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
@@ -600,6 +671,27 @@ enum CreateItemAction {
             help = "Read note content from standard input"
         )]
         notes_stdin: bool,
+        #[arg(
+            long = "field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Text custom field (repeatable)"
+        )]
+        fields: Vec<String>,
+        #[arg(
+            long = "hidden-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Hidden custom field (repeatable)"
+        )]
+        hidden_fields: Vec<String>,
+        #[arg(
+            long = "bool-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=true|false",
+            help = "Boolean custom field (repeatable)"
+        )]
+        bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
         #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
@@ -1919,6 +2011,9 @@ fn main() -> ExitCode {
                             generate_passphrase,
                             notes,
                             uris,
+                            fields,
+                            hidden_fields,
+                            bool_fields,
                             folder_id,
                             organization_id,
                             collection_id,
@@ -2026,7 +2121,27 @@ fn main() -> ExitCode {
                                 }
                             };
 
-                            let req = json!({
+                            let custom_fields =
+                                match build_custom_fields(&fields, &hidden_fields, &bool_fields) {
+                                    Ok(list) => list,
+                                    Err(err_msg) => {
+                                        if json {
+                                            println!(
+                                                "{}",
+                                                serde_json::to_string_pretty(&json!({
+                                                    "ok": false,
+                                                    "error": err_msg,
+                                                }))
+                                                .unwrap()
+                                            );
+                                        } else {
+                                            eprintln!("Error: {err_msg}");
+                                        }
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+
+                            let mut req = json!({
                                 "action": "cipher_create",
                                 "cipher_type": "login",
                                 "name": name,
@@ -2036,12 +2151,18 @@ fn main() -> ExitCode {
                                 "uris": uris,
                                 "folder_id": folder_id,
                             });
+                            if !custom_fields.is_empty() {
+                                req["fields"] = json!(custom_fields);
+                            }
                             (req, "login cipher", name)
                         }
                         Some(CreateItemAction::Note {
                             name,
                             notes,
                             notes_stdin,
+                            fields,
+                            hidden_fields,
+                            bool_fields,
                             folder_id,
                             organization_id,
                             collection_id,
@@ -2078,7 +2199,27 @@ fn main() -> ExitCode {
                                 zeroize::Zeroizing::new(notes.unwrap_or_default())
                             };
 
-                            let req = json!({
+                            let custom_fields =
+                                match build_custom_fields(&fields, &hidden_fields, &bool_fields) {
+                                    Ok(list) => list,
+                                    Err(err_msg) => {
+                                        if json {
+                                            println!(
+                                                "{}",
+                                                serde_json::to_string_pretty(&json!({
+                                                    "ok": false,
+                                                    "error": err_msg,
+                                                }))
+                                                .unwrap()
+                                            );
+                                        } else {
+                                            eprintln!("Error: {err_msg}");
+                                        }
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+
+                            let mut req = json!({
                                 "action": "cipher_create",
                                 "type": 2,
                                 "cipher_type": "note",
@@ -2086,6 +2227,9 @@ fn main() -> ExitCode {
                                 "notes": *notes_val,
                                 "folder_id": folder_id,
                             });
+                            if !custom_fields.is_empty() {
+                                req["fields"] = json!(custom_fields);
+                            }
                             (req, "note cipher", name)
                         }
                         None => {
@@ -4959,6 +5103,53 @@ Note line 2 with: colons and # symbols
         let res = parse_editor_template(content, "login");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Invalid favorite value"));
+    }
+
+    #[test]
+    fn test_build_custom_fields_typed_flags() {
+        let fields = build_custom_fields(
+            &["Cluster=Prod".to_string()],
+            &["API_KEY=secret-tok".to_string()],
+            &["Requires VPN=true".to_string(), "Retired=false".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            fields,
+            vec![
+                json!({"name": "Cluster", "value": "Prod", "type": 0}),
+                json!({"name": "API_KEY", "value": "secret-tok", "type": 1}),
+                json!({"name": "Requires VPN", "value": "true", "type": 2}),
+                json!({"name": "Retired", "value": "false", "type": 2}),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_custom_fields_keeps_equals_in_value() {
+        let fields = build_custom_fields(&["Equation=a=b".to_string()], &[], &[]).unwrap();
+        assert_eq!(fields[0]["name"], "Equation");
+        assert_eq!(fields[0]["value"], "a=b");
+    }
+
+    #[test]
+    fn test_build_custom_fields_rejects_missing_separator() {
+        let err = build_custom_fields(&["NoSeparator".to_string()], &[], &[]).unwrap_err();
+        assert!(err.contains("expected NAME=VALUE"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_build_custom_fields_rejects_empty_name() {
+        let err = build_custom_fields(&[], &["=oops".to_string()], &[]).unwrap_err();
+        assert!(err.contains("name cannot be empty"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_build_custom_fields_rejects_malformed_boolean() {
+        let err = build_custom_fields(&[], &[], &["Active=maybe".to_string()]).unwrap_err();
+        assert!(
+            err.contains("Invalid boolean value 'maybe' for custom field 'Active'"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
