@@ -765,7 +765,12 @@ fn write_offline_cache(root: &Path) {
                 "login": {
                     "password": user_key.encrypt_string("offline secret").unwrap(),
                     "totp": user_key.encrypt_string("JBSWY3DPEHPK3PXP").unwrap()
-                }
+                },
+                "fields": [{
+                    "name": user_key.encrypt_string("PIN").unwrap(),
+                    "value": user_key.encrypt_string("fixture PIN value").unwrap(),
+                    "type": 1
+                }]
             }]
         })
         .to_string(),
@@ -775,13 +780,27 @@ fn write_offline_cache(root: &Path) {
 
 #[test]
 fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
+    assert_offline_copy_requires_current_epoch(
+        &["copy", "offline-item", "--password", "--timeout", "0"],
+        "offline secret",
+    );
+}
+
+#[test]
+fn offline_custom_field_copy_requires_current_epoch() {
+    assert_offline_copy_requires_current_epoch(
+        &["copy", "offline-item", "--field", "PIN", "--timeout", "0"],
+        "fixture PIN value",
+    );
+}
+
+fn assert_offline_copy_requires_current_epoch(copy_args: &[&str], expected: &str) {
     let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
     let clip = Clipboard::new();
     let root = clip.0.path();
     write_offline_cache(root);
 
     let command = || clip.command(cli);
-    let copy_args = ["copy", "offline-item", "--password", "--timeout", "0"];
     let mut pending = command()
         .args(copy_args)
         .stdin(Stdio::piped())
@@ -835,7 +854,7 @@ fn offline_copy_captures_the_epoch_before_prompting_for_the_master_password() {
         "{}",
         String::from_utf8_lossy(&fresh_output.stdout)
     );
-    assert_eq!(clip.paste().as_deref(), Some("offline secret"));
+    assert_eq!(clip.paste().as_deref(), Some(expected));
 }
 
 #[test]
