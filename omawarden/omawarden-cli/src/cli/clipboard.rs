@@ -10,6 +10,7 @@ pub(crate) struct HolderArgs {
     pub(crate) expected_lock_generation: Option<u64>,
     pub(crate) cache_path: Option<PathBuf>,
     pub(crate) expected_credential_id: Option<String>,
+    pub(crate) expected_lock_epoch: Option<u64>,
     pub(crate) legacy_path: Option<PathBuf>,
 }
 
@@ -17,17 +18,22 @@ pub(crate) fn run_holder(args: HolderArgs) -> ExitCode {
     let active_path = args.binary_path.as_deref().or(args.legacy_path.as_deref());
     let resolved_provider =
         omawarden_engine::clipboard::resolve_provider(args.provider.as_deref(), active_path);
-    let scope = args
-        .expected_lock_generation
-        .map(ClipboardScope::Session)
-        .or_else(|| {
-            args.cache_path
-                .zip(args.expected_credential_id)
-                .map(|(path, credential_id)| ClipboardScope::Cache {
-                    path,
-                    credential_id,
-                })
-        });
+    let scope = match (
+        args.expected_lock_generation,
+        args.cache_path,
+        args.expected_credential_id,
+        args.expected_lock_epoch,
+    ) {
+        (Some(generation), None, None, None) => Some(ClipboardScope::Session(generation)),
+        (None, Some(path), Some(credential_id), Some(lock_epoch)) => {
+            Some(ClipboardScope::Cache { path, credential_id, lock_epoch })
+        }
+        (None, None, None, None) => None,
+        _ => {
+            eprintln!("Invalid clipboard holder scope");
+            return ExitCode::FAILURE;
+        }
+    };
     match crate::clipboard_holder::hold_selection(
         resolved_provider,
         std::time::Duration::from_secs(args.seconds),

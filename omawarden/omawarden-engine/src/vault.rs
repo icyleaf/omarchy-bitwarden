@@ -277,12 +277,49 @@ where
     Ok(user_key)
 }
 
-/// Retrieves a decrypted `VaultItem` from the unlocked daemon, falling back to
-/// local offline cache decryption when the daemon is locked or unavailable.
+/// Retrieves a decrypted item paired with authorization for a clipboard copy.
+///
+/// # Errors
+/// Returns an error when the source session cannot be authorized or unlocked.
 pub fn vault_output_item<F>(
     cfg: &crate::config::Config,
     query: &str,
     touch: bool,
+    read_unlock_password: F,
+) -> Result<Option<VaultOutputItem>, String>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    read_vault_output(cfg, query, touch, VaultReadPurpose::Clipboard, read_unlock_password)
+}
+
+/// Retrieves a decrypted item for inspection or editing.
+///
+/// # Errors
+/// Returns an error when the vault cannot be unlocked or its cache read.
+pub fn read_vault_item<F>(
+    cfg: &crate::config::Config,
+    query: &str,
+    touch: bool,
+    read_unlock_password: F,
+) -> Result<Option<VaultItem>, String>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    read_vault_output(cfg, query, touch, VaultReadPurpose::Inspect, read_unlock_password)
+        .map(|found| found.map(|output| output.item))
+}
+
+enum VaultReadPurpose {
+    Clipboard,
+    Inspect,
+}
+
+fn read_vault_output<F>(
+    cfg: &crate::config::Config,
+    query: &str,
+    touch: bool,
+    purpose: VaultReadPurpose,
     read_unlock_password: F,
 ) -> Result<Option<VaultOutputItem>, String>
 where
@@ -306,8 +343,19 @@ where
             .map(|item| VaultOutputItem { item, scope }));
     }
 
-    let vault =
-        VaultManager::with_identity_url(&cfg.server_url, cfg.identity_url.as_deref(), None, None);
+    // Capture authorization before reading or decrypting the cache, including
+    // before a callback waits for the user's master password.
+    let storage_mgr = StorageManager::default();
+    let lock_epoch = match purpose {
+        VaultReadPurpose::Clipboard => Some(
+            crate::clipboard::current_lock_epoch(&storage_mgr.file_path)
+                .map_err(|error| format!("Could not verify the current vault lock state. {error}"))?,
+        ),
+        VaultReadPurpose::Inspect => None,
+    };
+    let vault = VaultManager::with_identity_url(
+        &cfg.server_url, cfg.identity_url.as_deref(), Some(storage_mgr), None,
+    );
     let storage = vault.storage_mgr.load();
     let key = ensure_unlocked_user_key(&vault, &storage, read_unlock_password)?;
     let query_lower = query.to_lowercase();
@@ -327,12 +375,13 @@ where
     });
     Ok(item.map(|item| VaultOutputItem {
         item,
-        scope: storage
-            .credential_id
-            .map(|credential_id| crate::clipboard::ClipboardScope::Cache {
+        scope: lock_epoch.and_then(|lock_epoch| {
+            storage.credential_id.map(|credential_id| crate::clipboard::ClipboardScope::Cache {
                 path: vault.storage_mgr.file_path,
                 credential_id,
-            }),
+                lock_epoch,
+            })
+        }),
     }))
 }
 
@@ -363,11 +412,12 @@ pub fn resolve_totp_for_query<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    let Some(found) = vault_output_item(cfg, query, false, read_unlock_password)
-        .ok()
-        .flatten()
-    else {
-        return Ok(TotpOutput::standalone(query));
+    let purpose = if copy { VaultReadPurpose::Clipboard } else { VaultReadPurpose::Inspect };
+    let found = match read_vault_output(cfg, query, false, purpose, read_unlock_password) {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(TotpOutput::standalone(query)),
+        Err(error) if copy => return Err(error),
+        Err(_) => return Ok(TotpOutput::standalone(query)),
     };
     if copy && found.scope.is_none() {
         return Err("Could not verify the clipboard source session.".to_string());
@@ -1259,12 +1309,25 @@ pub struct VaultManager {
     /// commit section (which re-checks the epoch under the guard), making
     /// wipe-vs-restore mutually exclusive at the commit point.
     pub restore_guard: std::sync::Mutex<()>,
+    /// Tests that assert epoch transitions run concurrently with tests that
+    /// lock other vaults. Pin their epoch file to a private directory instead
+    /// of sharing the process-wide runtime directory.
+    #[cfg(test)]
+    pub(crate) lock_epoch_dir: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) before_unlock_publication: crate::test_support::PausePoint,
     #[cfg(test)]
     pub(crate) cache_validated: crate::test_support::PausePoint,
     #[cfg(test)]
     pub(crate) before_activation_persist: std::sync::OnceLock<fn(&tempfile::NamedTempFile)>,
+}
+
+/// Outcome of a lock transition. `lock_epoch` is `Some` only when the shared
+/// epoch was durably advanced, so a caller can fall back instead of claiming
+/// that queued offline outputs were invalidated.
+pub(crate) struct VaultLockOutcome {
+    pub(crate) outputs_cleared: bool,
+    pub(crate) lock_epoch: Option<u64>,
 }
 
 impl VaultManager {
@@ -1318,6 +1381,8 @@ impl VaultManager {
             quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
             #[cfg(test)]
+            lock_epoch_dir: None,
+            #[cfg(test)]
             before_unlock_publication: Default::default(),
             #[cfg(test)]
             cache_validated: Default::default(),
@@ -1348,7 +1413,7 @@ impl VaultManager {
         })
     }
 
-    fn purge_decrypted_state(&self) -> bool {
+    fn purge_decrypted_state(&self) -> VaultLockOutcome {
         let mut unlocked = self.is_unlocked.write().unwrap_or_else(|e| e.into_inner());
         if *unlocked {
             self.lock_generation
@@ -1362,14 +1427,52 @@ impl VaultManager {
             *key = None;
         }
         drop(unlocked);
-        if let Err(error) = crate::clipboard::revoke_session_outputs() {
-            crate::log_warn!(
-                "omawarden:vault",
-                "Vault locked. Session output cleanup is pending. {error}"
-            );
-            return false;
+        let _outputs = match crate::daemon::lock_session_outputs() {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault locked. Cannot secure output revocation. {error}"
+                );
+                return VaultLockOutcome {
+                    outputs_cleared: false,
+                    lock_epoch: None,
+                };
+            }
+        };
+        // Advance before cleanup: a pending offline copy must be rejected even
+        // when clipboard or preview revocation fails.
+        #[cfg(test)]
+        let epoch_store = match self.lock_epoch_dir.as_deref() {
+            Some(dir) => crate::lock_epoch::LockEpochStore::new(dir),
+            None => crate::lock_epoch::store(),
+        };
+        #[cfg(not(test))]
+        let epoch_store = crate::lock_epoch::store();
+        let lock_epoch = match epoch_store.advance() {
+            Ok(epoch) => Some(epoch.value()),
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault locked, but the shared output epoch could not be advanced. {error}"
+                );
+                None
+            }
+        };
+        let outputs_cleared = match crate::clipboard::clear_session_outputs() {
+            Ok(()) => true,
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault locked. Session output cleanup is pending. {error}"
+                );
+                false
+            }
+        };
+        VaultLockOutcome {
+            outputs_cleared,
+            lock_epoch,
         }
-        true
     }
 
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
@@ -1380,7 +1483,7 @@ impl VaultManager {
     }
 
     /// Revoke the current plaintext and retained key under restore_guard.
-    pub(crate) fn hard_lock_inner(&self) -> bool {
+    pub(crate) fn hard_lock_inner(&self) -> VaultLockOutcome {
         self.wipe_quick_unlock_inner();
         self.purge_decrypted_state()
     }
@@ -3633,6 +3736,37 @@ pub(crate) mod tests {
         *vault_mgr.is_unlocked.write().unwrap() = true;
         vault_mgr.hard_lock();
         assert_eq!(vault_mgr.lock_generation(), start + 2);
+    }
+
+    #[test]
+    fn test_shared_lock_epoch_advances_on_lock_and_survives_quick_unlock() {
+        let _environment = crate::env_lock();
+        let runtime = tempfile::tempdir().unwrap();
+        let epoch_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.remove("WAYLAND_DISPLAY");
+        env.remove("WAYLAND_SOCKET");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = seeded_vault(dir.path(), "master-pw");
+        vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "70").unwrap();
+        let current = || {
+            std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch"))
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        };
+
+        vault.unlock("master-pw").unwrap();
+        assert_eq!(current(), 70, "unlock preserves the epoch");
+        assert!(vault.soft_lock());
+        assert_eq!(current(), 71, "soft lock advances the epoch");
+        assert_eq!(vault.quick_unlock_restore().unwrap(), 0);
+        assert_eq!(current(), 71, "quick unlock preserves the epoch");
+        vault.lock();
+        assert_eq!(current(), 72, "hard lock advances the epoch");
     }
 
     #[test]

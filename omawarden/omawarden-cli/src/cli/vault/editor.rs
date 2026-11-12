@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::ExitCode;
 
-use super::super::client::{submit_cipher_mutation, vault_output_item};
+use super::super::client::{read_vault_item, submit_cipher_mutation};
 use super::super::io::parse_cli_bool;
 
 #[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
@@ -465,10 +465,9 @@ pub(crate) fn handle_editor_edit(
     let item_name = resolved["name"].as_str().unwrap_or("").to_string();
     let item_type = resolved["type"].as_str().unwrap_or("login");
 
-    let full_item = vault_output_item(cfg, &item_id, false)
+    let full_item = read_vault_item(cfg, &item_id, false)
         .ok()
-        .flatten()
-        .map(|o| o.item);
+        .flatten();
 
     let initial_template =
         format_editor_template(&item_id, &item_name, item_type, full_item.as_ref());

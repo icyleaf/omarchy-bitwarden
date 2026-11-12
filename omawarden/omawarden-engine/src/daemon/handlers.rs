@@ -259,6 +259,7 @@ pub fn handle_client_with_peer(
             "capabilities": DAEMON_CAPABILITIES,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
+            "shared_lock_epoch": true,
             "unlock_context": state.vault_mgr.unlock_context(),
             "version": crate::ENGINE_VERSION,
             "commit": crate::GIT_HASH,
@@ -428,8 +429,14 @@ pub fn handle_client_with_peer(
             json!({ "ok": true, "quick_unlock_enabled": enabled })
         }
         "lock" => {
-            let outputs_cleared = state.lock();
-            json!({ "ok": true, "status": "locked", "outputs_cleared": outputs_cleared })
+            let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+            json!({
+                "ok": true,
+                "status": "locked",
+                "outputs_cleared": outputs_cleared,
+                "epoch_advanced": lock_epoch.is_some(),
+                "lock_epoch": lock_epoch
+            })
         }
         "sync" => match state.sync_with_client(client_context.as_ref()) {
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),

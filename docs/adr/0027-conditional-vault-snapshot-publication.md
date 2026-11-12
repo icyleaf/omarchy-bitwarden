@@ -84,14 +84,75 @@ receipts and retry rules remain in
    when changing accounts.
 
    Overlay copies, daemon-backed CLI copies and attachment outputs carry the
-   generation that supplied the plaintext. An offline CLI copy rechecks the
-   credential slot of the cache it decrypted. The detached holder revalidates
-   that authority under the output gate and keeps the gate until clipboard
-   setup completes. Attachment HTTP and decryption run outside the gate.
-   Previews are stored by credential slot, item and attachment ID.
+   generation that supplied the plaintext. An offline CLI copy captures the
+   shared lock epoch before it reads the encrypted cache, then rechecks the
+   credential slot and captured epoch under the account guard and output gate.
+   The detached holder repeats those checks before it starts the clipboard
+   provider and keeps the gate until clipboard setup completes, so a lock that
+   lands during the master-password prompt or decryption cannot revive the
+   copy. Attachment HTTP and decryption run outside the gate. Previews are
+   stored by credential slot, item and attachment ID.
 
-   The daemon and its helpers share the same validated runtime directory and
-   Wayland session. A vault copy records a marker before setting the selection.
+   The provider abstraction in ADR 0030 keeps these authorization checks in
+   `ClipboardGuard`, before any provider writes. The holder accepts explicit
+   provider/binary options and the legacy positional binary path, but a cache
+   scope must include its captured epoch in either form. An explicit provider
+   (including the mock provider) cannot bypass credential or epoch validation.
+
+   Offline authorization and final publication separately verify the daemon's
+   `shared_lock_epoch: true` ping capability. Clients require both wire
+   compatibility and this capability. With no reachable daemon, both the
+   runtime and cache owner leases must be available. The holder retains those
+   leases through clipboard setup. A busy owner with an unreachable socket
+   fails authorization. An epoch-unaware daemon requires an explicit upgrade
+   before it can authorize offline copies.
+
+   This cache-only clipboard path supports the default runtime socket paired
+   with its configured cache. Embedded hosts using a custom socket require a
+   client configured for that socket and remain outside this discovery path.
+   A busy cache owner prevents absence fallback when the default socket is
+   unreachable. Sampling releases its leases before password entry and
+   decryption. The detached holder rechecks authority and retains newly
+   acquired leases until clipboard
+   setup is acknowledged.
+
+   Hard and soft lock advance the persisted runtime lock epoch before output
+   cleanup, so an expired copy is rejected even when clipboard or preview
+   cleanup stays pending. `auth lock` and `auth logout` advance the epoch
+   locally after a daemon confirms locking without a durable epoch, or after
+   obtaining the owner leases and confirming the daemon is absent. An
+   unconfirmed reply from a live or starting daemon reports failure. A daemon
+   restart preserves a completed epoch. A graceful stop is a lock transition
+   and advances it. Quick unlock preserves the epoch. The epoch file contains no
+   secrets, is serialized across CLI and daemon processes, and readers fail
+   closed on corrupt data; a lock transition with corrupt data rotates to a
+   fresh epoch so an old authorization can never be reused.
+
+   Lock transitions hold the output gate while advancing the epoch and
+   clearing outputs. Before staging a new epoch, the previous record is
+   invalidated and synced under the epoch guard. Failed writes and renames
+   therefore leave readers with invalid state. A subsequent successful
+   `omawarden auth lock` repairs that state. The guard inode remains stable and
+   records publication completion in its length. An empty guard marks an
+   unfinished transition. A readable old data record with that marker is
+   advanced before another authorization is issued, including when migrating
+   a guard from an older build.
+
+   A daemon `lock` reply carries `lock_epoch` and `epoch_advanced` alongside
+   `outputs_cleared`. A numeric epoch and `epoch_advanced: true` identify the
+   durable transition. `null` and `epoch_advanced: false` report a locked vault
+   whose new epoch could not be published. The CLI preserves confirmed lock
+   success while exposing that independent outcome through `epoch_advanced`
+   and an optional `warning`. `error` describes an unsuccessful operation.
+   The overlay commits its locked state after a successful JSON receipt and
+   normal process exit, and refreshes auth status after an unsuccessful lock.
+   Direct IPC callers apply the same owner checks before a local fallback.
+   The epoch associates a cleanup result with its transition for the
+   pending-cleanup follow-up.
+
+   The daemon and its helpers share the same validated runtime directory,
+   configured clipboard provider and display session. A vault copy records a
+   marker before setting the selection.
    The marker survives a daemon restart and is removed only after confirmed
    clipboard clearing. A headless runtime without a configured Wayland
    display, the default Wayland socket or a marker can sign in without a
@@ -137,3 +198,5 @@ responses, uncached receipts, bounded retries, remote deletion, and login failur
 [CLI tests](../../omawarden/tests/vault_sync_cli.rs) cover cold daemon login,
 same-server and cross-server account changes, locks on both sides of
 activation, and lost replies across daemon restart using isolated vaults.
+[Clipboard tests](../../omawarden/tests/clipboard_cli.rs) cover stale offline
+holders, lock fallback without a daemon, and the local logout transition.
