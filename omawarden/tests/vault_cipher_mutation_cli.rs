@@ -1963,6 +1963,98 @@ fn test_edit_cipher_partial_field_update() {
     assert!(received);
 }
 
+/// Vaultwarden 1.37+ requires `encryptedFor` on `PUT /api/ciphers/{id}`, the same
+/// as on create. Without it every edit — including a favorite toggle — comes
+/// back 422, so the update path must send it.
+#[test]
+fn test_edit_cipher_sends_encrypted_for() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "22222222-3333-4444-5555-666666666666";
+    let cipher_name = "Favorite Site";
+    add_cipher_to_cache(dir, &user_key, cipher_id, cipher_name, "user1");
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args(["vault", "edit", cipher_name, "--favorite", "true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["encryptedFor"].as_str(),
+            Some("user-id-123"),
+            "update payload must carry encryptedFor"
+        );
+        assert_eq!(payload["favorite"], true);
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": true,
+            "login": payload["login"],
+            "revisionDate": "2026-11-09T14:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(received);
+}
+
 #[test]
 fn test_edit_cipher_optimistic_concurrency_conflict_rejected() {
     let (temp, api, _server_url, user_key) = setup_test_environment();
