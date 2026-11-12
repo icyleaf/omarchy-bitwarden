@@ -574,6 +574,34 @@ enum VaultAction {
             help = "Clear all URIs from login cipher"
         )]
         clear_uris: bool,
+        #[arg(
+            long = "field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Upsert a text custom field (NAME=VALUE; repeatable)"
+        )]
+        fields: Vec<String>,
+        #[arg(
+            long = "hidden-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Upsert a hidden custom field (NAME=VALUE; repeatable)"
+        )]
+        hidden_fields: Vec<String>,
+        #[arg(
+            long = "bool-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=true|false",
+            help = "Upsert a boolean custom field (repeatable)"
+        )]
+        bool_fields: Vec<String>,
+        #[arg(
+            long = "remove-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME",
+            help = "Remove a custom field by name (repeatable)"
+        )]
+        remove_fields: Vec<String>,
         #[arg(long, help = "Folder ID for the cipher")]
         folder_id: Option<String>,
         #[arg(
@@ -2522,6 +2550,10 @@ fn main() -> ExitCode {
                     uris,
                     add_uris,
                     clear_uris,
+                    fields,
+                    hidden_fields,
+                    bool_fields,
+                    remove_fields,
                     folder_id,
                     favorite,
                     json,
@@ -2537,6 +2569,10 @@ fn main() -> ExitCode {
                         || !uris.is_empty()
                         || !add_uris.is_empty()
                         || clear_uris
+                        || !fields.is_empty()
+                        || !hidden_fields.is_empty()
+                        || !bool_fields.is_empty()
+                        || !remove_fields.is_empty()
                         || folder_id.is_some()
                         || favorite.is_some();
 
@@ -2629,6 +2665,26 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
+                    let custom_fields =
+                        match build_custom_fields(&fields, &hidden_fields, &bool_fields) {
+                            Ok(list) => list,
+                            Err(err_msg) => {
+                                if json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string_pretty(&json!({
+                                            "ok": false,
+                                            "error": err_msg,
+                                        }))
+                                        .unwrap()
+                                    );
+                                } else {
+                                    eprintln!("Error: {err_msg}");
+                                }
+                                return ExitCode::FAILURE;
+                            }
+                        };
+
                     let password_val = if generate_password {
                         let opts = omawarden::generator::PasswordOptions {
                             length: 16,
@@ -2688,6 +2744,12 @@ fn main() -> ExitCode {
                     }
                     if clear_uris {
                         daemon_req["clear_uris"] = json!(true);
+                    }
+                    if !custom_fields.is_empty() {
+                        daemon_req["fields"] = json!(custom_fields);
+                    }
+                    if !remove_fields.is_empty() {
+                        daemon_req["remove_fields"] = json!(remove_fields);
                     }
                     if let Some(ref ctx) = client_ctx {
                         daemon_req["client"] = json!(ctx);
@@ -4925,6 +4987,14 @@ mod tests {
             "folder-123",
             "--favorite",
             "true",
+            "--field",
+            "Cluster=Prod",
+            "--hidden-field",
+            "API_KEY=secret",
+            "--bool-field",
+            "Verified=true",
+            "--remove-field",
+            "Obsolete",
             "--json",
         ])
         .unwrap();
@@ -4945,6 +5015,10 @@ mod tests {
                         uris,
                         add_uris,
                         clear_uris,
+                        fields,
+                        hidden_fields,
+                        bool_fields,
+                        remove_fields,
                         folder_id,
                         favorite,
                         json,
@@ -4962,6 +5036,10 @@ mod tests {
                 assert_eq!(uris, vec!["https://new.uri"]);
                 assert!(add_uris.is_empty());
                 assert!(!clear_uris);
+                assert_eq!(fields, vec!["Cluster=Prod"]);
+                assert_eq!(hidden_fields, vec!["API_KEY=secret"]);
+                assert_eq!(bool_fields, vec!["Verified=true"]);
+                assert_eq!(remove_fields, vec!["Obsolete"]);
                 assert_eq!(folder_id.as_deref(), Some("folder-123"));
                 assert_eq!(favorite, Some(true));
                 assert!(json);

@@ -4215,3 +4215,595 @@ fn test_create_cipher_rejects_malformed_boolean_custom_field() {
         "unexpected error output: {stderr}"
     );
 }
+
+fn add_login_cipher_with_fields_to_cache(
+    dir: &Path,
+    user_key: &SymmetricCryptoKey,
+    id: &str,
+    name: &str,
+    fields: &[(&str, &str, i64)],
+) {
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    let encrypted: Vec<Value> = fields
+        .iter()
+        .map(|(field_name, value, field_type)| {
+            json!({
+                "name": user_key.encrypt_string(field_name).unwrap(),
+                "value": user_key.encrypt_string(value).unwrap(),
+                "type": field_type,
+            })
+        })
+        .collect();
+    ciphers.push(json!({
+        "id": id,
+        "organizationId": null,
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("octo").unwrap(),
+            "password": user_key.encrypt_string("pass").unwrap(),
+            "uris": []
+        },
+        "fields": encrypted,
+        "revisionDate": "2026-11-09T00:00:00.000Z"
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+}
+
+fn decrypt_payload_fields(payload: &Value, key: &SymmetricCryptoKey) -> Vec<(String, String, i64)> {
+    payload["fields"]
+        .as_array()
+        .expect("fields must be array")
+        .iter()
+        .map(|field| {
+            (
+                decrypt_field_string(&field["name"], key),
+                decrypt_field_string(&field["value"], key),
+                field["type"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn test_edit_login_cipher_upserts_custom_field() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf1111-2222-3333-4444-555555555555";
+    let cipher_name = "Upsert Field Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("PIN", "1234", 0), ("Keep", "untouched", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args(["vault", "edit", cipher_id, "--field", "PIN=9999", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let fields = decrypt_payload_fields(&payload, &user_key);
+        assert_eq!(
+            fields,
+            vec![
+                ("PIN".to_string(), "9999".to_string(), 0),
+                ("Keep".to_string(), "untouched".to_string(), 0),
+            ]
+        );
+        // Unmentioned credentials stay intact.
+        let username = decrypt_field_string(&payload["login"]["username"], &user_key);
+        assert_eq!(username, "octo");
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T02:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI upsert failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_edit_login_cipher_upserts_custom_field_case_insensitive() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf2222-2222-3333-4444-555555555555";
+    let cipher_name = "Case Insensitive Field Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("pin", "1234", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args(["vault", "edit", cipher_id, "--field", "PIN=9999", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (_, _, body) = read_request_with_method(&mut stream);
+        received = true;
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let fields = decrypt_payload_fields(&payload, &user_key);
+        assert_eq!(fields, vec![("PIN".to_string(), "9999".to_string(), 0)]);
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T02:10:00.000Z"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI case-insensitive upsert failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_edit_login_cipher_appends_hidden_field() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf3333-2222-3333-4444-555555555555";
+    let cipher_name = "Append Field Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("Existing", "value", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--hidden-field",
+            "NewSecret=val123",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (_, _, body) = read_request_with_method(&mut stream);
+        received = true;
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let fields = decrypt_payload_fields(&payload, &user_key);
+        assert_eq!(
+            fields,
+            vec![
+                ("Existing".to_string(), "value".to_string(), 0),
+                ("NewSecret".to_string(), "val123".to_string(), 1),
+            ]
+        );
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T02:20:00.000Z"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI append failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_edit_login_cipher_removes_custom_field() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf4444-2222-3333-4444-555555555555";
+    let cipher_name = "Remove Field Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("Keep", "x", 0), ("ObsoleteKey", "stale", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--remove-field",
+            "ObsoleteKey",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (_, _, body) = read_request_with_method(&mut stream);
+        received = true;
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let fields = decrypt_payload_fields(&payload, &user_key);
+        assert_eq!(fields, vec![("Keep".to_string(), "x".to_string(), 0)]);
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T02:30:00.000Z"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI removal failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_edit_login_cipher_remove_unknown_field_fails_without_request() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf5555-2222-3333-4444-555555555555";
+    let cipher_name = "Unknown Remove Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("Keep", "x", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let out = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--remove-field",
+            "Nope",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("No custom field named 'Nope'"),
+        "unexpected output: {stdout}"
+    );
+    assert!(
+        stdout.contains("Keep"),
+        "should list available fields: {stdout}"
+    );
+}
+
+#[test]
+fn test_edit_login_cipher_optimistic_concurrency_conflict_on_field() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "afaf6666-2222-3333-4444-555555555555";
+    let cipher_name = "Field Conflict Target";
+    add_login_cipher_with_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[("PIN", "1234", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args(["vault", "edit", cipher_id, "--field", "PIN=9999", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (_, _, _) = read_request_with_method(&mut stream);
+        received = true;
+        let resp_body = json!({
+            "error": "Conflict",
+            "message": "Cipher revisionDate does not match server"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    assert!(received);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("modified remotely"),
+        "unexpected output: {stdout}"
+    );
+}
