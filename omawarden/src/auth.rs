@@ -197,7 +197,9 @@ impl AuthManager {
     }
 
     fn advance_local_lock_epoch(&self) -> std::io::Result<u64> {
-        let _outputs = crate::daemon::lock_session_outputs()?;
+        // Hold the output gate when available. Its failure leaves cleanup
+        // pending, but the independent epoch guard can still revoke old copies.
+        let _outputs = crate::daemon::lock_session_outputs().ok();
         #[cfg(test)]
         let store = match self.lock_epoch_dir.as_deref() {
             Some(dir) => crate::lock_epoch::LockEpochStore::new(dir),

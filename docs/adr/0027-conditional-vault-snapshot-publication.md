@@ -129,10 +129,13 @@ receipts and retry rules remain in
    fresh epoch so an old authorization can never be reused.
 
    Lock transitions hold the output gate while advancing the epoch and
-   clearing outputs. Before staging a new epoch, the previous record is
-   invalidated and synced under the epoch guard. Failed writes and renames
-   therefore leave readers with invalid state. A subsequent successful
-   `omawarden auth lock` repairs that state. The guard inode remains stable and
+   clearing outputs when the gate is available. If acquiring the gate fails,
+   the transition still attempts to advance the epoch under its independent
+   guard and leaves output cleanup pending. Before staging a new epoch, the
+   transition invalidates and syncs the previous record under the epoch guard.
+   Failed writes and renames therefore leave readers with invalid state.
+   A subsequent successful `omawarden auth lock` repairs that state. The guard
+   inode remains stable and
    records publication completion in its length. An empty guard marks an
    unfinished transition. A readable old data record with that marker is
    advanced before another authorization is issued, including when migrating

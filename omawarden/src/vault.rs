@@ -417,21 +417,9 @@ impl VaultManager {
             *key = None;
         }
         drop(unlocked);
-        let _outputs = match crate::daemon::lock_session_outputs() {
-            Ok(outputs) => outputs,
-            Err(error) => {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "Vault locked. Cannot secure output revocation. {error}"
-                );
-                return VaultLockOutcome {
-                    outputs_cleared: false,
-                    lock_epoch: None,
-                };
-            }
-        };
-        // Advance before cleanup: a pending offline copy must be rejected even
-        // when clipboard or preview revocation fails.
+        let output_gate = crate::daemon::lock_session_outputs();
+        // Revoke queued copies even if we could not secure the output gate.
+        // When available, the gate stays held through the transition and cleanup.
         #[cfg(test)]
         let epoch_store = match self.lock_epoch_dir.as_deref() {
             Some(dir) => crate::lock_epoch::LockEpochStore::new(dir),
@@ -447,6 +435,19 @@ impl VaultManager {
                     "Vault locked, but the shared output epoch could not be advanced. {error}"
                 );
                 None
+            }
+        };
+        let _outputs = match output_gate {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:vault",
+                    "Vault locked. Cannot secure output cleanup. {error}"
+                );
+                return VaultLockOutcome {
+                    outputs_cleared: false,
+                    lock_epoch,
+                };
             }
         };
         let outputs_cleared = match crate::clipboard::clear_session_outputs() {
