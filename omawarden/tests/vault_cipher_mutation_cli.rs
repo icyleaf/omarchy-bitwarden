@@ -1095,6 +1095,30 @@ fn test_create_cipher_string_type_and_bitwarden_uris_format() {
     assert!(posted, "Bitwarden API POST was not received");
 }
 
+fn add_cipher_with_login_to_cache(
+    dir: &Path,
+    user_key: &SymmetricCryptoKey,
+    id: &str,
+    name: &str,
+    login: Value,
+) {
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": id,
+        "organizationId": null,
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": login,
+        "revisionDate": "2026-11-09T00:00:00.000Z"
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+}
+
 fn add_cipher_to_cache(
     dir: &Path,
     user_key: &SymmetricCryptoKey,
@@ -3511,4 +3535,409 @@ fn test_disambiguation_non_interactive_fails_closed_with_ids() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&format!("Multiple ciphers matched '{cipher_name}': [{cipher1_id}, {cipher2_id}]. Specify by ID or narrower name.")));
+}
+
+#[test]
+fn test_create_login_cipher_multiple_uris() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "MultiURI Cipher",
+            "--username",
+            "octocat",
+            "--password",
+            "secretpass",
+            "--uri",
+            "https://github.com",
+            "--uri",
+            "https://api.github.com",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris_arr = payload["login"]["uris"]
+            .as_array()
+            .expect("uris must be array");
+        assert_eq!(uris_arr.len(), 2);
+
+        let u1 = EncString::parse(uris_arr[0]["uri"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        let u2 = EncString::parse(uris_arr[1]["uri"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(u1, "https://github.com");
+        assert_eq!(u2, "https://api.github.com");
+
+        let resp_body = json!({
+            "id": "multi-uri-uuid-1111",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-10T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI exit status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(posted, "Bitwarden API POST was not received");
+
+    let stdout_json: Value = serde_json::from_slice(&out.stdout).expect("output must be JSON");
+    assert_eq!(stdout_json["ok"], true);
+    assert_eq!(stdout_json["outcome"], "saved");
+    assert_eq!(stdout_json["item"]["id"], "multi-uri-uuid-1111");
+}
+
+#[test]
+fn test_edit_login_cipher_add_uri_and_clear_uris() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "11111111-2222-3333-4444-555555555555";
+    let cipher_name = "Edit MultiURI Target";
+
+    let initial_login = json!({
+        "username": user_key.encrypt_string("octo").unwrap(),
+        "password": user_key.encrypt_string("pass").unwrap(),
+        "uris": [
+            { "uri": user_key.encrypt_string("https://primary.com").unwrap(), "match": Value::Null }
+        ]
+    });
+    add_cipher_with_login_to_cache(dir, &user_key, cipher_id, cipher_name, initial_login);
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // 1. Test --add-uri
+    let mut cli_add = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--add-uri",
+            "https://secondary.com",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut add_received = false;
+    while cli_add.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        add_received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris_arr = payload["login"]["uris"]
+            .as_array()
+            .expect("uris must be array");
+        assert_eq!(uris_arr.len(), 2);
+        let u1 = EncString::parse(uris_arr[0]["uri"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        let u2 = EncString::parse(uris_arr[1]["uri"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(u1, "https://primary.com");
+        assert_eq!(u2, "https://secondary.com");
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-10T01:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out_add = cli_add.wait_with_output().unwrap();
+    assert!(
+        out_add.status.success(),
+        "CLI add-uri failed: {}",
+        String::from_utf8_lossy(&out_add.stderr)
+    );
+    assert!(add_received);
+
+    // 2. Test --clear-uris
+    let mut cli_clear = make_command(dir)
+        .args(["vault", "edit", cipher_id, "--clear-uris", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut clear_received = false;
+    while cli_clear.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        clear_received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris_arr = payload["login"]["uris"]
+            .as_array()
+            .expect("uris must be array");
+        assert_eq!(uris_arr.len(), 0);
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-10T02:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out_clear = cli_clear.wait_with_output().unwrap();
+    assert!(
+        out_clear.status.success(),
+        "CLI clear-uris failed: {}",
+        String::from_utf8_lossy(&out_clear.stderr)
+    );
+    assert!(clear_received);
+}
+
+#[test]
+fn test_edit_login_cipher_replace_uris() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "22222222-3333-4444-5555-666666666666";
+    let cipher_name = "Edit Replace URIs Target";
+
+    let initial_login = json!({
+        "username": user_key.encrypt_string("octo").unwrap(),
+        "password": user_key.encrypt_string("pass").unwrap(),
+        "uris": [
+            { "uri": user_key.encrypt_string("https://old-1.com").unwrap(), "match": Value::Null },
+            { "uri": user_key.encrypt_string("https://old-2.com").unwrap(), "match": Value::Null }
+        ]
+    });
+    add_cipher_with_login_to_cache(dir, &user_key, cipher_id, cipher_name, initial_login);
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--uri",
+            "https://single-replacement.com",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris_arr = payload["login"]["uris"]
+            .as_array()
+            .expect("uris must be array");
+        assert_eq!(uris_arr.len(), 1);
+        let u1 = EncString::parse(uris_arr[0]["uri"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(u1, "https://single-replacement.com");
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "revisionDate": "2026-11-10T03:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI replace uris failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
 }
