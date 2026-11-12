@@ -1836,7 +1836,8 @@ fn test_standalone_daemon_rejects_stop_without_admin() {
 
 #[test]
 fn test_standalone_admin_stop_with_known_or_unknown_peer_pid() {
-    for peer_pid in [Some(99999), None] {
+    let external_pid = if std::process::id() == 1 { 2 } else { 1 };
+    for peer_pid in [Some(external_pid), None] {
         let dir = tempdir().unwrap();
         let path = dir.path().join("daemon_data.json");
         let storage_mgr = StorageManager::new(path);
