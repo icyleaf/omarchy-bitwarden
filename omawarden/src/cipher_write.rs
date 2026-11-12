@@ -458,13 +458,27 @@ impl VaultManager {
                 field_changed = true;
             } else if let Some(ref replace_uris) = draft.uris {
                 let mut enc_uris = Vec::new();
+                // Preserve match values from existing URIs when replacing
+                let existing_uris = payload["login"]["uris"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|u| {
+                                let uri = u["uri"].as_str()?;
+                                let match_val = u["match"].clone();
+                                Some((uri.to_string(), match_val))
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
                 for u in replace_uris {
                     let u_str = u.uri();
                     if !u_str.is_empty() {
                         let enc_uri = cipher_key
                             .encrypt_string(u_str)
                             .map_err(|_| "Could not encrypt URI.".to_string())?;
-                        enc_uris.push(json!({"uri": enc_uri, "match": Value::Null}));
+                        let match_val = existing_uris.get(u_str).cloned().unwrap_or(Value::Null);
+                        enc_uris.push(json!({"uri": enc_uri, "match": match_val}));
                     }
                 }
                 payload["login"]["uris"] = json!(enc_uris);
@@ -485,20 +499,35 @@ impl VaultManager {
                     }
                 }
             } else if let Some(ref uri) = draft.uri {
-                if uri.is_empty() {
+                let existing_uris = payload["login"]["uris"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|u| {
+                                let uri_val = u["uri"].as_str()?;
+                                let match_val = u["match"].clone();
+                                Some((uri_val.to_string(), match_val))
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let u_str = uri;
+                if u_str.is_empty() {
                     payload["login"]["uris"] = json!([]);
                 } else {
                     let enc_uri = cipher_key
-                        .encrypt_string(uri)
+                        .encrypt_string(u_str)
                         .map_err(|_| "Could not encrypt URI.".to_string())?;
+                    let match_val = existing_uris.get(u_str).cloned().unwrap_or(Value::Null);
                     if let Some(uris) = payload["login"]["uris"].as_array_mut() {
                         if !uris.is_empty() {
                             uris[0]["uri"] = json!(enc_uri);
+                            uris[0]["match"] = match_val;
                         } else {
-                            uris.push(json!({"uri": enc_uri, "match": Value::Null}));
+                            uris.push(json!({"uri": enc_uri, "match": match_val}));
                         }
                     } else {
-                        payload["login"]["uris"] = json!([{"uri": enc_uri, "match": Value::Null}]);
+                        payload["login"]["uris"] = json!([{"uri": enc_uri, "match": match_val}]);
                     }
                 }
                 field_changed = true;

@@ -170,6 +170,11 @@ enum Commands {
         private_key: bool,
         #[arg(long, help = "Copy SSH public key or card number")]
         public_key: bool,
+        #[arg(
+            long,
+            help = "Copy a custom field by name (exact, then case-insensitive fallback)"
+        )]
+        field: Option<String>,
         #[arg(long, help = "Auto-clear timeout in seconds (default: config value)")]
         timeout: Option<i64>,
         #[arg(long, hide = true, requires = "stdin")]
@@ -2803,6 +2808,7 @@ fn main() -> ExitCode {
             notes,
             private_key,
             public_key,
+            field,
             timeout,
             expected_lock_generation,
         } => {
@@ -2875,6 +2881,20 @@ fn main() -> ExitCode {
                 }
             };
 
+            // --field cannot be combined with other field selection flags
+            let field_flags = [username, totp, notes, public_key, private_key, password];
+            if field.is_some() && field_flags.iter().any(|&f| f) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": "--field cannot be combined with --username, --totp, --notes, --public-key, --private-key, or --password"
+                    }))
+                    .unwrap()
+                );
+                return ExitCode::FAILURE;
+            }
+
             let (item, scope) = match vault_output_item(&cfg, &query, true) {
                 Ok(Some(VaultOutputItem {
                     item,
@@ -2911,7 +2931,7 @@ fn main() -> ExitCode {
                     })
                     .unwrap_or_default()
                     .to_string();
-                ("username", u, false)
+                ("username".to_string(), u, false)
             } else if totp {
                 let seed = item
                     .login
@@ -2920,7 +2940,7 @@ fn main() -> ExitCode {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if let Some(t_res) = omawarden::totp::generate_totp(seed, None, 6, 30) {
-                    ("totp", t_res.code, true)
+                    ("totp".to_string(), t_res.code, true)
                 } else {
                     println!(
                         "{}",
@@ -2933,7 +2953,11 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             } else if notes {
-                ("notes", item.notes.clone().unwrap_or_default(), false)
+                (
+                    "notes".to_string(),
+                    item.notes.clone().unwrap_or_default(),
+                    false,
+                )
             } else if public_key {
                 let pk = item
                     .ssh_key
@@ -2947,7 +2971,7 @@ fn main() -> ExitCode {
                     })
                     .unwrap_or_default()
                     .to_string();
-                ("public_key", pk, false)
+                ("public_key".to_string(), pk, false)
             } else if private_key {
                 let privk = item
                     .ssh_key
@@ -2961,7 +2985,69 @@ fn main() -> ExitCode {
                     })
                     .unwrap_or_default()
                     .to_string();
-                ("private_key", privk, true)
+                ("private_key".to_string(), privk, true)
+            } else if let Some(ref field_name_query) = field {
+                // Find the custom field by exact name, then case-insensitive fallback
+                let field_name_lower = field_name_query.to_lowercase();
+                let mut found_field = None;
+                let mut found_field_type = 0i64;
+                let mut found_field_name = field_name_query.clone();
+
+                for f in &item.fields {
+                    let name = f.get("name").and_then(Value::as_str).unwrap_or("");
+                    let field_type = f.get("type").and_then(Value::as_i64).unwrap_or(0);
+
+                    // Exact match first
+                    if name == field_name_query {
+                        found_field = f.get("value").and_then(Value::as_str).map(str::to_string);
+                        found_field_type = field_type;
+                        found_field_name = name.to_string();
+                        break;
+                    }
+                    // Case-insensitive fallback
+                    if name.to_lowercase() == field_name_lower {
+                        found_field = f.get("value").and_then(Value::as_str).map(str::to_string);
+                        found_field_type = field_type;
+                        found_field_name = name.to_string();
+                        break;
+                    }
+                }
+
+                let field_value = match found_field {
+                    Some(v) => v,
+                    None => {
+                        // List available custom fields for actionable error
+                        let available: Vec<String> = item
+                            .fields
+                            .iter()
+                            .filter_map(|f| {
+                                f.get("name").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .collect();
+                        let error_msg = if available.is_empty() {
+                            format!("Item '{}' has no custom fields", item.name)
+                        } else {
+                            format!(
+                                "Custom field '{}' not found on item '{}'. Available fields: {}",
+                                field_name_query,
+                                item.name,
+                                available.join(", ")
+                            )
+                        };
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": error_msg
+                            }))
+                            .unwrap()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
+
+                let is_sensitive = found_field_type == 1; // Hidden fields are sensitive
+                (found_field_name, field_value, is_sensitive)
             } else if password {
                 let pwd = item
                     .login
@@ -2970,7 +3056,7 @@ fn main() -> ExitCode {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                ("password", pwd, true)
+                ("password".to_string(), pwd, true)
             } else {
                 match item.type_name.as_str() {
                     "login" => {
@@ -2981,7 +3067,7 @@ fn main() -> ExitCode {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        ("password", pwd, true)
+                        ("password".to_string(), pwd, true)
                     }
                     "ssh_key" => {
                         let privk = item
@@ -2990,7 +3076,7 @@ fn main() -> ExitCode {
                             .and_then(|s| s.private_key.as_deref())
                             .unwrap_or_default()
                             .to_string();
-                        ("private_key", privk, true)
+                        ("private_key".to_string(), privk, true)
                     }
                     "card" => {
                         let num = item
@@ -3000,9 +3086,13 @@ fn main() -> ExitCode {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        ("card_number", num, true)
+                        ("card_number".to_string(), num, true)
                     }
-                    "note" => ("notes", item.notes.clone().unwrap_or_default(), false),
+                    "note" => (
+                        "notes".to_string(),
+                        item.notes.clone().unwrap_or_default(),
+                        false,
+                    ),
                     _ => {
                         let val = item
                             .login
@@ -3011,7 +3101,7 @@ fn main() -> ExitCode {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        ("password", val, true)
+                        ("password".to_string(), val, true)
                     }
                 }
             };
@@ -5265,6 +5355,34 @@ mod tests {
                 assert!(notes_stdin);
             }
             _ => panic!("Expected VaultAction::Edit"),
+        }
+    }
+
+    #[test]
+    fn test_cli_copy_field_flag() {
+        let cli =
+            Cli::try_parse_from(["omawarden", "copy", "my-target", "--field", "PIN"]).unwrap();
+        match cli.command {
+            Commands::Copy {
+                query,
+                field,
+                password,
+                username,
+                ..
+            } => {
+                assert_eq!(query.as_deref(), Some("my-target"));
+                assert_eq!(field.as_deref(), Some("PIN"));
+                assert!(!password);
+                assert!(!username);
+            }
+            _ => panic!("Expected Commands::Copy"),
+        }
+
+        // Without --field the flag stays None so the existing default applies.
+        let cli_default = Cli::try_parse_from(["omawarden", "copy", "my-target"]).unwrap();
+        match cli_default.command {
+            Commands::Copy { field, .. } => assert!(field.is_none()),
+            _ => panic!("Expected Commands::Copy"),
         }
     }
 
