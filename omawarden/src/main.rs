@@ -3950,11 +3950,19 @@ fn resolve_target_cipher(
 }
 
 #[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct ParsedEditorField {
+    name: String,
+    value: String,
+    field_type: i64,
+}
+
+#[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct ParsedEditorCipher {
     name: String,
     username: Option<String>,
     password: Option<String>,
-    uri: Option<String>,
+    uris: Vec<String>,
+    fields: Vec<ParsedEditorField>,
     folder_id: Option<String>,
     favorite: bool,
     notes: String,
@@ -3986,29 +3994,87 @@ fn format_editor_template(
             .and_then(|l| l.get("password"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let uri = item_details
+        let _ = writeln!(out, "Username: {username}");
+        let _ = writeln!(out, "Password: {password}");
+        let uris = item_details
             .and_then(|i| i.login.as_ref())
             .and_then(|l| l.get("uris"))
             .and_then(Value::as_array)
-            .and_then(|uris| uris.first())
-            .and_then(|u| u.get("uri"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let _ = writeln!(out, "Username: {username}");
-        let _ = writeln!(out, "Password: {password}");
-        let _ = writeln!(out, "URI: {uri}");
+            .cloned()
+            .unwrap_or_default();
+        for uri in &uris {
+            let value = uri.get("uri").and_then(Value::as_str).unwrap_or("");
+            let _ = writeln!(out, "URI: {value}");
+        }
     }
     let folder_id = item_details
         .and_then(|i| i.folder_id.as_deref())
         .unwrap_or("");
     let favorite = item_details.map(|i| i.favorite).unwrap_or(false);
     let _ = writeln!(out, "Folder: {folder_id}");
-    let _ = writeln!(out, "Favorite: {favorite}\n");
-    out.push_str("# Notes (everything below this line is treated as notes):\n");
+    let _ = writeln!(out, "Favorite: {favorite}");
+
+    out.push_str("\n# Custom Fields:\n");
+    if let Some(details) = item_details {
+        for field in &details.fields {
+            let name = field.get("name").and_then(Value::as_str).unwrap_or("");
+            let value = field.get("value").and_then(Value::as_str).unwrap_or("");
+            match field.get("type").and_then(Value::as_i64).unwrap_or(0) {
+                0 => {
+                    let _ = writeln!(out, "Field: {name} = {value}");
+                }
+                1 => {
+                    let _ = writeln!(out, "Hidden Field: {name} = {value}");
+                }
+                2 => {
+                    let _ = writeln!(out, "Bool Field: {name} = {value}");
+                }
+                // Linked custom fields are read-only here and preserved untouched.
+                _ => {}
+            }
+        }
+    }
+
+    out.push_str("\n# Notes (everything below this line is treated as notes):\n");
     if let Some(notes) = item_details.and_then(|i| i.notes.as_deref()) {
         out.push_str(notes);
     }
     out
+}
+
+fn parse_editor_field(
+    value: &str,
+    field_type: i64,
+    line_number: usize,
+    key: &str,
+) -> Result<ParsedEditorField, String> {
+    let Some((name, field_value)) = value.split_once('=') else {
+        return Err(format!(
+            "Invalid custom field on line {line_number}: expected '{key}: NAME = VALUE'."
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!(
+            "Invalid custom field on line {line_number}: name cannot be empty."
+        ));
+    }
+    let mut field_value = field_value.trim().to_string();
+    if field_type == 2 {
+        match parse_cli_bool(&field_value) {
+            Ok(parsed) => field_value = parsed.to_string(),
+            Err(_) => {
+                return Err(format!(
+                    "Invalid boolean value '{field_value}' for custom field '{name}' on line {line_number}: expected true or false."
+                ));
+            }
+        }
+    }
+    Ok(ParsedEditorField {
+        name: name.to_string(),
+        value: field_value,
+        field_type,
+    })
 }
 
 fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorCipher, String> {
@@ -4018,11 +4084,13 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
     let mut name = String::new();
     let mut username = String::new();
     let mut password = String::new();
-    let mut uri = String::new();
+    let mut uris: Vec<String> = Vec::new();
+    let mut fields: Vec<ParsedEditorField> = Vec::new();
     let mut folder_id = String::new();
     let mut favorite = false;
 
-    for line in content.lines() {
+    for (index, line) in content.lines().enumerate() {
+        let line_number = index + 1;
         if in_notes {
             notes_lines.push(line);
             continue;
@@ -4045,7 +4113,16 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
                 "name" => name = val.to_string(),
                 "username" => username = val.to_string(),
                 "password" => password = val.to_string(),
-                "uri" => uri = val.to_string(),
+                "uri" => {
+                    if !val.is_empty() {
+                        uris.push(val.to_string());
+                    }
+                }
+                "field" => fields.push(parse_editor_field(val, 0, line_number, "Field")?),
+                "hidden field" => {
+                    fields.push(parse_editor_field(val, 1, line_number, "Hidden Field")?)
+                }
+                "bool field" => fields.push(parse_editor_field(val, 2, line_number, "Bool Field")?),
                 "folder" | "folder_id" | "folder id" => folder_id = val.to_string(),
                 "favorite" => {
                     favorite =
@@ -4056,6 +4133,7 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
         }
     }
 
+    let has_login = item_type == "login";
     let notes = notes_lines.join("\n");
     let folder_opt = if folder_id.is_empty() {
         None
@@ -4065,21 +4143,10 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
 
     Ok(ParsedEditorCipher {
         name,
-        username: if item_type == "login" {
-            Some(username)
-        } else {
-            None
-        },
-        password: if item_type == "login" {
-            Some(password)
-        } else {
-            None
-        },
-        uri: if item_type == "login" {
-            Some(uri)
-        } else {
-            None
-        },
+        username: if has_login { Some(username) } else { None },
+        password: if has_login { Some(password) } else { None },
+        uris: if has_login { uris } else { Vec::new() },
+        fields,
         folder_id: folder_opt,
         favorite,
         notes,
@@ -4218,18 +4285,30 @@ fn handle_editor_edit(
         }
     };
 
-    securely_wipe_and_remove(temp_file);
-
     let parsed = match parse_editor_template(&edited_content, item_type) {
         Ok(p) => p,
         Err(e) => {
+            // A formatting mistake must never discard the user's draft: keep
+            // the 0600 temp file and point the user at it instead of wiping.
+            let draft_path = temp_file.path().to_path_buf();
+            let _ = temp_file.keep();
             eprintln!("Error: {e}");
+            eprintln!(
+                "Your edits were kept at {} so no changes are lost; fix the format and re-run.",
+                draft_path.display()
+            );
             return ExitCode::FAILURE;
         }
     };
 
     if parsed.name.trim().is_empty() {
+        let draft_path = temp_file.path().to_path_buf();
+        let _ = temp_file.keep();
         eprintln!("Error: Cipher name cannot be empty.");
+        eprintln!(
+            "Your edits were kept at {} so no changes are lost; fix the name and re-run.",
+            draft_path.display()
+        );
         return ExitCode::FAILURE;
     }
 
@@ -4241,52 +4320,112 @@ fn handle_editor_edit(
     let orig_favorite = full_item.as_ref().map(|i| i.favorite).unwrap_or(false);
     let orig_folder_id = full_item.as_ref().and_then(|i| i.folder_id.as_deref());
 
-    let (orig_user, orig_pass, orig_uri) = if item_type == "login" {
+    let (orig_user, orig_pass) = if item_type == "login" {
         let u = full_item
             .as_ref()
             .and_then(|i| i.login.as_ref())
             .and_then(|l| l.get("username"))
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         let p = full_item
             .as_ref()
             .and_then(|i| i.login.as_ref())
             .and_then(|l| l.get("password"))
             .and_then(Value::as_str)
-            .unwrap_or("");
-        let uri = full_item
+            .unwrap_or("")
+            .to_string();
+        (u, p)
+    } else {
+        (String::new(), String::new())
+    };
+
+    let orig_uris: Vec<String> = if item_type == "login" {
+        full_item
             .as_ref()
             .and_then(|i| i.login.as_ref())
             .and_then(|l| l.get("uris"))
             .and_then(Value::as_array)
-            .and_then(|uris| uris.first())
-            .and_then(|u| u.get("uri"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        (u, p, uri)
+            .map(|uris| {
+                uris.iter()
+                    .filter_map(|u| u.get("uri").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     } else {
-        ("", "", "")
+        Vec::new()
     };
+
+    // Only Text/Hidden/Boolean fields are editable here; Linked fields stay
+    // read-only and are therefore excluded from both template and diff.
+    let orig_fields: Vec<(String, String, i64)> = full_item
+        .as_ref()
+        .map(|item| {
+            item.fields
+                .iter()
+                .filter_map(|field| {
+                    let field_type = field.get("type").and_then(Value::as_i64).unwrap_or(0);
+                    if field_type == 3 {
+                        return None;
+                    }
+                    Some((
+                        field.get("name").and_then(Value::as_str)?.to_string(),
+                        field
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        field_type,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let name_changed = parsed.name != *orig_name;
     let username_changed =
-        item_type == "login" && parsed.username.as_deref().unwrap_or("") != orig_user;
+        item_type == "login" && parsed.username.as_deref() != Some(orig_user.as_str());
     let password_changed =
-        item_type == "login" && parsed.password.as_deref().unwrap_or("") != orig_pass;
-    let uri_changed = item_type == "login" && parsed.uri.as_deref().unwrap_or("") != orig_uri;
+        item_type == "login" && parsed.password.as_deref() != Some(orig_pass.as_str());
+    let uris_changed = item_type == "login" && parsed.uris != orig_uris;
     let folder_changed = parsed.folder_id.as_deref() != orig_folder_id;
     let favorite_changed = parsed.favorite != orig_favorite;
     let notes_changed =
         parsed.notes.trim_end_matches(['\r', '\n']) != orig_notes.trim_end_matches(['\r', '\n']);
 
+    // Fields absent from the edited buffer are removed; fields whose value or
+    // type changed (or that are new) are upserted. Untouched and read-only
+    // fields are left alone.
+    let mut upsert_fields: Vec<Value> = Vec::new();
+    for field in &parsed.fields {
+        let unchanged = orig_fields.iter().any(|(name, value, field_type)| {
+            *name == field.name && *value == field.value && *field_type == field.field_type
+        });
+        if !unchanged {
+            upsert_fields.push(json!({
+                "name": field.name,
+                "value": field.value,
+                "type": field.field_type,
+            }));
+        }
+    }
+    let remove_field_names: Vec<String> = orig_fields
+        .iter()
+        .filter(|(name, _, _)| !parsed.fields.iter().any(|f| f.name == *name))
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    let fields_changed = !upsert_fields.is_empty() || !remove_field_names.is_empty();
+
     if !name_changed
         && !username_changed
         && !password_changed
-        && !uri_changed
+        && !uris_changed
         && !folder_changed
         && !favorite_changed
         && !notes_changed
+        && !fields_changed
     {
+        securely_wipe_and_remove(temp_file);
         println!("No changes made.");
         return ExitCode::SUCCESS;
     }
@@ -4304,8 +4443,14 @@ fn handle_editor_edit(
     if password_changed {
         daemon_req["password"] = json!(parsed.password);
     }
-    if uri_changed {
-        daemon_req["uri"] = json!(parsed.uri);
+    if uris_changed {
+        daemon_req["uris"] = json!(parsed.uris);
+    }
+    if !upsert_fields.is_empty() {
+        daemon_req["fields"] = json!(upsert_fields);
+    }
+    if !remove_field_names.is_empty() {
+        daemon_req["remove_fields"] = json!(remove_field_names);
     }
     if folder_changed {
         daemon_req["folder_id"] = json!(parsed.folder_id.as_deref().unwrap_or(""));
@@ -4319,6 +4464,8 @@ fn handle_editor_edit(
     if let Some(ctx) = client_ctx {
         daemon_req["client"] = json!(ctx);
     }
+
+    securely_wipe_and_remove(temp_file);
 
     match submit_cipher_mutation(&daemon_req) {
         Ok(receipt) => {
@@ -5166,12 +5313,116 @@ Note line 2 with: colons and # symbols
         assert_eq!(parsed.name, "Updated Name");
         assert_eq!(parsed.username.as_deref(), Some("updated_user"));
         assert_eq!(parsed.password.as_deref(), Some("new_password"));
-        assert_eq!(parsed.uri.as_deref(), Some("https://example.com/updated"));
+        assert_eq!(parsed.uris, vec!["https://example.com/updated"]);
         assert_eq!(parsed.folder_id.as_deref(), Some("folder-2"));
         assert!(parsed.favorite);
         assert_eq!(
             parsed.notes,
             "Note line 1\nNote line 2 with: colons and # symbols"
+        );
+    }
+
+    #[test]
+    fn test_format_editor_template_multi_uri_and_fields() {
+        let details = VaultItem {
+            id: "uuid-1".into(),
+            type_name: "login".into(),
+            name: "GitHub".into(),
+            notes: None,
+            favorite: false,
+            login: Some(json!({
+                "username": "octocat",
+                "password": "supersecret",
+                "uris": [
+                    {"uri": "https://github.com"},
+                    {"uri": "https://api.github.com"}
+                ]
+            })),
+            fields: vec![
+                json!({"name": "PIN", "value": "1234", "type": 0}),
+                json!({"name": "Recovery Code", "value": "sec-98765", "type": 1}),
+                json!({"name": "Requires VPN", "value": "true", "type": 2}),
+                json!({"name": "Linked", "value": "cipher-uuid", "type": 3}),
+            ],
+            ..Default::default()
+        };
+        let tpl = format_editor_template("uuid-1", "GitHub", "login", Some(&details));
+        assert!(tpl.contains("URI: https://github.com\n"));
+        assert!(tpl.contains("URI: https://api.github.com\n"));
+        assert!(tpl.contains("# Custom Fields:\n"));
+        assert!(tpl.contains("Field: PIN = 1234\n"));
+        assert!(tpl.contains("Hidden Field: Recovery Code = sec-98765\n"));
+        assert!(tpl.contains("Bool Field: Requires VPN = true\n"));
+        // Linked fields are read-only and never rendered.
+        assert!(!tpl.contains("Linked"));
+    }
+
+    #[test]
+    fn test_parse_editor_template_multi_uri_and_fields() {
+        let content = "\
+Name: Updated
+Username: user
+Password: pass
+URI: https://one.example
+URI: https://two.example
+
+# Custom Fields:
+Field: PIN = 1234
+Hidden Field: Recovery Code = sec-98765
+Bool Field: Requires VPN = true
+Bool Field: Retired = false
+
+# Notes (everything below this line is treated as notes):
+body
+";
+        let parsed = parse_editor_template(content, "login").unwrap();
+        assert_eq!(
+            parsed.uris,
+            vec!["https://one.example", "https://two.example"]
+        );
+        assert_eq!(parsed.fields.len(), 4);
+        assert_eq!(parsed.fields[0].name, "PIN");
+        assert_eq!(parsed.fields[0].value, "1234");
+        assert_eq!(parsed.fields[0].field_type, 0);
+        assert_eq!(parsed.fields[1].name, "Recovery Code");
+        assert_eq!(parsed.fields[1].field_type, 1);
+        assert_eq!(parsed.fields[2].name, "Requires VPN");
+        assert_eq!(parsed.fields[2].value, "true");
+        assert_eq!(parsed.fields[2].field_type, 2);
+        assert_eq!(parsed.fields[3].name, "Retired");
+        assert_eq!(parsed.fields[3].value, "false");
+        assert_eq!(parsed.notes, "body");
+    }
+
+    #[test]
+    fn test_parse_editor_template_rejects_malformed_custom_field_with_line() {
+        let content = "\
+Name: Updated
+# Custom Fields:
+Field: NoSeparator
+# Notes:
+";
+        let err = parse_editor_template(content, "login").unwrap_err();
+        assert!(
+            err.contains("line 3") && err.contains("Field: NAME = VALUE"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_editor_template_rejects_invalid_bool_field_with_line() {
+        let content = "\
+Name: Updated
+# Custom Fields:
+Bool Field: Active = maybe
+# Notes:
+";
+        let err = parse_editor_template(content, "login").unwrap_err();
+        assert!(
+            err.contains("line 3")
+                && err.contains("Invalid boolean value 'maybe'")
+                && err.contains("'Active'"),
+            "unexpected: {err}"
         );
     }
 

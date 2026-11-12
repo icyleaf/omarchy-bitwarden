@@ -4807,3 +4807,243 @@ fn test_edit_login_cipher_optimistic_concurrency_conflict_on_field() {
         "unexpected output: {stdout}"
     );
 }
+
+fn add_login_cipher_with_uris_and_fields_to_cache(
+    dir: &Path,
+    user_key: &SymmetricCryptoKey,
+    id: &str,
+    name: &str,
+    uris: &[&str],
+    fields: &[(&str, &str, i64)],
+) {
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    let encrypted_uris: Vec<Value> = uris
+        .iter()
+        .map(|uri| json!({"uri": user_key.encrypt_string(uri).unwrap(), "match": Value::Null}))
+        .collect();
+    let encrypted_fields: Vec<Value> = fields
+        .iter()
+        .map(|(field_name, value, field_type)| {
+            json!({
+                "name": user_key.encrypt_string(field_name).unwrap(),
+                "value": user_key.encrypt_string(value).unwrap(),
+                "type": field_type,
+            })
+        })
+        .collect();
+    ciphers.push(json!({
+        "id": id,
+        "organizationId": null,
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("octo").unwrap(),
+            "password": user_key.encrypt_string("pass").unwrap(),
+            "uris": encrypted_uris
+        },
+        "fields": encrypted_fields,
+        "revisionDate": "2026-11-09T00:00:00.000Z"
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+}
+
+#[test]
+fn test_edit_cipher_in_editor_multiple_uris_and_custom_fields() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "ed170000-1111-2222-3333-444444444444";
+    let cipher_name = "Editor Fields Site";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &["https://one.example", "https://two.example"],
+        &[("PIN", "1234", 0), ("Old", "x", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Editor: drop the second URI, drop the Obsolete field, edit PIN and add a
+    // new hidden field.
+    let editor_script = dir.join("mock_editor_fields.sh");
+    fs::write(
+        &editor_script,
+        "#!/bin/sh\n\
+         SED=/usr/bin/sed\n\
+         [ -x \"$SED\" ] || SED=/bin/sed\n\
+         \"$SED\" -i '/URI: https:\\/\\/two.example/d' \"$1\"\n\
+         \"$SED\" -i '/Field: Old = x/d' \"$1\"\n\
+         \"$SED\" -i 's/Field: PIN = 1234/Field: PIN = 9999/' \"$1\"\n\
+         \"$SED\" -i '/# Custom Fields:/a Hidden Field: Added = fresh' \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut cli = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+
+        let uris: Vec<String> = payload["login"]["uris"]
+            .as_array()
+            .expect("login.uris must be array")
+            .iter()
+            .map(|u| decrypt_field_string(&u["uri"], &user_key))
+            .collect();
+        assert_eq!(uris, vec!["https://one.example"]);
+
+        let fields = decrypt_payload_fields(&payload, &user_key);
+        assert_eq!(
+            fields,
+            vec![
+                ("PIN".to_string(), "9999".to_string(), 0),
+                ("Added".to_string(), "fresh".to_string(), 1),
+            ]
+        );
+
+        let resp_body = json!({
+            "id": cipher_id,
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T03:00:00.000Z"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "editor edit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "no cipher update was sent");
+}
+
+#[test]
+fn test_edit_cipher_in_editor_malformed_field_keeps_draft() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "ed170000-2222-3333-4444-555555555555";
+    let cipher_name = "Editor Bad Field Site";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        &[],
+        &[("PIN", "1234", 0)],
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Editor writes a malformed field line without the '=' separator.
+    let editor_script = dir.join("mock_editor_bad_field.sh");
+    fs::write(
+        &editor_script,
+        "#!/bin/sh\n\
+         SED=/usr/bin/sed\n\
+         [ -x \"$SED\" ] || SED=/bin/sed\n\
+         \"$SED\" -i '/# Custom Fields:/a Field: NoSeparator' \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let out = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_id])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("expected 'Field: NAME = VALUE'"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Your edits were kept at"),
+        "draft must not be discarded: {stderr}"
+    );
+}
