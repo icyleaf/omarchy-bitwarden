@@ -94,6 +94,8 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) uris: Option<Vec<LoginUriDraft>>,
     pub(crate) add_uris: Option<Vec<LoginUriDraft>>,
     pub(crate) clear_uris: Option<bool>,
+    pub(crate) fields: Option<Vec<CipherFieldDraft>>,
+    pub(crate) remove_fields: Option<Vec<String>>,
     pub(crate) folder_id: Option<String>,
     pub(crate) favorite: Option<bool>,
 }
@@ -501,6 +503,79 @@ impl VaultManager {
                 }
                 field_changed = true;
             }
+        }
+
+        if draft.fields.is_some() || draft.remove_fields.is_some() {
+            let mut fields: Vec<Value> = payload
+                .get("fields")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(removals) = draft.remove_fields.as_deref() {
+                let mut unmatched: Vec<&str> = Vec::new();
+                for name in removals {
+                    let before = fields.len();
+                    fields.retain(|field| {
+                        decrypt_field_name(field, &cipher_key).is_none_or(|existing| {
+                            existing != *name && !existing.eq_ignore_ascii_case(name)
+                        })
+                    });
+                    if fields.len() == before {
+                        unmatched.push(name);
+                    }
+                }
+                if !unmatched.is_empty() {
+                    let available: Vec<String> = fields
+                        .iter()
+                        .filter_map(|f| decrypt_field_name(f, &cipher_key))
+                        .collect();
+                    let hint = if available.is_empty() {
+                        "this cipher has no custom fields".to_string()
+                    } else {
+                        format!("available fields: {}", available.join(", "))
+                    };
+                    let missing = unmatched
+                        .iter()
+                        .map(|n| format!("'{n}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(WriteError::Rejected(format!(
+                        "No custom field named {missing} on this cipher ({hint})."
+                    )));
+                }
+                field_changed = true;
+            }
+
+            if let Some(upserts) = draft.fields.as_deref() {
+                for field in upserts {
+                    let encrypted = encrypt_cipher_field(
+                        &cipher_key,
+                        &field.name,
+                        &field.value,
+                        field.field_type,
+                    )?;
+                    let existing = fields
+                        .iter()
+                        .position(|f| {
+                            decrypt_field_name(f, &cipher_key).as_deref()
+                                == Some(field.name.as_str())
+                        })
+                        .or_else(|| {
+                            fields.iter().position(|f| {
+                                decrypt_field_name(f, &cipher_key)
+                                    .is_some_and(|n| n.eq_ignore_ascii_case(&field.name))
+                            })
+                        });
+                    match existing {
+                        Some(idx) => fields[idx] = encrypted,
+                        None => fields.push(encrypted),
+                    }
+                    field_changed = true;
+                }
+            }
+
+            payload["fields"] = json!(fields);
         }
 
         if !field_changed {
@@ -944,17 +1019,36 @@ fn encrypt_cipher_fields(
     key: &SymmetricCryptoKey,
     fields: &[CipherFieldDraft],
 ) -> Result<Vec<Value>, String> {
-    let mut encrypted = Vec::with_capacity(fields.len());
-    for field in fields {
-        encrypted.push(json!({
-            "name": key
-                .encrypt_string(&field.name)
-                .map_err(|_| "Could not encrypt custom field name.".to_string())?,
-            "value": key
-                .encrypt_string(&field.value)
-                .map_err(|_| "Could not encrypt custom field value.".to_string())?,
-            "type": field.field_type,
-        }));
-    }
-    Ok(encrypted)
+    fields
+        .iter()
+        .map(|field| encrypt_cipher_field(key, &field.name, &field.value, field.field_type))
+        .collect()
+}
+
+/// Encrypt a single custom field into its Bitwarden wire shape.
+fn encrypt_cipher_field(
+    key: &SymmetricCryptoKey,
+    name: &str,
+    value: &str,
+    field_type: u32,
+) -> Result<Value, String> {
+    Ok(json!({
+        "name": key
+            .encrypt_string(name)
+            .map_err(|_| "Could not encrypt custom field name.".to_string())?,
+        "value": key
+            .encrypt_string(value)
+            .map_err(|_| "Could not encrypt custom field value.".to_string())?,
+        "type": field_type,
+    }))
+}
+
+/// Decrypt a custom field's `name` from the cached cipher so name-based
+/// upserts and removals can match existing entries.
+fn decrypt_field_name(field: &Value, key: &SymmetricCryptoKey) -> Option<String> {
+    field
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|enc| EncString::parse(enc).ok())
+        .and_then(|enc| enc.decrypt_string(key).ok())
 }
