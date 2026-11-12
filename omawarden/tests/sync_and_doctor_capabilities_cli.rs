@@ -575,7 +575,7 @@ fn write_doctor_executable(path: &std::path::Path, content: &str) {
     write_test_executable(path, content);
 }
 
-fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value) {
+fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -597,6 +597,8 @@ fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value) {
 
     let body = if path == "/api/config" || path.starts_with("/api/config?") {
         config_body.to_string()
+    } else if path == "/api/version" || path.starts_with("/api/version?") {
+        version_body.to_string()
     } else {
         "{}".to_string()
     };
@@ -609,7 +611,10 @@ fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn spawn_doctor_server(config_body: Value) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
+fn spawn_doctor_server(
+    config_body: Value,
+    version_body: &str,
+) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -617,10 +622,13 @@ fn spawn_doctor_server(config_body: Value) -> (String, Arc<AtomicBool>, thread::
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
 
+    let version_response = version_body.to_string();
     let handle = thread::spawn(move || {
         while r_clone.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => handle_doctor_connection(stream, &config_body),
+                Ok((stream, _)) => {
+                    handle_doctor_connection(stream, &config_body, &version_response)
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -681,12 +689,15 @@ fn test_doctor_vaultwarden_1374_recommends_only_agent_flag() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_doctor_server(json!({
-        "version": "2026.6.0",
-        "gitHash": "vw123456",
-        "server": { "name": "Vaultwarden", "version": "1.37.4" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw123456",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
     let config_path = doctor_config_path(dir, &server_url);
 
     let json_out = run_doctor(dir, &config_path, true);
@@ -733,11 +744,14 @@ fn test_doctor_vaultwarden_1352_recommends_feature_flags() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_doctor_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.35.2" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.35.2\"",
+    );
     let config_path = doctor_config_path(dir, &server_url);
 
     let json_out = run_doctor(dir, &config_path, true);
@@ -761,11 +775,14 @@ fn test_doctor_vaultwarden_1300_recommends_upgrade() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_doctor_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.30.0" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.30.0\"",
+    );
     let config_path = doctor_config_path(dir, &server_url);
 
     let json_out = run_doctor(dir, &config_path, true);
@@ -805,11 +822,14 @@ fn test_doctor_vaultwarden_1260_warns_minimum_baseline() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_doctor_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.26.0" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.26.0\"",
+    );
     let config_path = doctor_config_path(dir, &server_url);
 
     let json_out = run_doctor(dir, &config_path, true);

@@ -520,7 +520,7 @@ fn test_daemon_ssh_agent_apply_ipc_gating() {
 // Version-aware gating end-to-end tests (Vaultwarden 1.37.4 / 1.35.x / 1.30.0)
 // ---------------------------------------------------------------------------
 
-fn handle_capability_connection(mut stream: TcpStream, config_body: &Value) {
+fn handle_capability_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -542,6 +542,8 @@ fn handle_capability_connection(mut stream: TcpStream, config_body: &Value) {
 
     let body = if path == "/api/config" || path.starts_with("/api/config?") {
         config_body.to_string()
+    } else if path == "/api/version" || path.starts_with("/api/version?") {
+        version_body.to_string()
     } else {
         "{}".to_string()
     };
@@ -556,6 +558,7 @@ fn handle_capability_connection(mut stream: TcpStream, config_body: &Value) {
 
 fn spawn_capability_server(
     config_body: Value,
+    version_body: &str,
 ) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
@@ -564,10 +567,13 @@ fn spawn_capability_server(
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
 
+    let version_response = version_body.to_string();
     let handle = thread::spawn(move || {
         while r_clone.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => handle_capability_connection(stream, &config_body),
+                Ok((stream, _)) => {
+                    handle_capability_connection(stream, &config_body, &version_response)
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -621,12 +627,15 @@ fn test_gating_vaultwarden_1374_passes_without_flags() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_capability_server(json!({
-        "version": "2026.6.0",
-        "gitHash": "vw123456",
-        "server": { "name": "Vaultwarden", "version": "1.37.4" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw123456",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
     let config_path = setup_gating_env(dir, &server_url);
 
     // ssh-key create / import and ssh-agent must all pass capability gating.
@@ -668,11 +677,14 @@ fn test_gating_vaultwarden_1352_recommends_flags() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_capability_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.35.2" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.35.2\"",
+    );
     let config_path = setup_gating_env(dir, &server_url);
 
     let out = run_cli(
@@ -704,11 +716,14 @@ fn test_gating_vaultwarden_1300_recommends_upgrade() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_capability_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.30.0" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.30.0\"",
+    );
     let config_path = setup_gating_env(dir, &server_url);
 
     let out = run_cli(
@@ -744,11 +759,14 @@ fn test_gating_vaultwarden_1374_ssh_agent_passes() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_capability_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.37.4" },
-        "featureStates": { "ssh-agent-v2": false }
-    }));
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": { "ssh-agent-v2": false }
+        }),
+        "\"1.37.4\"",
+    );
     let config_path = setup_gating_env(dir, &server_url);
 
     let out = run_cli(dir, &config_path, &["ssh-agent", "start"]);

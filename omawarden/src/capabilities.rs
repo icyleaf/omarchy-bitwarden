@@ -62,7 +62,8 @@ pub struct ServerCapabilities {
 pub enum ServerFlavor {
     /// Official Bitwarden Cloud (`bitwarden.com` / `bitwarden.eu`) or self-hosted official Bitwarden.
     BitwardenOfficial,
-    /// Vaultwarden (self-hosted, reports a `server` block with its own release version).
+    /// Vaultwarden (self-hosted; reports `server.name = "Vaultwarden"`, with its release
+    /// version discovered from the flavor-gated `/api/version` probe).
     Vaultwarden,
     /// Self-hosted server whose flavor cannot be determined from URL or metadata.
     UnknownSelfHosted,
@@ -161,8 +162,9 @@ pub fn classify_server(identity: &ServerIdentity<'_>) -> ServerFlavor {
     ServerFlavor::UnknownSelfHosted
 }
 
-/// Returns the Vaultwarden release tuple, preferring `server.version` and falling back to a
-/// major-`1` compatibility version. Returns `None` when no Vaultwarden release can be parsed.
+/// Returns the Vaultwarden release tuple, preferring the `/api/version`-sourced
+/// `server_vendor_version` and falling back to a major-`1` compatibility version.
+/// Returns `None` when no Vaultwarden release can be parsed.
 pub fn vaultwarden_version(identity: &ServerIdentity<'_>) -> Option<(u64, u64, u64)> {
     if let Some(v) = identity.server_vendor_version.and_then(parse_version_tuple) {
         return Some(v);
@@ -328,6 +330,18 @@ pub fn load_cached_capabilities() -> Option<ServerCapabilities> {
     load_cached_capabilities_for(None)
 }
 
+/// Canonicalizes a configured server URL to its resolved API base, **including any
+/// sub-path**, so the capability cache is keyed by full deployment rather than origin.
+///
+/// Two deployments that share a scheme and host but differ by path (e.g. `/old` and
+/// `/new`) resolve to distinct bases; a trailing slash is not significant.
+fn canonical_api_base(server_url: &str) -> String {
+    crate::api::EnvironmentUrls::resolve(server_url, None)
+        .api_url
+        .trim_end_matches('/')
+        .to_string()
+}
+
 pub fn load_cached_capabilities_for(
     expected_server_url: Option<&str>,
 ) -> Option<ServerCapabilities> {
@@ -339,7 +353,7 @@ pub fn load_cached_capabilities_for(
     let caps: ServerCapabilities = serde_json::from_str(&data).ok()?;
 
     if let Some(expected) = expected_server_url {
-        if !crate::attachment::is_same_origin(&caps.server_url, expected) {
+        if canonical_api_base(&caps.server_url) != canonical_api_base(expected) {
             return None;
         }
     }
@@ -360,6 +374,41 @@ pub fn save_capabilities(caps: &ServerCapabilities) -> Result<(), String> {
         .map_err(|e| format!("Failed to persist capabilities cache: {}", e))?;
 
     Ok(())
+}
+
+/// Fetches `GET /api/version` and returns the reported version string.
+///
+/// The endpoint is answered with a bare JSON string (e.g. `"1.37.4"`), though some
+/// deployments wrap it in an object; both shapes are tolerated. Returns `None` on any
+/// network, non-200, or parse failure so callers can degrade gracefully.
+fn fetch_version_endpoint(client: &reqwest::blocking::Client, ver_url: &str) -> Option<String> {
+    let mut resp = client.get(ver_url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let text = crate::api::read_response_text(&mut resp, crate::api::MAX_API_BODY_SIZE).ok()?;
+
+    if let Ok(ver_val) = serde_json::from_str::<Value>(&text) {
+        if let Some(v) = ver_val.as_str() {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        } else if let Some(v) = ver_val.get("version").and_then(Value::as_str) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+        None
+    } else {
+        let trimmed = text.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
 }
 
 pub fn discover_capabilities(
@@ -386,18 +435,22 @@ pub fn discover_capabilities(
 
     let mut server_version = None;
     let mut server_name = None;
-    let mut server_vendor_version = None;
     let mut git_hash = None;
     let mut feature_states = HashMap::new();
 
-    // 1. Try /config
+    // 1. Interrogate /api/config for the Bitwarden compatibility version, git hash,
+    //    nested server identity, and active feature flags. The nested `server.version`
+    //    is intentionally ignored: Vaultwarden removed it in 1.32.1 (see ADR 0031 §1.1).
     if let Ok(mut resp) = client.get(&config_url).send() {
         if resp.status().is_success() {
             if let Ok(val) =
                 crate::api::read_response_json::<Value>(&mut resp, crate::api::MAX_API_BODY_SIZE)
             {
                 if let Some(v) = val.get("version").and_then(Value::as_str) {
-                    server_version = Some(v.to_string());
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        server_version = Some(v.to_string());
+                    }
                 }
                 if let Some(g) = val.get("gitHash").and_then(Value::as_str) {
                     git_hash = Some(g.to_string());
@@ -407,12 +460,6 @@ pub fn discover_capabilities(
                         let n = n.trim();
                         if !n.is_empty() {
                             server_name = Some(n.to_string());
-                        }
-                    }
-                    if let Some(v) = server.get("version").and_then(Value::as_str) {
-                        let v = v.trim();
-                        if !v.is_empty() {
-                            server_vendor_version = Some(v.to_string());
                         }
                     }
                 }
@@ -425,31 +472,32 @@ pub fn discover_capabilities(
         }
     }
 
-    // 2. If version was missing or /config failed, fallback to /version
-    if server_version.is_none() {
-        if let Ok(mut resp) = client.get(&ver_url).send() {
-            if resp.status().is_success() {
-                if let Ok(text) =
-                    crate::api::read_response_text(&mut resp, crate::api::MAX_API_BODY_SIZE)
-                {
-                    if let Ok(ver_val) = serde_json::from_str::<Value>(&text) {
-                        if let Some(v) = ver_val.as_str() {
-                            server_version = Some(v.to_string());
-                        } else if let Some(v) = ver_val.get("version").and_then(Value::as_str) {
-                            server_version = Some(v.to_string());
-                        }
-                    } else {
-                        let trimmed = text.trim().trim_matches('"');
-                        if !trimmed.is_empty() {
-                            server_version = Some(trimmed.to_string());
-                        }
-                    }
-                }
-            }
-        }
+    // 2. Classify the flavor from the `/api/config`-derived metadata alone. The vendor
+    //    version is deliberately excluded here: it is discovered from `/api/version`,
+    //    which is only consulted once the flavor is known.
+    let flavor = classify_server(&ServerIdentity {
+        server_url: Some(server_url),
+        server_name: server_name.as_deref(),
+        server_vendor_version: None,
+        server_version: server_version.as_deref(),
+    });
+
+    // 3. Vendor release version: flavor-gated, best-effort `/api/version` probe.
+    //    On Vaultwarden this endpoint reports its release tag (e.g. `1.37.4`). It is
+    //    never consulted for official Bitwarden, whose `/api/version` carries a
+    //    calendar-style version that must not be recorded as a vendor version.
+    let mut server_vendor_version = None;
+    if flavor == ServerFlavor::Vaultwarden {
+        server_vendor_version = fetch_version_endpoint(&client, &ver_url);
     }
 
-    if server_version.is_none() && feature_states.is_empty() {
+    // 4. Compatibility-version fallback: only for non-Vaultwarden servers whose
+    //    `/api/config` did not report a version.
+    if server_version.is_none() && flavor != ServerFlavor::Vaultwarden {
+        server_version = fetch_version_endpoint(&client, &ver_url);
+    }
+
+    if server_version.is_none() && server_name.is_none() && feature_states.is_empty() {
         return Err(format!(
             "Could not query capabilities from server {}",
             server_url
@@ -876,12 +924,25 @@ mod tests {
 
         save_capabilities(&caps).expect("save must succeed");
 
-        // Cache hit for same origin
+        // Cache hit for same origin (trailing slash is not significant)
         assert!(load_cached_capabilities_for(Some("https://vault.corp.local")).is_some());
         assert!(load_cached_capabilities_for(Some("https://vault.corp.local/")).is_some());
 
         // Cache miss for different origin
         assert!(load_cached_capabilities_for(Some("https://vault.bitwarden.com")).is_none());
+
+        // The cache is keyed on the API base *including path*: a sub-path deployment is
+        // distinct from the path-less origin and from a sibling path.
+        let subpath_caps = ServerCapabilities {
+            server_url: "https://vault.corp.local/old".to_string(),
+            ..caps
+        };
+        save_capabilities(&subpath_caps).expect("save must succeed");
+
+        assert!(load_cached_capabilities_for(Some("https://vault.corp.local/old")).is_some());
+        assert!(load_cached_capabilities_for(Some("https://vault.corp.local/old/")).is_some());
+        assert!(load_cached_capabilities_for(Some("https://vault.corp.local/new")).is_none());
+        assert!(load_cached_capabilities_for(Some("https://vault.corp.local")).is_none());
 
         std::env::remove_var("OMAWARDEN_DATA_DIR");
     }

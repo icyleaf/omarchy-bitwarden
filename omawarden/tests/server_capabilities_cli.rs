@@ -399,8 +399,25 @@ fn test_server_capabilities_daemon_ipc() {
     running.store(false, Ordering::Relaxed);
 }
 
-/// Serves a caller-provided `/api/config` payload (and a `/api/version` fallback).
-fn spawn_mock_server(config_body: Value) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
+/// Serves a caller-provided `/api/config` payload, plus the `/api/version` body.
+///
+/// `version_body` is the raw JSON response served at `GET /api/version` (e.g. `"1.37.4"`
+/// including quotes). Real Vaultwarden does not report its own release inside `/api/config`;
+/// the release is only available from this endpoint.
+fn spawn_mock_server(
+    config_body: Value,
+    version_body: &str,
+) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
+    spawn_mock_server_with_version_status(config_body, version_body, 200)
+}
+
+/// Like [`spawn_mock_server`], but lets the caller force the `/api/version` response
+/// status so best-effort probe-failure handling can be exercised.
+fn spawn_mock_server_with_version_status(
+    config_body: Value,
+    version_body: &str,
+    version_status: u16,
+) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -408,10 +425,16 @@ fn spawn_mock_server(config_body: Value) -> (String, Arc<AtomicBool>, thread::Jo
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
 
+    let version_response = version_body.to_string();
     let handle = thread::spawn(move || {
         while r_clone.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => handle_custom_connection(stream, &config_body),
+                Ok((stream, _)) => handle_custom_connection(
+                    stream,
+                    &config_body,
+                    &version_response,
+                    version_status,
+                ),
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -423,7 +446,12 @@ fn spawn_mock_server(config_body: Value) -> (String, Arc<AtomicBool>, thread::Jo
     (format!("http://{}", addr), running, handle)
 }
 
-fn handle_custom_connection(mut stream: TcpStream, config_body: &Value) {
+fn handle_custom_connection(
+    mut stream: TcpStream,
+    config_body: &Value,
+    version_body: &str,
+    version_status: u16,
+) {
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -446,7 +474,15 @@ fn handle_custom_connection(mut stream: TcpStream, config_body: &Value) {
     let body = if path == "/api/config" || path.starts_with("/api/config?") {
         config_body.to_string()
     } else if path == "/api/version" || path.starts_with("/api/version?") {
-        "\"2026.9.0\"".to_string()
+        if version_status != 200 {
+            let response = format!(
+                "HTTP/1.1 {} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                version_status
+            );
+            let _ = stream.write_all(response.as_bytes());
+            return;
+        }
+        version_body.to_string()
     } else {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(response.as_bytes());
@@ -505,12 +541,17 @@ fn test_server_capabilities_vaultwarden_1374_native_ssh_key() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
 
-    let (server_url, running, handle) = spawn_mock_server(json!({
-        "version": "2026.6.0",
-        "gitHash": "vw123456",
-        "server": { "name": "Vaultwarden", "version": "1.37.4" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_mock_server(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw123456",
+            // Real Vaultwarden >= 1.32.1 does not report a nested `server.version`;
+            // the release is only available from `GET /api/version`.
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
     let config_path = write_config(dir, &server_url);
 
     let (json_val, output) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
@@ -560,11 +601,14 @@ fn test_server_capabilities_vaultwarden_1352_feature_flag_transition() {
     let dir = temp.path();
 
     // 1. Flag absent on 1.35.2 => disabled
-    let (server_url, running, handle) = spawn_mock_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.35.2" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_mock_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.35.2\"",
+    );
     let config_path = write_config(dir, &server_url);
 
     let (json_val, _) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
@@ -583,11 +627,14 @@ fn test_server_capabilities_vaultwarden_1352_feature_flag_transition() {
     let _ = handle.join();
 
     // 2. Explicit flag enabled on 1.35.2 => supported
-    let (server_url2, running2, handle2) = spawn_mock_server(json!({
-        "version": "2026.6.0",
-        "server": { "name": "Vaultwarden", "version": "1.35.2" },
-        "featureStates": { "ssh-key-vault-item": true }
-    }));
+    let (server_url2, running2, handle2) = spawn_mock_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": { "ssh-key-vault-item": true }
+        }),
+        "\"1.35.2\"",
+    );
     let config_path2 = write_config(dir, &server_url2);
 
     let (json_val2, _) = run_capabilities(dir, &config_path2, &["--refresh", "--json"]);
@@ -610,11 +657,14 @@ fn test_server_capabilities_vaultwarden_legacy_unsupported() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
 
-        let (server_url, running, handle) = spawn_mock_server(json!({
-            "version": "2026.6.0",
-            "server": { "name": "Vaultwarden", "version": vendor },
-            "featureStates": {}
-        }));
+        let (server_url, running, handle) = spawn_mock_server(
+            json!({
+                "version": "2026.6.0",
+                "server": { "name": "Vaultwarden" },
+                "featureStates": {}
+            }),
+            &format!("\"{}\"", vendor),
+        );
         let config_path = write_config(dir, &server_url);
 
         let (json_val, _) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
@@ -641,15 +691,21 @@ fn test_server_capabilities_official_bitwarden_defaults_and_override() {
     let dir = temp.path();
 
     // 1. Self-hosted official Bitwarden, flag absent => supported
-    let (server_url, running, handle) = spawn_mock_server(json!({
-        "version": "2026.5.0",
-        "server": { "name": "Bitwarden", "version": "2026.5.0" },
-        "featureStates": {}
-    }));
+    let (server_url, running, handle) = spawn_mock_server(
+        json!({
+            "version": "2026.5.0",
+            "server": { "name": "Bitwarden" },
+            "featureStates": {}
+        }),
+        "\"2026.5.0\"",
+    );
     let config_path = write_config(dir, &server_url);
 
     let (json_val, _) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
     assert_eq!(json_val["server_name"], "Bitwarden");
+    // Official Bitwarden's calendar-style `/api/version` must never be recorded as a
+    // Vaultwarden vendor version.
+    assert_eq!(json_val["server_vendor_version"], Value::Null);
     let ssh_key = json_val["matrix"]
         .as_array()
         .unwrap()
@@ -663,11 +719,14 @@ fn test_server_capabilities_official_bitwarden_defaults_and_override() {
     let _ = handle.join();
 
     // 2. Explicit false is always honored
-    let (server_url2, running2, handle2) = spawn_mock_server(json!({
-        "version": "2026.5.0",
-        "server": { "name": "Bitwarden", "version": "2026.5.0" },
-        "featureStates": { "ssh-key-vault-item": false }
-    }));
+    let (server_url2, running2, handle2) = spawn_mock_server(
+        json!({
+            "version": "2026.5.0",
+            "server": { "name": "Bitwarden" },
+            "featureStates": { "ssh-key-vault-item": false }
+        }),
+        "\"2026.5.0\"",
+    );
     let config_path2 = write_config(dir, &server_url2);
 
     let (json_val2, _) = run_capabilities(dir, &config_path2, &["--refresh", "--json"]);
@@ -682,6 +741,88 @@ fn test_server_capabilities_official_bitwarden_defaults_and_override() {
 
     running2.store(false, Ordering::Relaxed);
     let _ = handle2.join();
+}
+
+#[test]
+fn test_server_capabilities_vaultwarden_probe_failure_preserves_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    // `/api/config` identifies Vaultwarden, but the `/api/version` probe fails (503).
+    // Discovery must still succeed and preserve the config-derived metadata.
+    let (server_url, running, handle) = spawn_mock_server_with_version_status(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw999",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": { "ssh-agent-v2": true }
+        }),
+        "\"1.37.4\"",
+        503,
+    );
+    let config_path = write_config(dir, &server_url);
+
+    let (json_val, output) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
+    assert!(
+        output.status.success(),
+        "discovery must not fail when the vendor-version probe fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(json_val["ok"], true);
+    assert_eq!(json_val["server_name"], "Vaultwarden");
+    assert_eq!(json_val["server_version"], "2026.6.0");
+    assert_eq!(json_val["git_hash"], "vw999");
+    assert_eq!(json_val["feature_states"]["ssh-agent-v2"], true);
+    // Best-effort: no vendor version, and the ssh-key tier falls back conservatively.
+    assert_eq!(json_val["server_vendor_version"], Value::Null);
+    let ssh_key = json_val["matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "ssh-key-vault-item")
+        .unwrap()
+        .clone();
+    assert_eq!(ssh_key["status"], "disabled");
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_server_capabilities_ignores_stale_nested_server_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    // Deliberate counterfactual: an (older) `/api/config` that still carries a nested
+    // `server.version` claiming 1.30.0, while `/api/version` reports the true 1.37.4.
+    // The documented contract reads the release only from `/api/version`, so the stale
+    // nested value must be ignored (vendor = 1.37.4 => native ssh-key support).
+    let (server_url, running, handle) = spawn_mock_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden", "version": "1.30.0" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
+    let config_path = write_config(dir, &server_url);
+
+    let (json_val, _) = run_capabilities(dir, &config_path, &["--refresh", "--json"]);
+    assert_eq!(json_val["server_vendor_version"], "1.37.4");
+    let ssh_key = json_val["matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "ssh-key-vault-item")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        ssh_key["status"], "supported",
+        "the stale nested server.version must not override the /api/version release"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
 }
 
 #[test]
