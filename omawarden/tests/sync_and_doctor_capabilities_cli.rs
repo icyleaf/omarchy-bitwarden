@@ -700,6 +700,18 @@ fn test_doctor_vaultwarden_1374_recommends_only_agent_flag() {
     let human = run_doctor(dir, &config_path, false);
     let human_str = human["human"].as_str().unwrap();
     assert!(
+        human_str.contains("[OK] Upstream ssh-key-vault-item enabled"),
+        "expected ssh-key [OK] on 1.37.4: {human_str}"
+    );
+    assert!(
+        human_str.contains("Server Name:        Vaultwarden"),
+        "expected server identity in doctor output: {human_str}"
+    );
+    assert!(
+        human_str.contains("Vendor Version:     1.37.4"),
+        "expected vendor version in doctor output: {human_str}"
+    );
+    assert!(
         human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-agent-v2"),
         "expected agent-only guidance: {human_str}"
     );
@@ -738,6 +750,50 @@ fn test_doctor_vaultwarden_1352_recommends_feature_flags() {
     assert!(
         human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item"),
         "expected feature flag guidance: {human_str}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_doctor_vaultwarden_1300_recommends_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_doctor_server(json!({
+        "version": "2026.6.0",
+        "server": { "name": "Vaultwarden", "version": "1.30.0" },
+        "featureStates": {}
+    }));
+    let config_path = doctor_config_path(dir, &server_url);
+
+    let json_out = run_doctor(dir, &config_path, true);
+    let caps = &json_out["upstream_capabilities"];
+    assert_eq!(caps["ssh_key_vault_item_status"], "unsupported");
+    assert_eq!(caps["ssh_agent_v2_status"], "disabled");
+
+    let details = caps["details"].as_array().unwrap();
+    assert!(
+        details.iter().any(|d| d
+            .as_str()
+            .unwrap_or("")
+            .contains("unsupported on this server version")),
+        "expected unsupported detail: {details:?}"
+    );
+
+    let recommendations = caps["recommendations"].as_array().unwrap();
+    assert!(
+        recommendations
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("Upgrade Vaultwarden")),
+        "expected upgrade recommendation: {recommendations:?}"
+    );
+    assert!(
+        !recommendations
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("ssh-key-vault-item")),
+        "must not recommend removed flags on 1.30.0: {recommendations:?}"
     );
 
     running.store(false, Ordering::Relaxed);

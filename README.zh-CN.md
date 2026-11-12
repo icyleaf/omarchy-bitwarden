@@ -357,7 +357,17 @@ omawarden server capabilities --json
 omawarden server capabilities --refresh
 ```
 
-### 支持的 Vaultwarden 版本分级
+### 支持的服务端版本分级
+
+`omawarden` 支持 **官方 Bitwarden 云端**(`vault.bitwarden.com` / `vault.bitwarden.eu`)以及自建的 **Bitwarden** / **Vaultwarden** 服务端。Vaultwarden 的支持程度按版本分级:
+
+| Vaultwarden 版本 | 支持分级 |
+| --- | --- |
+| `>= 1.37.4` | **推荐**:原生支持 SSH Key(Cipher Type 5),无需实验性标志 |
+| `>= 1.33.0` | SSH Key 支持需配置 `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent` |
+| `>= 1.32.0` | 支持 WebAuthn / OTP |
+| `>= 1.28.0` | **最低基线**:支持 Argon2id KDF 与现代 identity prelogin |
+| `< 1.28.0` | 不受支持:`omawarden doctor` 会提示服务端低于最低基线 |
 
 `omawarden` 会同时捕获嵌套的服务端身份(`server.name` / `server.version`)与顶层 Bitwarden 兼容版本(`version`)。当上游 `featureStates` 未包含 `ssh-key-vault-item` 时,矩阵会依据服务端类型与版本求值:
 
@@ -365,7 +375,7 @@ omawarden server capabilities --refresh
 | --- | --- | --- |
 | **Vaultwarden** | `>= 1.37.4` | `supported`(已 GA,上游移除了实验性标志) |
 | **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled`(需配置 `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
-| **Vaultwarden** | `< 1.33.0` | `unsupported`(需升级,最低基线 `>= 1.28.0` 以支持 Argon2id KDF) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported`(需升级至 `>= 1.33.0`,推荐 `>= 1.37.4`) |
 | **官方 Bitwarden**(云端或 `server.name == "Bitwarden"`) | 兼容版本 `>= 2024.12.0` | `supported` |
 | **官方 Bitwarden** | 兼容版本 `< 2024.12.0` | `unsupported` |
 

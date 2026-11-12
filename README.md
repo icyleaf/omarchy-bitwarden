@@ -357,7 +357,17 @@ omawarden server capabilities --json
 omawarden server capabilities --refresh
 ```
 
-### Supported Vaultwarden version tiers
+### Supported server version tiers
+
+`omawarden` supports **Official Bitwarden Cloud** (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self-hosted **Bitwarden** / **Vaultwarden** servers. Vaultwarden support is tiered by release:
+
+| Vaultwarden version | Support tier |
+| --- | --- |
+| `>= 1.37.4` | **Recommended**: native SSH Key (Cipher Type 5) support without experimental flags |
+| `>= 1.33.0` | SSH Key support behind `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent` |
+| `>= 1.32.0` | WebAuthn / OTP support |
+| `>= 1.28.0` | **Minimum baseline**: Argon2id KDF and modern identity prelogin |
+| `< 1.28.0` | Unsupported: `omawarden doctor` warns that the server is below the minimum baseline |
 
 Both the nested server identity (`server.name` / `server.version`) and the Bitwarden compatibility version (`version`) are captured. When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
 
@@ -365,7 +375,7 @@ Both the nested server identity (`server.name` / `server.version`) and the Bitwa
 | --- | --- | --- |
 | **Vaultwarden** | `>= 1.37.4` | `supported` (graduated to GA; experimental flag removed upstream) |
 | **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled` (enable via `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
-| **Vaultwarden** | `< 1.33.0` | `unsupported` (upgrade required; minimum baseline `>= 1.28.0` for Argon2id KDF) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported` (upgrade to `>= 1.33.0`, recommended `>= 1.37.4`) |
 | **Official Bitwarden** (Cloud or `server.name == "Bitwarden"`) | compatibility `>= 2024.12.0` | `supported` |
 | **Official Bitwarden** | compatibility `< 2024.12.0` | `unsupported` |
 

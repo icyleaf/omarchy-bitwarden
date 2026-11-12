@@ -67,6 +67,18 @@ For `ssh-key-vault-item`, explicit booleans in `featureStates` always take prece
 
 Cascading feature gating and `doctor` diagnostics are flavor/version aware: pre-1.33.0 Vaultwarden servers receive an upgrade recommendation instead of flag guidance, and Vaultwarden `>= 1.37.4` instances are never told to re-add the removed `ssh-key-vault-item` / `ssh-agent` flags. Vaultwarden `< 1.28.0` triggers an explicit minimum-baseline warning (Argon2id KDF and modern identity prelogin).
 
+##### 2.1.1 Vaultwarden version support tiers
+
+| Vaultwarden version | Support tier |
+| --- | --- |
+| `>= 1.37.4` | Recommended: native SSH Key (Cipher Type 5) support without experimental flags |
+| `>= 1.33.0` | SSH Key support behind `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent` |
+| `>= 1.32.0` | WebAuthn / OTP support |
+| `>= 1.28.0` | Minimum baseline: Argon2id KDF and modern identity prelogin |
+| `< 1.28.0` | Unsupported: `doctor` warns the server is below the minimum baseline |
+
+Official Bitwarden Cloud (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self-hosted official Bitwarden (`server.name == "Bitwarden"`, compatibility version `>= 2024.12.0`) support `ssh-key-vault-item` natively without flags.
+
 ### 3. Graceful Diagnostic & Health Strategy
 - **Non-Blocking Invariant**: Missing optional upstream features (such as `ssh-agent-v2`) MUST NEVER fail core synchronization, cipher editing, or unlock operations.
 - **Graduated Health Reporting in `omawarden doctor`**:
