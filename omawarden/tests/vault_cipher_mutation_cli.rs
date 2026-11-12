@@ -3941,3 +3941,277 @@ fn test_edit_login_cipher_replace_uris() {
     );
     assert!(received);
 }
+
+fn decrypt_field_string(value: &Value, key: &SymmetricCryptoKey) -> String {
+    let enc = value.as_str().expect("field component must be a string");
+    EncString::parse(enc).unwrap().decrypt_string(key).unwrap()
+}
+
+#[test]
+fn test_create_login_cipher_with_custom_fields() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Fields Cipher",
+            "--username",
+            "octocat",
+            "--password",
+            "secretpass",
+            "--field",
+            "Cluster=Prod",
+            "--hidden-field",
+            "API_KEY=secret-tok",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let fields = payload["fields"].as_array().expect("fields must be array");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0]["type"], 0);
+        assert_eq!(fields[1]["type"], 1);
+
+        // Both name and value cross the wire as ciphertext only.
+        assert_ne!(fields[0]["name"].as_str().unwrap(), "Cluster");
+        assert_ne!(fields[0]["value"].as_str().unwrap(), "Prod");
+        assert_eq!(
+            decrypt_field_string(&fields[0]["name"], &user_key),
+            "Cluster"
+        );
+        assert_eq!(decrypt_field_string(&fields[0]["value"], &user_key), "Prod");
+
+        assert_ne!(fields[1]["name"].as_str().unwrap(), "API_KEY");
+        assert_ne!(fields[1]["value"].as_str().unwrap(), "secret-tok");
+        assert_eq!(
+            decrypt_field_string(&fields[1]["name"], &user_key),
+            "API_KEY"
+        );
+        assert_eq!(
+            decrypt_field_string(&fields[1]["value"], &user_key),
+            "secret-tok"
+        );
+
+        let resp_body = json!({
+            "id": "custom-fields-uuid-1111",
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "login": payload["login"],
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T00:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI exit status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(posted, "Bitwarden API POST was not received");
+
+    // The decrypted cache snapshot must retain both typed custom fields.
+    let item = ipc(
+        &socket,
+        json!({"action": "get_item", "query": "Fields Cipher", "touch": true}),
+    );
+    assert_eq!(item["ok"], true, "cached item missing: {item}");
+    let cached = item["item"]["fields"].as_array().unwrap();
+    assert_eq!(cached.len(), 2);
+    assert_eq!(cached[0]["name"], "Cluster");
+    assert_eq!(cached[0]["value"], "Prod");
+    assert_eq!(cached[0]["type"], 0);
+    assert_eq!(cached[1]["name"], "API_KEY");
+    assert_eq!(cached[1]["value"], "secret-tok");
+    assert_eq!(cached[1]["type"], 1);
+}
+
+#[test]
+fn test_create_note_cipher_with_bool_field() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "note",
+            "--name",
+            "Bool Note",
+            "--notes",
+            "content",
+            "--bool-field",
+            "Verified=true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut posted = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        let (path, body) = read_request(&mut stream);
+        assert_eq!(path, "/api/ciphers");
+        posted = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], 2);
+        let fields = payload["fields"].as_array().expect("fields must be array");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["type"], 2);
+        assert_eq!(
+            decrypt_field_string(&fields[0]["name"], &user_key),
+            "Verified"
+        );
+        assert_eq!(decrypt_field_string(&fields[0]["value"], &user_key), "true");
+
+        let resp_body = json!({
+            "id": "bool-note-uuid-2222",
+            "organizationId": null,
+            "folderId": null,
+            "type": 2,
+            "name": payload["name"],
+            "notes": payload["notes"],
+            "favorite": false,
+            "secureNote": { "type": 0 },
+            "fields": payload["fields"],
+            "revisionDate": "2026-11-11T01:00:00.000Z"
+        })
+        .to_string();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "CLI exit status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(posted, "Bitwarden API POST was not received");
+}
+
+#[test]
+fn test_create_cipher_rejects_malformed_boolean_custom_field() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+
+    let out = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Bad Bool",
+            "--username",
+            "octocat",
+            "--password",
+            "secretpass",
+            "--bool-field",
+            "Active=maybe",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Invalid boolean value 'maybe' for custom field 'Active'"),
+        "unexpected error output: {stderr}"
+    );
+}
