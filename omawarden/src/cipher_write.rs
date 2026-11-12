@@ -492,6 +492,14 @@ impl VaultManager {
                 ));
             }
 
+            // Vaultwarden 1.37+ requires `encryptedFor` on `PUT /api/ciphers/{id}`,
+            // exactly as on create. Without it the server answers 422, so every
+            // edit — including a favorite toggle — is rejected outright.
+            let encrypted_for = stored
+                .or(subject)
+                .ok_or_else(|| WriteError::Rejected("Missing account ID. Sign in again.".into()))?;
+            payload["encryptedFor"] = json!(encrypted_for);
+
             let same_account = self
                 .storage_mgr
                 .load_existing()
