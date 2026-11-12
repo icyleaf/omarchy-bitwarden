@@ -505,8 +505,25 @@ enum VaultAction {
             help = "Read new notes from standard input"
         )]
         notes_stdin: bool,
-        #[arg(long, help = "New URI for login cipher")]
-        uri: Option<String>,
+        #[arg(
+            long = "uri",
+            action = clap::ArgAction::Append,
+            help = "New URI for login cipher (repeatable to replace URI list)"
+        )]
+        uris: Vec<String>,
+        #[arg(
+            long = "add-uri",
+            action = clap::ArgAction::Append,
+            conflicts_with = "clear_uris",
+            help = "Append an additional URI to existing URIs"
+        )]
+        add_uris: Vec<String>,
+        #[arg(
+            long,
+            conflicts_with_all = ["uris", "add_uris"],
+            help = "Clear all URIs from login cipher"
+        )]
+        clear_uris: bool,
         #[arg(long, help = "Folder ID for the cipher")]
         folder_id: Option<String>,
         #[arg(
@@ -554,8 +571,12 @@ enum CreateItemAction {
         generate_passphrase: bool,
         #[arg(long, help = "Optional notes")]
         notes: Option<String>,
-        #[arg(long, help = "Optional URI")]
-        uri: Option<String>,
+        #[arg(
+            long = "uri",
+            action = clap::ArgAction::Append,
+            help = "Optional URI (repeatable for multiple URLs)"
+        )]
+        uris: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
         #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
@@ -1897,7 +1918,7 @@ fn main() -> ExitCode {
                             generate_password,
                             generate_passphrase,
                             notes,
-                            uri,
+                            uris,
                             folder_id,
                             organization_id,
                             collection_id,
@@ -2012,7 +2033,7 @@ fn main() -> ExitCode {
                                 "username": username,
                                 "password": *password_val,
                                 "notes": notes,
-                                "uri": uri,
+                                "uris": uris,
                                 "folder_id": folder_id,
                             });
                             (req, "login cipher", name)
@@ -2354,7 +2375,9 @@ fn main() -> ExitCode {
                     generate_passphrase,
                     notes,
                     notes_stdin,
-                    uri,
+                    uris,
+                    add_uris,
+                    clear_uris,
                     folder_id,
                     favorite,
                     json,
@@ -2367,7 +2390,9 @@ fn main() -> ExitCode {
                         || generate_passphrase
                         || notes.is_some()
                         || notes_stdin
-                        || uri.is_some()
+                        || !uris.is_empty()
+                        || !add_uris.is_empty()
+                        || clear_uris
                         || folder_id.is_some()
                         || favorite.is_some();
 
@@ -2438,7 +2463,9 @@ fn main() -> ExitCode {
                         || password_stdin
                         || generate_password
                         || generate_passphrase
-                        || uri.is_some())
+                        || !uris.is_empty()
+                        || !add_uris.is_empty()
+                        || clear_uris)
                         && item_type != "login"
                     {
                         let err_msg =
@@ -2506,10 +2533,18 @@ fn main() -> ExitCode {
                         "username": username,
                         "password": password_val.as_deref(),
                         "notes": notes_val.as_deref(),
-                        "uri": uri,
                         "folder_id": folder_id,
                         "favorite": favorite,
                     });
+                    if !uris.is_empty() {
+                        daemon_req["uris"] = json!(uris);
+                    }
+                    if !add_uris.is_empty() {
+                        daemon_req["add_uris"] = json!(add_uris);
+                    }
+                    if clear_uris {
+                        daemon_req["clear_uris"] = json!(true);
+                    }
                     if let Some(ref ctx) = client_ctx {
                         daemon_req["client"] = json!(ctx);
                     }
@@ -4763,7 +4798,9 @@ mod tests {
                         generate_passphrase,
                         notes,
                         notes_stdin,
-                        uri,
+                        uris,
+                        add_uris,
+                        clear_uris,
                         folder_id,
                         favorite,
                         json,
@@ -4778,7 +4815,9 @@ mod tests {
                 assert!(!generate_passphrase);
                 assert_eq!(notes.as_deref(), Some("new-notes"));
                 assert!(!notes_stdin);
-                assert_eq!(uri.as_deref(), Some("https://new.uri"));
+                assert_eq!(uris, vec!["https://new.uri"]);
+                assert!(add_uris.is_empty());
+                assert!(!clear_uris);
                 assert_eq!(folder_id.as_deref(), Some("folder-123"));
                 assert_eq!(favorite, Some(true));
                 assert!(json);

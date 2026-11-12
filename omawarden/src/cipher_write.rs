@@ -67,6 +67,7 @@ pub(crate) struct CipherCreateDraft {
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) uri: Option<String>,
+    pub(crate) uris: Option<Vec<LoginUriDraft>>,
 }
 
 #[derive(Deserialize, ZeroizeOnDrop, Default)]
@@ -78,6 +79,9 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) password: Option<String>,
     pub(crate) notes: Option<String>,
     pub(crate) uri: Option<String>,
+    pub(crate) uris: Option<Vec<LoginUriDraft>>,
+    pub(crate) add_uris: Option<Vec<LoginUriDraft>>,
+    pub(crate) clear_uris: Option<bool>,
     pub(crate) folder_id: Option<String>,
     pub(crate) favorite: Option<bool>,
 }
@@ -337,7 +341,12 @@ impl VaultManager {
                 .and_then(Value::as_i64)
                 .unwrap_or(1);
             let is_login = cipher_type == 1;
-            if (draft.username.is_some() || draft.password.is_some() || draft.uri.is_some())
+            if (draft.username.is_some()
+                || draft.password.is_some()
+                || draft.uri.is_some()
+                || draft.uris.is_some()
+                || draft.add_uris.is_some()
+                || draft.clear_uris.is_some())
                 && !is_login
             {
                 return Err(WriteError::Rejected(
@@ -403,7 +412,14 @@ impl VaultManager {
             field_changed = true;
         }
 
-        if draft.username.is_some() || draft.password.is_some() || draft.uri.is_some() {
+        let has_login_updates = draft.username.is_some()
+            || draft.password.is_some()
+            || draft.uri.is_some()
+            || draft.uris.is_some()
+            || draft.add_uris.is_some()
+            || draft.clear_uris == Some(true);
+
+        if has_login_updates {
             if !payload["login"].is_object() {
                 payload["login"] = json!({});
             }
@@ -423,7 +439,38 @@ impl VaultManager {
                 field_changed = true;
             }
 
-            if let Some(ref uri) = draft.uri {
+            if draft.clear_uris == Some(true) {
+                payload["login"]["uris"] = json!([]);
+                field_changed = true;
+            } else if let Some(ref replace_uris) = draft.uris {
+                let mut enc_uris = Vec::new();
+                for u in replace_uris {
+                    let u_str = u.uri();
+                    if !u_str.is_empty() {
+                        let enc_uri = cipher_key
+                            .encrypt_string(u_str)
+                            .map_err(|_| "Could not encrypt URI.".to_string())?;
+                        enc_uris.push(json!({"uri": enc_uri, "match": Value::Null}));
+                    }
+                }
+                payload["login"]["uris"] = json!(enc_uris);
+                field_changed = true;
+            } else if let Some(ref add_uris) = draft.add_uris {
+                if !payload["login"]["uris"].is_array() {
+                    payload["login"]["uris"] = json!([]);
+                }
+                let uris_arr = payload["login"]["uris"].as_array_mut().unwrap();
+                for u in add_uris {
+                    let u_str = u.uri();
+                    if !u_str.is_empty() {
+                        let enc_uri = cipher_key
+                            .encrypt_string(u_str)
+                            .map_err(|_| "Could not encrypt URI.".to_string())?;
+                        uris_arr.push(json!({"uri": enc_uri, "match": Value::Null}));
+                        field_changed = true;
+                    }
+                }
+            } else if let Some(ref uri) = draft.uri {
                 if uri.is_empty() {
                     payload["login"]["uris"] = json!([]);
                 } else {
@@ -818,7 +865,23 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         .transpose()?;
 
     let mut uris_list = Vec::new();
-    if let Some(uri) = draft
+    let all_uris = draft
+        .login
+        .as_ref()
+        .and_then(|l| l.uris.as_deref())
+        .or(draft.uris.as_deref());
+
+    if let Some(uris) = all_uris {
+        for u in uris {
+            let uri_str = u.uri();
+            if !uri_str.is_empty() {
+                uris_list.push(json!({
+                    "uri": encrypt(uri_str)?,
+                    "match": null
+                }));
+            }
+        }
+    } else if let Some(uri) = draft
         .login
         .as_ref()
         .and_then(|l| l.uri.as_deref())
@@ -829,17 +892,6 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
                 "uri": encrypt(uri)?,
                 "match": null
             }));
-        }
-    }
-    if let Some(extra_uris) = draft.login.as_ref().and_then(|l| l.uris.as_deref()) {
-        for u in extra_uris {
-            let uri_str = u.uri();
-            if !uri_str.is_empty() {
-                uris_list.push(json!({
-                    "uri": encrypt(uri_str)?,
-                    "match": null
-                }));
-            }
         }
     }
 
