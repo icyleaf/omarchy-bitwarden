@@ -645,6 +645,80 @@ fn daemon_epoch_write_failure_cannot_authorize_an_offline_holder() {
 }
 
 #[test]
+fn daemon_lock_revokes_old_epoch_when_output_gate_is_unavailable() {
+    assert_lock_revokes_old_epoch_with_unavailable_output_gate(true);
+}
+
+#[test]
+fn cli_lock_without_daemon_revokes_old_epoch_when_output_gate_is_unavailable() {
+    assert_lock_revokes_old_epoch_with_unavailable_output_gate(false);
+}
+
+fn assert_lock_revokes_old_epoch_with_unavailable_output_gate(with_daemon: bool) {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let clip = Clipboard::new();
+    let root = clip.0.path();
+    let cache = root.join("data.json");
+    let active = "11111111111111111111111111111111";
+    fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
+    let keyring = root.join("secret-tool");
+    fs::write(&keyring, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(keyring, fs::Permissions::from_mode(0o700)).unwrap();
+    clip.write_epoch(100);
+    let wl_copy = root.join("wl-copy");
+    let stale = holder_args(&wl_copy, &cache, active, "100");
+
+    // Make only the output gate unavailable. The epoch files remain writable.
+    let gate = root.join("omawarden.outputs.lock");
+    fs::create_dir(&gate).unwrap();
+    let _daemon =
+        with_daemon.then(|| DaemonProcess(clip.command(cli).arg("daemon").spawn().unwrap()));
+    let reply: Value = if with_daemon {
+        let socket = root.join("omawarden.sock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "daemon did not start");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{}", json!({"action":"lock"})).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    } else {
+        let lock = clip.run(cli, &["auth", "lock"], "");
+        assert!(lock.status.success());
+        serde_json::from_slice(&lock.stdout).unwrap()
+    };
+
+    fs::remove_dir(&gate).unwrap();
+    assert!(
+        !clip
+            .run(cli, &stale, "stale fixture selection")
+            .status
+            .success(),
+        "the old holder could publish after the output gate recovered"
+    );
+    assert!(clip.paste().is_none());
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["epoch_advanced"], true);
+    assert_eq!(reply["lock_epoch"], 101);
+    if with_daemon {
+        assert_eq!(reply["outputs_cleared"], false);
+    }
+
+    let fresh = holder_args(&wl_copy, &cache, active, "101");
+    assert!(clip
+        .run(cli, &fresh, "fresh fixture selection")
+        .status
+        .success());
+    assert_eq!(clip.paste().as_deref(), Some("fresh fixture selection"));
+}
+
+#[test]
 fn offline_holder_requires_shared_epoch_support_from_a_live_daemon() {
     let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
     for shared_epoch in [false, true] {
