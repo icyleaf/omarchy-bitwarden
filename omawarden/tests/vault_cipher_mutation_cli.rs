@@ -5047,3 +5047,282 @@ fn test_edit_cipher_in_editor_malformed_field_keeps_draft() {
         "draft must not be discarded: {stderr}"
     );
 }
+
+fn install_wl_copy_stub(dir: &Path) {
+    let stub = dir.join("wl-copy");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nset -eu\nif [ \"${1:-}\" = --clear ]; then exit 0; fi\n\
+         CAT=/bin/cat\n\
+         [ -x \"$CAT\" ] || CAT=/usr/bin/cat\n\
+         echo \"$*\" >> \"$XDG_RUNTIME_DIR/wl-copy-args.log\"\n\
+         \"$CAT\" > \"$XDG_RUNTIME_DIR/wl-copy-content\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn copy_command(dir: &Path) -> Command {
+    let mut cmd = make_command(dir);
+    cmd.env("WAYLAND_DISPLAY", "fixture-wayland");
+    cmd
+}
+
+fn start_unlocked_daemon(dir: &Path) -> Daemon {
+    let daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+    daemon
+}
+
+#[test]
+fn test_copy_custom_field_text() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000001";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy Field Target",
+        &[],
+        &[("PIN", "1234", 0), ("API_KEY", "secret-token", 0)],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "PIN"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "copy failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["copied"], "PIN");
+    assert_eq!(result["timeout"], 0, "text fields are not sensitive");
+
+    // The clipboard stub actually received the decrypted value, without the
+    // sensitive flag.
+    assert_eq!(
+        fs::read_to_string(dir.join("wl-copy-content")).unwrap(),
+        "1234"
+    );
+    let args = fs::read_to_string(dir.join("wl-copy-args.log")).unwrap();
+    assert!(args.contains("--type text/plain"));
+    assert!(!args.contains("--sensitive"));
+}
+
+#[test]
+fn test_copy_custom_field_hidden_is_sensitive() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000002";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy Hidden Target",
+        &[],
+        &[("API_KEY", "secret-token", 1)],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "API_KEY", "--timeout", "3"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "copy failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["copied"], "API_KEY");
+    assert_eq!(result["timeout"], 3, "hidden fields enforce a TTL");
+
+    assert_eq!(
+        fs::read_to_string(dir.join("wl-copy-content")).unwrap(),
+        "secret-token"
+    );
+    let args = fs::read_to_string(dir.join("wl-copy-args.log")).unwrap();
+    assert!(
+        args.contains("--sensitive"),
+        "hidden field must be copied as sensitive: {args}"
+    );
+}
+
+#[test]
+fn test_copy_custom_field_case_insensitive_fallback() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000003";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy Case Insensitive",
+        &[],
+        &[("PIN", "1234", 0), ("RecoveryCode", "abc123", 0)],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "recoverycode"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["copied"], "RecoveryCode");
+    assert_eq!(
+        fs::read_to_string(dir.join("wl-copy-content")).unwrap(),
+        "abc123"
+    );
+}
+
+#[test]
+fn test_copy_custom_field_not_found_lists_available() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000004";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy Not Found",
+        &[],
+        &[("PIN", "1234", 0), ("API_KEY", "secret", 1)],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "NONEXISTENT"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    let error = result["error"].as_str().unwrap();
+    assert!(error.contains("NONEXISTENT"));
+    assert!(error.contains("Available fields"));
+    assert!(error.contains("PIN"));
+    assert!(error.contains("API_KEY"));
+    assert!(!dir.join("wl-copy-content").exists(), "nothing was copied");
+}
+
+#[test]
+fn test_copy_custom_field_item_without_fields() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000005";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy No Fields",
+        &[],
+        &[],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "ANYTHING"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains("has no custom fields"));
+}
+
+#[test]
+fn test_copy_custom_field_conflicts_with_other_flags() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "copy0000-0000-0000-0000-000000000006";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Copy Conflict",
+        &[],
+        &[("PIN", "1234", 0)],
+    );
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "PIN", "--password"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains("--field cannot be combined with"));
+}
