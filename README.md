@@ -342,6 +342,49 @@ flowchart TD
 
 ---
 
+## Server Compatibility & Capability Discovery
+
+`omawarden` interrogates the connected server's `GET /api/config` endpoint to detect its identity, versions, and active feature flags, then evaluates them against a declarative **Server Capability Matrix**. Results are cached locally (non-sensitive metadata only) and exposed through `omawarden server capabilities` and `omawarden doctor`.
+
+```bash
+# Inspect the connected server flavor, versions, and evaluated capability matrix
+omawarden server capabilities
+
+# Machine-readable output for scripts
+omawarden server capabilities --json
+
+# Force re-discovery from the network
+omawarden server capabilities --refresh
+```
+
+### Supported server version tiers
+
+`omawarden` supports **Official Bitwarden Cloud** (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self-hosted **Bitwarden** / **Vaultwarden** servers. Vaultwarden support is tiered by release:
+
+| Vaultwarden version | Support tier |
+| --- | --- |
+| `>= 1.37.4` | **Recommended**: native SSH Key (Cipher Type 5) support without experimental flags |
+| `>= 1.33.0` | SSH Key support behind `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent` |
+| `>= 1.32.0` | WebAuthn / OTP support |
+| `>= 1.28.0` | **Minimum baseline**: Argon2id KDF and modern identity prelogin |
+| `< 1.28.0` | Unsupported: `omawarden doctor` warns that the server is below the minimum baseline |
+
+Both the nested server identity (`server.name`) and the Bitwarden compatibility version (`version`) are captured from `/api/config`. Because Vaultwarden stopped emitting its release version in the nested `server.version` after `1.32.1`, the Vaultwarden release is read from a flavor-gated `GET /api/version` probe (on official Bitwarden that endpoint carries a calendar-style version and is never recorded as a vendor version). When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
+
+| Server | Tier | `ssh-key-vault-item` (flag absent) |
+| --- | --- | --- |
+| **Vaultwarden** | `>= 1.37.4` | `supported` (graduated to GA; experimental flag removed upstream) |
+| **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled` (enable via `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported` (upgrade to `>= 1.33.0`, recommended `>= 1.37.4`) |
+| **Official Bitwarden** (Cloud or `server.name == "Bitwarden"`) | compatibility `>= 2024.12.0` | `supported` |
+| **Official Bitwarden** | compatibility `< 2024.12.0` | `unsupported` |
+
+An explicit boolean in `featureStates["ssh-key-vault-item"]` always takes precedence (`true` → `supported`, `false` → `disabled`) regardless of flavor or version.
+
+> **Vaultwarden self-hosters on `>= 1.37.4`**: remove obsolete `ssh-key-vault-item` and `ssh-agent` entries from `EXPERIMENTAL_CLIENT_FEATURE_FLAGS`, as upstream 1.37.4+ rejects them and emits startup warnings. Only `ssh-agent-v2` (if desired) remains flag-gated.
+
+---
+
 ## Password & Passphrase Generator
 
 Generate cryptographically secure passwords or EFF Diceware passphrases directly in the overlay (<kbd>Ctrl</kbd>+<kbd>G</kbd>) or via the CLI.

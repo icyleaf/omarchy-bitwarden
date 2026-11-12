@@ -7,6 +7,10 @@ pub struct UpstreamCapabilitiesReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_vendor_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub git_hash: Option<String>,
     pub ssh_agent_v2_status: String,
     pub ssh_key_vault_item_status: String,
@@ -117,6 +121,18 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
             let mut details = Vec::new();
             let mut recommendations = Vec::new();
 
+            let identity = crate::capabilities::ServerIdentity {
+                server_url: Some(&c.server_url),
+                server_name: c.server_name.as_deref(),
+                server_vendor_version: c.server_vendor_version.as_deref(),
+                server_version: c.server_version.as_deref(),
+            };
+            let flavor = crate::capabilities::classify_server(&identity);
+            let vaultwarden_version = crate::capabilities::vaultwarden_version(&identity);
+            let is_vaultwarden = flavor == crate::capabilities::ServerFlavor::Vaultwarden;
+            let format_version =
+                |v: (u64, u64, u64)| format!("{}.{}.{}", v.0, v.1, v.2);
+
             let ssh_agent_v2_status = c
                 .matrix
                 .iter()
@@ -131,38 +147,95 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
                 .map(|m| m.status.as_str().to_string())
                 .unwrap_or_else(|| "disabled".to_string());
 
+            // Minimum supported Vaultwarden baseline warning (>= 1.28.0 for Argon2id KDF and
+            // modern identity prelogin).
+            if is_vaultwarden {
+                if let Some(v) = vaultwarden_version {
+                    if v < (1, 28, 0) {
+                        details.push(format!(
+                            "[WARN] Vaultwarden {} is below the minimum supported baseline (>= 1.28.0 for Argon2id KDF and modern identity prelogin).",
+                            format_version(v)
+                        ));
+                        recommendations.push(
+                            "Upgrade Vaultwarden to >= 1.37.4 (minimum >= 1.28.0) for Argon2id KDF and modern identity prelogin support."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
             if ssh_agent_v2_status == "supported" {
                 details.push("[OK] Upstream ssh-agent-v2 enabled".to_string());
             } else {
                 details.push("[INFO] Upstream ssh-agent-v2 is not enabled (optional)".to_string());
             }
 
-            if ssh_key_status == "supported" {
-                details.push("[OK] Upstream ssh-key-vault-item enabled".to_string());
-            } else {
-                details.push("[INFO] Upstream ssh-key-vault-item is not enabled (optional)".to_string());
+            match ssh_key_status.as_str() {
+                "supported" => details.push("[OK] Upstream ssh-key-vault-item enabled".to_string()),
+                "unsupported" => details.push(
+                    "[WARN] Upstream ssh-key-vault-item is unsupported on this server version"
+                        .to_string(),
+                ),
+                _ => details.push(
+                    "[INFO] Upstream ssh-key-vault-item is not enabled (optional)".to_string(),
+                ),
             }
 
-            if ssh_agent_v2_status != "supported" && ssh_key_status != "supported" {
+            // An old Vaultwarden predates the experimental flag entirely; never recommend
+            // configuring flags that do not exist on that release.
+            let below_flag_tier =
+                is_vaultwarden && vaultwarden_version.map(|v| v < (1, 33, 0)).unwrap_or(false);
+            let native_ssh_key = is_vaultwarden
+                && vaultwarden_version.map(|v| v >= (1, 37, 4)).unwrap_or(false);
+            let ssh_key_needs_flag = ssh_key_status == "disabled" && !native_ssh_key;
+
+            if ssh_key_status == "unsupported" && is_vaultwarden {
                 recommendations.push(
-                    "For Vaultwarden self-hosters: enable modern agent and SSH key storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                    "Upgrade Vaultwarden to >= 1.33.0 for SSH Key Cipher support (>= 1.37.4 recommended for native support without experimental flags)."
                         .to_string(),
                 );
-            } else if ssh_agent_v2_status != "supported" {
+            } else if ssh_key_needs_flag && is_vaultwarden {
                 recommendations.push(
-                    "For Vaultwarden self-hosters: enable modern agent support by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                    "For Vaultwarden self-hosters: enable SSH Key vault storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent in your environment."
                         .to_string(),
                 );
-            } else if ssh_key_status != "supported" {
-                recommendations.push(
-                    "For Vaultwarden self-hosters: enable SSH Key vault storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item in your environment."
-                        .to_string(),
-                );
+            }
+
+            if ssh_agent_v2_status != "supported" {
+                if below_flag_tier {
+                    recommendations.push(
+                        "Upgrade Vaultwarden to >= 1.33.0 to enable ssh-agent-v2 (>= 1.37.4 recommended)."
+                            .to_string(),
+                    );
+                } else if is_vaultwarden && native_ssh_key {
+                    // Native SSH Key support is present; only the agent flag remains relevant.
+                    recommendations.push(
+                        "For Vaultwarden self-hosters: enable modern agent support by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-agent-v2 in your environment."
+                            .to_string(),
+                    );
+                } else if is_vaultwarden && ssh_key_needs_flag {
+                    recommendations.push(
+                        "For Vaultwarden self-hosters: enable modern agent and SSH key storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                            .to_string(),
+                    );
+                } else if is_vaultwarden {
+                    recommendations.push(
+                        "For Vaultwarden self-hosters: enable modern agent support by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-agent-v2 in your environment."
+                            .to_string(),
+                    );
+                } else {
+                    recommendations.push(
+                        "For Vaultwarden self-hosters: enable modern agent and SSH key storage by configuring EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent,ssh-agent-v2 in your environment."
+                            .to_string(),
+                    );
+                }
             }
 
             UpstreamCapabilitiesReport {
                 server_url: c.server_url,
                 server_version: c.server_version,
+                server_name: c.server_name,
+                server_vendor_version: c.server_vendor_version,
                 git_hash: c.git_hash,
                 ssh_agent_v2_status,
                 ssh_key_vault_item_status: ssh_key_status,

@@ -1252,8 +1252,14 @@ fn main() -> ExitCode {
                 );
 
                 if let Some(ref caps) = status.upstream_capabilities {
+                    if let Some(ref n) = caps.server_name {
+                        println!("  Server Name:        {}", n);
+                    }
                     if let Some(ref v) = caps.server_version {
                         println!("  Server Version:     {}", v);
+                    }
+                    if let Some(ref v) = caps.server_vendor_version {
+                        println!("  Vendor Version:     {}", v);
                     }
                     if let Some(ref g) = caps.git_hash {
                         println!("  Git Hash:           {}", g);
@@ -3380,6 +3386,8 @@ fn main() -> ExitCode {
                                 "ok": true,
                                 "server_url": c.server_url,
                                 "server_version": c.server_version,
+                                "server_name": c.server_name,
+                                "server_vendor_version": c.server_vendor_version,
                                 "git_hash": c.git_hash,
                                 "cached_at": c.cached_at,
                                 "feature_states": c.feature_states,
@@ -3401,8 +3409,14 @@ fn main() -> ExitCode {
                             .as_str()
                             .unwrap_or(&cfg.server_url);
                         println!("Server URL:     {}", server_url);
+                        if let Some(n) = response_val["server_name"].as_str() {
+                            println!("Server Name:    {}", n);
+                        }
                         if let Some(v) = response_val["server_version"].as_str() {
                             println!("Server Version: {}", v);
+                        }
+                        if let Some(v) = response_val["server_vendor_version"].as_str() {
+                            println!("Vendor Version: {}", v);
                         }
                         if let Some(g) = response_val["git_hash"].as_str() {
                             println!("Git Hash:       {}", g);

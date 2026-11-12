@@ -570,3 +570,289 @@ fn test_sync_updates_capabilities_on_http_200() {
     running.store(false, Ordering::Relaxed);
     let _ = server_handle.join();
 }
+
+fn write_doctor_executable(path: &std::path::Path, content: &str) {
+    write_test_executable(path, content);
+}
+
+fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+        return;
+    }
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+    }
+
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+    let path = parts[1];
+
+    let body = if path == "/api/config" || path.starts_with("/api/config?") {
+        config_body.to_string()
+    } else if path == "/api/version" || path.starts_with("/api/version?") {
+        version_body.to_string()
+    } else {
+        "{}".to_string()
+    };
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn spawn_doctor_server(
+    config_body: Value,
+    version_body: &str,
+) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
+    let running = Arc::new(AtomicBool::new(true));
+    let r_clone = running.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let version_response = version_body.to_string();
+    let handle = thread::spawn(move || {
+        while r_clone.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    handle_doctor_connection(stream, &config_body, &version_response)
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (format!("http://{}", addr), running, handle)
+}
+
+fn run_doctor(dir: &std::path::Path, config_path: &std::path::Path, json: bool) -> Value {
+    let fake_secret_tool = dir.join("secret-tool");
+    write_doctor_executable(&fake_secret_tool, "#!/bin/sh\nexit 0\n");
+
+    let mut args = vec!["--config", config_path.to_str().unwrap(), "doctor"];
+    if json {
+        args.push("--json");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .env_clear()
+        .env("HOME", dir)
+        .env("PATH", dir)
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .args(args)
+        .output()
+        .expect("Failed to execute omawarden doctor");
+
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if json {
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid doctor json")
+    } else {
+        json!({ "human": String::from_utf8_lossy(&output.stdout).to_string() })
+    }
+}
+
+fn doctor_config_path(dir: &std::path::Path, server_url: &str) -> std::path::PathBuf {
+    let config_path = dir.join("config.json");
+    fs::write(
+        &config_path,
+        json!({ "server_url": server_url }).to_string(),
+    )
+    .unwrap();
+    config_path
+}
+
+#[test]
+fn test_doctor_vaultwarden_1374_recommends_only_agent_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw123456",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
+    let config_path = doctor_config_path(dir, &server_url);
+
+    let json_out = run_doctor(dir, &config_path, true);
+    let caps = &json_out["upstream_capabilities"];
+    assert_eq!(caps["server_name"], "Vaultwarden");
+    assert_eq!(caps["server_vendor_version"], "1.37.4");
+    assert_eq!(caps["server_version"], "2026.6.0");
+    assert_eq!(caps["ssh_key_vault_item_status"], "supported");
+    assert_eq!(caps["ssh_agent_v2_status"], "disabled");
+
+    let human = run_doctor(dir, &config_path, false);
+    let human_str = human["human"].as_str().unwrap();
+    assert!(
+        human_str.contains("[OK] Upstream ssh-key-vault-item enabled"),
+        "expected ssh-key [OK] on 1.37.4: {human_str}"
+    );
+    assert!(
+        human_str.contains("Server Name:        Vaultwarden"),
+        "expected server identity in doctor output: {human_str}"
+    );
+    assert!(
+        human_str.contains("Vendor Version:     1.37.4"),
+        "expected vendor version in doctor output: {human_str}"
+    );
+    assert!(
+        human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-agent-v2"),
+        "expected agent-only guidance: {human_str}"
+    );
+    assert!(
+        !human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item"),
+        "must not recommend removed flags: {human_str}"
+    );
+    assert!(
+        !human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent"),
+        "must not recommend removed flags: {human_str}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_doctor_vaultwarden_1352_recommends_feature_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.35.2\"",
+    );
+    let config_path = doctor_config_path(dir, &server_url);
+
+    let json_out = run_doctor(dir, &config_path, true);
+    let caps = &json_out["upstream_capabilities"];
+    assert_eq!(caps["server_vendor_version"], "1.35.2");
+    assert_eq!(caps["ssh_key_vault_item_status"], "disabled");
+
+    let human = run_doctor(dir, &config_path, false);
+    let human_str = human["human"].as_str().unwrap();
+    assert!(
+        human_str.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item"),
+        "expected feature flag guidance: {human_str}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_doctor_vaultwarden_1300_recommends_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.30.0\"",
+    );
+    let config_path = doctor_config_path(dir, &server_url);
+
+    let json_out = run_doctor(dir, &config_path, true);
+    let caps = &json_out["upstream_capabilities"];
+    assert_eq!(caps["ssh_key_vault_item_status"], "unsupported");
+    assert_eq!(caps["ssh_agent_v2_status"], "disabled");
+
+    let details = caps["details"].as_array().unwrap();
+    assert!(
+        details.iter().any(|d| d
+            .as_str()
+            .unwrap_or("")
+            .contains("unsupported on this server version")),
+        "expected unsupported detail: {details:?}"
+    );
+
+    let recommendations = caps["recommendations"].as_array().unwrap();
+    assert!(
+        recommendations
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("Upgrade Vaultwarden")),
+        "expected upgrade recommendation: {recommendations:?}"
+    );
+    assert!(
+        !recommendations
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("ssh-key-vault-item")),
+        "must not recommend removed flags on 1.30.0: {recommendations:?}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_doctor_vaultwarden_1260_warns_minimum_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_doctor_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.26.0\"",
+    );
+    let config_path = doctor_config_path(dir, &server_url);
+
+    let json_out = run_doctor(dir, &config_path, true);
+    let caps = &json_out["upstream_capabilities"];
+    assert_eq!(caps["ssh_key_vault_item_status"], "unsupported");
+
+    let details = caps["details"].as_array().unwrap();
+    assert!(
+        details.iter().any(|d| d
+            .as_str()
+            .unwrap_or("")
+            .contains("below the minimum supported baseline")),
+        "expected baseline warning in details: {details:?}"
+    );
+
+    let recommendations = caps["recommendations"].as_array().unwrap();
+    assert!(
+        recommendations
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("Upgrade Vaultwarden")),
+        "expected upgrade recommendation: {recommendations:?}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}

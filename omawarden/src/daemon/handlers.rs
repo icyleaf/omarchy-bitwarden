@@ -629,6 +629,8 @@ pub fn handle_client_with_peer(
                     "ok": true,
                     "server_url": c.server_url,
                     "server_version": c.server_version,
+                    "server_name": c.server_name,
+                    "server_vendor_version": c.server_vendor_version,
                     "git_hash": c.git_hash,
                     "cached_at": c.cached_at,
                     "feature_states": c.feature_states,

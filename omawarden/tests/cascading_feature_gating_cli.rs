@@ -1,8 +1,11 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -511,4 +514,268 @@ fn test_daemon_ssh_agent_apply_ipc_gating() {
 
     assert_eq!(reply2["ok"], true);
     assert_eq!(reply2["running"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Version-aware gating end-to-end tests (Vaultwarden 1.37.4 / 1.35.x / 1.30.0)
+// ---------------------------------------------------------------------------
+
+fn handle_capability_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+        return;
+    }
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+    }
+
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+    let path = parts[1];
+
+    let body = if path == "/api/config" || path.starts_with("/api/config?") {
+        config_body.to_string()
+    } else if path == "/api/version" || path.starts_with("/api/version?") {
+        version_body.to_string()
+    } else {
+        "{}".to_string()
+    };
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn spawn_capability_server(
+    config_body: Value,
+    version_body: &str,
+) -> (String, Arc<AtomicBool>, thread::JoinHandle<()>) {
+    let running = Arc::new(AtomicBool::new(true));
+    let r_clone = running.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let version_response = version_body.to_string();
+    let handle = thread::spawn(move || {
+        while r_clone.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    handle_capability_connection(stream, &config_body, &version_response)
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (format!("http://{}", addr), running, handle)
+}
+
+fn setup_gating_env(dir: &std::path::Path, server_url: &str) -> std::path::PathBuf {
+    let config_path = dir.join("config.json");
+    fs::write(
+        &config_path,
+        json!({ "server_url": server_url }).to_string(),
+    )
+    .unwrap();
+
+    let fake_secret_tool = dir.join("secret-tool");
+    write_test_executable(&fake_secret_tool, "#!/bin/sh\nexit 0\n");
+
+    config_path
+}
+
+fn run_cli(
+    dir: &std::path::Path,
+    config_path: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    let mut full_args = vec!["--config", config_path.to_str().unwrap()];
+    full_args.extend_from_slice(args);
+
+    Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .env_clear()
+        .env("HOME", dir)
+        .env("PATH", dir)
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .args(full_args)
+        .output()
+        .expect("failed to run omawarden")
+}
+
+const GATING_SENTINEL: &str = "Upstream server does not support 'ssh-key-vault-item'";
+
+#[test]
+fn test_gating_vaultwarden_1374_passes_without_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "gitHash": "vw123456",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.37.4\"",
+    );
+    let config_path = setup_gating_env(dir, &server_url);
+
+    // ssh-key create / import and ssh-agent must all pass capability gating.
+    for args in [
+        vec!["ssh-key", "create", "--name", "Native Key"],
+        vec!["ssh-key", "import", "--name", "Native Import"],
+        vec!["ssh-agent"],
+    ] {
+        let out = run_cli(dir, &config_path, &args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains(GATING_SENTINEL),
+            "Vaultwarden 1.37.4 must not be gated for {:?}, got: {stdout}",
+            args
+        );
+    }
+
+    // Non-vacuous proof that discovery evaluated the native tier rather than failing open.
+    let cache: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("server_capabilities.json")).unwrap())
+            .unwrap();
+    assert_eq!(cache["server_name"], "Vaultwarden");
+    assert_eq!(cache["server_vendor_version"], "1.37.4");
+    assert!(
+        cache["matrix"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "ssh-key-vault-item" && m["status"] == "supported"),
+        "cache must record ssh-key-vault-item as supported: {cache}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_gating_vaultwarden_1352_recommends_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.35.2\"",
+    );
+    let config_path = setup_gating_env(dir, &server_url);
+
+    let out = run_cli(
+        dir,
+        &config_path,
+        &["ssh-key", "create", "--name", "Flagged Key"],
+    );
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let val: Value = serde_json::from_str(&stdout).expect("JSON error envelope");
+    assert_eq!(val["ok"], false);
+    let err = val["error"].as_str().unwrap();
+    assert!(err.contains(GATING_SENTINEL), "unexpected error: {err}");
+    assert!(
+        err.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item"),
+        "expected flag guidance: {err}"
+    );
+    assert!(
+        !err.contains("predates native SSH Key Cipher support"),
+        "must not advise upgrading an in-support release: {err}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_gating_vaultwarden_1300_recommends_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": {}
+        }),
+        "\"1.30.0\"",
+    );
+    let config_path = setup_gating_env(dir, &server_url);
+
+    let out = run_cli(
+        dir,
+        &config_path,
+        &["ssh-key", "import", "--name", "Legacy Import"],
+    );
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let val: Value = serde_json::from_str(&stdout).expect("JSON error envelope");
+    assert_eq!(val["ok"], false);
+    let err = val["error"].as_str().unwrap();
+    assert!(err.contains(GATING_SENTINEL), "unexpected error: {err}");
+    assert!(
+        err.contains("predates native SSH Key Cipher support"),
+        "expected upgrade guidance: {err}"
+    );
+    assert!(
+        err.contains(">= 1.33.0"),
+        "expected minimum upgrade target: {err}"
+    );
+    assert!(
+        !err.contains("EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item"),
+        "must not recommend flags that do not exist on legacy releases: {err}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
+}
+
+#[test]
+fn test_gating_vaultwarden_1374_ssh_agent_passes() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let (server_url, running, handle) = spawn_capability_server(
+        json!({
+            "version": "2026.6.0",
+            "server": { "name": "Vaultwarden" },
+            "featureStates": { "ssh-agent-v2": false }
+        }),
+        "\"1.37.4\"",
+    );
+    let config_path = setup_gating_env(dir, &server_url);
+
+    let out = run_cli(dir, &config_path, &["ssh-agent", "start"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(GATING_SENTINEL),
+        "ssh-agent start must not be gated on 1.37.4: {stdout}"
+    );
+
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
 }
