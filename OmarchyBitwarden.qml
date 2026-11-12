@@ -698,6 +698,7 @@ Item {
   }
 
   function refreshAuthStatus() {
+    if (!authLockProc.finalized) return
     if (authStatusProc.running) return
     authStatusProc.revision = root.vaultRevision
     authStatusProc.command = [
@@ -1929,16 +1930,16 @@ Item {
   }
 
   function doLock() {
+    if (authLockProc.running || !authLockProc.finalized) return
     root.logInfo("omarchy:auth", "Locking vault...")
     root.clearSensitiveState()
-    root.authState = ({
-      status: "locked",
-      server_url: (root.authState && root.authState.server_url) || "",
-      user_email: (root.authState && root.authState.user_email) || "",
-      has_session: Boolean(root.authState && root.authState.has_session)
-    })
     root.isBusy = true
+    root.errorMessage = ""
     root.statusMessage = "Locking vault..."
+    authLockProc.revision = root.vaultRevision
+    authLockProc.lockReply = undefined
+    authLockProc.exitResult = null
+    authLockProc.finalized = false
     authLockProc.command = [root.helperPath, "auth", "lock"]
     authLockProc.running = true
   }
@@ -3545,27 +3546,62 @@ Item {
 
   Process {
     id: authLockProc
+    property int revision: 0
+    property var lockReply: undefined
+    property var exitResult: null
+    property bool finalized: true
     command: []
+
+    function applyLockResult() {
+      if (finalized || lockReply === undefined || exitResult === null) return
+      finalized = true
+      if (revision !== root.vaultRevision) {
+        root.refreshAuthStatus()
+        return
+      }
+      root.isBusy = false
+      root.statusMessage = ""
+      if (exitResult.code !== 0 || exitResult.status !== 0
+          || !lockReply || lockReply.ok !== true || lockReply.status !== "locked") {
+        root.errorMessage = (lockReply && lockReply.error)
+            ? String(lockReply.error) : "Could not confirm the vault lock. Check auth status and retry."
+        root.logWarn("omarchy:auth", root.errorMessage)
+        root.refreshAuthStatus()
+        return
+      }
+      root.clearSensitiveState()
+      root.authState = ({
+        status: "locked",
+        server_url: (root.authState && root.authState.server_url) || "",
+        user_email: (root.authState && root.authState.user_email) || "",
+        has_session: Boolean(root.authState && root.authState.has_session)
+      })
+      root.errorMessage = ""
+      // Older helpers reported the non-fatal epoch diagnostic in error.
+      var warning = lockReply.warning || lockReply.error
+          || (lockReply.epoch_advanced === false ? "Vault locked. Shared output revocation is pending. Retry locking." : "")
+      root.statusMessage = warning ? String(warning) : "Vault locked."
+      if (warning) root.logWarn("omarchy:auth", String(warning))
+      root.refreshAuthStatus()
+    }
+
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.clearSensitiveState()
-        root.authState = ({
-          status: "locked",
-          server_url: (root.authState && root.authState.server_url) || "",
-          user_email: (root.authState && root.authState.user_email) || "",
-          has_session: Boolean(root.authState && root.authState.has_session)
-        })
-        root.refreshAuthStatus()
-        root.isBusy = false
+        try { authLockProc.lockReply = JSON.parse(text) }
+        catch (e) { authLockProc.lockReply = null }
+        authLockProc.applyLockResult()
       }
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
+      onStreamFinished: {
+        if (authLockProc.revision === root.vaultRevision) root.handleProcessStderr(text, "omawarden:auth")
+      }
     }
-    onExited: function(code) {
-      root.isBusy = false
+    onExited: function(code, exitStatus) {
+      authLockProc.exitResult = ({ code: code, status: exitStatus === undefined ? 0 : exitStatus })
+      authLockProc.applyLockResult()
     }
   }
 
