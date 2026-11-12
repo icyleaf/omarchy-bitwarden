@@ -342,6 +342,39 @@ flowchart TD
 
 ---
 
+## Server Compatibility & Capability Discovery
+
+`omawarden` interrogates the connected server's `GET /api/config` endpoint to detect its identity, versions, and active feature flags, then evaluates them against a declarative **Server Capability Matrix**. Results are cached locally (non-sensitive metadata only) and exposed through `omawarden server capabilities` and `omawarden doctor`.
+
+```bash
+# Inspect the connected server flavor, versions, and evaluated capability matrix
+omawarden server capabilities
+
+# Machine-readable output for scripts
+omawarden server capabilities --json
+
+# Force re-discovery from the network
+omawarden server capabilities --refresh
+```
+
+### Supported Vaultwarden version tiers
+
+Both the nested server identity (`server.name` / `server.version`) and the Bitwarden compatibility version (`version`) are captured. When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
+
+| Server | Tier | `ssh-key-vault-item` (flag absent) |
+| --- | --- | --- |
+| **Vaultwarden** | `>= 1.37.4` | `supported` (graduated to GA; experimental flag removed upstream) |
+| **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled` (enable via `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported` (upgrade required; minimum baseline `>= 1.28.0` for Argon2id KDF) |
+| **Official Bitwarden** (Cloud or `server.name == "Bitwarden"`) | compatibility `>= 2024.12.0` | `supported` |
+| **Official Bitwarden** | compatibility `< 2024.12.0` | `unsupported` |
+
+An explicit boolean in `featureStates["ssh-key-vault-item"]` always takes precedence (`true` → `supported`, `false` → `disabled`) regardless of flavor or version.
+
+> **Vaultwarden self-hosters on `>= 1.37.4`**: remove obsolete `ssh-key-vault-item` and `ssh-agent` entries from `EXPERIMENTAL_CLIENT_FEATURE_FLAGS`, as upstream 1.37.4+ rejects them and emits startup warnings. Only `ssh-agent-v2` (if desired) remains flag-gated.
+
+---
+
 ## Password & Passphrase Generator
 
 Generate cryptographically secure passwords or EFF Diceware passphrases directly in the overlay (<kbd>Ctrl</kbd>+<kbd>G</kbd>) or via the CLI.

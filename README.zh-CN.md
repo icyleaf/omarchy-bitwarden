@@ -342,6 +342,39 @@ flowchart TD
 
 ---
 
+## 服务端兼容性与能力探测
+
+`omawarden` 会主动查询所连接服务端的 `GET /api/config`,识别其身份标识、版本号与启用的功能标志(`featureStates`),并依据声明式的 **服务端能力矩阵 (Server Capability Matrix)** 进行求值。结果(仅含非敏感元数据)会被本地缓存,并通过 `omawarden server capabilities` 与 `omawarden doctor` 呈现。
+
+```bash
+# 查看所连接服务端的类型、版本与能力矩阵求值结果
+omawarden server capabilities
+
+# 面向脚本的机器可读输出
+omawarden server capabilities --json
+
+# 强制从网络重新探测并刷新缓存
+omawarden server capabilities --refresh
+```
+
+### 支持的 Vaultwarden 版本分级
+
+`omawarden` 会同时捕获嵌套的服务端身份(`server.name` / `server.version`)与顶层 Bitwarden 兼容版本(`version`)。当上游 `featureStates` 未包含 `ssh-key-vault-item` 时,矩阵会依据服务端类型与版本求值:
+
+| 服务端 | 版本分级 | `ssh-key-vault-item`(标志缺失时) |
+| --- | --- | --- |
+| **Vaultwarden** | `>= 1.37.4` | `supported`(已 GA,上游移除了实验性标志) |
+| **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled`(需配置 `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported`(需升级,最低基线 `>= 1.28.0` 以支持 Argon2id KDF) |
+| **官方 Bitwarden**(云端或 `server.name == "Bitwarden"`) | 兼容版本 `>= 2024.12.0` | `supported` |
+| **官方 Bitwarden** | 兼容版本 `< 2024.12.0` | `unsupported` |
+
+只要 `featureStates["ssh-key-vault-item"]` 存在显式布尔值,它始终具有最高优先级(`true` → `supported`,`false` → `disabled`),不受服务端类型或版本影响。
+
+> **运行 Vaultwarden `>= 1.37.4` 的自建用户**:请从 `EXPERIMENTAL_CLIENT_FEATURE_FLAGS` 中移除过时的 `ssh-key-vault-item` 与 `ssh-agent`,因为上游 1.37.4+ 会拒绝这些标志并产生启动告警。如有需要,仅保留 `ssh-agent-v2`。
+
+---
+
 ## 密码与密语生成器
 
 支持在覆盖层内（<kbd>Ctrl</kbd>+<kbd>G</kbd>）或直接通过 CLI 批量生成密码学高强度随机密码与 EFF Diceware 口令短语。
