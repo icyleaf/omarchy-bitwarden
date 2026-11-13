@@ -36,6 +36,8 @@ pub struct VaultItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_name: Option<String>,
@@ -696,7 +698,10 @@ impl VaultManager {
             &key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
 
         // Fail closed on a stale key (server-side rotation, password change
         // elsewhere, account switch while soft-locked): decryption failures
@@ -936,7 +941,10 @@ impl VaultManager {
             &user_key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
         #[cfg(test)]
         self.before_unlock_publication.reach();
         let _account = self
@@ -1223,7 +1231,14 @@ impl VaultManager {
         }
     }
 
+    /// Active items only: Trash items are never served to active operations.
     pub fn get_items(&self) -> Vec<VaultItem> {
+        self.get_items_by_state(false)
+    }
+
+    /// Items in the requested state: active (`trash == false`) or Trash
+    /// (`trash == true`). Empty while locked.
+    pub fn get_items_by_state(&self, trash: bool) -> Vec<VaultItem> {
         let Ok(unlocked) = self.is_unlocked.read() else {
             return Vec::new();
         };
@@ -1232,13 +1247,20 @@ impl VaultManager {
         }
         self.decrypted_items
             .read()
-            .map(|g| g.clone())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.deleted_at.is_some() == trash)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Name and SSH data of the unlocked vault's SSH key items, without
+    /// Name and SSH data of the unlocked vault's active SSH key items, without
     /// copying the rest of the vault. Empty while locked, and never asks the
-    /// daemon: the SSH agent runs inside it.
+    /// daemon: the SSH agent runs inside it. Trashed keys are excluded so the
+    /// agent never signs with a soft-deleted key.
     pub fn ssh_key_items(&self) -> Vec<(String, SshMetadata)> {
         let Ok(unlocked) = self.is_unlocked.read() else {
             return Vec::new();
@@ -1251,6 +1273,7 @@ impl VaultManager {
             .map(|items| {
                 items
                     .iter()
+                    .filter(|i| i.deleted_at.is_none())
                     .filter_map(|i| Some((i.name.clone(), i.ssh_key.clone()?)))
                     .collect()
             })
@@ -1258,7 +1281,18 @@ impl VaultManager {
     }
 
     pub fn search_items(&self, query: &str, category: Option<&str>) -> Vec<VaultItem> {
-        self.search(&self.get_items(), query, category)
+        self.search_items_by_state(query, category, false)
+    }
+
+    /// Search only within the requested state: active (`trash == false`) or
+    /// Trash (`trash == true`).
+    pub fn search_items_by_state(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        trash: bool,
+    ) -> Vec<VaultItem> {
+        self.search(&self.get_items_by_state(trash), query, category)
     }
 
     pub fn resolve_attachment_key(
@@ -1292,6 +1326,14 @@ impl VaultManager {
             .ciphers
             .iter()
             .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))?;
+        // A soft-deleted cipher must never yield an attachment key.
+        if cipher
+            .get("deletedDate")
+            .or_else(|| cipher.get("DeletedDate"))
+            .is_some_and(|v| !v.is_null())
+        {
+            return None;
+        }
 
         let org_id_opt = cipher.get("organizationId").and_then(|v| v.as_str());
         let mut base_key = user_key.clone();
@@ -1580,7 +1622,10 @@ impl VaultManager {
                         .read()
                         .is_ok_and(|s| s.same_active_slot(&fresh_storage));
                 let count = if current {
-                    self.decrypted_items.read().map(|i| i.len()).unwrap_or(0)
+                    self.decrypted_items
+                        .read()
+                        .map(|items| items.iter().filter(|i| i.deleted_at.is_none()).count())
+                        .unwrap_or(0)
                 } else {
                     0
                 };
@@ -1674,6 +1719,12 @@ impl VaultManager {
                 .or_else(|| raw.get("revision_date"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let deleted_at = raw
+                .get("deletedDate")
+                .or_else(|| raw.get("DeletedDate"))
+                .or_else(|| raw.get("deleted_at"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             let type_name = match item_type {
                 1 => "login",
@@ -1739,6 +1790,7 @@ impl VaultManager {
                 favorite,
                 created_at,
                 updated_at,
+                deleted_at,
                 folder_id,
                 folder_name: None,
                 organization_id,

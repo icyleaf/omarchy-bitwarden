@@ -802,7 +802,7 @@ impl VaultManager {
             .storage_mgr
             .begin_cipher_write()
             .map_err(|e| e.to_string())?;
-        loop {
+        let server_deleted_at = loop {
             let claims = crate::auth::jwt_claims(&token);
             let subject = claims
                 .as_ref()
@@ -837,7 +837,7 @@ impl VaultManager {
                     token = renew()?;
                 }
                 result => {
-                    result.map_err(|e| match e {
+                    break result.map_err(|e| match e {
                         ApiError::HttpStatus(status, msg) => WriteError::Rejected(format!(
                             "Server rejected deletion (HTTP {status}): {msg}"
                         )),
@@ -845,22 +845,73 @@ impl VaultManager {
                             WriteError::Rejected(format!("Server communication failed: {other}"))
                         }
                     })?;
-                    break;
                 }
             }
-        }
+        };
 
         let receipt = json!({
             "id": target_id,
             "name": target_name,
             "permanent": permanent,
         });
-        let cached = self
-            .cache_deleted_cipher(&storage, generation, &target_id)
-            .is_some();
+        let cached = if permanent {
+            self.cache_deleted_cipher(&storage, generation, &target_id)
+                .is_some()
+        } else {
+            // Soft delete keeps the cipher in the cache so `--trash` sees it
+            // immediately, stamped with the server timestamp when returned.
+            let deleted_at = server_deleted_at.unwrap_or_else(|| {
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            });
+            self.cache_soft_deleted_cipher(&storage, generation, &target_id, &deleted_at)
+                .is_some()
+        };
         Ok(
             json!({"ok": true, "outcome": if cached { "deleted" } else { "deleted_needs_sync" }, "item": receipt}),
         )
+    }
+
+    fn cache_soft_deleted_cipher(
+        &self,
+        account: &VaultStorage,
+        generation: u64,
+        id: &str,
+        deleted_at: &str,
+    ) -> Option<()> {
+        let base = self.storage_mgr.cache_snapshot().ok()?;
+        if !base.storage.same_active_slot(account) {
+            return None;
+        }
+        let mut updated = base.storage.clone();
+        let cipher = updated
+            .ciphers
+            .iter_mut()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(id))?;
+        let deleted_key = if cipher.get("DeletedDate").is_some() {
+            "DeletedDate"
+        } else {
+            "deletedDate"
+        };
+        cipher[deleted_key] = Value::String(deleted_at.to_string());
+
+        // Reuse the already-decrypted active item so the Trash entry is
+        // visible immediately, without waiting for a manual sync.
+        let mut item = {
+            let items = self.decrypted_items.read().ok()?;
+            items.iter().find(|item| item.id == id)?.clone()
+        };
+        item.deleted_at = Some(deleted_at.to_string());
+        self.commit_cache(
+            &base,
+            updated,
+            IndexUpdate::Upsert(Box::new(item)),
+            CacheSession {
+                generation,
+                unlocked: true,
+            },
+        )
+        .ok()?;
+        Some(())
     }
 
     fn cache_deleted_cipher(

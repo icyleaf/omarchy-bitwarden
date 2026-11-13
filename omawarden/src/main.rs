@@ -456,6 +456,8 @@ enum VaultAction {
     List {
         #[arg(long = "filter")]
         category: Option<String>,
+        #[arg(long, help = "List only soft-deleted items in the Trash")]
+        trash: bool,
     },
     #[command(about = "Search vault items")]
     Search {
@@ -468,6 +470,8 @@ enum VaultAction {
         query_flag: Option<String>,
         #[arg(long = "filter")]
         category: Option<String>,
+        #[arg(long, help = "Search only soft-deleted items in the Trash")]
+        trash: bool,
     },
     #[command(about = "Create a new vault cipher")]
     Create {
@@ -1873,7 +1877,7 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
-                VaultAction::List { category } => {
+                VaultAction::List { category, trash } => {
                     if let Err(e @ omawarden::daemon::DispatchError::IncompatibleProtocol { .. }) =
                         omawarden::daemon::ensure_daemon_running()
                     {
@@ -1905,7 +1909,8 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     if is_unlocked && !vault_mgr.is_unlocked() {
-                        if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" }))
+                        if let Some(daemon_resp) =
+                            send_daemon_request(&json!({ "action": "list", "trash": trash }))
                         {
                             if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
@@ -1931,7 +1936,7 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
-                    let items = vault_mgr.get_items();
+                    let items = vault_mgr.get_items_by_state(trash);
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
@@ -1940,6 +1945,7 @@ fn main() -> ExitCode {
                     query,
                     query_flag,
                     category,
+                    trash,
                 } => {
                     let query = if query.is_empty() {
                         query_flag.unwrap_or(query)
@@ -1980,7 +1986,8 @@ fn main() -> ExitCode {
                         if let Some(daemon_resp) = send_daemon_request(&json!({
                             "action": "search",
                             "query": query,
-                            "category": category
+                            "category": category,
+                            "trash": trash
                         })) {
                             if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
@@ -2005,7 +2012,8 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
-                    let results = vault_mgr.search_items(&query, category.as_deref());
+                    let results =
+                        vault_mgr.search_items_by_state(&query, category.as_deref(), trash);
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
                 }
@@ -3466,7 +3474,8 @@ fn main() -> ExitCode {
                                     storage.enc_private_key.as_deref(),
                                 );
                                 items.into_iter().find(|i| {
-                                    i.type_name == "ssh_key"
+                                    i.deleted_at.is_none()
+                                        && i.type_name == "ssh_key"
                                         && (i.id == query
                                             || i.name.eq_ignore_ascii_case(&query)
                                             || i.name
@@ -3913,9 +3922,10 @@ fn vault_output_item(
     )
     .into_iter()
     .find(|item| {
-        item.id == query
-            || item.name.eq_ignore_ascii_case(query)
-            || item.name.to_lowercase().contains(&query_lower)
+        item.deleted_at.is_none()
+            && (item.id == query
+                || item.name.eq_ignore_ascii_case(query)
+                || item.name.to_lowercase().contains(&query_lower))
     });
     Ok(item.map(|item| VaultOutputItem {
         item,

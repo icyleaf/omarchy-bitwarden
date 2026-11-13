@@ -355,11 +355,17 @@ pub fn handle_client_with_peer(
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
             Err(e) => json!({ "ok": false, "error": e }),
         },
-        "list" => json!(state.vault_mgr.get_items()),
+        "list" => {
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            json!(state.vault_mgr.get_items_by_state(trash))
+        }
         "search" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());
-            json!(state.vault_mgr.search_items(query, category))
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            json!(state
+                .vault_mgr
+                .search_items_by_state(query, category, trash))
         }
         // A legacy CLI may repeat the POST locally on any non-success reply.
         // Never dispatch a remote write for the legacy request.

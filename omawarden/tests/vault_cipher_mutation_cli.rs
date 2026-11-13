@@ -1147,6 +1147,43 @@ fn add_cipher_to_cache(
     fs::write(&cache_path, data.to_string()).unwrap();
 }
 
+/// Adds a cipher with an explicit type and optional `deletedDate`, so tests can
+/// seed the Trash without going through a server round-trip.
+fn add_cipher_with_state(
+    dir: &Path,
+    user_key: &SymmetricCryptoKey,
+    id: &str,
+    name: &str,
+    cipher_type: i64,
+    deleted_at: Option<&str>,
+) {
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    let mut cipher = json!({
+        "id": id,
+        "organizationId": null,
+        "folderId": null,
+        "type": cipher_type,
+        "name": user_key.encrypt_string(name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "revisionDate": "2026-11-09T00:00:00.000Z"
+    });
+    if cipher_type == 1 {
+        cipher["login"] = json!({
+            "username": user_key.encrypt_string("user").unwrap(),
+            "password": user_key.encrypt_string("secretpass").unwrap(),
+            "uris": []
+        });
+    }
+    if let Some(ts) = deleted_at {
+        cipher["deletedDate"] = json!(ts);
+    }
+    ciphers.push(cipher);
+    fs::write(&cache_path, data.to_string()).unwrap();
+}
+
 #[test]
 fn test_delete_cipher_soft_delete_end_to_end() {
     let (temp, api, _server_url, user_key) = setup_test_environment();
@@ -1214,7 +1251,7 @@ fn test_delete_cipher_soft_delete_end_to_end() {
         "Unexpected CLI output: {stdout}"
     );
 
-    // Verify evicted from search index
+    // Verify hidden from the active search index
     let search_out = make_command(dir)
         .args(["vault", "search", cipher_name])
         .output()
@@ -1223,19 +1260,69 @@ fn test_delete_cipher_soft_delete_end_to_end() {
     let search_str = String::from_utf8_lossy(&search_out.stdout);
     assert!(
         !search_str.contains(cipher_name),
-        "Item should be evicted from search index: {search_str}"
+        "Item should be hidden from active search: {search_str}"
     );
 
-    // Verify evicted from data.json cache
-    let cache_data: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    // Verify hidden from the default list
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(list_out.status.success());
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
     assert!(
-        cache_data["ciphers"]
+        !list_str.contains(cipher_name),
+        "Item should be hidden from the default list: {list_str}"
+    );
+    let active_items: Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    assert!(
+        active_items
             .as_array()
             .unwrap()
             .iter()
-            .all(|c| c["id"] != cipher_id),
-        "Cipher should be removed from data.json"
+            .all(|i| i.get("deleted_at").is_none()),
+        "Active list must omit deleted_at: {list_str}"
+    );
+
+    // Verify retained in data.json cache with a non-null deletedDate
+    let cache_data: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    let cached = cache_data["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cipher_id)
+        .expect("soft-deleted cipher must stay in data.json");
+    assert!(
+        cached.get("deletedDate").and_then(Value::as_str).is_some(),
+        "soft-deleted cipher must carry deletedDate: {cached}"
+    );
+
+    // Verify immediately visible in the Trash with a deleted_at timestamp
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_out.status.success());
+    let trash_items: Value = serde_json::from_slice(&trash_out.stdout).unwrap();
+    let trashed = trash_items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == cipher_id)
+        .expect("soft-deleted cipher must appear in vault list --trash");
+    assert!(
+        trashed.get("deleted_at").and_then(Value::as_str).is_some(),
+        "Trash item must expose deleted_at: {trashed}"
+    );
+
+    // Verify searchable within the Trash
+    let trash_search = make_command(dir)
+        .args(["vault", "search", cipher_name, "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_search.status.success());
+    let trash_search_str = String::from_utf8_lossy(&trash_search.stdout);
+    assert!(
+        trash_search_str.contains(cipher_name),
+        "Trash search did not find the soft-deleted item: {trash_search_str}"
     );
 }
 
@@ -1371,6 +1458,210 @@ fn test_delete_cipher_permanent_hard_delete() {
         )),
         "Unexpected CLI output: {stdout}"
     );
+}
+
+#[test]
+fn test_list_and_search_trash_with_category_filter() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "Trashed Login",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "Trashed Note",
+        2,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "cccccccc-1111-2222-3333-444444444444",
+        "Active Login",
+        1,
+        None,
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Default list: only active items, and no deleted_at field.
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(list_out.status.success());
+    let active: Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    let active = active.as_array().unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "only the active cipher is listed: {active:?}"
+    );
+    assert_eq!(active[0]["name"], "Active Login");
+    assert!(
+        active[0].get("deleted_at").is_none(),
+        "active JSON must omit deleted_at"
+    );
+
+    // Trash list: only soft-deleted items, each with deleted_at.
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_out.status.success());
+    let trash: Value = serde_json::from_slice(&trash_out.stdout).unwrap();
+    let trash = trash.as_array().unwrap();
+    assert_eq!(trash.len(), 2, "both trashed ciphers are listed: {trash:?}");
+    assert!(trash
+        .iter()
+        .all(|item| item.get("deleted_at").and_then(Value::as_str).is_some()));
+
+    // --filter narrows the Trash list to a single category.
+    let note_out = make_command(dir)
+        .args(["vault", "list", "--trash", "--filter", "note"])
+        .output()
+        .unwrap();
+    assert!(note_out.status.success());
+    let notes: Value = serde_json::from_slice(&note_out.stdout).unwrap();
+    let notes = notes.as_array().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["name"], "Trashed Note");
+
+    // Trash search is scoped to Trash and supports --filter.
+    let search_out = make_command(dir)
+        .args(["vault", "search", "Trashed", "--trash", "--filter", "login"])
+        .output()
+        .unwrap();
+    assert!(search_out.status.success());
+    let found: Value = serde_json::from_slice(&search_out.stdout).unwrap();
+    let found = found.as_array().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["name"], "Trashed Login");
+
+    // Active search never sees the Trash.
+    let active_search = make_command(dir)
+        .args(["vault", "search", "Trashed"])
+        .output()
+        .unwrap();
+    assert!(active_search.status.success());
+    assert!(
+        !String::from_utf8_lossy(&active_search.stdout).contains("Trashed"),
+        "active search must not surface trashed items"
+    );
+}
+
+#[test]
+fn test_unlock_and_status_items_count_exclude_trash() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(dir, &user_key, "active-item-1", "Active One", 1, None);
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "trashed-item-1",
+        "Trashed One",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let unlock = ipc(&socket, json!({"action": "unlock", "password": "fixture"}));
+    assert_eq!(unlock["ok"], true);
+    assert_eq!(
+        unlock["items_count"], 1,
+        "unlock must count active items only"
+    );
+
+    let status = ipc(&socket, json!({"action": "status"}));
+    assert_eq!(status["items_count"], 1, "status must exclude Trash");
+}
+
+#[test]
+fn test_trashed_cipher_is_not_served_to_active_consumers() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "dead0000-0000-0000-0000-000000000001";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Trashed Copy Target",
+        &[],
+        &[("PIN", "1234", 0)],
+    );
+    // Mark the cipher as trashed in the cache.
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    data["ciphers"][0]["deletedDate"] = json!("2026-11-10T00:00:00.000Z");
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // copy must not resolve the trashed cipher.
+    let copy_out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "PIN"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(!copy_out.status.success(), "copy must fail closed");
+    assert!(
+        String::from_utf8_lossy(&copy_out.stdout).contains("not found in vault"),
+        "copy should report the trashed item as missing: {}",
+        String::from_utf8_lossy(&copy_out.stdout)
+    );
+    assert!(
+        !dir.join("wl-copy-content").exists(),
+        "nothing may be copied from a trashed cipher"
+    );
+
+    // get_item (used by totp/attachment) must not resolve it either.
+    let get_item = ipc(
+        &dir.join("omawarden.sock"),
+        json!({"action": "get_item", "query": cipher_id}),
+    );
+    assert_eq!(get_item["ok"], false, "trashed item must not be served");
 }
 
 #[test]

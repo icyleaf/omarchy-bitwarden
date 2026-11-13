@@ -52,6 +52,7 @@ fn test_daemon_totp_action_with_item_query() {
         favorite: false,
         created_at: None,
         updated_at: None,
+        deleted_at: None,
         folder_id: None,
         folder_name: None,
         organization_id: None,
