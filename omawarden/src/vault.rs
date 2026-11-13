@@ -1607,14 +1607,10 @@ impl VaultManager {
             }
             let stripped_target: String = target_val.chars().filter(|&c| c != '-').collect();
             let stripped_id: String = item_id.chars().filter(|&c| c != '-').collect();
-            if stripped_target.len() >= 4
+            stripped_target.len() >= 4
                 && stripped_id
                     .to_lowercase()
                     .starts_with(&stripped_target.to_lowercase())
-            {
-                return true;
-            }
-            false
         };
 
         let id_prefix_matches: Vec<_> = items
