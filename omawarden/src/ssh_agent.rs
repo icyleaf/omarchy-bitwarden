@@ -2836,6 +2836,7 @@ mod tests {
             favorite: false,
             created_at: None,
             updated_at: None,
+            deleted_at: None,
             folder_id: None,
             folder_name: None,
             organization_id: None,
@@ -2906,6 +2907,15 @@ mod tests {
                 ssh_meta(pem(&a), Some("ssh-ed25519".into()), None, None),
             ),
         ];
+        // A soft-deleted key must never be offered or used for signing.
+        state.vault_mgr.decrypted_items.write().unwrap().push({
+            let mut item = ssh_item(
+                "trashed",
+                ssh_meta(pem(&a), public(&a), Some("SHA256:trashed".into()), None),
+            );
+            item.deleted_at = Some("2026-11-10T00:00:00.000Z".into());
+            item
+        });
 
         let keys = vault_keys(&state);
         // Locked: nothing is offered, even though the items are still in memory.

@@ -1433,12 +1433,15 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    /// Deletes a cipher. For a soft delete, returns the server-reported
+    /// `deletedDate` when the response carries one, so the local cache can
+    /// keep the authoritative timestamp; `None` means the caller stamps it.
     pub fn delete_cipher(
         &self,
         access_token: &str,
         id: &str,
         permanent: bool,
-    ) -> Result<(), ApiError> {
+    ) -> Result<Option<String>, ApiError> {
         let client = self.get_client()?;
         let url = if permanent {
             format!("{}/ciphers/{}", self.urls.api_url, id)
@@ -1465,6 +1468,43 @@ impl BitwardenApiClient {
             ));
         }
 
+        if permanent {
+            return Ok(None);
+        }
+        let body = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&body) else {
+            return Ok(None);
+        };
+        Ok(value
+            .get("deletedDate")
+            .or_else(|| value.get("DeletedDate"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    }
+
+    /// Restore a soft-deleted cipher from the Trash (`PUT /ciphers/{id}/restore`).
+    pub fn restore_cipher(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/restore", self.urls.api_url, id);
+        let mut resp = client
+            .put(&url)
+            .header("Content-Length", "0")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Restore cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
         Ok(())
     }
 }
@@ -1557,15 +1597,15 @@ pub fn decrypt_sync_ciphers_with_context(
     let mut items = Vec::new();
 
     for c in ciphers {
-        // Filter out soft-deleted items (items in Trash / Recycle Bin)
-        let is_deleted = c
+        // Retain soft-deleted items (Trash / Recycle Bin) and tag them with
+        // their deletion timestamp instead of dropping them. Active callers
+        // filter on `deleted_at`; `--trash` surfaces the rest.
+        let deleted_at = c
             .get("deletedDate")
             .or_else(|| c.get("DeletedDate"))
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        if is_deleted {
-            continue;
-        }
+            .or_else(|| c.get("deleted_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let id = c
             .get("id")
@@ -2136,6 +2176,7 @@ pub fn decrypt_sync_ciphers_with_context(
             favorite,
             created_at,
             updated_at,
+            deleted_at,
             folder_id,
             folder_name,
             organization_id: org_id_opt,
@@ -2333,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_soft_deleted_ciphers() {
+    fn test_retains_soft_deleted_ciphers_with_deleted_at() {
         let raw_user_key = [9u8; 64];
         let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
 
@@ -2352,9 +2393,14 @@ mod tests {
             }),
         ];
 
+        // Soft-deleted ciphers are retained for the Trash, tagged with their
+        // deletion timestamp instead of being dropped during decryption.
         let items = decrypt_sync_ciphers(&ciphers, &user_key);
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, "active-1");
+        assert!(items[0].deleted_at.is_none());
+        assert_eq!(items[1].id, "deleted-1");
+        assert_eq!(items[1].deleted_at.as_deref(), Some("2024-01-01T00:00:00Z"));
     }
 
     #[test]
@@ -4163,7 +4209,12 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
             assert!(has_auth);
             assert!(has_cl_zero);
 
-            let response = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}";
+            let body = r#"{"deletedDate":"2026-11-10T00:00:00.000Z"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
             stream.write_all(response.as_bytes()).unwrap();
             stream.flush().unwrap();
 
@@ -4195,10 +4246,18 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
         });
 
         let soft_res = client.delete_cipher("test-token", "uuid-1", false);
-        assert!(soft_res.is_ok());
+        assert_eq!(
+            soft_res.unwrap().as_deref(),
+            Some("2026-11-10T00:00:00.000Z"),
+            "a soft delete must surface the server timestamp"
+        );
 
         let hard_res = client.delete_cipher("test-token", "uuid-2", true);
-        assert!(hard_res.is_ok());
+        assert_eq!(
+            hard_res.unwrap(),
+            None,
+            "a permanent delete has no timestamp"
+        );
 
         handle.join().unwrap();
     }

@@ -1147,6 +1147,43 @@ fn add_cipher_to_cache(
     fs::write(&cache_path, data.to_string()).unwrap();
 }
 
+/// Adds a cipher with an explicit type and optional `deletedDate`, so tests can
+/// seed the Trash without going through a server round-trip.
+fn add_cipher_with_state(
+    dir: &Path,
+    user_key: &SymmetricCryptoKey,
+    id: &str,
+    name: &str,
+    cipher_type: i64,
+    deleted_at: Option<&str>,
+) {
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    let mut cipher = json!({
+        "id": id,
+        "organizationId": null,
+        "folderId": null,
+        "type": cipher_type,
+        "name": user_key.encrypt_string(name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "revisionDate": "2026-11-09T00:00:00.000Z"
+    });
+    if cipher_type == 1 {
+        cipher["login"] = json!({
+            "username": user_key.encrypt_string("user").unwrap(),
+            "password": user_key.encrypt_string("secretpass").unwrap(),
+            "uris": []
+        });
+    }
+    if let Some(ts) = deleted_at {
+        cipher["deletedDate"] = json!(ts);
+    }
+    ciphers.push(cipher);
+    fs::write(&cache_path, data.to_string()).unwrap();
+}
+
 #[test]
 fn test_delete_cipher_soft_delete_end_to_end() {
     let (temp, api, _server_url, user_key) = setup_test_environment();
@@ -1214,7 +1251,7 @@ fn test_delete_cipher_soft_delete_end_to_end() {
         "Unexpected CLI output: {stdout}"
     );
 
-    // Verify evicted from search index
+    // Verify hidden from the active search index
     let search_out = make_command(dir)
         .args(["vault", "search", cipher_name])
         .output()
@@ -1223,19 +1260,69 @@ fn test_delete_cipher_soft_delete_end_to_end() {
     let search_str = String::from_utf8_lossy(&search_out.stdout);
     assert!(
         !search_str.contains(cipher_name),
-        "Item should be evicted from search index: {search_str}"
+        "Item should be hidden from active search: {search_str}"
     );
 
-    // Verify evicted from data.json cache
-    let cache_data: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    // Verify hidden from the default list
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(list_out.status.success());
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
     assert!(
-        cache_data["ciphers"]
+        !list_str.contains(cipher_name),
+        "Item should be hidden from the default list: {list_str}"
+    );
+    let active_items: Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    assert!(
+        active_items
             .as_array()
             .unwrap()
             .iter()
-            .all(|c| c["id"] != cipher_id),
-        "Cipher should be removed from data.json"
+            .all(|i| i.get("deleted_at").is_none()),
+        "Active list must omit deleted_at: {list_str}"
+    );
+
+    // Verify retained in data.json cache with a non-null deletedDate
+    let cache_data: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    let cached = cache_data["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cipher_id)
+        .expect("soft-deleted cipher must stay in data.json");
+    assert!(
+        cached.get("deletedDate").and_then(Value::as_str).is_some(),
+        "soft-deleted cipher must carry deletedDate: {cached}"
+    );
+
+    // Verify immediately visible in the Trash with a deleted_at timestamp
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_out.status.success());
+    let trash_items: Value = serde_json::from_slice(&trash_out.stdout).unwrap();
+    let trashed = trash_items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == cipher_id)
+        .expect("soft-deleted cipher must appear in vault list --trash");
+    assert!(
+        trashed.get("deleted_at").and_then(Value::as_str).is_some(),
+        "Trash item must expose deleted_at: {trashed}"
+    );
+
+    // Verify searchable within the Trash
+    let trash_search = make_command(dir)
+        .args(["vault", "search", cipher_name, "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_search.status.success());
+    let trash_search_str = String::from_utf8_lossy(&trash_search.stdout);
+    assert!(
+        trash_search_str.contains(cipher_name),
+        "Trash search did not find the soft-deleted item: {trash_search_str}"
     );
 }
 
@@ -1371,6 +1458,210 @@ fn test_delete_cipher_permanent_hard_delete() {
         )),
         "Unexpected CLI output: {stdout}"
     );
+}
+
+#[test]
+fn test_list_and_search_trash_with_category_filter() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "Trashed Login",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "Trashed Note",
+        2,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "cccccccc-1111-2222-3333-444444444444",
+        "Active Login",
+        1,
+        None,
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ipc(&socket, json!({"action": "unlock", "password": "fixture"}))["ok"],
+        true
+    );
+
+    // Default list: only active items, and no deleted_at field.
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(list_out.status.success());
+    let active: Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    let active = active.as_array().unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "only the active cipher is listed: {active:?}"
+    );
+    assert_eq!(active[0]["name"], "Active Login");
+    assert!(
+        active[0].get("deleted_at").is_none(),
+        "active JSON must omit deleted_at"
+    );
+
+    // Trash list: only soft-deleted items, each with deleted_at.
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(trash_out.status.success());
+    let trash: Value = serde_json::from_slice(&trash_out.stdout).unwrap();
+    let trash = trash.as_array().unwrap();
+    assert_eq!(trash.len(), 2, "both trashed ciphers are listed: {trash:?}");
+    assert!(trash
+        .iter()
+        .all(|item| item.get("deleted_at").and_then(Value::as_str).is_some()));
+
+    // --filter narrows the Trash list to a single category.
+    let note_out = make_command(dir)
+        .args(["vault", "list", "--trash", "--filter", "note"])
+        .output()
+        .unwrap();
+    assert!(note_out.status.success());
+    let notes: Value = serde_json::from_slice(&note_out.stdout).unwrap();
+    let notes = notes.as_array().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["name"], "Trashed Note");
+
+    // Trash search is scoped to Trash and supports --filter.
+    let search_out = make_command(dir)
+        .args(["vault", "search", "Trashed", "--trash", "--filter", "login"])
+        .output()
+        .unwrap();
+    assert!(search_out.status.success());
+    let found: Value = serde_json::from_slice(&search_out.stdout).unwrap();
+    let found = found.as_array().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["name"], "Trashed Login");
+
+    // Active search never sees the Trash.
+    let active_search = make_command(dir)
+        .args(["vault", "search", "Trashed"])
+        .output()
+        .unwrap();
+    assert!(active_search.status.success());
+    assert!(
+        !String::from_utf8_lossy(&active_search.stdout).contains("Trashed"),
+        "active search must not surface trashed items"
+    );
+}
+
+#[test]
+fn test_unlock_and_status_items_count_exclude_trash() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(dir, &user_key, "active-item-1", "Active One", 1, None);
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "trashed-item-1",
+        "Trashed One",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let unlock = ipc(&socket, json!({"action": "unlock", "password": "fixture"}));
+    assert_eq!(unlock["ok"], true);
+    assert_eq!(
+        unlock["items_count"], 1,
+        "unlock must count active items only"
+    );
+
+    let status = ipc(&socket, json!({"action": "status"}));
+    assert_eq!(status["items_count"], 1, "status must exclude Trash");
+}
+
+#[test]
+fn test_trashed_cipher_is_not_served_to_active_consumers() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    install_wl_copy_stub(dir);
+    let cipher_id = "dead0000-0000-0000-0000-000000000001";
+    add_login_cipher_with_uris_and_fields_to_cache(
+        dir,
+        &user_key,
+        cipher_id,
+        "Trashed Copy Target",
+        &[],
+        &[("PIN", "1234", 0)],
+    );
+    // Mark the cipher as trashed in the cache.
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    data["ciphers"][0]["deletedDate"] = json!("2026-11-10T00:00:00.000Z");
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // copy must not resolve the trashed cipher.
+    let copy_out = copy_command(dir)
+        .args(["copy", cipher_id, "--field", "PIN"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(!copy_out.status.success(), "copy must fail closed");
+    assert!(
+        String::from_utf8_lossy(&copy_out.stdout).contains("not found in vault"),
+        "copy should report the trashed item as missing: {}",
+        String::from_utf8_lossy(&copy_out.stdout)
+    );
+    assert!(
+        !dir.join("wl-copy-content").exists(),
+        "nothing may be copied from a trashed cipher"
+    );
+
+    // get_item (used by totp/attachment) must not resolve it either.
+    let get_item = ipc(
+        &dir.join("omawarden.sock"),
+        json!({"action": "get_item", "query": cipher_id}),
+    );
+    assert_eq!(get_item["ok"], false, "trashed item must not be served");
 }
 
 #[test]
@@ -5325,4 +5616,866 @@ fn test_copy_custom_field_conflicts_with_other_flags() {
         .as_str()
         .unwrap()
         .contains("--field cannot be combined with"));
+}
+
+#[test]
+fn test_restore_cipher_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "restore0-1111-2222-3333-444444444444";
+    let cipher_name = "Site to Restore";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "Bitwarden API restore was not received");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("Restored cipher \"{cipher_name}\" ({cipher_id}).")),
+        "Unexpected CLI output: {stdout}"
+    );
+
+    // The restored cipher stays in the cache without a deletedDate.
+    let cache_data: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    let cached = cache_data["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cipher_id)
+        .expect("restored cipher must stay in data.json");
+    assert!(
+        cached.get("deletedDate").is_none() && cached.get("DeletedDate").is_none(),
+        "restored cipher must clear deletedDate: {cached}"
+    );
+
+    // It immediately returns to the active vault and leaves the Trash.
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&list_out.stdout).contains(cipher_name),
+        "restored cipher must return to the active list"
+    );
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&trash_out.stdout).contains(cipher_name),
+        "restored cipher must leave the Trash"
+    );
+}
+
+#[test]
+fn test_restore_cipher_json_output() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "restore1-1111-2222-3333-444444444444";
+    let cipher_name = "JSON Restore";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "Bitwarden API restore was not received");
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["outcome"], "restored");
+    assert_eq!(result["item"]["id"], cipher_id);
+    assert_eq!(result["item"]["name"], cipher_name);
+}
+
+#[test]
+fn test_restore_cipher_disambiguates_by_name() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-dup-1111-2222-3333-444444444444";
+    let trashed_id = "trashed-dup-1111-2222-3333-444444444444";
+    let cipher_name = "Duplicate Name";
+    // Active cipher
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+    // Trashed cipher with same name
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        trashed_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        // Must target the TRASHED cipher, not the active one.
+        assert_eq!(path, format!("/api/ciphers/{trashed_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore disambiguation failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_restore_cipher_ambiguous_matches_fail_closed() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "Trashed One",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "Trashed Two",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Trashed"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Multiple ciphers matched"));
+    assert!(stderr.contains("aaaaaaaa-1111-2222-3333-444444444444"));
+    assert!(stderr.contains("bbbbbbbb-1111-2222-3333-444444444444"));
+}
+
+#[test]
+fn test_restore_cipher_active_not_in_trash() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-item-1111-2222-3333-444444444444";
+    let cipher_name = "Active Only";
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Cipher '{cipher_name}' is not in the trash.")));
+}
+
+#[test]
+fn test_restore_cipher_nonexistent() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    // Cache is empty except for the fixture setup.
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Does Not Exist"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Cipher 'Does Not Exist' not found in trash."));
+}
+
+#[test]
+fn test_restore_cipher_organization_read_only() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "org-restore-1111-2222-3333-444444444444";
+    let cipher_name = "Org Trashed";
+
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": cipher_id,
+        "organizationId": "org-uuid-1234",
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(cipher_name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("orguser").unwrap(),
+            "password": user_key.encrypt_string("secretpass").unwrap(),
+            "uris": []
+        },
+        "revisionDate": "2026-11-09T00:00:00.000Z",
+        "deletedDate": "2026-11-10T00:00:00.000Z",
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Organization ciphers are read-only."));
+}
+
+#[test]
+fn test_restore_cipher_locked_fails() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &SymmetricCryptoKey::from_raw_bytes(&[42u8; 64]).unwrap(),
+        "locked-restore-1111-2222-3333-444444444444",
+        "Locked Restore",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Do NOT unlock.
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Locked Restore"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Unlock the vault before restoring a cipher."));
+}
+
+#[test]
+fn test_delete_cipher_trash_permanent_purge_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "trashdel0-1111-2222-3333-444444444444";
+    let cipher_name = "Trash Item to Purge";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "delete", cipher_name, "--trash", "-y"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "DELETE");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "delete --trash failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "Bitwarden API DELETE was not received");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "Permanently deleted cipher \"{cipher_name}\" ({cipher_id})."
+        )),
+        "Unexpected CLI output: {stdout}"
+    );
+
+    // Verify removed from cache
+    let cache_data: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    let cached = cache_data["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cipher_id);
+    assert!(
+        cached.is_none(),
+        "purged cipher must be removed from data.json"
+    );
+
+    // Verify removed from Trash list
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&trash_out.stdout).contains(cipher_name),
+        "purged cipher must leave the Trash"
+    );
+}
+
+#[test]
+fn test_delete_cipher_trash_prompts_interactive() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "trashdel1-1111-2222-3333-444444444444";
+    let cipher_name = "Interactive Trash Purge";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // First run: answer 'n' to abort
+    let mut cli = make_command(dir)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "delete", cipher_name, "--trash"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdin = cli.stdin.as_mut().unwrap();
+    stdin.write_all(b"n\n").unwrap();
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(!out.status.success(), "delete --trash should abort on 'n'");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Permanently delete item"));
+    assert!(stderr.contains("Deletion aborted."));
+
+    // Second run: answer 'y' to confirm
+    let mut cli = make_command(dir)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "delete", cipher_name, "--trash"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdin = cli.stdin.as_mut().unwrap();
+    stdin.write_all(b"y\n").unwrap();
+
+    let mut received = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "DELETE");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "delete --trash confirm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_delete_cipher_trash_json_output() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "trashdel2-1111-2222-3333-444444444444";
+    let cipher_name = "JSON Trash Purge";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "delete", cipher_name, "--trash", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "DELETE");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "delete --trash --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["outcome"], "deleted");
+    assert_eq!(result["permanent"], true);
+    assert_eq!(result["item"]["id"], cipher_id);
+    assert_eq!(result["item"]["name"], cipher_name);
+}
+
+#[test]
+fn test_delete_cipher_same_name_active_vs_trash() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-same-1111-2222-3333-444444444444";
+    let trashed_id = "trashed-same-1111-2222-3333-444444444444";
+    let cipher_name = "Same Name Cipher";
+    // Active cipher
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+    // Trashed cipher with same name
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        trashed_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // 1. Delete without --trash targets the ACTIVE cipher
+    let mut cli = make_command(dir)
+        .args(["vault", "delete", cipher_name, "-y"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        // Must target the ACTIVE cipher via soft-delete
+        assert_eq!(path, format!("/api/ciphers/{active_id}/delete"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "active delete failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+
+    // Verify active cipher is now soft-deleted (moved to Trash)
+    let active_list = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&active_list.stdout).contains(cipher_name),
+        "active cipher should be gone from active list"
+    );
+    let trash_list = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&trash_list.stdout)
+            .matches(cipher_name)
+            .count()
+            == 2,
+        "both ciphers should now be in Trash (original trashed + soft-deleted active)"
+    );
+
+    // 2. Now use --trash to permanently delete the ORIGINAL trashed one by ID
+    let mut cli2 = make_command(dir)
+        .args(["vault", "delete", trashed_id, "--trash", "-y"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received2 = false;
+    let deadline2 = Instant::now() + Duration::from_secs(20);
+    while cli2.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline2, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "DELETE");
+        assert_eq!(path, format!("/api/ciphers/{trashed_id}"));
+        received2 = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let out2 = cli2.wait_with_output().unwrap();
+    assert!(
+        out2.status.success(),
+        "trash delete by ID failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(received2);
+
+    // Verify only one remains in Trash (the soft-deleted one)
+    let trash_list2 = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    let trash_items: Value = serde_json::from_slice(&trash_list2.stdout).unwrap();
+    let trash_items = trash_items.as_array().unwrap();
+    assert_eq!(trash_items.len(), 1);
+    assert_eq!(trash_items[0]["id"], active_id); // The one that was soft-deleted
+}
+
+#[test]
+fn test_delete_cipher_active_not_trash_fails() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-only-1111-2222-3333-444444444444";
+    let cipher_name = "Active Only Cipher";
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // Try to delete with --trash when cipher is only active
+    let out = make_command(dir)
+        .args(["vault", "delete", cipher_name, "--trash", "-y"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Cipher '{cipher_name}' is not in the trash.")));
+}
+
+#[test]
+fn test_delete_cipher_trash_not_active_fails() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let trashed_id = "trashed-only-1111-2222-3333-444444444444";
+    let cipher_name = "Trashed Only Cipher";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        trashed_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // Try to delete WITHOUT --trash when cipher is only in trash
+    let out = make_command(dir)
+        .args(["vault", "delete", cipher_name, "-y"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Cipher '{cipher_name}' is already in the trash.")));
+    assert!(stderr.contains("Use --trash to permanently delete it"));
+    assert!(stderr.contains("omawarden vault restore"));
+}
+
+#[test]
+fn test_edit_cipher_trash_fails() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let trashed_id = "trashed-edit-1111-2222-3333-444444444444";
+    let cipher_name = "Trashed Edit Target";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        trashed_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    // Try to edit a trashed cipher
+    let out = make_command(dir)
+        .args(["vault", "edit", cipher_name, "--name", "New Name"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!(
+        "Cipher '{cipher_name}' is in the trash and cannot be edited."
+    )));
+    assert!(stderr.contains("omawarden vault restore"));
+}
+
+#[test]
+fn test_delete_cipher_trash_organization_read_only() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "org-trashdel-1111-2222-3333-444444444444";
+    let cipher_name = "Org Trashed for Delete";
+
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": cipher_id,
+        "organizationId": "org-uuid-1234",
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(cipher_name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("orguser").unwrap(),
+            "password": user_key.encrypt_string("secretpass").unwrap(),
+            "uris": []
+        },
+        "revisionDate": "2026-11-09T00:00:00.000Z",
+        "deletedDate": "2026-11-10T00:00:00.000Z",
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "delete", cipher_name, "--trash", "-y"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Organization ciphers are read-only."));
+}
+
+#[test]
+fn test_delete_cipher_trash_ambiguous_matches_fail_closed() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "Trashed One",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "Trashed Two",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "delete", "Trashed", "--trash"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Multiple ciphers matched"));
+    assert!(stderr.contains("aaaaaaaa-1111-2222-3333-444444444444"));
+    assert!(stderr.contains("bbbbbbbb-1111-2222-3333-444444444444"));
 }

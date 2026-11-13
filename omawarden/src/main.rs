@@ -456,6 +456,8 @@ enum VaultAction {
     List {
         #[arg(long = "filter")]
         category: Option<String>,
+        #[arg(long, help = "List only soft-deleted items in the Trash")]
+        trash: bool,
     },
     #[command(about = "Search vault items")]
     Search {
@@ -468,6 +470,8 @@ enum VaultAction {
         query_flag: Option<String>,
         #[arg(long = "filter")]
         category: Option<String>,
+        #[arg(long, help = "Search only soft-deleted items in the Trash")]
+        trash: bool,
     },
     #[command(about = "Create a new vault cipher")]
     Create {
@@ -504,12 +508,24 @@ enum VaultAction {
             help = "Permanently delete the cipher instead of soft-deleting (moving to trash)"
         )]
         permanent: bool,
+        #[arg(long, help = "Permanently delete a soft-deleted cipher from the Trash")]
+        trash: bool,
         #[arg(
             short = 'y',
             long = "yes",
             help = "Skip confirmation prompt in interactive terminals"
         )]
         yes: bool,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
+    #[command(about = "Restore a soft-deleted cipher from the Trash")]
+    Restore {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target trashed cipher name or 32-character / UUID ID to restore"
+        )]
+        target: String,
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
@@ -1873,7 +1889,7 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
-                VaultAction::List { category } => {
+                VaultAction::List { category, trash } => {
                     if let Err(e @ omawarden::daemon::DispatchError::IncompatibleProtocol { .. }) =
                         omawarden::daemon::ensure_daemon_running()
                     {
@@ -1905,7 +1921,8 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     if is_unlocked && !vault_mgr.is_unlocked() {
-                        if let Some(daemon_resp) = send_daemon_request(&json!({ "action": "list" }))
+                        if let Some(daemon_resp) =
+                            send_daemon_request(&json!({ "action": "list", "trash": trash }))
                         {
                             if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
@@ -1931,7 +1948,7 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
-                    let items = vault_mgr.get_items();
+                    let items = vault_mgr.get_items_by_state(trash);
                     let filtered = vault_mgr.search(&items, "", category.as_deref());
                     println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
                     ExitCode::SUCCESS
@@ -1940,6 +1957,7 @@ fn main() -> ExitCode {
                     query,
                     query_flag,
                     category,
+                    trash,
                 } => {
                     let query = if query.is_empty() {
                         query_flag.unwrap_or(query)
@@ -1980,7 +1998,8 @@ fn main() -> ExitCode {
                         if let Some(daemon_resp) = send_daemon_request(&json!({
                             "action": "search",
                             "query": query,
-                            "category": category
+                            "category": category,
+                            "trash": trash
                         })) {
                             if daemon_resp.get("ok") == Some(&Value::Bool(false)) {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
@@ -2005,7 +2024,8 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
-                    let results = vault_mgr.search_items(&query, category.as_deref());
+                    let results =
+                        vault_mgr.search_items_by_state(&query, category.as_deref(), trash);
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
                     ExitCode::SUCCESS
                 }
@@ -2432,6 +2452,7 @@ fn main() -> ExitCode {
                 VaultAction::Delete {
                     target,
                     permanent,
+                    trash,
                     yes,
                     json,
                 } => {
@@ -2447,6 +2468,7 @@ fn main() -> ExitCode {
                         client_ctx.as_ref(),
                         is_interactive,
                         json,
+                        trash,
                     ) {
                         Ok(item) => item,
                         Err(code) => return code,
@@ -2475,12 +2497,15 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
+                    // When --trash is passed, permanent deletion is implied (DELETE /ciphers/{id})
+                    let is_permanent = trash || permanent;
+                    let action_verb = if is_permanent {
+                        "Permanently delete"
+                    } else {
+                        "Delete"
+                    };
+
                     if is_interactive {
-                        let action_verb = if permanent {
-                            "Permanently delete"
-                        } else {
-                            "Delete"
-                        };
                         eprint!("{action_verb} item '{item_name}'? [y/N] ");
                         let _ = io::stderr().flush();
                         let mut input = String::new();
@@ -2497,10 +2522,15 @@ fn main() -> ExitCode {
                         }
                     }
 
+                    let action = if trash {
+                        "cipher_delete_trash"
+                    } else {
+                        "cipher_delete"
+                    };
                     let mut daemon_req = json!({
-                        "action": "cipher_delete",
+                        "action": action,
                         "id": item_id,
-                        "permanent": permanent,
+                        "permanent": is_permanent,
                     });
                     if let Some(ref ctx) = client_ctx {
                         daemon_req["client"] = json!(ctx);
@@ -2513,7 +2543,7 @@ fn main() -> ExitCode {
                             } else {
                                 let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
                                 let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
-                                if permanent {
+                                if is_permanent {
                                     println!("Permanently deleted cipher \"{}\" ({}).", name, id);
                                 } else {
                                     println!("Deleted cipher \"{}\" ({}).", name, id);
@@ -2526,6 +2556,87 @@ fn main() -> ExitCode {
                                 .get("error")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("Failed to delete cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                VaultAction::Restore { target, json } => {
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !json;
+
+                    let resolved = match resolve_target_cipher(
+                        &target,
+                        "restore",
+                        client_ctx.as_ref(),
+                        is_interactive,
+                        json,
+                        true,
+                    ) {
+                        Ok(item) => item,
+                        Err(code) => return code,
+                    };
+
+                    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+                    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+
+                    if resolved
+                        .get("organization_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Organization ciphers are read-only.",
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Organization ciphers are read-only.");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let mut daemon_req = json!({
+                        "action": "cipher_restore",
+                        "id": item_id,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
+                                let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
+                                println!("Restored cipher \"{}\" ({}).", name, id);
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to restore cipher");
                             if json {
                                 println!(
                                     "{}",
@@ -2610,6 +2721,7 @@ fn main() -> ExitCode {
                         client_ctx.as_ref(),
                         is_interactive,
                         json,
+                        false,
                     ) {
                         Ok(item) => item,
                         Err(code) => return code,
@@ -3466,7 +3578,8 @@ fn main() -> ExitCode {
                                     storage.enc_private_key.as_deref(),
                                 );
                                 items.into_iter().find(|i| {
-                                    i.type_name == "ssh_key"
+                                    i.deleted_at.is_none()
+                                        && i.type_name == "ssh_key"
                                         && (i.id == query
                                             || i.name.eq_ignore_ascii_case(&query)
                                             || i.name
@@ -3821,9 +3934,13 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         {
             let verb = match request.get("action").and_then(|a| a.as_str()) {
                 Some("cipher_delete") => "deleting",
+                Some("cipher_delete_trash") => "permanently deleting from trash",
+                Some("cipher_restore") => "restoring",
                 Some("cipher_update") => "editing",
                 Some("cipher_resolve") => match request.get("purpose").and_then(Value::as_str) {
                     Some("edit") | Some("editing") => "editing",
+                    Some("restore") | Some("restoring") => "restoring",
+                    Some("delete") | Some("deleting") => "deleting",
                     _ => "deleting",
                 },
                 _ => "creating",
@@ -3913,9 +4030,10 @@ fn vault_output_item(
     )
     .into_iter()
     .find(|item| {
-        item.id == query
-            || item.name.eq_ignore_ascii_case(query)
-            || item.name.to_lowercase().contains(&query_lower)
+        item.deleted_at.is_none()
+            && (item.id == query
+                || item.name.eq_ignore_ascii_case(query)
+                || item.name.to_lowercase().contains(&query_lower))
     });
     Ok(item.map(|item| VaultOutputItem {
         item,
@@ -3974,11 +4092,13 @@ fn resolve_target_cipher(
     client_ctx: Option<&omawarden::api::ClientContext>,
     is_interactive: bool,
     json: bool,
+    trash: bool,
 ) -> Result<Value, ExitCode> {
     let mut resolve_req = json!({
         "action": "cipher_resolve",
         "target": target,
         "purpose": purpose,
+        "trash": trash,
     });
     if let Some(ctx) = client_ctx {
         resolve_req["client"] = json!(ctx);
@@ -5136,12 +5256,14 @@ mod tests {
                     VaultAction::Delete {
                         target,
                         permanent,
+                        trash,
                         yes,
                         json,
                     },
             } => {
                 assert_eq!(target, "my-target");
                 assert!(!permanent);
+                assert!(!trash);
                 assert!(!yes);
                 assert!(!json);
             }
@@ -5165,14 +5287,37 @@ mod tests {
                     VaultAction::Delete {
                         target,
                         permanent,
+                        trash,
                         yes,
                         json,
                     },
             } => {
                 assert_eq!(target, "target-uuid");
                 assert!(permanent);
+                assert!(!trash);
                 assert!(yes);
                 assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Delete"),
+        }
+
+        // Flag: --trash
+        let cli_trash =
+            Cli::try_parse_from(["omawarden", "vault", "delete", "trashed-target", "--trash"])
+                .unwrap();
+        match cli_trash.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Delete {
+                        target,
+                        trash,
+                        permanent,
+                        ..
+                    },
+            } => {
+                assert_eq!(target, "trashed-target");
+                assert!(trash);
+                assert!(!permanent);
             }
             _ => panic!("Expected VaultAction::Delete"),
         }

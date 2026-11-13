@@ -36,6 +36,8 @@ pub struct VaultItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_name: Option<String>,
@@ -696,7 +698,10 @@ impl VaultManager {
             &key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
 
         // Fail closed on a stale key (server-side rotation, password change
         // elsewhere, account switch while soft-locked): decryption failures
@@ -936,7 +941,10 @@ impl VaultManager {
             &user_key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
         #[cfg(test)]
         self.before_unlock_publication.reach();
         let _account = self
@@ -1223,7 +1231,14 @@ impl VaultManager {
         }
     }
 
+    /// Active items only: Trash items are never served to active operations.
     pub fn get_items(&self) -> Vec<VaultItem> {
+        self.get_items_by_state(false)
+    }
+
+    /// Items in the requested state: active (`trash == false`) or Trash
+    /// (`trash == true`). Empty while locked.
+    pub fn get_items_by_state(&self, trash: bool) -> Vec<VaultItem> {
         let Ok(unlocked) = self.is_unlocked.read() else {
             return Vec::new();
         };
@@ -1232,13 +1247,20 @@ impl VaultManager {
         }
         self.decrypted_items
             .read()
-            .map(|g| g.clone())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.deleted_at.is_some() == trash)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Name and SSH data of the unlocked vault's SSH key items, without
+    /// Name and SSH data of the unlocked vault's active SSH key items, without
     /// copying the rest of the vault. Empty while locked, and never asks the
-    /// daemon: the SSH agent runs inside it.
+    /// daemon: the SSH agent runs inside it. Trashed keys are excluded so the
+    /// agent never signs with a soft-deleted key.
     pub fn ssh_key_items(&self) -> Vec<(String, SshMetadata)> {
         let Ok(unlocked) = self.is_unlocked.read() else {
             return Vec::new();
@@ -1251,6 +1273,7 @@ impl VaultManager {
             .map(|items| {
                 items
                     .iter()
+                    .filter(|i| i.deleted_at.is_none())
                     .filter_map(|i| Some((i.name.clone(), i.ssh_key.clone()?)))
                     .collect()
             })
@@ -1258,7 +1281,18 @@ impl VaultManager {
     }
 
     pub fn search_items(&self, query: &str, category: Option<&str>) -> Vec<VaultItem> {
-        self.search(&self.get_items(), query, category)
+        self.search_items_by_state(query, category, false)
+    }
+
+    /// Search only within the requested state: active (`trash == false`) or
+    /// Trash (`trash == true`).
+    pub fn search_items_by_state(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        trash: bool,
+    ) -> Vec<VaultItem> {
+        self.search(&self.get_items_by_state(trash), query, category)
     }
 
     pub fn resolve_attachment_key(
@@ -1292,6 +1326,14 @@ impl VaultManager {
             .ciphers
             .iter()
             .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))?;
+        // A soft-deleted cipher must never yield an attachment key.
+        if cipher
+            .get("deletedDate")
+            .or_else(|| cipher.get("DeletedDate"))
+            .is_some_and(|v| !v.is_null())
+        {
+            return None;
+        }
 
         let org_id_opt = cipher.get("organizationId").and_then(|v| v.as_str());
         let mut base_key = user_key.clone();
@@ -1425,13 +1467,88 @@ impl VaultManager {
         &self,
         target: &str,
     ) -> Result<CipherTargetResolution, String> {
+        self.resolve_cipher_target_candidates_by_state(target, false)
+    }
+
+    /// Resolve `<target>` exclusively against one vault state. Trash-scoped
+    /// resolution never sees active items, so a trashed cipher sharing a name
+    /// with an active one stays unambiguous.
+    pub fn resolve_cipher_target_candidates_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<CipherTargetResolution, String> {
         let trimmed = target.trim();
         if trimmed.is_empty() {
             return Err("Target cipher cannot be empty.".to_string());
         }
 
-        let items = self.get_items();
+        let items = self.get_items_by_state(trash);
+        if let Some(resolution) = Self::match_cipher_candidates(&items, trimmed) {
+            return Ok(resolution);
+        }
 
+        if trash {
+            // Cross-state diagnostic: an active cipher with this target was
+            // never trashed, so it cannot be restored.
+            let active = self.get_items_by_state(false);
+            if let Some(CipherTargetResolution::Exact(item)) =
+                Self::match_cipher_candidates(&active, trimmed)
+            {
+                return Ok(CipherTargetResolution::NotFound(format!(
+                    "Cipher '{}' is not in the trash.",
+                    item.name
+                )));
+            }
+            return Ok(CipherTargetResolution::NotFound(format!(
+                "Cipher '{}' not found in trash.",
+                target
+            )));
+        }
+
+        Ok(CipherTargetResolution::NotFound(format!(
+            "Cipher '{}' not found in vault.",
+            target
+        )))
+    }
+
+    /// Active-scoped resolution for `delete` / `edit` mutations. When the
+    /// target is missing from the active vault but present in the Trash,
+    /// returns an actionable cross-state diagnostic instead of "not found".
+    pub fn resolve_cipher_target_candidates_for_active_mutation(
+        &self,
+        target: &str,
+        purpose: &str,
+    ) -> Result<CipherTargetResolution, String> {
+        let resolution = self.resolve_cipher_target_candidates_by_state(target, false)?;
+        if !matches!(resolution, CipherTargetResolution::NotFound(_)) {
+            return Ok(resolution);
+        }
+
+        let trashed = self.get_items_by_state(true);
+        if let Some(CipherTargetResolution::Exact(item)) =
+            Self::match_cipher_candidates(&trashed, target.trim())
+        {
+            let message = match purpose {
+                "edit" | "editing" => format!(
+                    "Cipher '{}' is in the trash and cannot be edited. Restore it first with 'omawarden vault restore'.",
+                    item.name
+                ),
+                _ => format!(
+                    "Cipher '{}' is already in the trash. Use --trash to permanently delete it or 'omawarden vault restore' to restore it.",
+                    item.name
+                ),
+            };
+            return Ok(CipherTargetResolution::NotFound(message));
+        }
+
+        Ok(resolution)
+    }
+
+    fn match_cipher_candidates(
+        items: &[VaultItem],
+        trimmed: &str,
+    ) -> Option<CipherTargetResolution> {
         // 1. Exact ID or 32-character hex ID match
         let is_id_match = |item_id: &str, target_val: &str| -> bool {
             if item_id.eq_ignore_ascii_case(target_val) {
@@ -1454,12 +1571,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if id_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 id_matches[0].clone(),
             )));
         }
         if id_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(id_matches));
+            return Some(CipherTargetResolution::Ambiguous(id_matches));
         }
 
         // 2. Exact Name match (case-insensitive)
@@ -1469,12 +1586,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if exact_name_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 exact_name_matches[0].clone(),
             )));
         }
         if exact_name_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(exact_name_matches));
+            return Some(CipherTargetResolution::Ambiguous(exact_name_matches));
         }
 
         // 3. ID prefix match (unique prefix, at least 4 characters)
@@ -1490,14 +1607,10 @@ impl VaultManager {
             }
             let stripped_target: String = target_val.chars().filter(|&c| c != '-').collect();
             let stripped_id: String = item_id.chars().filter(|&c| c != '-').collect();
-            if stripped_target.len() >= 4
+            stripped_target.len() >= 4
                 && stripped_id
                     .to_lowercase()
                     .starts_with(&stripped_target.to_lowercase())
-            {
-                return true;
-            }
-            false
         };
 
         let id_prefix_matches: Vec<_> = items
@@ -1506,12 +1619,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if id_prefix_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 id_prefix_matches[0].clone(),
             )));
         }
         if id_prefix_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(id_prefix_matches));
+            return Some(CipherTargetResolution::Ambiguous(id_prefix_matches));
         }
 
         // 4. Substring (fuzzy) match (case-insensitive)
@@ -1522,22 +1635,29 @@ impl VaultManager {
             .cloned()
             .collect();
         if sub_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 sub_matches[0].clone(),
             )));
         }
         if sub_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(sub_matches));
+            return Some(CipherTargetResolution::Ambiguous(sub_matches));
         }
 
-        Ok(CipherTargetResolution::NotFound(format!(
-            "Cipher '{}' not found in vault.",
-            target
-        )))
+        None
     }
 
     pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
-        match self.resolve_cipher_target_candidates(target)? {
+        self.resolve_cipher_target_by_state(target, false)
+    }
+
+    /// Resolve a single cipher in the requested state, or fail closed with a
+    /// candidate list when the target is ambiguous.
+    pub fn resolve_cipher_target_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<VaultItem, String> {
+        match self.resolve_cipher_target_candidates_by_state(target, trash)? {
             CipherTargetResolution::Exact(item) => Ok(*item),
             CipherTargetResolution::Ambiguous(candidates) => {
                 let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
@@ -1580,7 +1700,10 @@ impl VaultManager {
                         .read()
                         .is_ok_and(|s| s.same_active_slot(&fresh_storage));
                 let count = if current {
-                    self.decrypted_items.read().map(|i| i.len()).unwrap_or(0)
+                    self.decrypted_items
+                        .read()
+                        .map(|items| items.iter().filter(|i| i.deleted_at.is_none()).count())
+                        .unwrap_or(0)
                 } else {
                     0
                 };
@@ -1674,6 +1797,12 @@ impl VaultManager {
                 .or_else(|| raw.get("revision_date"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let deleted_at = raw
+                .get("deletedDate")
+                .or_else(|| raw.get("DeletedDate"))
+                .or_else(|| raw.get("deleted_at"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             let type_name = match item_type {
                 1 => "login",
@@ -1739,6 +1868,7 @@ impl VaultManager {
                 favorite,
                 created_at,
                 updated_at,
+                deleted_at,
                 folder_id,
                 folder_name: None,
                 organization_id,

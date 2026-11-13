@@ -74,6 +74,8 @@ pub fn handle_client_with_peer(
                 | "cipher_create"
                 | "cipher_update"
                 | "cipher_delete"
+                | "cipher_delete_trash"
+                | "cipher_restore"
                 | "cipher_resolve"
                 | "sync"
         )
@@ -119,9 +121,36 @@ pub fn handle_client_with_peer(
             )?;
             return Ok(());
         }
+        if action == "cipher_delete_trash" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before permanently deleting a cipher from trash.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
+        if action == "cipher_restore" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before restoring a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
         if action == "cipher_resolve" {
             let verb = match req.get("purpose").and_then(Value::as_str) {
                 Some("edit") | Some("editing") => "editing",
+                Some("restore") | Some("restoring") => "restoring",
                 _ => "deleting",
             };
             writeln!(
@@ -355,11 +384,17 @@ pub fn handle_client_with_peer(
             Ok(count) => json!({ "ok": true, "ciphers_count": count }),
             Err(e) => json!({ "ok": false, "error": e }),
         },
-        "list" => json!(state.vault_mgr.get_items()),
+        "list" => {
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            json!(state.vault_mgr.get_items_by_state(trash))
+        }
         "search" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());
-            json!(state.vault_mgr.search_items(query, category))
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            json!(state
+                .vault_mgr
+                .search_items_by_state(query, category, trash))
         }
         // A legacy CLI may repeat the POST locally on any non-success reply.
         // Never dispatch a remote write for the legacy request.
@@ -382,9 +417,31 @@ pub fn handle_client_with_peer(
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },
+        "cipher_delete_trash" => match state
+            .vault_mgr
+            .delete_cipher_trash(req, client_context.as_ref())
+        {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "cipher_restore" => match state.vault_mgr.restore_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
         "cipher_resolve" => {
             let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            match state.vault_mgr.resolve_cipher_target_candidates(target) {
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            let purpose = req.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
+            let resolution = if trash {
+                state
+                    .vault_mgr
+                    .resolve_cipher_target_candidates_by_state(target, true)
+            } else {
+                state
+                    .vault_mgr
+                    .resolve_cipher_target_candidates_for_active_mutation(target, purpose)
+            };
+            match resolution {
                 Ok(crate::vault::CipherTargetResolution::Exact(item)) => json!({
                     "ok": true,
                     "item": {
