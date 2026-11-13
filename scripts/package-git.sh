@@ -100,6 +100,9 @@ echo "==> Successfully generated package: ${FINAL_PKG}"
 if [ "${INSTALL}" = true ]; then
   echo "==> Installing ${FINAL_PKG} with pacman..."
   sudo pacman -U --noconfirm "${FINAL_PKG}"
+  # Stop any standalone daemon left running from the previous package so the
+  # upgraded binary is not shadowed by a stale in-memory process.
+  /usr/bin/omawarden daemon --stop >/dev/null 2>&1 || true
   echo "==> Installed omawarden to /usr/bin/omawarden:"
   /usr/bin/omawarden -V || true
 else
