@@ -508,6 +508,8 @@ enum VaultAction {
             help = "Permanently delete the cipher instead of soft-deleting (moving to trash)"
         )]
         permanent: bool,
+        #[arg(long, help = "Permanently delete a soft-deleted cipher from the Trash")]
+        trash: bool,
         #[arg(
             short = 'y',
             long = "yes",
@@ -2450,6 +2452,7 @@ fn main() -> ExitCode {
                 VaultAction::Delete {
                     target,
                     permanent,
+                    trash,
                     yes,
                     json,
                 } => {
@@ -2465,7 +2468,7 @@ fn main() -> ExitCode {
                         client_ctx.as_ref(),
                         is_interactive,
                         json,
-                        false,
+                        trash,
                     ) {
                         Ok(item) => item,
                         Err(code) => return code,
@@ -2494,12 +2497,15 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
 
+                    // When --trash is passed, permanent deletion is implied (DELETE /ciphers/{id})
+                    let is_permanent = trash || permanent;
+                    let action_verb = if is_permanent {
+                        "Permanently delete"
+                    } else {
+                        "Delete"
+                    };
+
                     if is_interactive {
-                        let action_verb = if permanent {
-                            "Permanently delete"
-                        } else {
-                            "Delete"
-                        };
                         eprint!("{action_verb} item '{item_name}'? [y/N] ");
                         let _ = io::stderr().flush();
                         let mut input = String::new();
@@ -2516,10 +2522,15 @@ fn main() -> ExitCode {
                         }
                     }
 
+                    let action = if trash {
+                        "cipher_delete_trash"
+                    } else {
+                        "cipher_delete"
+                    };
                     let mut daemon_req = json!({
-                        "action": "cipher_delete",
+                        "action": action,
                         "id": item_id,
-                        "permanent": permanent,
+                        "permanent": is_permanent,
                     });
                     if let Some(ref ctx) = client_ctx {
                         daemon_req["client"] = json!(ctx);
@@ -2532,7 +2543,7 @@ fn main() -> ExitCode {
                             } else {
                                 let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
                                 let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
-                                if permanent {
+                                if is_permanent {
                                     println!("Permanently deleted cipher \"{}\" ({}).", name, id);
                                 } else {
                                     println!("Deleted cipher \"{}\" ({}).", name, id);
@@ -3923,11 +3934,13 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         {
             let verb = match request.get("action").and_then(|a| a.as_str()) {
                 Some("cipher_delete") => "deleting",
+                Some("cipher_delete_trash") => "permanently deleting from trash",
                 Some("cipher_restore") => "restoring",
                 Some("cipher_update") => "editing",
                 Some("cipher_resolve") => match request.get("purpose").and_then(Value::as_str) {
                     Some("edit") | Some("editing") => "editing",
                     Some("restore") | Some("restoring") => "restoring",
+                    Some("delete") | Some("deleting") => "deleting",
                     _ => "deleting",
                 },
                 _ => "creating",
@@ -5243,12 +5256,14 @@ mod tests {
                     VaultAction::Delete {
                         target,
                         permanent,
+                        trash,
                         yes,
                         json,
                     },
             } => {
                 assert_eq!(target, "my-target");
                 assert!(!permanent);
+                assert!(!trash);
                 assert!(!yes);
                 assert!(!json);
             }
@@ -5272,14 +5287,37 @@ mod tests {
                     VaultAction::Delete {
                         target,
                         permanent,
+                        trash,
                         yes,
                         json,
                     },
             } => {
                 assert_eq!(target, "target-uuid");
                 assert!(permanent);
+                assert!(!trash);
                 assert!(yes);
                 assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Delete"),
+        }
+
+        // Flag: --trash
+        let cli_trash =
+            Cli::try_parse_from(["omawarden", "vault", "delete", "trashed-target", "--trash"])
+                .unwrap();
+        match cli_trash.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Delete {
+                        target,
+                        trash,
+                        permanent,
+                        ..
+                    },
+            } => {
+                assert_eq!(target, "trashed-target");
+                assert!(trash);
+                assert!(!permanent);
             }
             _ => panic!("Expected VaultAction::Delete"),
         }

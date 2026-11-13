@@ -1512,6 +1512,39 @@ impl VaultManager {
         )))
     }
 
+    /// Active-scoped resolution for `delete` / `edit` mutations. When the
+    /// target is missing from the active vault but present in the Trash,
+    /// returns an actionable cross-state diagnostic instead of "not found".
+    pub fn resolve_cipher_target_candidates_for_active_mutation(
+        &self,
+        target: &str,
+        purpose: &str,
+    ) -> Result<CipherTargetResolution, String> {
+        let resolution = self.resolve_cipher_target_candidates_by_state(target, false)?;
+        if !matches!(resolution, CipherTargetResolution::NotFound(_)) {
+            return Ok(resolution);
+        }
+
+        let trashed = self.get_items_by_state(true);
+        if let Some(CipherTargetResolution::Exact(item)) =
+            Self::match_cipher_candidates(&trashed, target.trim())
+        {
+            let message = match purpose {
+                "edit" | "editing" => format!(
+                    "Cipher '{}' is in the trash and cannot be edited. Restore it first with 'omawarden vault restore'.",
+                    item.name
+                ),
+                _ => format!(
+                    "Cipher '{}' is already in the trash. Use --trash to permanently delete it or 'omawarden vault restore' to restore it.",
+                    item.name
+                ),
+            };
+            return Ok(CipherTargetResolution::NotFound(message));
+        }
+
+        Ok(resolution)
+    }
+
     fn match_cipher_candidates(
         items: &[VaultItem],
         trimmed: &str,
