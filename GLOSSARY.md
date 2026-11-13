@@ -104,6 +104,10 @@ _Avoid_: Shared folder, group
 A user-defined organizational container for grouping personal or organization ciphers.
 _Avoid_: Category, directory
 
+**Trash**:
+The holding state for soft-deleted ciphers awaiting restoration to the active vault or permanent destruction.
+_Avoid_: Recycle bin, trash folder, deleted items
+
 **Password Generator**:
 The cryptographic engine within Omawarden that generates random passwords and passphrases using OS entropy.
 _Avoid_: Secret generator, randomizer
