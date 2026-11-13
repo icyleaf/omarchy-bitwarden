@@ -1,13 +1,13 @@
 //! A lost daemon reply must not start an independent CLI cache writer.
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct Daemon(std::process::Child);
 impl Drop for Daemon {
@@ -18,7 +18,20 @@ impl Drop for Daemon {
 }
 
 fn ipc(socket: &std::path::Path, request: Value) -> Value {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Ok(s) => break s,
+            Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+                assert!(
+                    Instant::now() < deadline,
+                    "daemon socket not ready after 5s"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();

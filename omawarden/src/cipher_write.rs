@@ -849,22 +849,36 @@ impl VaultManager {
             }
         };
 
-        let receipt = json!({
+        // For soft deletes, stamp the receipt with the same timestamp used to
+        // cache the item so callers see `deleted_at` without a manual sync.
+        let deleted_at = if permanent {
+            None
+        } else {
+            Some(server_deleted_at.unwrap_or_else(|| {
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            }))
+        };
+        let mut receipt = json!({
             "id": target_id,
             "name": target_name,
             "permanent": permanent,
         });
+        if let Some(ref deleted_at) = deleted_at {
+            receipt["deleted_at"] = json!(deleted_at);
+        }
         let cached = if permanent {
             self.cache_deleted_cipher(&storage, generation, &target_id)
                 .is_some()
         } else {
             // Soft delete keeps the cipher in the cache so `--trash` sees it
             // immediately, stamped with the server timestamp when returned.
-            let deleted_at = server_deleted_at.unwrap_or_else(|| {
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            });
-            self.cache_soft_deleted_cipher(&storage, generation, &target_id, &deleted_at)
-                .is_some()
+            self.cache_soft_deleted_cipher(
+                &storage,
+                generation,
+                &target_id,
+                deleted_at.as_deref().unwrap_or_default(),
+            )
+            .is_some()
         };
         Ok(
             json!({"ok": true, "outcome": if cached { "deleted" } else { "deleted_needs_sync" }, "item": receipt}),

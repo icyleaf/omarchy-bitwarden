@@ -3,7 +3,7 @@
 use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::{fs::PermissionsExt, net::UnixStream};
 use std::path::Path;
@@ -19,7 +19,20 @@ impl Drop for Daemon {
 }
 
 fn ipc(socket: &Path, request: Value) -> Value {
-    let mut stream = UnixStream::connect(socket).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match UnixStream::connect(socket) {
+            Ok(s) => break s,
+            Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+                assert!(
+                    Instant::now() < deadline,
+                    "daemon socket not ready after 5s"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
