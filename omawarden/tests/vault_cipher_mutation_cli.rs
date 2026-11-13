@@ -5617,3 +5617,362 @@ fn test_copy_custom_field_conflicts_with_other_flags() {
         .unwrap()
         .contains("--field cannot be combined with"));
 }
+
+#[test]
+fn test_restore_cipher_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "restore0-1111-2222-3333-444444444444";
+    let cipher_name = "Site to Restore";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "Bitwarden API restore was not received");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("Restored cipher \"{cipher_name}\" ({cipher_id}).")),
+        "Unexpected CLI output: {stdout}"
+    );
+
+    // The restored cipher stays in the cache without a deletedDate.
+    let cache_data: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+    let cached = cache_data["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cipher_id)
+        .expect("restored cipher must stay in data.json");
+    assert!(
+        cached.get("deletedDate").is_none() && cached.get("DeletedDate").is_none(),
+        "restored cipher must clear deletedDate: {cached}"
+    );
+
+    // It immediately returns to the active vault and leaves the Trash.
+    let list_out = make_command(dir).args(["vault", "list"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&list_out.stdout).contains(cipher_name),
+        "restored cipher must return to the active list"
+    );
+    let trash_out = make_command(dir)
+        .args(["vault", "list", "--trash"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&trash_out.stdout).contains(cipher_name),
+        "restored cipher must leave the Trash"
+    );
+}
+
+#[test]
+fn test_restore_cipher_json_output() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "restore1-1111-2222-3333-444444444444";
+    let cipher_name = "JSON Restore";
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        cipher_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received, "Bitwarden API restore was not received");
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["outcome"], "restored");
+    assert_eq!(result["item"]["id"], cipher_id);
+    assert_eq!(result["item"]["name"], cipher_name);
+}
+
+#[test]
+fn test_restore_cipher_disambiguates_by_name() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-dup-1111-2222-3333-444444444444";
+    let trashed_id = "trashed-dup-1111-2222-3333-444444444444";
+    let cipher_name = "Duplicate Name";
+    // Active cipher
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+    // Trashed cipher with same name
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        trashed_id,
+        cipher_name,
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let mut cli = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "CLI did not finish in time");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, _) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        // Must target the TRASHED cipher, not the active one.
+        assert_eq!(path, format!("/api/ciphers/{trashed_id}/restore"));
+        received = true;
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "restore disambiguation failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_restore_cipher_ambiguous_matches_fail_closed() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "Trashed One",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+    add_cipher_with_state(
+        dir,
+        &user_key,
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "Trashed Two",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Trashed"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Multiple ciphers matched"));
+    assert!(stderr.contains("aaaaaaaa-1111-2222-3333-444444444444"));
+    assert!(stderr.contains("bbbbbbbb-1111-2222-3333-444444444444"));
+}
+
+#[test]
+fn test_restore_cipher_active_not_in_trash() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let active_id = "active-item-1111-2222-3333-444444444444";
+    let cipher_name = "Active Only";
+    add_cipher_to_cache(dir, &user_key, active_id, cipher_name, "user1");
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Cipher '{cipher_name}' is not in the trash.")));
+}
+
+#[test]
+fn test_restore_cipher_nonexistent() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    // Cache is empty except for the fixture setup.
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Does Not Exist"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Cipher 'Does Not Exist' not found in trash."));
+}
+
+#[test]
+fn test_restore_cipher_organization_read_only() {
+    let (temp, _api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "org-restore-1111-2222-3333-444444444444";
+    let cipher_name = "Org Trashed";
+
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": cipher_id,
+        "organizationId": "org-uuid-1234",
+        "folderId": null,
+        "type": 1,
+        "name": user_key.encrypt_string(cipher_name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("orguser").unwrap(),
+            "password": user_key.encrypt_string("secretpass").unwrap(),
+            "uris": []
+        },
+        "revisionDate": "2026-11-09T00:00:00.000Z",
+        "deletedDate": "2026-11-10T00:00:00.000Z",
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let out = make_command(dir)
+        .args(["vault", "restore", cipher_name])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Organization ciphers are read-only."));
+}
+
+#[test]
+fn test_restore_cipher_locked_fails() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    add_cipher_with_state(
+        dir,
+        &SymmetricCryptoKey::from_raw_bytes(&[42u8; 64]).unwrap(),
+        "locked-restore-1111-2222-3333-444444444444",
+        "Locked Restore",
+        1,
+        Some("2026-11-10T00:00:00.000Z"),
+    );
+
+    let _daemon = Daemon(
+        make_command(dir)
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Do NOT unlock.
+
+    let out = make_command(dir)
+        .args(["vault", "restore", "Locked Restore"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Unlock the vault before restoring a cipher."));
+}

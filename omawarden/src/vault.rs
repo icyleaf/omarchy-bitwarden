@@ -1467,13 +1467,55 @@ impl VaultManager {
         &self,
         target: &str,
     ) -> Result<CipherTargetResolution, String> {
+        self.resolve_cipher_target_candidates_by_state(target, false)
+    }
+
+    /// Resolve `<target>` exclusively against one vault state. Trash-scoped
+    /// resolution never sees active items, so a trashed cipher sharing a name
+    /// with an active one stays unambiguous.
+    pub fn resolve_cipher_target_candidates_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<CipherTargetResolution, String> {
         let trimmed = target.trim();
         if trimmed.is_empty() {
             return Err("Target cipher cannot be empty.".to_string());
         }
 
-        let items = self.get_items();
+        let items = self.get_items_by_state(trash);
+        if let Some(resolution) = Self::match_cipher_candidates(&items, trimmed) {
+            return Ok(resolution);
+        }
 
+        if trash {
+            // Cross-state diagnostic: an active cipher with this target was
+            // never trashed, so it cannot be restored.
+            let active = self.get_items_by_state(false);
+            if let Some(CipherTargetResolution::Exact(item)) =
+                Self::match_cipher_candidates(&active, trimmed)
+            {
+                return Ok(CipherTargetResolution::NotFound(format!(
+                    "Cipher '{}' is not in the trash.",
+                    item.name
+                )));
+            }
+            return Ok(CipherTargetResolution::NotFound(format!(
+                "Cipher '{}' not found in trash.",
+                target
+            )));
+        }
+
+        Ok(CipherTargetResolution::NotFound(format!(
+            "Cipher '{}' not found in vault.",
+            target
+        )))
+    }
+
+    fn match_cipher_candidates(
+        items: &[VaultItem],
+        trimmed: &str,
+    ) -> Option<CipherTargetResolution> {
         // 1. Exact ID or 32-character hex ID match
         let is_id_match = |item_id: &str, target_val: &str| -> bool {
             if item_id.eq_ignore_ascii_case(target_val) {
@@ -1496,12 +1538,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if id_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 id_matches[0].clone(),
             )));
         }
         if id_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(id_matches));
+            return Some(CipherTargetResolution::Ambiguous(id_matches));
         }
 
         // 2. Exact Name match (case-insensitive)
@@ -1511,12 +1553,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if exact_name_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 exact_name_matches[0].clone(),
             )));
         }
         if exact_name_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(exact_name_matches));
+            return Some(CipherTargetResolution::Ambiguous(exact_name_matches));
         }
 
         // 3. ID prefix match (unique prefix, at least 4 characters)
@@ -1548,12 +1590,12 @@ impl VaultManager {
             .cloned()
             .collect();
         if id_prefix_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 id_prefix_matches[0].clone(),
             )));
         }
         if id_prefix_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(id_prefix_matches));
+            return Some(CipherTargetResolution::Ambiguous(id_prefix_matches));
         }
 
         // 4. Substring (fuzzy) match (case-insensitive)
@@ -1564,22 +1606,29 @@ impl VaultManager {
             .cloned()
             .collect();
         if sub_matches.len() == 1 {
-            return Ok(CipherTargetResolution::Exact(Box::new(
+            return Some(CipherTargetResolution::Exact(Box::new(
                 sub_matches[0].clone(),
             )));
         }
         if sub_matches.len() > 1 {
-            return Ok(CipherTargetResolution::Ambiguous(sub_matches));
+            return Some(CipherTargetResolution::Ambiguous(sub_matches));
         }
 
-        Ok(CipherTargetResolution::NotFound(format!(
-            "Cipher '{}' not found in vault.",
-            target
-        )))
+        None
     }
 
     pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
-        match self.resolve_cipher_target_candidates(target)? {
+        self.resolve_cipher_target_by_state(target, false)
+    }
+
+    /// Resolve a single cipher in the requested state, or fail closed with a
+    /// candidate list when the target is ambiguous.
+    pub fn resolve_cipher_target_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<VaultItem, String> {
+        match self.resolve_cipher_target_candidates_by_state(target, trash)? {
             CipherTargetResolution::Exact(item) => Ok(*item),
             CipherTargetResolution::Ambiguous(candidates) => {
                 let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();

@@ -74,6 +74,7 @@ pub fn handle_client_with_peer(
                 | "cipher_create"
                 | "cipher_update"
                 | "cipher_delete"
+                | "cipher_restore"
                 | "cipher_resolve"
                 | "sync"
         )
@@ -119,9 +120,23 @@ pub fn handle_client_with_peer(
             )?;
             return Ok(());
         }
+        if action == "cipher_restore" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before restoring a cipher.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
         if action == "cipher_resolve" {
             let verb = match req.get("purpose").and_then(Value::as_str) {
                 Some("edit") | Some("editing") => "editing",
+                Some("restore") | Some("restoring") => "restoring",
                 _ => "deleting",
             };
             writeln!(
@@ -388,9 +403,17 @@ pub fn handle_client_with_peer(
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },
+        "cipher_restore" => match state.vault_mgr.restore_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
         "cipher_resolve" => {
             let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            match state.vault_mgr.resolve_cipher_target_candidates(target) {
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            match state
+                .vault_mgr
+                .resolve_cipher_target_candidates_by_state(target, trash)
+            {
                 Ok(crate::vault::CipherTargetResolution::Exact(item)) => json!({
                     "ok": true,
                     "item": {

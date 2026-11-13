@@ -1484,6 +1484,29 @@ impl BitwardenApiClient {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()))
     }
+
+    /// Restore a soft-deleted cipher from the Trash (`PUT /ciphers/{id}/restore`).
+    pub fn restore_cipher(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/restore", self.urls.api_url, id);
+        let mut resp = client
+            .put(&url)
+            .header("Content-Length", "0")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Restore cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn decrypt_cipher_string(

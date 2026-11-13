@@ -517,6 +517,16 @@ enum VaultAction {
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
+    #[command(about = "Restore a soft-deleted cipher from the Trash")]
+    Restore {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target trashed cipher name or 32-character / UUID ID to restore"
+        )]
+        target: String,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
     #[command(about = "Edit an existing vault cipher")]
     Edit {
         #[arg(
@@ -2455,6 +2465,7 @@ fn main() -> ExitCode {
                         client_ctx.as_ref(),
                         is_interactive,
                         json,
+                        false,
                     ) {
                         Ok(item) => item,
                         Err(code) => return code,
@@ -2550,6 +2561,87 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                VaultAction::Restore { target, json } => {
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !json;
+
+                    let resolved = match resolve_target_cipher(
+                        &target,
+                        "restore",
+                        client_ctx.as_ref(),
+                        is_interactive,
+                        json,
+                        true,
+                    ) {
+                        Ok(item) => item,
+                        Err(code) => return code,
+                    };
+
+                    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+                    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+
+                    if resolved
+                        .get("organization_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({
+                                    "ok": false,
+                                    "error": "Organization ciphers are read-only.",
+                                }))
+                                .unwrap()
+                            );
+                        } else {
+                            eprintln!("Error: Organization ciphers are read-only.");
+                        }
+                        return ExitCode::FAILURE;
+                    }
+
+                    let mut daemon_req = json!({
+                        "action": "cipher_restore",
+                        "id": item_id,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
+                                let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
+                                println!("Restored cipher \"{}\" ({}).", name, id);
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to restore cipher");
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&json!({
+                                        "ok": false,
+                                        "error": err_msg,
+                                    }))
+                                    .unwrap()
+                                );
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
                 VaultAction::Edit {
                     target,
                     name,
@@ -2618,6 +2710,7 @@ fn main() -> ExitCode {
                         client_ctx.as_ref(),
                         is_interactive,
                         json,
+                        false,
                     ) {
                         Ok(item) => item,
                         Err(code) => return code,
@@ -3830,9 +3923,11 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         {
             let verb = match request.get("action").and_then(|a| a.as_str()) {
                 Some("cipher_delete") => "deleting",
+                Some("cipher_restore") => "restoring",
                 Some("cipher_update") => "editing",
                 Some("cipher_resolve") => match request.get("purpose").and_then(Value::as_str) {
                     Some("edit") | Some("editing") => "editing",
+                    Some("restore") | Some("restoring") => "restoring",
                     _ => "deleting",
                 },
                 _ => "creating",
@@ -3984,11 +4079,13 @@ fn resolve_target_cipher(
     client_ctx: Option<&omawarden::api::ClientContext>,
     is_interactive: bool,
     json: bool,
+    trash: bool,
 ) -> Result<Value, ExitCode> {
     let mut resolve_req = json!({
         "action": "cipher_resolve",
         "target": target,
         "purpose": purpose,
+        "trash": trash,
     });
     if let Some(ctx) = client_ctx {
         resolve_req["client"] = json!(ctx);
