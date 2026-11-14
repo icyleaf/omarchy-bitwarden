@@ -655,7 +655,7 @@ fn test_create_cipher_from_stdin_and_from_json() {
         true
     );
 
-    // 1. Test via stdin
+    // 1. Test via stdin without closing write end
     let raw_payload = json!({
         "type": 2,
         "name": "Note From Stdin",
@@ -670,9 +670,10 @@ fn test_create_cipher_from_stdin_and_from_json() {
         .spawn()
         .unwrap();
 
-    {
-        let mut stdin = cli_stdin.stdin.take().unwrap();
-        stdin.write_all(raw_payload.to_string().as_bytes()).unwrap();
+    // Write line without closing stdin to assert that create completes without EOF
+    if let Some(stdin) = cli_stdin.stdin.as_mut() {
+        writeln!(stdin, "{}", raw_payload).unwrap();
+        stdin.flush().unwrap();
     }
 
     let mut posted_stdin = false;
@@ -3372,9 +3373,21 @@ fn test_edit_cipher_stdin_rejects_empty_and_login_fields_on_note() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        {
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(payload.to_string().as_bytes()).unwrap();
+        // Write line without closing stdin, then wait with timeout
+        if let Some(stdin) = child.stdin.as_mut() {
+            writeln!(stdin, "{}", payload).unwrap();
+            stdin.flush().unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("vault edit --stdin hung waiting for stdin EOF!");
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
         child.wait_with_output().unwrap()
     };

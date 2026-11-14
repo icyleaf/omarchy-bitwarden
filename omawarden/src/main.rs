@@ -959,6 +959,23 @@ fn read_secret_stdin() -> String {
     String::new()
 }
 
+fn read_json_payload_stdin() -> zeroize::Zeroizing<String> {
+    let stdin = io::stdin();
+    let mut raw = String::new();
+    if stdin.lock().read_line(&mut raw).is_ok() {
+        let trimmed = raw.trim_end_matches(&['\r', '\n'][..]).trim();
+        // If the first line is already valid complete JSON (e.g. from Quickshell/scripts
+        // which don't close the stdin pipe), parse it directly without blocking on EOF.
+        if serde_json::from_str::<Value>(trimmed).is_ok() {
+            return zeroize::Zeroizing::new(trimmed.to_string());
+        }
+        let mut rest = String::new();
+        let _ = stdin.lock().read_to_string(&mut rest);
+        return zeroize::Zeroizing::new(format!("{}{}", raw, rest));
+    }
+    zeroize::Zeroizing::new(String::new())
+}
+
 fn read_clipboard_stdin() -> String {
     let stdin = io::stdin();
     let mut raw = String::new();
@@ -2403,9 +2420,7 @@ fn main() -> ExitCode {
                         }
                         None => {
                             let raw_json = if stdin {
-                                let mut buf = String::new();
-                                io::stdin().read_to_string(&mut buf).unwrap_or_default();
-                                zeroize::Zeroizing::new(buf)
+                                read_json_payload_stdin()
                             } else if let Some(path) = from_json {
                                 match std::fs::read_to_string(&path) {
                                     Ok(content) => zeroize::Zeroizing::new(content),
@@ -2877,9 +2892,7 @@ fn main() -> ExitCode {
 
                     let mut daemon_req = if has_json_payload {
                         let raw_json = if stdin {
-                            let mut buf = zeroize::Zeroizing::new(String::new());
-                            io::stdin().read_to_string(&mut buf).unwrap_or_default();
-                            buf
+                            read_json_payload_stdin()
                         } else if let Some(path) = from_json.as_ref() {
                             match std::fs::read_to_string(path) {
                                 Ok(content) => zeroize::Zeroizing::new(content),
