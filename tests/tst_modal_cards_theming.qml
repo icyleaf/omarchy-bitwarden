@@ -99,6 +99,26 @@ Item {
     borderColor: lattePopupBorder
   }
 
+  Components.CipherFormModal {
+    id: cipherModal
+    active: true
+    foreground: latteFg
+    accent: latteAccent
+    muted: latteMuted
+    cardBackground: lattePopupBg
+    borderColor: lattePopupBorder
+  }
+
+  Components.DeleteCipherModal {
+    id: deleteCipherModal
+    active: true
+    foreground: latteFg
+    accent: latteAccent
+    muted: latteMuted
+    cardBackground: lattePopupBg
+    borderColor: lattePopupBorder
+  }
+
   Components.ToastAlert {
     id: toast
     statusMessage: "Vault synced"
@@ -133,6 +153,8 @@ Item {
       check(sshApprovalModal.hasOwnProperty("cardBackground"), "SshApprovalModal should have cardBackground property")
       check(sshKeyModal.hasOwnProperty("cardBackground"), "SshKeyModal should have cardBackground property")
       check(releaseModal.hasOwnProperty("cardBackground"), "ReleaseNotesModal should have cardBackground property")
+      check(cipherModal.hasOwnProperty("cardBackground"), "CipherFormModal should have cardBackground property")
+      check(deleteCipherModal.hasOwnProperty("cardBackground"), "DeleteCipherModal should have cardBackground property")
 
       // 2. Card background colors should match lattePopupBg (#e6e9ef)
       check(paletteModal.cardBackground == lattePopupBg, "paletteModal cardBackground matches popup background token")
@@ -141,6 +163,8 @@ Item {
       check(sshApprovalModal.cardBackground == lattePopupBg, "sshApprovalModal cardBackground matches popup background token")
       check(sshKeyModal.cardBackground == lattePopupBg, "sshKeyModal cardBackground matches popup background token")
       check(releaseModal.cardBackground == lattePopupBg, "releaseModal cardBackground matches popup background token")
+      check(cipherModal.cardBackground == lattePopupBg, "cipherModal cardBackground matches popup background token")
+      check(deleteCipherModal.cardBackground == lattePopupBg, "deleteCipherModal cardBackground matches popup background token")
 
       if (failures > 0) {
         console.error("TOTAL FAILURES:", failures)
