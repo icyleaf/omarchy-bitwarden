@@ -345,6 +345,8 @@ Item {
   property bool showCipherFormModal: false
   property string cipherFormType: "login"
   property string cipherFormDefaultFolderId: ""
+  // Non-null while the cipher form is editing an existing personal cipher.
+  property var cipherFormEditItem: null
   // Set after a successful create so the reloaded list can select the new row.
   property string pendingSelectItemId: ""
   readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal
@@ -444,9 +446,14 @@ Item {
 
     root.showCipherFormModal = false
     root.cipherFormDefaultFolderId = ""
+    root.cipherFormEditItem = null
     root.pendingSelectItemId = ""
     if (cipherCreateProc.running) {
       cipherCreateProc.running = false
+      root.isBusy = false
+    }
+    if (cipherEditProc.running) {
+      cipherEditProc.running = false
       root.isBusy = false
     }
     if (cipherGenProc.running) {
@@ -535,6 +542,7 @@ Item {
       root.showPasswordGeneratorModal = false
       root.showCipherFormModal = false
       root.cipherFormDefaultFolderId = ""
+      root.cipherFormEditItem = null
       root.pendingSelectItemId = ""
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
@@ -609,6 +617,7 @@ Item {
     root.showPasswordGeneratorModal = false
     root.showCipherFormModal = false
     root.cipherFormDefaultFolderId = ""
+    root.cipherFormEditItem = null
     root.pendingSelectItemId = ""
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
@@ -1198,6 +1207,25 @@ Item {
     root.cipherFormType = cipherType === "note" ? "note" : "login"
     var scope = root.activeFolderScope || "all"
     root.cipherFormDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
+    root.cipherFormEditItem = null
+    root.showActionPalette = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherFormModal = true
+  }
+
+  function openCipherEditModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item) return
+    var typeName = item.type_name || ""
+    if (typeName !== "login" && typeName !== "note") return
+    if (item.organization_id) {
+      root.errorMessage = "Organization ciphers are read-only."
+      return
+    }
+    root.cipherFormType = typeName === "note" ? "note" : "login"
+    root.cipherFormDefaultFolderId = ""
+    root.cipherFormEditItem = item
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
@@ -1291,6 +1319,54 @@ Item {
     }
 
     root.statusMessage = "Cipher '" + createdName + "' created."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function submitCipherEdit(payload) {
+    if (!payload || cipherEditProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    var item = root.cipherFormEditItem
+    if (!item || !item.id) return
+    root.isBusy = true
+    if (cipherFormModalComponent) {
+      cipherFormModalComponent.isBusy = true
+      cipherFormModalComponent.errorMessage = ""
+    }
+    cipherEditProc.revision = root.vaultRevision
+    cipherEditProc.errorReported = false
+    cipherEditProc.lastStderr = ""
+    cipherEditProc.itemId = item.id
+    cipherEditProc.editedName = payload.name || item.name || ""
+    cipherEditProc.editedType = item.type_name === "note" ? "note" : "login"
+    cipherEditProc.editedFolderId = (payload.folder_id !== undefined) ? String(payload.folder_id || "") : String(item.folder_id || "")
+    cipherEditProc.payload = JSON.stringify(payload)
+    // Secrets travel over stdin only: argv carries just the resolved item id.
+    cipherEditProc.command = [root.helperPath, "vault", "edit", item.id, "--stdin", "--json"]
+    cipherEditProc.running = true
+  }
+
+  function handleCipherEditSuccess(data) {
+    root.isBusy = false
+    if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
+    root.showCipherFormModal = false
+
+    var receipt = (data && data.item) ? data.item : {}
+    var editedId = receipt.id || cipherEditProc.itemId
+    var editedName = receipt.name || cipherEditProc.editedName
+    root.cipherFormEditItem = null
+    root.pendingSelectItemId = editedId
+    root.revealCreatedCipher(cipherEditProc.editedType, cipherEditProc.editedFolderId)
+
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Cipher '" + editedName + "' saved on the server. Sync the vault to refresh the local copy."
+      // The sync completion reloads the list and applies the pending selection.
+      root.syncVault(true, true)
+      return
+    }
+
+    root.statusMessage = "Cipher '" + editedName + "' updated."
     root.invalidateVaultList()
     if (vaultListProc.running) vaultListProc.running = false
     root.loadVaultItems()
@@ -1725,6 +1801,15 @@ Item {
       if (item.identity.ssn) actions.push({ label: "Copy SSN", icon: "\uf292", shortcut: "", action: function() { root.copyToClipboard(item.identity.ssn, true, "SSN") } })
       if (item.identity.passportNumber) actions.push({ label: "Copy Passport Number", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.passportNumber, true, "passport") } })
       if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
+    }
+
+    if (item.type_name === "login" || item.type_name === "note") {
+      actions.push({
+        label: "Edit Item",
+        icon: "\uf044",
+        shortcut: "Ctrl+E",
+        action: function() { root.openCipherEditModal(item) }
+      })
     }
 
     if (item.notes) {
@@ -2324,9 +2409,12 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+E"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.hasActiveModal
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
         onActivated: {
-          root.openSshKeyModal("export", root.selectedItem)
+          var item = root.selectedItem
+          if (!item) return
+          if (item.type_name === "ssh_key") root.openSshKeyModal("export", item)
+          else root.openCipherEditModal(item)
         }
       }
 
@@ -2374,7 +2462,10 @@ Item {
         enabled: root.opened
         onActivated: {
           if (root.showCipherFormModal) {
-            if (!cipherFormModalComponent || !cipherFormModalComponent.isBusy) root.showCipherFormModal = false
+            if (!cipherFormModalComponent || !cipherFormModalComponent.isBusy) {
+              root.showCipherFormModal = false
+              root.cipherFormEditItem = null
+            }
           } else if (root.showPasswordGeneratorModal) {
             root.showPasswordGeneratorModal = false
           } else if (root.showPasswordHistoryModal) {
@@ -2428,6 +2519,7 @@ Item {
         if (root.showCipherFormModal) {
           if (event.key === Qt.Key_Escape && (!cipherFormModalComponent || !cipherFormModalComponent.isBusy)) {
             root.showCipherFormModal = false
+            root.cipherFormEditItem = null
             event.accepted = true
           }
           return
@@ -2525,8 +2617,9 @@ Item {
           } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.openFirstWebsite(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.hasActiveModal) {
-            root.openSshKeyModal("export", root.selectedItem)
+          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            if (root.selectedItem.type_name === "ssh_key") root.openSshKeyModal("export", root.selectedItem)
+            else root.openCipherEditModal(root.selectedItem)
             event.accepted = true
           } else if (event.key === Qt.Key_H && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             if (root.selectedItem.login && root.selectedItem.login.password_history && root.selectedItem.login.password_history.length > 0) {
@@ -2679,6 +2772,7 @@ Item {
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
                 onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
+                onEditRequested: function(item) { root.openCipherEditModal(item) }
                 onClosePreviewRequested: {
                   var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
                   root.activeAttachmentPreview = null
@@ -2963,14 +3057,15 @@ Item {
         }
       }
 
-      // 9. Create Login / Secure Note Modal Overlay (zero-argv stdin contract)
+      // 9. Create/Edit Login and Secure Note Modal (zero-argv stdin contract)
       CipherFormModal {
         id: cipherFormModalComponent
         active: root.showCipherFormModal
-        mode: "create"
+        mode: root.cipherFormEditItem ? "edit" : "create"
         cipherType: root.cipherFormType
         folders: root.getAvailableFolders()
         defaultFolderId: root.cipherFormDefaultFolderId
+        originalItem: root.cipherFormEditItem
         isEngineOutdated: root.isGeneratorEngineOutdated
         engineVersion: (root.cliHealth && root.cliHealth.version) || ""
         requiredVersion: root.minimumGeneratorEngineVersion
@@ -2980,10 +3075,16 @@ Item {
         muted: root.muted
         cardBackground: Commons.Color.popups.background
         borderColor: Commons.Color.popups.border
-        onSubmitRequested: function(payload) { root.submitCipherCreate(payload) }
+        onSubmitRequested: function(payload) {
+          if (root.cipherFormEditItem) root.submitCipherEdit(payload)
+          else root.submitCipherCreate(payload)
+        }
         onGeneratePasswordRequested: root.generateCipherPassword()
         onCloseRequested: {
-          if (!cipherFormModalComponent.isBusy) root.showCipherFormModal = false
+          if (!cipherFormModalComponent.isBusy) {
+            root.showCipherFormModal = false
+            root.cipherFormEditItem = null
+          }
         }
       }
     }
@@ -3153,6 +3254,79 @@ Item {
           cipherFormModalComponent.errorMessage = "Process exited with error code " + code
         } else if (!root.errorMessage) {
           root.errorMessage = "Cipher creation failed."
+        }
+      }
+    }
+  }
+
+  Process {
+    id: cipherEditProc
+    property string payload: ""
+    property int revision: 0
+    property string itemId: ""
+    property string editedType: "login"
+    property string editedFolderId: ""
+    property string editedName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherEditProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showCipherFormModal = false
+          root.cipherFormEditItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherEditProc.errorReported = true
+          root.handleCipherEditSuccess(data)
+          return
+        }
+        cipherEditProc.errorReported = true
+        root.isBusy = false
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherEditProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher update failed."
+        // Keep the modal open so the user can correct the conflict and retry.
+        if (cipherFormModalComponent) {
+          cipherFormModalComponent.isBusy = false
+          cipherFormModalComponent.errorMessage = errMsg
+        } else {
+          root.errorMessage = errMsg
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherEditProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherEditProc.errorReported) return
+      if (cipherEditProc.revision !== root.vaultRevision) return
+      root.isBusy = false
+      if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
+      if (code !== 0) {
+        if (cipherFormModalComponent && root.showCipherFormModal) {
+          cipherFormModalComponent.errorMessage = "Process exited with error code " + code
+        } else if (!root.errorMessage) {
+          root.errorMessage = "Cipher update failed."
         }
       }
     }

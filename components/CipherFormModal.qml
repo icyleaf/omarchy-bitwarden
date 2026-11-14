@@ -7,15 +7,19 @@ import qs.Commons as Commons
 
 // Create/edit form for personal Login and Secure Note ciphers.
 // Secrets are only ever emitted through `submitRequested`; the Overlay pipes
-// the payload to `omawarden vault create --stdin --json`, never via argv.
+// the payload to `omawarden vault create/edit --stdin --json`, never via argv.
 Rectangle {
   id: modalRoot
 
   property bool active: false
-  property string mode: "create" // "create" (edit mode is added by the edit slice)
+  property string mode: "create" // "create" | "edit"
   property string cipherType: "login" // "login" | "note"
   property var folders: [] // [{ id, name }]
   property string defaultFolderId: ""
+  // In edit mode this is the selected vault item. Saving diffs against it.
+  property var originalItem: null
+  // Linked (type 3) fields are read-only and never enter the update payload.
+  property var linkedFields: []
 
   property color foreground: Commons.Color.foreground
   property color accent: Commons.Color.accent
@@ -33,7 +37,8 @@ Rectangle {
 
   readonly property color textOnAccent: StatusPalette.textOn(accent)
   readonly property bool isLogin: cipherType === "login"
-  readonly property string title: mode === "edit" ? "Edit Item" : (isLogin ? "New Login" : "New Secure Note")
+  readonly property bool isEdit: mode === "edit"
+  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : "New Secure Note")
 
   // Editable form state.
   property string cipherName: ""
@@ -68,19 +73,84 @@ Rectangle {
     return ""
   }
 
+  function originalFields() {
+    var out = []
+    var src = (originalItem && originalItem.fields) ? originalItem.fields : []
+    for (var i = 0; i < src.length; i++) {
+      var field = src[i] || {}
+      out.push({
+        name: String(field.name || ""),
+        value: String(field.value || ""),
+        type: Number(field.type || 0)
+      })
+    }
+    return out
+  }
+
+  function originalUriValues() {
+    var out = []
+    if (!originalItem || !originalItem.login || !originalItem.login.uris) return out
+    var src = originalItem.login.uris
+    for (var i = 0; i < src.length; i++) {
+      var raw = src[i]
+      var value = (typeof raw === "string") ? raw : ((raw && raw.uri) ? raw.uri : "")
+      value = String(value || "").trim()
+      if (value.length > 0) out.push(value)
+    }
+    return out
+  }
+
   function resetForm() {
     errorMessage = ""
     isBusy = false
     isGeneratingPassword = false
     cipherName = ""
-    folderId = normalizeFolderId(defaultFolderId)
+    folderId = ""
     username = ""
     password = ""
     passwordRevealed = false
     notes = ""
     uriModel.clear()
-    uriModel.append({ uri: "" })
     fieldModel.clear()
+
+    var linked = []
+    if (isEdit && originalItem) {
+      cipherName = String(originalItem.name || "")
+      // Keep the stored folder id even if the folder list is momentarily
+      // incomplete, so an edit never silently moves the cipher to No Folder.
+      folderId = String(originalItem.folder_id || "")
+      notes = String(originalItem.notes || "")
+
+      if (isLogin && originalItem.login) {
+        username = String(originalItem.login.username || "")
+        password = String(originalItem.login.password || "")
+        var uris = originalItem.login.uris || []
+        for (var u = 0; u < uris.length; u++) {
+          var rawUri = uris[u]
+          var uriValue = (typeof rawUri === "string") ? rawUri : ((rawUri && rawUri.uri) ? rawUri.uri : "")
+          uriModel.append({ uri: String(uriValue || "") })
+        }
+      }
+
+      var fields = originalFields()
+      for (var f = 0; f < fields.length; f++) {
+        if (fields[f].type === 3) {
+          linked.push(fields[f])
+        } else {
+          fieldModel.append({
+            name: fields[f].name,
+            value: fields[f].value,
+            type: fields[f].type,
+            revealed: false
+          })
+        }
+      }
+    } else {
+      folderId = normalizeFolderId(defaultFolderId)
+    }
+
+    if (uriModel.count === 0) uriModel.append({ uri: "" })
+    linkedFields = linked
   }
 
   onActiveChanged: {
@@ -206,6 +276,8 @@ Rectangle {
       }
     }
 
+    if (isEdit && originalItem) return buildEditPayload(trimmedName)
+
     var payload = {
       cipher_type: cipherType,
       name: trimmedName,
@@ -240,11 +312,100 @@ Rectangle {
     return payload
   }
 
+  // Minimal dirty diff against the cipher being edited. An empty object means
+  // the user changed nothing, so the caller can dismiss without a subprocess.
+  function buildEditPayload(trimmedName) {
+    var payload = {}
+    var original = originalItem || {}
+
+    if (trimmedName !== String(original.name || "")) payload.name = trimmedName
+
+    var originalFolder = String(original.folder_id || "")
+    var currentFolder = String(folderId || "")
+    if (currentFolder !== originalFolder) payload.folder_id = currentFolder
+
+    var originalNotes = String(original.notes || "")
+    if (String(notes || "") !== originalNotes) payload.notes = String(notes || "")
+
+    if (isLogin) {
+      var login = original.login || {}
+
+      if (String(username || "") !== String(login.username || "")) {
+        payload.username = String(username || "")
+      }
+      if (String(password || "") !== String(login.password || "")) {
+        payload.password = String(password || "")
+      }
+
+      var originalUris = originalUriValues()
+      var currentUris = []
+      for (var u = 0; u < uriModel.count; u++) {
+        var uri = String(uriModel.get(u).uri || "").trim()
+        if (uri.length > 0) currentUris.push(uri)
+      }
+      var urisMatch = originalUris.length === currentUris.length
+      if (urisMatch) {
+        for (var c = 0; c < currentUris.length; c++) {
+          if (currentUris[c] !== originalUris[c]) {
+            urisMatch = false
+            break
+          }
+        }
+      }
+      if (!urisMatch) {
+        if (currentUris.length === 0 && originalUris.length > 0) payload.clear_uris = true
+        else payload.uris = currentUris
+      }
+    }
+
+    // Linked (type 3) fields are deliberately absent from both `fields` and
+    // `remove_fields`, so the daemon preserves them untouched.
+    var originalEditable = []
+    var originalFieldList = originalFields()
+    for (var o = 0; o < originalFieldList.length; o++) {
+      if (originalFieldList[o].type !== 3) originalEditable.push(originalFieldList[o])
+    }
+
+    var currentNames = {}
+    var upserts = []
+    for (var i = 0; i < fieldModel.count; i++) {
+      var item = fieldModel.get(i)
+      var name = String(item.name || "").trim()
+      var value = String(item.value || "")
+      currentNames[name] = true
+
+      var match = null
+      for (var m = 0; m < originalEditable.length; m++) {
+        if (originalEditable[m].name === name) {
+          match = originalEditable[m]
+          break
+        }
+      }
+      if (!match || match.type !== item.type || match.value !== value) {
+        upserts.push({ name: name, value: value, type: item.type })
+      }
+    }
+
+    var removals = []
+    for (var r = 0; r < originalEditable.length; r++) {
+      if (!currentNames[originalEditable[r].name]) removals.push(originalEditable[r].name)
+    }
+
+    if (removals.length > 0) payload.remove_fields = removals
+    if (upserts.length > 0) payload.fields = upserts
+
+    return payload
+  }
+
   function submit() {
     if (isBusy) return
     errorMessage = ""
     var payload = buildPayload()
     if (!payload) return
+    if (isEdit && Object.keys(payload).length === 0) {
+      closeRequested()
+      return
+    }
     submitRequested(payload)
   }
 
@@ -1088,6 +1249,74 @@ Rectangle {
                 }
               }
             }
+
+            // Linked (Type 3) fields are read-only: they reference other item
+            // properties and must never be rewritten by the edit diff.
+            Repeater {
+              model: modalRoot.linkedFields
+
+              delegate: ColumnLayout {
+                required property var modelData
+                Layout.fillWidth: true
+                spacing: 4
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 6
+
+                  Rectangle {
+                    implicitHeight: 22
+                    implicitWidth: linkedTypeLabel.implicitWidth + 10
+                    radius: 3
+                    color: StatusPalette.tint(StatusPalette.trace, 0.15)
+                    border.color: StatusPalette.trace
+                    border.width: 1
+
+                    Text {
+                      id: linkedTypeLabel
+                      anchors.centerIn: parent
+                      text: "Linked"
+                      color: StatusPalette.labelOnTint(StatusPalette.trace, 0.15, modalRoot.cardBackground)
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  Text {
+                    text: modelData.name || "Field"
+                    color: modalRoot.muted
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+
+                  Text {
+                    text: "read-only"
+                    color: modalRoot.muted
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Rectangle {
+                  Layout.fillWidth: true
+                  height: 30
+                  radius: 4
+                  color: Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.04)
+                  border.color: modalRoot.borderColor
+                  border.width: 1
+
+                  Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    verticalAlignment: Text.AlignVCenter
+                    text: modelData.value || ""
+                    color: modalRoot.muted
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -1145,7 +1374,7 @@ Rectangle {
             }
 
             Text {
-              text: modalRoot.isBusy ? "Creating..." : (modalRoot.mode === "edit" ? "Save Changes" : "Create")
+              text: modalRoot.isBusy ? (modalRoot.isEdit ? "Saving..." : "Creating...") : (modalRoot.isEdit ? "Save Changes" : "Create")
               color: modalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold

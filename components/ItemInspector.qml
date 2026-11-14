@@ -33,6 +33,7 @@ ScrollView {
   signal viewAttachmentRequested(var item, var att)
   signal downloadAttachmentRequested(var item, var att)
   signal exportSshKeyRequested(var item)
+  signal editRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
   signal togglePrivateKeyRevealed()
@@ -610,6 +611,46 @@ ScrollView {
             elide: Text.ElideRight
             Layout.fillWidth: true
             Layout.preferredWidth: 0
+          }
+        }
+
+        // Edit is only offered for the cipher types the Overlay form supports.
+        // Organization ownership is enforced by the root before the modal opens.
+        Rectangle {
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.preferredWidth: editButtonRow.implicitWidth + 16
+          Layout.preferredHeight: 24
+          Layout.alignment: Qt.AlignTop
+          radius: 4
+          color: editMouse.containsMouse ? Qt.rgba(inspectorRoot.accent.r, inspectorRoot.accent.g, inspectorRoot.accent.b, 0.18) : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.06)
+          border.color: inspectorRoot.borderColor
+          border.width: 1
+
+          RowLayout {
+            id: editButtonRow
+            anchors.centerIn: parent
+            spacing: 4
+
+            Text {
+              text: "\uf044"
+              font.family: inspectorRoot.fontFamily
+              font.pixelSize: Style.font.caption
+              color: inspectorRoot.accent
+            }
+
+            Text {
+              text: "Edit"
+              font.pixelSize: Style.font.caption
+              color: inspectorRoot.accent
+            }
+          }
+
+          MouseArea {
+            id: editMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: inspectorRoot.editRequested(inspectorRoot.item)
           }
         }
       }
