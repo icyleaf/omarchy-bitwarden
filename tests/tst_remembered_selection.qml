@@ -155,6 +155,9 @@ Item {
     warmOpen("beta")
     overlay.requestFieldCopy("primary")
     overlay.doLock()
+    check(overlay.authState.status === "unlocked" && !overlay.pendingFieldCopy && !overlay.highlightedItem,
+          "pending lock claimed success or retained the selected credential")
+    processEnding("auth", "lock").reply({ ok: true, status: "locked", epoch_advanced: true })
     statusProc.reply(session)
     check(overlay.authState.status === "locked" && !overlay.pendingFieldCopy && !overlay.highlightedItem, "a stale status undid manual lock")
 
