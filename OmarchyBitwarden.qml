@@ -1297,7 +1297,10 @@ Item {
       return
     }
     if (!CipherMutation.canMutate(item)) return
-    if (cipherFavoriteProc.running) return
+    if (cipherFavoriteProc.running) {
+      root.statusMessage = "Favorite update in progress..."
+      return
+    }
 
     var itemId = item.id
     var itemName = item.name || ""
@@ -2956,6 +2959,7 @@ Item {
                 showWebsiteIcons: root.showWebsiteIcons
                 visible: root.selectedItem !== null
                 item: root.selectedItem
+                isFavoriteMutating: cipherFavoriteProc.running && cipherFavoriteProc.itemId === (root.selectedItem ? root.selectedItem.id : "")
                 currentTotp: root.currentTotp
                 showPasswordRevealed: root.showPasswordRevealed
                 showPrivateKeyRevealed: root.showPrivateKeyRevealed

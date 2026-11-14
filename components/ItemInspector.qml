@@ -26,6 +26,7 @@ ScrollView {
   property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
   property bool showWebsiteIcons: false
+  property bool isFavoriteMutating: false
   readonly property int keyPixelSize: Style.font.caption
   readonly property int valuePixelSize: Style.font.body
 
@@ -603,10 +604,12 @@ ScrollView {
         GhostIconButton {
           objectName: "favoriteButton"
           visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          isBusy: inspectorRoot.isFavoriteMutating
+          enabled: !inspectorRoot.isFavoriteMutating
           Layout.alignment: Qt.AlignTop
           iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
           iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
-          tooltip: (inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)"
+          tooltip: inspectorRoot.isFavoriteMutating ? "Updating favorite..." : ((inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)")
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
         }

@@ -26,6 +26,13 @@ Item {
   property int confirmCount: 0
   property bool lastPermanent: false
   property int closeCount: 0
+  property int ghostClickCount: 0
+
+  Components.GhostIconButton {
+    id: testGhostBtn
+    iconText: "\uf005"
+    onClicked: testRunner.ghostClickCount++
+  }
 
   Components.DeleteCipherModal {
     id: deleteModal
@@ -179,6 +186,18 @@ Item {
     check(deleteModal.errorMessage === "", "reopening clears a stale error banner")
 
     // ------------------------------------------------------------------
+    // 5b. GhostIconButton busy guards
+    // ------------------------------------------------------------------
+    check(testGhostBtn.isBusy === false, "ghost button defaults to idle")
+    testGhostBtn.clicked()
+    check(testRunner.ghostClickCount === 1, "idle ghost button emits clicked")
+    testGhostBtn.isBusy = true
+    check(testGhostBtn.isBusy === true, "ghost button can be set busy")
+    check(testGhostBtn.opacity === 0.6, "busy ghost button dims opacity to 0.6")
+    testGhostBtn.isBusy = false
+    check(testGhostBtn.opacity === 1.0, "idle ghost button restores opacity to 1.0")
+
+    // ------------------------------------------------------------------
     // 6. Root wiring (source checks)
     // ------------------------------------------------------------------
     var src = readSource(Qt.resolvedUrl("../OmarchyBitwarden.qml"))
@@ -264,6 +283,10 @@ Item {
           "favorite applies optimistically before the process starts")
     check(src.indexOf("root.updatingResults = true") !== -1,
           "optimistic updates guard the reveal state")
+    check(src.indexOf('root.statusMessage = "Favorite update in progress..."') !== -1,
+          "root reports in-progress status message when toggle called while mutating")
+    check(src.indexOf("isFavoriteMutating: cipherFavoriteProc.running && cipherFavoriteProc.itemId === (root.selectedItem ? root.selectedItem.id : \"\")") !== -1,
+          "root passes scoped isFavoriteMutating to ItemInspector")
 
     var escapeWindow = sourceWindow(src, "if (root.showDeleteCipherModal) {", 0, 300)
     check(escapeWindow.indexOf("!deleteCipherModalComponent.isBusy") !== -1,
@@ -282,6 +305,12 @@ Item {
           "Card actions remain copy-only")
 
     var inspectorSrc = readSource(Qt.resolvedUrl("../components/ItemInspector.qml"))
+    check(inspectorSrc.indexOf("property bool isFavoriteMutating: false") !== -1,
+          "ItemInspector declares isFavoriteMutating")
+    check(inspectorSrc.indexOf("isBusy: inspectorRoot.isFavoriteMutating") !== -1,
+          "favorite button binds isBusy to isFavoriteMutating")
+    check(inspectorSrc.indexOf("enabled: !inspectorRoot.isFavoriteMutating") !== -1,
+          "favorite button disables while mutating")
     check(inspectorSrc.indexOf("signal favoriteToggled(var item)") !== -1,
           "ItemInspector declares favoriteToggled")
     check(inspectorSrc.indexOf("signal deleteRequested(var item)") !== -1,
