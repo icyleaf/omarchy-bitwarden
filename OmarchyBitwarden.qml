@@ -342,7 +342,12 @@ Item {
   property var activePasswordHistoryItem: null
   property bool showPasswordGeneratorModal: false
   property string passwordGeneratorModalMode: "password"
-  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal
+  property bool showCipherFormModal: false
+  property string cipherFormType: "login"
+  property string cipherFormDefaultFolderId: ""
+  // Set after a successful create so the reloaded list can select the new row.
+  property string pendingSelectItemId: ""
+  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -437,6 +442,17 @@ Item {
     root.showPasswordHistoryModal = false
     root.activePasswordHistoryItem = null
 
+    root.showCipherFormModal = false
+    root.cipherFormDefaultFolderId = ""
+    root.pendingSelectItemId = ""
+    if (cipherCreateProc.running) {
+      cipherCreateProc.running = false
+      root.isBusy = false
+    }
+    if (cipherGenProc.running) {
+      cipherGenProc.running = false
+    }
+
     root.showPasswordGeneratorModal = false
     if (passwordGeneratorModalComponent) {
       passwordGeneratorModalComponent.generatedPassword = ""
@@ -517,6 +533,9 @@ Item {
       root.showSshKeyModal = false
       root.showPasswordHistoryModal = false
       root.showPasswordGeneratorModal = false
+      root.showCipherFormModal = false
+      root.cipherFormDefaultFolderId = ""
+      root.pendingSelectItemId = ""
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
       root.showCardNumberRevealed = false
@@ -588,6 +607,9 @@ Item {
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
     root.showPasswordGeneratorModal = false
+    root.showCipherFormModal = false
+    root.cipherFormDefaultFolderId = ""
+    root.pendingSelectItemId = ""
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1159,10 +1181,132 @@ Item {
     }
   }
 
+  onShowCipherFormModalChanged: {
+    if (!root.showCipherFormModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
   function openPasswordGeneratorModal(mode) {
     root.passwordGeneratorModalMode = mode || "password"
     root.showActionPalette = false
     root.showPasswordGeneratorModal = true
+  }
+
+  function openCipherCreateModal(cipherType) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.cipherFormType = cipherType === "note" ? "note" : "login"
+    var scope = root.activeFolderScope || "all"
+    root.cipherFormDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
+    root.showActionPalette = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherFormModal = true
+  }
+
+  function getAvailableFolders() {
+    var items = root.rawVaultItems || []
+    var seen = {}
+    var list = []
+    for (var i = 0; i < items.length; i++) {
+      var id = items[i].folder_id
+      if (!id || seen[id]) continue
+      seen[id] = true
+      list.push({ id: id, name: items[i].folder_name || "Folder" })
+    }
+    list.sort(function(a, b) {
+      return a.name.localeCompare(b.name)
+    })
+    return list
+  }
+
+  function submitCipherCreate(payload) {
+    if (!payload || cipherCreateProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.isBusy = true
+    if (cipherFormModalComponent) {
+      cipherFormModalComponent.isBusy = true
+      cipherFormModalComponent.errorMessage = ""
+    }
+    cipherCreateProc.revision = root.vaultRevision
+    cipherCreateProc.errorReported = false
+    cipherCreateProc.lastStderr = ""
+    cipherCreateProc.createdType = payload.cipher_type === "note" ? "note" : "login"
+    cipherCreateProc.createdFolderId = payload.folder_id || ""
+    cipherCreateProc.createdName = payload.name || ""
+    cipherCreateProc.payload = JSON.stringify(payload)
+    // Secrets travel over stdin only: argv stays free of plaintext.
+    cipherCreateProc.command = [root.helperPath, "vault", "create", "--stdin", "--json"]
+    cipherCreateProc.running = true
+  }
+
+  function revealCreatedCipher(cipherType, folderId) {
+    // Drop only the filters that would hide the new personal cipher.
+    if (root.searchQuery) root.searchQuery = ""
+    if (root.activeVaultScope !== "all" && root.activeVaultScope !== "personal") {
+      root.activeVaultScope = "all"
+    }
+    var category = cipherType === "note" ? "note" : "login"
+    if (root.activeCategory !== "all" && root.activeCategory !== category) {
+      root.activeCategory = "all"
+    }
+    if (root.activeFolderScope !== "all") {
+      var scopeMatches = root.activeFolderScope === "none" ? !folderId : root.activeFolderScope === folderId
+      if (!scopeMatches) root.activeFolderScope = "all"
+    }
+  }
+
+  function applyPendingCipherSelection() {
+    var id = root.pendingSelectItemId
+    if (!id) return false
+    var rows = root.filteredItems || []
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].id === id) {
+        root.pendingSelectItemId = ""
+        root.selectedIndex = i
+        return true
+      }
+    }
+    // The reload that carried this id may predate the server receipt; keep it
+    // for the next reload instead of silently losing the selection.
+    return false
+  }
+
+  function handleCipherCreateSuccess(data) {
+    root.isBusy = false
+    if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
+    root.showCipherFormModal = false
+
+    var receipt = (data && data.item) ? data.item : {}
+    var newId = receipt.id || ""
+    var createdName = cipherCreateProc.createdName
+    root.pendingSelectItemId = newId
+    root.revealCreatedCipher(cipherCreateProc.createdType, cipherCreateProc.createdFolderId)
+
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Cipher '" + createdName + "' saved on the server. Sync the vault to refresh the local copy."
+      // The sync completion reloads the list and applies the pending selection.
+      root.syncVault(true, true)
+      return
+    }
+
+    root.statusMessage = "Cipher '" + createdName + "' created."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function generateCipherPassword() {
+    if (!cipherFormModalComponent) return
+    var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
+    if (cliVer && root.compareSemVer(cliVer, root.minimumGeneratorEngineVersion) < 0) {
+      cipherFormModalComponent.isGeneratingPassword = false
+      cipherFormModalComponent.errorMessage = "omawarden engine is outdated (v" + cliVer + "). Please upgrade omawarden to >= " + root.minimumGeneratorEngineVersion + " to support credential generation."
+      return
+    }
+    if (cipherGenProc.running) cipherGenProc.running = false
+    cipherGenProc.command = [root.helperPath, "generate", "--json", "-l", "16"]
+    cipherGenProc.running = true
   }
 
   onSelectedItemChanged: root.handleSelectedItemChanged()
@@ -1440,6 +1584,8 @@ Item {
   function getAvailableActions(item) {
     var actions = []
     if (!item) {
+      actions.push({ label: "Create Login", icon: "\uf067", shortcut: "Ctrl+N", action: function() { root.openCipherCreateModal("login") } })
+      actions.push({ label: "Create Secure Note", icon: "\uf0f6", shortcut: "", action: function() { root.openCipherCreateModal("note") } })
       actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
       actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
       actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
@@ -1718,6 +1864,8 @@ Item {
       })
     }
 
+    actions.push({ label: "Create Login", icon: "\uf067", shortcut: "Ctrl+N", action: function() { root.openCipherCreateModal("login") } })
+    actions.push({ label: "Create Secure Note", icon: "\uf0f6", shortcut: "", action: function() { root.openCipherCreateModal("note") } })
     actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
     actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
@@ -2143,6 +2291,14 @@ Item {
       }
 
       Shortcut {
+        sequence: "Ctrl+N"
+        enabled: root.opened && root.effectiveView === "search" && !root.hasActiveModal
+        onActivated: {
+          root.openCipherCreateModal(root.activeCategory === "note" ? "note" : "login")
+        }
+      }
+
+      Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
         enabled: root.opened && root.effectiveView === "search" && root.highlightedItem !== null && !root.hasActiveModal
         onActivated: root.requestFieldCopy("totp")
@@ -2217,7 +2373,9 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showPasswordGeneratorModal) {
+          if (root.showCipherFormModal) {
+            if (!cipherFormModalComponent || !cipherFormModalComponent.isBusy) root.showCipherFormModal = false
+          } else if (root.showPasswordGeneratorModal) {
             root.showPasswordGeneratorModal = false
           } else if (root.showPasswordHistoryModal) {
             root.showPasswordHistoryModal = false
@@ -2265,6 +2423,14 @@ Item {
             event.accepted = true
             return
           }
+        }
+
+        if (root.showCipherFormModal) {
+          if (event.key === Qt.Key_Escape && (!cipherFormModalComponent || !cipherFormModalComponent.isBusy)) {
+            root.showCipherFormModal = false
+            event.accepted = true
+          }
+          return
         }
 
         if (root.showSshKeyModal) {
@@ -2350,6 +2516,9 @@ Item {
           } else if (event.key === Qt.Key_G && root.effectiveView === "search" && !root.hasActiveModal) {
             root.openPasswordGeneratorModal("password")
             event.accepted = true
+          } else if (event.key === Qt.Key_N && root.effectiveView === "search" && !root.hasActiveModal) {
+            root.openCipherCreateModal(root.activeCategory === "note" ? "note" : "login")
+            event.accepted = true
           } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.toggleItemRevealed()
             event.accepted = true
@@ -2411,6 +2580,7 @@ Item {
           onVaultScopeSelected: function(scope) { root.activeVaultScope = scope }
           onFolderScopeSelected: function(scope) { root.activeFolderScope = scope }
           onCreateSshKeyRequested: { root.openSshKeyModal("create", null) }
+          onCreateCipherRequested: function(cipherType) { root.openCipherCreateModal(cipherType) }
           onImportSshKeyRequested: { root.openSshKeyModal("import", null) }
           onClearSearchRequested: {
             root.searchQuery = ""
@@ -2792,6 +2962,30 @@ Item {
           }
         }
       }
+
+      // 9. Create Login / Secure Note Modal Overlay (zero-argv stdin contract)
+      CipherFormModal {
+        id: cipherFormModalComponent
+        active: root.showCipherFormModal
+        mode: "create"
+        cipherType: root.cipherFormType
+        folders: root.getAvailableFolders()
+        defaultFolderId: root.cipherFormDefaultFolderId
+        isEngineOutdated: root.isGeneratorEngineOutdated
+        engineVersion: (root.cliHealth && root.cliHealth.version) || ""
+        requiredVersion: root.minimumGeneratorEngineVersion
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onSubmitRequested: function(payload) { root.submitCipherCreate(payload) }
+        onGeneratePasswordRequested: root.generateCipherPassword()
+        onCloseRequested: {
+          if (!cipherFormModalComponent.isBusy) root.showCipherFormModal = false
+        }
+      }
     }
   }
 
@@ -2892,6 +3086,120 @@ Item {
     }
     passwordGenProc.command = cmd
     passwordGenProc.running = true
+  }
+
+  Process {
+    id: cipherCreateProc
+    property string payload: ""
+    property int revision: 0
+    property string createdType: "login"
+    property string createdFolderId: ""
+    property string createdName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherCreateProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showCipherFormModal = false
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherCreateProc.errorReported = true
+          root.handleCipherCreateSuccess(data)
+          return
+        }
+        cipherCreateProc.errorReported = true
+        root.isBusy = false
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherCreateProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher creation failed."
+        if (cipherFormModalComponent) {
+          cipherFormModalComponent.isBusy = false
+          cipherFormModalComponent.errorMessage = errMsg
+        } else {
+          root.errorMessage = errMsg
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherCreateProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherCreateProc.errorReported) return
+      if (cipherCreateProc.revision !== root.vaultRevision) return
+      root.isBusy = false
+      if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
+      if (code !== 0) {
+        if (cipherFormModalComponent && root.showCipherFormModal) {
+          cipherFormModalComponent.errorMessage = "Process exited with error code " + code
+        } else if (!root.errorMessage) {
+          root.errorMessage = "Cipher creation failed."
+        }
+      }
+    }
+  }
+
+  Process {
+    id: cipherGenProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!cipherFormModalComponent) return
+        cipherFormModalComponent.isGeneratingPassword = false
+        var out = (text || "").trim()
+        if (!out) return
+        try {
+          var data = JSON.parse(out)
+          if (data && data.ok) {
+            cipherFormModalComponent.errorMessage = ""
+            cipherFormModalComponent.setGeneratedPassword(data.password || "")
+          } else if (data && data.error) {
+            cipherFormModalComponent.errorMessage = data.error
+          }
+        } catch (e) {
+          cipherFormModalComponent.errorMessage = "Failed to parse generated password."
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.handleProcessStderr(text, "omawarden:generate")
+        if (!cipherFormModalComponent) return
+        cipherFormModalComponent.isGeneratingPassword = false
+        var err = (text || "").trim()
+        if (err && !cipherFormModalComponent.errorMessage) {
+          cipherFormModalComponent.errorMessage = err.replace(/^Error:\s*/i, "")
+        }
+      }
+    }
+    onExited: function(code) {
+      if (!cipherFormModalComponent) return
+      cipherFormModalComponent.isGeneratingPassword = false
+      if (code !== 0 && !cipherFormModalComponent.errorMessage) {
+        cipherFormModalComponent.errorMessage = "Failed to generate password."
+      }
+    }
   }
 
   Process {
@@ -3708,6 +4016,7 @@ Item {
             if (!fFound) root.activeFolderScope = "all"
           }
           root.filterVaultItems(false)
+          root.applyPendingCipherSelection()
           Qt.callLater(function() {
             if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
               searchHeader.searchField.forceActiveFocus()

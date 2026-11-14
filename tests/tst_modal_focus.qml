@@ -23,8 +23,9 @@ Item {
   property bool showSshKeyModal: false
   property bool showPasswordHistoryModal: false
   property bool showPasswordGeneratorModal: false
+  property bool showCipherFormModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal
+  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal
 
   property int searchFocusRestoredCount: 0
 
@@ -104,12 +105,25 @@ Item {
     showPasswordGeneratorModal = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Password Generator modal")
 
-    // 5. No modals: focus restore executes
+    // 6. Cipher creation modal active
+    showCipherFormModal = true
+    check(hasActiveModal === true, "hasActiveModal is true when showCipherFormModal is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Cipher Form modal")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Cipher Form modal")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Cipher Form modal is active")
+
+    showCipherFormModal = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Cipher Form modal")
+
+    // 7. No modals: focus restore executes
     searchFocusRestoredCount = 0
     simulateFocusRestore()
     check(searchFocusRestoredCount === 1, "Background focus restore proceeds when no modals are active")
 
-    // 6. Test legacy unguarded behavior vs guarded behavior
+    // 8. Test legacy unguarded behavior vs guarded behavior
     // The bug was: condition only checked !showActionPalette
     var legacyGuardSshModal = (!showActionPalette) // would be true even if showSshKeyModal is true!
     showSshKeyModal = true
