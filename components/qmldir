@@ -3,6 +3,7 @@ ActionPaletteModal 1.0 ActionPaletteModal.qml
 AuthView 1.0 AuthView.qml
 CategoryTabBar 1.0 CategoryTabBar.qml
 CipherFormModal 1.0 CipherFormModal.qml
+DeleteCipherModal 1.0 DeleteCipherModal.qml
 DependencyCheckView 1.0 DependencyCheckView.qml
 EmptyInspector 1.0 EmptyInspector.qml
 FooterBar 1.0 FooterBar.qml

@@ -130,6 +130,8 @@ Rectangle {
                 else if (event.key === Qt.Key_T) pressedKey = "Ctrl+T"
                 else if (event.key === Qt.Key_O) pressedKey = "Ctrl+O"
                 else if (event.key === Qt.Key_H) pressedKey = "Ctrl+H"
+                else if (event.key === Qt.Key_B) pressedKey = "Ctrl+B"
+                else if (event.key === Qt.Key_D) pressedKey = "Ctrl+D"
 
                 if (pressedKey) {
                   for (var i = 0; i < filtered.length; i++) {

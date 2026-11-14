@@ -24,8 +24,9 @@ Item {
   property bool showPasswordHistoryModal: false
   property bool showPasswordGeneratorModal: false
   property bool showCipherFormModal: false
+  property bool showDeleteCipherModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal
+  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal || showDeleteCipherModal
 
   property int searchFocusRestoredCount: 0
 
@@ -117,6 +118,19 @@ Item {
 
     showCipherFormModal = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Cipher Form modal")
+
+    // 6b. Cipher delete confirmation modal active
+    showDeleteCipherModal = true
+    check(hasActiveModal === true, "hasActiveModal is true when showDeleteCipherModal is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Delete Cipher modal")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Delete Cipher modal")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Delete Cipher modal is active")
+
+    showDeleteCipherModal = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Delete Cipher modal")
 
     // 7. No modals: focus restore executes
     searchFocusRestoredCount = 0

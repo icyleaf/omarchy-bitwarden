@@ -8,6 +8,7 @@ import qs.Commons as Commons
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
 import "./components/CardFormatter.js" as CardFormatter
+import "./components/CipherMutation.js" as CipherMutation
 
 Item {
   id: root
@@ -349,7 +350,9 @@ Item {
   property var cipherFormEditItem: null
   // Set after a successful create so the reloaded list can select the new row.
   property string pendingSelectItemId: ""
-  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal
+  property bool showDeleteCipherModal: false
+  property var deleteCipherItem: null
+  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal || root.showDeleteCipherModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -460,6 +463,14 @@ Item {
       cipherGenProc.running = false
     }
 
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+    if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
+    if (cipherDeleteProc.running) {
+      cipherDeleteProc.running = false
+      root.isBusy = false
+    }
+
     root.showPasswordGeneratorModal = false
     if (passwordGeneratorModalComponent) {
       passwordGeneratorModalComponent.generatedPassword = ""
@@ -544,6 +555,8 @@ Item {
       root.cipherFormDefaultFolderId = ""
       root.cipherFormEditItem = null
       root.pendingSelectItemId = ""
+      root.showDeleteCipherModal = false
+      root.deleteCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
       root.showCardNumberRevealed = false
@@ -619,6 +632,8 @@ Item {
     root.cipherFormDefaultFolderId = ""
     root.cipherFormEditItem = null
     root.pendingSelectItemId = ""
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1196,6 +1211,12 @@ Item {
     }
   }
 
+  onShowDeleteCipherModalChanged: {
+    if (!root.showDeleteCipherModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
   function openPasswordGeneratorModal(mode) {
     root.passwordGeneratorModalMode = mode || "password"
     root.showActionPalette = false
@@ -1230,6 +1251,138 @@ Item {
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
     root.showCipherFormModal = true
+  }
+
+  // Returns the read-only error for ciphers the Overlay must not mutate, or an
+  // empty string when the cipher can be favorited/deleted.
+  function cipherMutationGuard(item) {
+    if (!CipherMutation.isMutableType(item)) return ""
+    if (CipherMutation.isOrganizationOwned(item)) return "Organization ciphers are read-only."
+    return ""
+  }
+
+  function openDeleteCipherModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item) return
+    var guard = root.cipherMutationGuard(item)
+    if (guard) {
+      root.errorMessage = guard
+      return
+    }
+    if (!CipherMutation.canMutate(item)) return
+    root.deleteCipherItem = item
+    root.showActionPalette = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherFormModal = false
+    root.showDeleteCipherModal = true
+  }
+
+  // Applies the optimistic favorite flag to both the raw list and the visible
+  // rows. Rollback simply calls this again with the previous value.
+  function applyCipherFavorite(itemId, favorite) {
+    root.updatingResults = true
+    root.rawVaultItems = CipherMutation.withFavorite(root.rawVaultItems, itemId, favorite)
+    root.filteredItems = CipherMutation.withFavorite(root.filteredItems, itemId, favorite)
+    root.updatingResults = false
+    root.updateAvailableActions()
+  }
+
+  function toggleCipherFavorite(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item || !item.id) return
+    var guard = root.cipherMutationGuard(item)
+    if (guard) {
+      root.errorMessage = guard
+      return
+    }
+    if (!CipherMutation.canMutate(item)) return
+    if (cipherFavoriteProc.running) return
+
+    var itemId = item.id
+    var itemName = item.name || ""
+    var previousFavorite = Boolean(item.favorite)
+    var nextFavorite = CipherMutation.nextFavorite(item)
+
+    root.applyCipherFavorite(itemId, nextFavorite)
+    cipherFavoriteProc.revision = root.vaultRevision
+    cipherFavoriteProc.errorReported = false
+    cipherFavoriteProc.lastStderr = ""
+    cipherFavoriteProc.itemId = itemId
+    cipherFavoriteProc.itemName = itemName
+    cipherFavoriteProc.previousFavorite = previousFavorite
+    cipherFavoriteProc.nextFavorite = nextFavorite
+    cipherFavoriteProc.payload = JSON.stringify({ favorite: nextFavorite })
+    // The update travels over stdin so no secret ever reaches argv.
+    cipherFavoriteProc.command = [root.helperPath, "vault", "edit", itemId, "--stdin", "--json"]
+    cipherFavoriteProc.running = true
+  }
+
+  function handleCipherFavoriteSuccess(data) {
+    var name = cipherFavoriteProc.itemName
+    var next = cipherFavoriteProc.nextFavorite
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Favorite change for '" + name + "' saved on the server. Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = next ? ("Added '" + name + "' to favorites.") : ("Removed '" + name + "' from favorites.")
+  }
+
+  function handleCipherFavoriteFailure(message) {
+    root.applyCipherFavorite(cipherFavoriteProc.itemId, cipherFavoriteProc.previousFavorite)
+    root.statusMessage = ""
+    root.errorMessage = message
+  }
+
+  function submitCipherDelete(permanent) {
+    var item = root.deleteCipherItem
+    if (!item || !item.id || cipherDeleteProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.isBusy = true
+    if (deleteCipherModalComponent) {
+      deleteCipherModalComponent.isBusy = true
+      deleteCipherModalComponent.errorMessage = ""
+    }
+    cipherDeleteProc.revision = root.vaultRevision
+    cipherDeleteProc.errorReported = false
+    cipherDeleteProc.lastStderr = ""
+    cipherDeleteProc.itemId = item.id
+    cipherDeleteProc.itemName = item.name || ""
+    cipherDeleteProc.permanent = Boolean(permanent)
+    var cmd = [root.helperPath, "vault", "delete", item.id, "--yes", "--json"]
+    if (permanent) cmd.push("--permanent")
+    cipherDeleteProc.command = cmd
+    cipherDeleteProc.running = true
+  }
+
+  function handleCipherDeleteSuccess(data) {
+    root.isBusy = false
+    if (deleteCipherModalComponent) deleteCipherModalComponent.isBusy = false
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+
+    var name = cipherDeleteProc.itemName
+    var verb = cipherDeleteProc.permanent ? "permanently deleted" : "moved to Trash"
+    if (data && data.outcome === "deleted_needs_sync") {
+      root.statusMessage = "Cipher '" + name + "' " + verb + ". Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = "Cipher '" + name + "' " + verb + "."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function handleCipherDeleteFailure(message) {
+    root.isBusy = false
+    if (deleteCipherModalComponent) {
+      deleteCipherModalComponent.isBusy = false
+      deleteCipherModalComponent.errorMessage = message
+    } else {
+      root.errorMessage = message
+    }
   }
 
   function getAvailableFolders() {
@@ -1809,6 +1962,18 @@ Item {
         icon: "\uf044",
         shortcut: "Ctrl+E",
         action: function() { root.openCipherEditModal(item) }
+      })
+      actions.push({
+        label: item.favorite ? "Unfavorite Item" : "Favorite Item",
+        icon: item.favorite ? "\uf005" : "\uf006",
+        shortcut: "Ctrl+B",
+        action: function() { root.toggleCipherFavorite(item) }
+      })
+      actions.push({
+        label: "Delete Item",
+        icon: "\uf2ed",
+        shortcut: "Ctrl+D",
+        action: function() { root.openDeleteCipherModal(item) }
       })
     }
 
@@ -2419,6 +2584,22 @@ Item {
       }
 
       Shortcut {
+        sequence: "Ctrl+B"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        onActivated: {
+          if (root.selectedItem) root.toggleCipherFavorite(root.selectedItem)
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+D"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        onActivated: {
+          if (root.selectedItem) root.openDeleteCipherModal(root.selectedItem)
+        }
+      }
+
+      Shortcut {
         sequence: "Ctrl+L"
         enabled: root.opened && root.authState.status === "unlocked" && !root.hasActiveModal
         onActivated: root.doLock()
@@ -2461,7 +2642,12 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showCipherFormModal) {
+          if (root.showDeleteCipherModal) {
+            if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
+              root.showDeleteCipherModal = false
+              root.deleteCipherItem = null
+            }
+          } else if (root.showCipherFormModal) {
             if (!cipherFormModalComponent || !cipherFormModalComponent.isBusy) {
               root.showCipherFormModal = false
               root.cipherFormEditItem = null
@@ -2514,6 +2700,15 @@ Item {
             event.accepted = true
             return
           }
+        }
+
+        if (root.showDeleteCipherModal) {
+          if (event.key === Qt.Key_Escape && (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy)) {
+            root.showDeleteCipherModal = false
+            root.deleteCipherItem = null
+            event.accepted = true
+          }
+          return
         }
 
         if (root.showCipherFormModal) {
@@ -2620,6 +2815,12 @@ Item {
           } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
             if (root.selectedItem.type_name === "ssh_key") root.openSshKeyModal("export", root.selectedItem)
             else root.openCipherEditModal(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_B && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            root.toggleCipherFavorite(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_D && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            root.openDeleteCipherModal(root.selectedItem)
             event.accepted = true
           } else if (event.key === Qt.Key_H && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             if (root.selectedItem.login && root.selectedItem.login.password_history && root.selectedItem.login.password_history.length > 0) {
@@ -2773,6 +2974,8 @@ Item {
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
                 onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
                 onEditRequested: function(item) { root.openCipherEditModal(item) }
+                onFavoriteToggled: function(item) { root.toggleCipherFavorite(item) }
+                onDeleteRequested: function(item) { root.openDeleteCipherModal(item) }
                 onClosePreviewRequested: {
                   var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
                   root.activeAttachmentPreview = null
@@ -3087,6 +3290,26 @@ Item {
           }
         }
       }
+
+      // 10. Delete confirmation for personal Login and Secure Note ciphers.
+      DeleteCipherModal {
+        id: deleteCipherModalComponent
+        active: root.showDeleteCipherModal
+        itemName: root.deleteCipherItem ? (root.deleteCipherItem.name || "Untitled") : ""
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onConfirmRequested: function(permanent) { root.submitCipherDelete(permanent) }
+        onCloseRequested: {
+          if (!deleteCipherModalComponent.isBusy) {
+            root.showDeleteCipherModal = false
+            root.deleteCipherItem = null
+          }
+        }
+      }
     }
   }
 
@@ -3328,6 +3551,113 @@ Item {
         } else if (!root.errorMessage) {
           root.errorMessage = "Cipher update failed."
         }
+      }
+    }
+  }
+
+  Process {
+    id: cipherFavoriteProc
+    property string payload: ""
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property bool previousFavorite: false
+    property bool nextFavorite: false
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherFavoriteProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") return
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherFavoriteProc.errorReported = true
+          root.handleCipherFavoriteSuccess(data)
+          return
+        }
+        cipherFavoriteProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherFavoriteProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Favorite update failed."
+        root.handleCipherFavoriteFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherFavoriteProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherFavoriteProc.errorReported) return
+      if (cipherFavoriteProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherFavoriteFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+  Process {
+    id: cipherDeleteProc
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property bool permanent: false
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherDeleteProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showDeleteCipherModal = false
+          root.deleteCipherItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherDeleteProc.errorReported = true
+          root.handleCipherDeleteSuccess(data)
+          return
+        }
+        cipherDeleteProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherDeleteProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher deletion failed."
+        root.handleCipherDeleteFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherDeleteProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherDeleteProc.errorReported) return
+      if (cipherDeleteProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherDeleteFailure("Process exited with error code " + code)
       }
     }
   }

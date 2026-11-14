@@ -34,6 +34,8 @@ ScrollView {
   signal downloadAttachmentRequested(var item, var att)
   signal exportSshKeyRequested(var item)
   signal editRequested(var item)
+  signal favoriteToggled(var item)
+  signal deleteRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
   signal togglePrivateKeyRevealed()
@@ -612,6 +614,25 @@ ScrollView {
             Layout.fillWidth: true
             Layout.preferredWidth: 0
           }
+        }
+
+        // Favorite and delete are only offered for the cipher types the
+        // Overlay can mutate. Organization ownership is enforced by the root.
+        GhostIconButton {
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.alignment: Qt.AlignTop
+          iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
+          iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
+          tooltip: (inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)"
+          onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
+        }
+
+        GhostIconButton {
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf2ed"
+          tooltip: "Delete item (Ctrl+D)"
+          onClicked: inspectorRoot.deleteRequested(inspectorRoot.item)
         }
 
         // Edit is only offered for the cipher types the Overlay form supports.
