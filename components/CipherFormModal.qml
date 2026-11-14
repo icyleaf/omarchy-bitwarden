@@ -1024,8 +1024,9 @@ Rectangle {
 
                 Rectangle {
                   required property var modelData
+                  objectName: "addFieldButton_" + modelData.type
                   implicitHeight: 24
-                  implicitWidth: addFieldText.implicitWidth + 12
+                  implicitWidth: addFieldRow.implicitWidth + 12
                   radius: 4
                   color: addFieldMouse.containsMouse ? Qt.rgba(modalRoot.accent.r, modalRoot.accent.g, modalRoot.accent.b, 0.18) : Qt.rgba(modalRoot.foreground.r, modalRoot.foreground.g, modalRoot.foreground.b, 0.06)
                   border.color: modalRoot.borderColor
@@ -1033,6 +1034,7 @@ Rectangle {
 
                   RowLayout {
                     id: addFieldRow
+                    objectName: "addFieldRow_" + modelData.type
                     anchors.centerIn: parent
                     spacing: 4
 

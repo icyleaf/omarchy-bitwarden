@@ -534,35 +534,6 @@ ScrollView {
               Layout.preferredWidth: 0
             }
 
-            // Monochrome Favorite Badge
-            Rectangle {
-              visible: Boolean(inspectorRoot.item && inspectorRoot.item.favorite)
-              implicitHeight: 18
-              implicitWidth: favRow.implicitWidth + 10
-              radius: 3
-              color: Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.08)
-              border.color: inspectorRoot.borderColor
-              border.width: 1
-
-              RowLayout {
-                id: favRow
-                anchors.centerIn: parent
-                spacing: 3
-                Text {
-                  text: "\uf005"
-                  font.family: inspectorRoot.fontFamily
-                  font.pixelSize: Style.fontPx(0.75)
-                  color: inspectorRoot.muted
-                }
-                Text {
-                  text: "Favorite"
-                  color: inspectorRoot.muted
-                  font.pixelSize: Style.font.caption
-                  font.weight: Font.Medium
-                }
-              }
-            }
-
             // Organization Badge
             Rectangle {
               visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
@@ -616,63 +587,38 @@ ScrollView {
           }
         }
 
-        // Favorite and delete are only offered for the cipher types the
+        // Favorite, delete, and edit are only offered for the cipher types the
         // Overlay can mutate. Organization ownership is enforced by the root.
         GhostIconButton {
+          objectName: "editButton"
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf044"
+          iconColor: inspectorRoot.accent
+          tooltip: "Edit item (Ctrl+E)"
+          fontFamily: inspectorRoot.fontFamily
+          onClicked: inspectorRoot.editRequested(inspectorRoot.item)
+        }
+
+        GhostIconButton {
+          objectName: "favoriteButton"
           visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
           Layout.alignment: Qt.AlignTop
           iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
           iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
           tooltip: (inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)"
+          fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
         }
 
         GhostIconButton {
+          objectName: "deleteButton"
           visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
           Layout.alignment: Qt.AlignTop
-          iconText: "\uf2ed"
+          iconText: "\uf1f8"
           tooltip: "Delete item (Ctrl+D)"
+          fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.deleteRequested(inspectorRoot.item)
-        }
-
-        // Edit is only offered for the cipher types the Overlay form supports.
-        // Organization ownership is enforced by the root before the modal opens.
-        Rectangle {
-          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
-          Layout.preferredWidth: editButtonRow.implicitWidth + 16
-          Layout.preferredHeight: 24
-          Layout.alignment: Qt.AlignTop
-          radius: 4
-          color: editMouse.containsMouse ? Qt.rgba(inspectorRoot.accent.r, inspectorRoot.accent.g, inspectorRoot.accent.b, 0.18) : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.06)
-          border.color: inspectorRoot.borderColor
-          border.width: 1
-
-          RowLayout {
-            id: editButtonRow
-            anchors.centerIn: parent
-            spacing: 4
-
-            Text {
-              text: "\uf044"
-              font.family: inspectorRoot.fontFamily
-              font.pixelSize: Style.font.caption
-              color: inspectorRoot.accent
-            }
-
-            Text {
-              text: "Edit"
-              font.pixelSize: Style.font.caption
-              color: inspectorRoot.accent
-            }
-          }
-
-          MouseArea {
-            id: editMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: inspectorRoot.editRequested(inspectorRoot.item)
-          }
         }
       }
 

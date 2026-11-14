@@ -99,7 +99,7 @@ Rectangle {
         spacing: 8
 
         Text {
-          text: "\uf2ed"
+          text: "\uf1f8"
           font.family: modalRoot.fontFamily
           font.pixelSize: Style.font.subtitle
           color: modalRoot.warningRole

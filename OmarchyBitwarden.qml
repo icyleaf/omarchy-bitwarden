@@ -1971,7 +1971,7 @@ Item {
       })
       actions.push({
         label: "Delete Item",
-        icon: "\uf2ed",
+        icon: "\uf1f8",
         shortcut: "Ctrl+D",
         action: function() { root.openDeleteCipherModal(item) }
       })
