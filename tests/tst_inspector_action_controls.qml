@@ -40,6 +40,8 @@ Item {
       name: "GitHub",
       type_name: "login",
       favorite: true,
+      folder_name: "Development",
+      organization_name: "Acme Corp",
       login: {
         username: "octocat",
         password: "secretpassword",
@@ -134,6 +136,23 @@ Item {
                 "custom field add button " + type + " reserves padding around its icon and label (" +
                 button.implicitWidth + " >= " + (row.implicitWidth + 12) + ")")
         }
+      }
+
+      // 5. Header layout: favoriteButton is in title row next to titleText; folder and org badges follow categoryLabel.
+      var titleText = findChildByName(inspector, "titleText")
+      check(titleText !== null, "Inspector exposes titleText")
+      if (titleText && favoriteButton) {
+        check(titleText.parent === favoriteButton.parent, "favoriteButton is placed in the title row next to titleText")
+      }
+      var categoryLabel = findChildByName(inspector, "categoryLabel")
+      var folderBadge = findChildByName(inspector, "folderBadge")
+      var orgBadge = findChildByName(inspector, "orgBadge")
+      check(categoryLabel !== null, "Inspector exposes categoryLabel")
+      check(folderBadge !== null, "Inspector exposes folderBadge")
+      check(orgBadge !== null, "Inspector exposes orgBadge")
+      if (categoryLabel && folderBadge && orgBadge) {
+        check(categoryLabel.parent === folderBadge.parent && folderBadge.parent === orgBadge.parent,
+              "folder and org badges are placed in the subtitle row alongside categoryLabel")
       }
 
       if (failures > 0) {

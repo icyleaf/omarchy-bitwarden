@@ -526,70 +526,106 @@ ScrollView {
             spacing: 6
 
             Text {
+              id: titleText
+              objectName: "titleText"
               text: inspectorRoot.item ? (inspectorRoot.item.name || "Untitled") : ""
               color: inspectorRoot.foreground
               font.pixelSize: Style.font.body
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
-              Layout.preferredWidth: 0
+              Layout.maximumWidth: implicitWidth
+              Layout.alignment: Qt.AlignVCenter
             }
 
-            // Organization Badge
-            Rectangle {
-              visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
-              implicitHeight: 18
-              implicitWidth: orgText.implicitWidth + 8
-              radius: 3
-              color: StatusPalette.tint(StatusPalette.organization, 0.2)
-              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
-              border.width: 1
+            GhostIconButton {
+              objectName: "favoriteButton"
+              visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+              isBusy: inspectorRoot.isFavoriteMutating
+              enabled: !inspectorRoot.isFavoriteMutating
+              Layout.alignment: Qt.AlignVCenter
+              iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
+              iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
+              tooltip: inspectorRoot.isFavoriteMutating ? "Updating favorite..." : ((inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)")
+              fontFamily: inspectorRoot.fontFamily
+              onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
+            }
 
-              Text {
-                id: orgText
-                anchors.centerIn: parent
-                text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
-                font.family: inspectorRoot.fontFamily
-                color: StatusPalette.organization
-                font.pixelSize: Style.font.caption
-                font.weight: Font.Medium
-              }
+            Item {
+              Layout.fillWidth: true
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: 0
+            spacing: 6
+
+            Text {
+              objectName: "categoryLabel"
+              text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
+              color: inspectorRoot.muted
+              font.pixelSize: Style.font.bodySmall
+              Layout.alignment: Qt.AlignVCenter
             }
 
             // Folder Badge
             Rectangle {
+              objectName: "folderBadge"
               visible: Boolean(inspectorRoot.item && inspectorRoot.item.folder_name)
               implicitHeight: 18
-              implicitWidth: folderText.implicitWidth + 8
+              implicitWidth: Math.min(140, folderText.implicitWidth + 8)
               radius: 3
               color: StatusPalette.tint(StatusPalette.folder, 0.2)
               border.color: StatusPalette.tint(StatusPalette.folder, 0.5)
               border.width: 1
+              Layout.alignment: Qt.AlignVCenter
 
               Text {
                 id: folderText
                 anchors.centerIn: parent
+                width: Math.min(132, implicitWidth)
                 text: "\uf07b " + (inspectorRoot.item ? (inspectorRoot.item.folder_name || "") : "")
                 font.family: inspectorRoot.fontFamily
                 color: StatusPalette.folder
                 font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
+                elide: Text.ElideRight
               }
             }
-          }
 
-          Text {
-            text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
-            color: inspectorRoot.muted
-            font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
-            Layout.fillWidth: true
-            Layout.preferredWidth: 0
+            // Organization Badge
+            Rectangle {
+              objectName: "orgBadge"
+              visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
+              implicitHeight: 18
+              implicitWidth: Math.min(160, orgText.implicitWidth + 8)
+              radius: 3
+              color: StatusPalette.tint(StatusPalette.organization, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
+              border.width: 1
+              Layout.alignment: Qt.AlignVCenter
+
+              Text {
+                id: orgText
+                anchors.centerIn: parent
+                width: Math.min(152, implicitWidth)
+                text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
+                font.family: inspectorRoot.fontFamily
+                color: StatusPalette.organization
+                font.pixelSize: Style.font.caption
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+              }
+            }
+
+            Item {
+              Layout.fillWidth: true
+            }
           }
         }
 
-        // Favorite, delete, and edit are only offered for the cipher types the
-        // Overlay can mutate. Organization ownership is enforced by the root.
+        // Edit and delete controls for mutable ciphers
         GhostIconButton {
           objectName: "editButton"
           visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
@@ -599,19 +635,6 @@ ScrollView {
           tooltip: "Edit item (Ctrl+E)"
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.editRequested(inspectorRoot.item)
-        }
-
-        GhostIconButton {
-          objectName: "favoriteButton"
-          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
-          isBusy: inspectorRoot.isFavoriteMutating
-          enabled: !inspectorRoot.isFavoriteMutating
-          Layout.alignment: Qt.AlignTop
-          iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
-          iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
-          tooltip: inspectorRoot.isFavoriteMutating ? "Updating favorite..." : ((inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)")
-          fontFamily: inspectorRoot.fontFamily
-          onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
         }
 
         GhostIconButton {
