@@ -534,7 +534,7 @@ ScrollView {
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
-              Layout.maximumWidth: implicitWidth
+              Layout.maximumWidth: Math.ceil(implicitWidth) + 2
               Layout.alignment: Qt.AlignVCenter
             }
 
