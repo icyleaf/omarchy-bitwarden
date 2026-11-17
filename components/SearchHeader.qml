@@ -162,6 +162,9 @@ ColumnLayout {
     color: Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08)
     border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
     border.width: 1
+    // While a sub-interaction (modal or the Inspector Form) owns the keyboard,
+    // the left-side search input is suspended so drafts cannot filter the list.
+    enabled: !searchHeaderRoot.modalsActive
 
     RowLayout {
       anchors.fill: parent

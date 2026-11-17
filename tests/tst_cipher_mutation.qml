@@ -24,6 +24,12 @@ Item {
   property int generateCount: 0
   property int closeCount: 0
 
+  // Inspector Form (issue #386) harness counters.
+  property var editorSubmitted: null
+  property int editorSubmitCount: 0
+  property int editorGenerateCount: 0
+  property int editorCancelCount: 0
+
   Components.CipherFormModal {
     id: form
     active: false
@@ -41,6 +47,25 @@ Item {
     onCloseRequested: testRunner.closeCount++
   }
 
+  Components.CipherEditor {
+    id: editor
+    width: 500
+    height: 600
+    active: false
+    cipherType: "login"
+    folders: [
+      { id: "f1", name: "Work" },
+      { id: "f2", name: "Personal" }
+    ]
+    defaultFolderId: ""
+    onSubmitRequested: function(payload) {
+      testRunner.editorSubmitted = payload
+      testRunner.editorSubmitCount++
+    }
+    onGeneratePasswordRequested: testRunner.editorGenerateCount++
+    onCancelRequested: testRunner.editorCancelCount++
+  }
+
   function readSource(path) {
     var xhr = new XMLHttpRequest()
     xhr.open("GET", path, false)
@@ -54,6 +79,19 @@ Item {
       if (lines[i].indexOf(needle) !== -1) return lines[i]
     }
     return ""
+  }
+
+  // Strip line comments before scanning for palette literals: issue references
+  // such as `#386` in a comment are not hardcoded colors (the static gate
+  // strips comments too).
+  function stripLineComments(src) {
+    var lines = String(src || "").split("\n")
+    var out = []
+    for (var i = 0; i < lines.length; i++) {
+      var idx = lines[i].indexOf("//")
+      out.push(idx >= 0 ? lines[i].substring(0, idx) : lines[i])
+    }
+    return out.join("\n")
   }
 
   Component.onCompleted: {
@@ -560,6 +598,398 @@ Item {
     showCipherFormModal = false
     hasActiveModal = false || false || false || false || showCipherFormModal
     check(hasActiveModal === false, "closed cipher modal releases the focus guard")
+
+    // ==================================================================
+    // Inspector-Embedded Cipher Creation Form (issue #386)
+    // ==================================================================
+    console.log("Running Inspector Cipher Creation Form Tests...")
+
+    // ------------------------------------------------------------------
+    // 16. CipherEditor Login payload construction
+    // ------------------------------------------------------------------
+    editor.cipherType = "login"
+    editor.defaultFolderId = ""
+    editor.resetForm()
+    check(editor.title === "New Login", "editor login title is New Login")
+    check(editor.isLogin === true, "editor login mode is detected")
+    editor.cipherName = "  My Login  "
+    editor.folderId = "f1"
+    editor.username = "alice"
+    editor.password = "  p@ss word  "
+    editor.notes = "line1\nline2"
+    editor.setUri(0, "https://example.com")
+    editor.addUri()
+    editor.setUri(1, "   ")
+    editor.addUri()
+    editor.setUri(2, "https://second.example")
+    editor.addCustomField(0)
+    editor.setFieldName(0, "recovery")
+    editor.setFieldValue(0, "abc")
+    editor.addCustomField(1)
+    editor.setFieldName(1, "hidden-token")
+    editor.setFieldValue(1, "s3cret")
+    editor.addCustomField(2)
+    editor.setFieldName(2, "enabled")
+    editor.toggleFieldBoolean(2)
+
+    var editorLoginPayload = editor.buildPayload()
+    check(editorLoginPayload !== null, "editor login payload builds")
+    check(editorLoginPayload.cipher_type === "login", "editor login payload carries cipher_type=login")
+    check(editorLoginPayload.name === "My Login", "editor login name is trimmed")
+    check(editorLoginPayload.folder_id === "f1", "editor login folder id is serialized")
+    check(editorLoginPayload.username === "alice", "editor login username is serialized")
+    check(editorLoginPayload.password === "  p@ss word  ", "editor password whitespace is preserved verbatim")
+    check(editorLoginPayload.notes === "line1\nline2", "editor login notes are serialized")
+    check(editorLoginPayload.uris.length === 2, "editor blank URI rows are filtered out")
+    check(editorLoginPayload.uris[0] === "https://example.com" && editorLoginPayload.uris[1] === "https://second.example",
+          "editor non-blank URIs keep their order")
+    check(editorLoginPayload.fields.length === 3, "editor serializes all custom fields")
+    check(editorLoginPayload.fields[0].type === 0 && editorLoginPayload.fields[0].name === "recovery" &&
+          editorLoginPayload.fields[0].value === "abc", "editor Text custom field round-trips")
+    check(editorLoginPayload.fields[1].type === 1 && editorLoginPayload.fields[1].name === "hidden-token" &&
+          editorLoginPayload.fields[1].value === "s3cret", "editor Hidden custom field round-trips")
+    check(editorLoginPayload.fields[2].type === 2 && editorLoginPayload.fields[2].name === "enabled" &&
+          editorLoginPayload.fields[2].value === "true", "editor Boolean custom field serializes true")
+
+    check(editor.customFieldAt(1).revealed === false, "editor Hidden custom field starts masked")
+    editor.toggleFieldRevealed(1)
+    check(editor.customFieldAt(1).revealed === true, "editor Hidden custom field can be revealed")
+    editor.toggleFieldRevealed(1)
+    check(editor.customFieldAt(1).revealed === false, "editor Hidden custom field can be masked again")
+
+    // ------------------------------------------------------------------
+    // 17. CipherEditor Secure Note payload omits login-only fields
+    // ------------------------------------------------------------------
+    editor.cipherType = "note"
+    editor.resetForm()
+    check(editor.title === "New Secure Note", "editor note title is New Secure Note")
+    check(editor.isLogin === false, "editor note mode hides login-only fields")
+    editor.cipherName = "  My Note  "
+    editor.username = "ignored"
+    editor.password = "ignored"
+    editor.setUri(0, "https://ignored.example")
+    editor.notes = "body"
+    var editorNotePayload = editor.buildPayload()
+    check(editorNotePayload !== null, "editor note payload builds")
+    check(editorNotePayload.cipher_type === "note", "editor note payload carries cipher_type=note")
+    check(editorNotePayload.name === "My Note", "editor note name is trimmed")
+    check(!editorNotePayload.hasOwnProperty("username"), "editor note payload omits username")
+    check(!editorNotePayload.hasOwnProperty("password"), "editor note payload omits password")
+    check(!editorNotePayload.hasOwnProperty("uris"), "editor note payload omits URIs")
+    check(editorNotePayload.notes === "body", "editor note payload keeps the note body")
+
+    // ------------------------------------------------------------------
+    // 18. CipherEditor validation
+    // ------------------------------------------------------------------
+    editor.cipherType = "login"
+    editor.resetForm()
+    editor.cipherName = "   "
+    testRunner.editorSubmitted = null
+    testRunner.editorSubmitCount = 0
+    editor.submit()
+    check(editor.errorMessage === "Cipher name is required.", "editor rejects a blank name")
+    check(testRunner.editorSubmitCount === 0, "editor blank name does not emit a submit")
+
+    editor.resetForm()
+    editor.cipherName = "Valid"
+    editor.addCustomField(0)
+    editor.setFieldName(0, "   ")
+    editor.submit()
+    check(editor.errorMessage === "Custom field name cannot be empty.", "editor rejects a blank custom field name")
+    check(testRunner.editorSubmitCount === 0, "editor blank field name does not emit a submit")
+
+    editor.resetForm()
+    editor.cipherName = "Valid"
+    editor.submit()
+    check(testRunner.editorSubmitCount === 1, "editor valid form emits submitRequested")
+    check(editor.errorMessage === "", "editor valid submit clears the error")
+
+    // ------------------------------------------------------------------
+    // 19. CipherEditor folder selector defaults
+    // ------------------------------------------------------------------
+    editor.defaultFolderId = "f2"
+    editor.resetForm()
+    check(editor.folderId === "f2", "editor active folder scope pre-selects the folder")
+    check(editor.folderLabel() === "Personal", "editor folder label resolves the selected folder")
+    editor.defaultFolderId = "does-not-exist"
+    editor.resetForm()
+    check(editor.folderId === "", "editor unknown default folder falls back to No Folder")
+    check(editor.folderLabel() === "No Folder", "editor folder label falls back to No Folder")
+
+    var editorFolderOptions = editor.folderOptions()
+    check(editorFolderOptions.length === 3, "editor folder selector lists No Folder plus every folder")
+    check(editorFolderOptions[0].name === "No Folder", "editor first folder option is No Folder")
+    check(editorFolderOptions[1].name === "Personal" && editorFolderOptions[2].name === "Work",
+          "editor folders are sorted by name")
+
+    editor.defaultFolderId = ""
+    editor.resetForm()
+    editor.cipherName = "No Folder"
+    var editorNoFolderPayload = editor.buildPayload()
+    check(editorNoFolderPayload.folder_id === null, "editor No Folder serializes folder_id as null")
+
+    // ------------------------------------------------------------------
+    // 20. CipherEditor dirty tracking
+    // ------------------------------------------------------------------
+    editor.resetForm()
+    check(editor.isDirty === false, "editor pristine draft is clean")
+
+    editor.cipherName = "x"
+    check(editor.isDirty === true, "editor typed name marks the draft dirty")
+    editor.cipherName = ""
+    check(editor.isDirty === false, "editor reverting the name restores a clean draft")
+
+    editor.username = "user"
+    check(editor.isDirty === true, "editor typed username marks the draft dirty")
+    editor.username = ""
+
+    editor.password = "pw"
+    check(editor.isDirty === true, "editor typed password marks the draft dirty")
+    editor.password = ""
+
+    editor.notes = "note"
+    check(editor.isDirty === true, "editor typed notes mark the draft dirty")
+    editor.notes = ""
+
+    editor.setUri(0, "https://dirty.example")
+    check(editor.isDirty === true, "editor non-blank URI marks the draft dirty")
+    editor.setUri(0, "")
+    check(editor.isDirty === false, "editor clearing the URI restores a clean draft")
+
+    editor.addUri()
+    check(editor.isDirty === false, "editor a blank URI row alone stays clean")
+    editor.removeUri(1)
+
+    editor.defaultFolderId = "f1"
+    editor.resetForm()
+    check(editor.isDirty === false, "editor default folder alone stays clean")
+    editor.folderId = "f2"
+    check(editor.isDirty === true, "editor changing the folder marks the draft dirty")
+    editor.folderId = "f1"
+    check(editor.isDirty === false, "editor restoring the default folder stays clean")
+
+    editor.defaultFolderId = ""
+    editor.resetForm()
+    editor.addCustomField(0)
+    check(editor.isDirty === true, "editor a custom field marks the draft dirty")
+    editor.removeCustomField(0)
+    check(editor.isDirty === false, "editor removing the custom field restores a clean draft")
+
+    // ------------------------------------------------------------------
+    // 21. CipherEditor cancel and dirty-draft confirmation
+    // ------------------------------------------------------------------
+    editor.resetForm()
+    testRunner.editorCancelCount = 0
+    editor.requestCancel()
+    check(testRunner.editorCancelCount === 1, "editor pristine Esc cancels immediately")
+    check(editor.discardPromptVisible === false, "editor pristine cancel shows no discard prompt")
+
+    editor.resetForm()
+    editor.cipherName = "draft"
+    testRunner.editorCancelCount = 0
+    editor.requestCancel()
+    check(editor.discardPromptVisible === true, "editor dirty Esc raises the discard prompt")
+    check(testRunner.editorCancelCount === 0, "editor dirty Esc does not cancel immediately")
+
+    editor.keepEditing()
+    check(editor.discardPromptVisible === false, "editor Keep Editing dismisses the prompt")
+    check(testRunner.editorCancelCount === 0, "editor Keep Editing keeps the draft")
+
+    editor.requestCancel()
+    editor.confirmDiscard()
+    check(editor.discardPromptVisible === false, "editor Discard dismisses the prompt")
+    check(testRunner.editorCancelCount === 1, "editor Discard emits cancelRequested")
+
+    // ------------------------------------------------------------------
+    // 22. CipherEditor keyboard seam (handleKey)
+    // ------------------------------------------------------------------
+    // Pristine Esc cancels.
+    editor.resetForm()
+    testRunner.editorCancelCount = 0
+    check(editor.handleKey(Qt.Key_Escape, Qt.NoModifier) === true, "editor handleKey consumes Esc")
+    check(testRunner.editorCancelCount === 1, "editor handleKey Esc cancels a pristine draft")
+
+    // Dirty Esc opens the prompt; a second Esc keeps editing.
+    editor.resetForm()
+    editor.cipherName = "draft"
+    testRunner.editorCancelCount = 0
+    check(editor.handleKey(Qt.Key_Escape, Qt.NoModifier) === true, "editor handleKey Esc consumes the dismiss")
+    check(editor.discardPromptVisible === true, "editor handleKey dirty Esc raises the prompt")
+    check(editor.handleKey(Qt.Key_Escape, Qt.NoModifier) === true, "editor handleKey Esc consumes the prompt dismiss")
+    check(editor.discardPromptVisible === false, "editor handleKey Esc on the prompt keeps editing")
+    check(testRunner.editorCancelCount === 0, "editor handleKey prompt Esc does not cancel")
+
+    // Accepting the prompt discards.
+    editor.requestCancel()
+    check(editor.handleKey(Qt.Key_Return, Qt.NoModifier) === true, "editor handleKey consumes Return")
+    check(testRunner.editorCancelCount === 1, "editor handleKey Return on the prompt discards")
+
+    // Ctrl+S saves a valid draft.
+    editor.resetForm()
+    editor.cipherName = "KeySaved"
+    testRunner.editorSubmitCount = 0
+    check(editor.handleKey(Qt.Key_S, Qt.ControlModifier) === true, "editor handleKey consumes Ctrl+S")
+    check(testRunner.editorSubmitCount === 1, "editor handleKey Ctrl+S submits a valid draft")
+    check(testRunner.editorSubmitted.name === "KeySaved", "editor handleKey Ctrl+S carries the payload")
+
+    // Ctrl+S on an invalid draft surfaces the error and does not submit.
+    editor.resetForm()
+    testRunner.editorSubmitCount = 0
+    check(editor.handleKey(Qt.Key_S, Qt.ControlModifier) === true, "editor handleKey consumes Ctrl+S on a blank draft")
+    check(editor.errorMessage === "Cipher name is required.", "editor handleKey Ctrl+S validates first")
+    check(testRunner.editorSubmitCount === 0, "editor handleKey Ctrl+S does not submit a blank draft")
+
+    // Ctrl+G requests password generation.
+    editor.resetForm()
+    testRunner.editorGenerateCount = 0
+    check(editor.handleKey(Qt.Key_G, Qt.ControlModifier) === true, "editor handleKey consumes Ctrl+G")
+    check(testRunner.editorGenerateCount === 1, "editor handleKey Ctrl+G requests generation")
+    check(editor.isGeneratingPassword === true, "editor handleKey Ctrl+G marks the field busy")
+
+    // Ctrl+G is blocked on an outdated engine.
+    editor.resetForm()
+    editor.isEngineOutdated = true
+    testRunner.editorGenerateCount = 0
+    check(editor.handleKey(Qt.Key_G, Qt.ControlModifier) === true, "editor handleKey consumes Ctrl+G when outdated")
+    check(testRunner.editorGenerateCount === 0, "editor outdated engine blocks generation")
+    check(editor.errorMessage.indexOf("outdated") !== -1, "editor outdated engine surfaces an upgrade hint")
+    editor.isEngineOutdated = false
+
+    // Unhandled keys bubble untouched.
+    check(editor.handleKey(Qt.Key_A, Qt.NoModifier) === false, "editor handleKey ignores plain character keys")
+
+    // Generator fill handoff clears the busy flag and reveals the secret.
+    editor.resetForm()
+    editor.isGeneratingPassword = true
+    editor.setGeneratedPassword("Abcdef1234567890")
+    check(editor.password === "Abcdef1234567890", "editor generated password fills the field")
+    check(editor.passwordRevealed === true, "editor generated password is revealed")
+    check(editor.isGeneratingPassword === false, "editor generated password clears the busy flag")
+
+    // A busy draft refuses a second submit (duplicate-submission guard).
+    editor.resetForm()
+    editor.cipherName = "Busy"
+    editor.isBusy = true
+    testRunner.editorSubmitCount = 0
+    editor.submit()
+    check(testRunner.editorSubmitCount === 0, "editor busy draft refuses a duplicate submit")
+    editor.isBusy = false
+
+    // ------------------------------------------------------------------
+    // 22b. CipherEditor lifecycle: secret scrubbing
+    // ------------------------------------------------------------------
+    editor.resetForm()
+    editor.active = true
+    editor.cipherName = "secret-name"
+    editor.username = "secret-user"
+    editor.password = "secret-pass"
+    editor.notes = "secret-notes"
+    check(editor.isDirty === true, "editor draft with secrets is dirty")
+    editor.active = false
+    check(editor.cipherName === "" && editor.username === "" && editor.password === "" && editor.notes === "",
+          "editor scrubs the draft secrets when it closes")
+    check(editor.isDirty === false, "editor scrubbed draft is clean")
+
+    // ------------------------------------------------------------------
+    // 23. CipherEditor theme tokens and source hygiene
+    // ------------------------------------------------------------------
+    check(editor.hasOwnProperty("cardBackground"), "editor exposes cardBackground token")
+    check(editor.hasOwnProperty("foreground"), "editor exposes foreground token")
+    check(editor.hasOwnProperty("accent"), "editor exposes accent token")
+    check(editor.hasOwnProperty("borderColor"), "editor exposes borderColor token")
+
+    var editorSrc = readSource(Qt.resolvedUrl("../components/CipherEditor.qml"))
+    check(editorSrc.length > 0, "CipherEditor.qml readable")
+    var editorCode = stripLineComments(editorSrc)
+    check(!/#[0-9a-fA-F]{3,8}\b/.test(editorCode), "CipherEditor contains no bare hex colors")
+    check(!/Qt\.rgba\(\s*[\d.]+\s*,/.test(editorCode), "CipherEditor contains no numeric Qt.rgba literals")
+    check(editorSrc.indexOf("signal submitRequested(var payload)") !== -1,
+          "CipherEditor declares the submitRequested signal")
+    check(editorSrc.indexOf("signal generatePasswordRequested()") !== -1,
+          "CipherEditor declares the generatePasswordRequested signal")
+    check(editorSrc.indexOf("signal cancelRequested()") !== -1,
+          "CipherEditor declares the cancelRequested signal")
+    check(editorSrc.indexOf("function handleKey(key, modifiers)") !== -1,
+          "CipherEditor owns a single handleKey keyboard seam")
+    check(editorSrc.indexOf("Keys.onPressed") === -1,
+          "CipherEditor declares no competing live Keys handler")
+    check(editorSrc.indexOf("titleInput.forceActiveFocus()") !== -1,
+          "CipherEditor focuses the Title field when it opens")
+
+    // ------------------------------------------------------------------
+    // 24. Overlay wiring (source checks)
+    // ------------------------------------------------------------------
+    check(src.indexOf("id: cipherEditorComponent") !== -1, "Overlay instantiates the CipherEditor")
+    check(src.indexOf("active: root.showCipherEditor") !== -1, "CipherEditor visibility is bound to showCipherEditor")
+    check(src.indexOf("cipherType: root.cipherEditorType") !== -1, "CipherEditor receives the picked cipher type")
+    check(src.indexOf("defaultFolderId: root.cipherEditorDefaultFolderId") !== -1,
+          "CipherEditor receives the scoped default folder")
+    check(src.indexOf("onSubmitRequested: function(payload) { root.submitCipherCreate(payload) }") !== -1,
+          "CipherEditor submit routes to cipher creation")
+    check(src.indexOf("onGeneratePasswordRequested: { root.openPasswordGeneratorForCipherEditor() }") !== -1,
+          "CipherEditor Generate opens the generator in fill mode")
+
+    var modalLine2 = sourceLine(src, "readonly property bool hasActiveModal")
+    check(modalLine2.indexOf("root.showCipherEditor") !== -1,
+          "hasActiveModal includes the Inspector Form")
+    check(modalLine2.indexOf("root.showCipherFormModal") !== -1,
+          "hasActiveModal still includes the edit modal")
+
+    var createFnIdx = src.indexOf("function openCipherCreateModal(cipherType)")
+    var createFnWindow = createFnIdx >= 0 ? src.substring(createFnIdx, createFnIdx + 900) : ""
+    check(createFnWindow.indexOf("root.showCipherEditor = true") !== -1,
+          "openCipherCreateModal opens the Inspector Form")
+    check(createFnWindow.indexOf("root.showCipherFormModal = true") === -1,
+          "openCipherCreateModal no longer opens the centered modal")
+
+    check(src.indexOf('sequence: "Ctrl+S"') !== -1, "Ctrl+S shortcut is declared")
+    check(src.indexOf("cipherEditorComponent.handleKey(Qt.Key_S, Qt.ControlModifier)") !== -1,
+          "Ctrl+S triggers the editor save through handleKey")
+    check(src.indexOf('sequence: "Ctrl+G"') !== -1, "Ctrl+G shortcut is declared")
+    check(src.indexOf("cipherEditorComponent.handleKey(Qt.Key_G, Qt.ControlModifier)") !== -1,
+          "editor Ctrl+G requests password generation through handleKey")
+    check(src.indexOf("enabled: root.opened && root.showCipherEditor && !root.showPasswordGeneratorModal") !== -1,
+          "editor shortcuts are disabled while the generator modal overlays the draft")
+
+    var escEditorIdx = src.indexOf("} else if (root.showCipherEditor) {")
+    check(escEditorIdx !== -1 && src.substring(escEditorIdx, escEditorIdx + 220).indexOf("handleKey(Qt.Key_Escape, Qt.NoModifier)") !== -1,
+          "Esc routes to the editor cancel path through handleKey")
+
+    check(src.indexOf("function openPasswordGeneratorForCipherEditor()") !== -1,
+          "Overlay declares the editor generator helper")
+    check(src.indexOf("root.passwordGeneratorFillMode = true") !== -1,
+          "editor generator opens in fill mode")
+    check(src.indexOf("root.passwordGeneratorFillMode = false") !== -1,
+          "manual generator invocation stays in clipboard mode")
+
+    check(src.indexOf("fillMode: root.passwordGeneratorFillMode") !== -1,
+          "PasswordGeneratorModal receives fillMode")
+    check(src.indexOf("cipherEditorComponent.setGeneratedPassword(password)") !== -1,
+          "generator selection back-fills the editor password")
+
+    check(src.indexOf("cipherEditorComponent.isBusy = true") !== -1,
+          "create submit marks the editor busy")
+    check(src.indexOf("root.submitCipherCreate(payload)") !== -1, "editor payload reaches submitCipherCreate")
+
+    check(src.indexOf("modalsActive: root.hasActiveModal") !== -1,
+          "SearchHeader suspends itself while the editor is active")
+    check(searchHeaderSrc.indexOf("enabled: !searchHeaderRoot.modalsActive") !== -1,
+          "SearchHeader search box is disabled while a sub-interaction owns the keyboard")
+
+    check(src.indexOf("visible: root.selectedItem !== null && !root.showCipherEditor") !== -1,
+          "ItemInspector hides while the Inspector Form is open")
+    check(src.indexOf("visible: root.selectedItem === null && !root.showCipherEditor") !== -1,
+          "EmptyInspector hides while the Inspector Form is open")
+
+    // ------------------------------------------------------------------
+    // 25. Focus guard mirror with the Inspector Form
+    // ------------------------------------------------------------------
+    var showCipherEditor = true
+    var hasActiveModalWithEditor = false || false || false || false || false || showCipherEditor
+    check(hasActiveModalWithEditor === true, "open Inspector Form counts as an active sub-interaction")
+    showCipherEditor = false
+    hasActiveModalWithEditor = false || false || false || false || false || showCipherEditor
+    check(hasActiveModalWithEditor === false, "closed Inspector Form releases the focus guard")
 
     console.log("CipherFormModal Tests Completed: " + (failures === 0 ? "ALL PASSED" : failures + " FAILURES"))
     Qt.exit(failures === 0 ? 0 : 1)
