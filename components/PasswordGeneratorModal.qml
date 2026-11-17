@@ -30,6 +30,11 @@ Rectangle {
   property string passphraseSeparator: "-"
   property bool passphraseCapitalize: false
 
+  // Fill workflow (issue #385): when fillMode is enabled (e.g. invoked from a
+  // credential creation/edit form) the primary action delivers the generated
+  // secret through passwordSelected instead of the clipboard.
+  property bool fillMode: false
+
   // Generated results
   property string generatedPassword: ""
   property real generatedEntropy: 0.0
@@ -72,6 +77,7 @@ Rectangle {
 
   signal generateRequested(var options)
   signal copyRequested(string text, bool isSensitive, string label)
+  signal passwordSelected(string password)
   signal upgradeRequested()
   signal closeRequested()
 
@@ -132,6 +138,30 @@ Rectangle {
     }
   }
 
+  // Fill-mode counterpart of copyAndClose(): delivers the current secret
+  // through passwordSelected and closes without touching the clipboard.
+  function useAndClose() {
+    if (generatedPassword && !errorMessage) {
+      passwordSelected(generatedPassword)
+      closeRequested()
+    }
+  }
+
+  // Single dispatch site for the primary footer action (button click and the
+  // Enter key): fill mode hands the secret to the calling form, otherwise the
+  // clipboard copy workflow runs.
+  function triggerPrimaryAction() {
+    if (fillMode) {
+      useAndClose()
+    } else {
+      copyAndClose()
+    }
+  }
+
+  // Primary footer action surface (label + icon), driven by fillMode.
+  readonly property string primaryActionLabel: fillMode ? "Use Password (↵)" : "Copy to Clipboard (↵)"
+  readonly property string primaryActionIcon: fillMode ? "\uf00c" : "\uf0c5"
+
   function formatStyledPassword(password) {
     if (!password) return ""
     var accentHex = "" + genModalRoot.accent
@@ -162,31 +192,45 @@ Rectangle {
     }
   }
 
-  Keys.onPressed: function(event) {
-    if (event.key === Qt.Key_Escape) {
+  // Single keyboard seam shared by the live focus trap and the test runner
+  // (mirrors TypePickerModal). Returns true when the key was handled.
+  function handleKey(key, modifiers) {
+    if (key === Qt.Key_Escape) {
       closeRequested()
-      event.accepted = true
-    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-      copyAndClose()
-      event.accepted = true
-    } else if (event.modifiers & Qt.ControlModifier && (event.key === Qt.Key_G || event.key === Qt.Key_R)) {
+      return true
+    }
+    if (key === Qt.Key_Return || key === Qt.Key_Enter) {
+      triggerPrimaryAction()
+      return true
+    }
+    if ((modifiers & Qt.ControlModifier) && (key === Qt.Key_G || key === Qt.Key_R)) {
       regenerate()
-      event.accepted = true
-    } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Tab) {
-      genModalRoot.mode = (genModalRoot.mode === "password" ? "passphrase" : "password")
-      genModalRoot.regenerate()
-      event.accepted = true
-    } else if ((event.modifiers & Qt.AltModifier) && (event.key === Qt.Key_1 || event.key === Qt.Key_P || event.key === Qt.Key_G)) {
-      if (genModalRoot.mode !== "password") {
-        genModalRoot.mode = "password"
-        genModalRoot.regenerate()
+      return true
+    }
+    if ((modifiers & Qt.ControlModifier) && key === Qt.Key_Tab) {
+      mode = (mode === "password" ? "passphrase" : "password")
+      regenerate()
+      return true
+    }
+    if ((modifiers & Qt.AltModifier) && (key === Qt.Key_1 || key === Qt.Key_P || key === Qt.Key_G)) {
+      if (mode !== "password") {
+        mode = "password"
+        regenerate()
       }
-      event.accepted = true
-    } else if ((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_2) {
-      if (genModalRoot.mode !== "passphrase") {
-        genModalRoot.mode = "passphrase"
-        genModalRoot.regenerate()
+      return true
+    }
+    if ((modifiers & Qt.AltModifier) && key === Qt.Key_2) {
+      if (mode !== "passphrase") {
+        mode = "passphrase"
+        regenerate()
       }
+      return true
+    }
+    return false
+  }
+
+  Keys.onPressed: function(event) {
+    if (handleKey(event.key, event.modifiers)) {
       event.accepted = true
     }
   }
@@ -824,28 +868,28 @@ Rectangle {
 
         Item { Layout.fillWidth: true }
 
-        // Copy Credential Button
+        // Primary Action Button (Copy to Clipboard, or Use Password in fill mode)
         Rectangle {
-          id: copyBtnBox
-          readonly property bool canCopy: !genModalRoot.errorMessage && Boolean(genModalRoot.generatedPassword)
+          id: primaryBtnBox
+          readonly property bool canUsePrimary: !genModalRoot.errorMessage && Boolean(genModalRoot.generatedPassword)
           Layout.preferredHeight: 34
-          Layout.preferredWidth: copyBtnRow.implicitWidth + 24
+          Layout.preferredWidth: primaryBtnRow.implicitWidth + 24
           radius: 6
-          opacity: canCopy ? 1.0 : 0.4
+          opacity: canUsePrimary ? 1.0 : 0.4
           color: genModalRoot.accent
 
           RowLayout {
-            id: copyBtnRow
+            id: primaryBtnRow
             anchors.centerIn: parent
             spacing: 8
             Text {
-              text: "\uf0c5"
+              text: genModalRoot.primaryActionIcon
               font.family: genModalRoot.fontFamily
               color: genModalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
             }
             Text {
-              text: "Copy to Clipboard (↵)"
+              text: genModalRoot.primaryActionLabel
               color: genModalRoot.textOnAccent
               font.pixelSize: Style.font.bodySmall
               font.weight: Font.DemiBold
@@ -854,11 +898,11 @@ Rectangle {
 
           MouseArea {
             anchors.fill: parent
-            enabled: copyBtnBox.canCopy
+            enabled: primaryBtnBox.canUsePrimary
             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
             onClicked: {
-              if (copyBtnBox.canCopy) {
-                genModalRoot.copyAndClose()
+              if (primaryBtnBox.canUsePrimary) {
+                genModalRoot.triggerPrimaryAction()
               }
             }
           }

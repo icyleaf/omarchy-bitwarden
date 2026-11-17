@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import "../components" as Components
 
 Item {
   id: testRunner
@@ -29,6 +30,11 @@ Item {
   property int passphraseWords: 4
   property string passphraseSeparator: "-"
   property bool passphraseCapitalize: false
+
+  // Fill workflow (issue #385): when fillMode is enabled the primary action
+  // returns the generated secret to the caller via passwordSelected instead
+  // of writing it to the clipboard.
+  property bool fillMode: false
 
   property string generatedPassword: ""
   property real generatedEntropy: 0.0
@@ -90,6 +96,9 @@ Item {
   property bool lastCopiedSensitive: false
   property string lastCopiedLabel: ""
   property bool wasClosed: false
+
+  property string lastSelectedPassword: ""
+  property int selectionCount: 0
 
   function handleProcessOutput(stdoutText, stderrText, exitCode) {
     var out = (stdoutText || "").trim()
@@ -163,7 +172,41 @@ Item {
     }
   }
 
+  // Fill-mode counterpart of copyAndClose(): delivers the secret through the
+  // passwordSelected signal and closes, never touching the clipboard.
+  function useAndClose() {
+    if (generatedPassword && !errorMessage) {
+      lastSelectedPassword = generatedPassword
+      selectionCount++
+      active = false
+      wasClosed = true
+    }
+  }
+
+  // Single dispatch site for the primary footer action (mirrors the component).
+  function triggerPrimaryAction() {
+    if (fillMode) {
+      useAndClose()
+    } else {
+      copyAndClose()
+    }
+  }
+
+  // Primary footer action (mirrors the component's button bindings).
+  readonly property string primaryActionLabel: fillMode ? "Use Password (↵)" : "Copy to Clipboard (↵)"
+  readonly property string primaryActionIcon: fillMode ? "\uf00c" : "\uf0c5"
+
   property color accent: "#3b82f6"
+
+  // The REAL PasswordGeneratorModal under the stub Commons harness, wired the
+  // way OmarchyBitwarden.qml wires it (parent owns `active`, process output
+  // feeds generatedPassword). Tests drive it only through top-level
+  // properties, signals and the handleKey() keyboard seam, never internals.
+  Components.PasswordGeneratorModal {
+    id: genModal
+    active: false
+    mode: "password"
+  }
 
   function formatStyledPassword(password) {
     if (!password) return ""
@@ -190,7 +233,7 @@ Item {
     if (key === Qt.Key_Escape) {
       handleEscape()
     } else if (key === Qt.Key_Return || key === Qt.Key_Enter) {
-      copyAndClose()
+      triggerPrimaryAction()
     } else if (modifiers & Qt.ControlModifier && (key === Qt.Key_G || key === Qt.Key_R)) {
       regenerate()
     }
@@ -343,6 +386,9 @@ Item {
     check(lastCopiedText === "stale-secret-123", "copyAndClose() copies secret when errorMessage is clear")
     check(wasClosed === true, "copyAndClose() closes modal when errorMessage is clear")
     generatedPassword = ""
+    // Restore a clean engine state for the sections that follow.
+    isEngineOutdated = false
+    engineVersion = "0.9.0"
 
     // 15. Password Complexity / Strength Level and Label Mapping (方案 B)
     generatedEntropy = 30.0
@@ -416,6 +462,179 @@ Item {
     check(isLong === true, "128-char password flagged as long password (> 32 chars)")
     var styled128 = formatStyledPassword(long128)
     check(styled128.length >= 128, "128-char formatted secret retains full character content")
+
+    // 20. Fill Mode Defaults & Primary Action Surface (issue #385)
+    check(fillMode === false, "Default fillMode is false (backward compatible)")
+    check(primaryActionLabel === "Copy to Clipboard (↵)", "Non-fill primary action reads 'Copy to Clipboard (↵)'")
+    check(primaryActionIcon === "\uf0c5", "Non-fill primary action uses copy icon")
+
+    // 21. Fill Mode Primary Action Surface
+    fillMode = true
+    check(primaryActionLabel === "Use Password (↵)", "fillMode primary action reads 'Use Password (↵)'")
+    check(primaryActionIcon === "\uf00c", "fillMode primary action uses check icon")
+
+    // 22. Fill Mode Enter Selection Workflow: passwordSelected without clipboard write
+    active = true
+    wasClosed = false
+    lastCopiedText = ""
+    generatedPassword = "FillSecret!2026Use"
+    handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(lastSelectedPassword === "FillSecret!2026Use", "Enter in fillMode emits passwordSelected with generated secret")
+    check(selectionCount === 1, "Enter in fillMode emits passwordSelected exactly once")
+    check(lastCopiedText === "", "Enter in fillMode does not modify the clipboard")
+    check(active === false, "Enter in fillMode closes the modal")
+    check(wasClosed === true, "Enter in fillMode marks wasClosed")
+
+    // 23. Fill Mode Enter Also Fires For Keypad Enter
+    active = true
+    wasClosed = false
+    lastSelectedPassword = ""
+    selectionCount = 0
+    handleKey(Qt.Key_Enter, Qt.NoModifier)
+    check(lastSelectedPassword === "FillSecret!2026Use", "Keypad Enter in fillMode emits passwordSelected")
+    check(selectionCount === 1, "Keypad Enter in fillMode emits passwordSelected exactly once")
+    check(wasClosed === true, "Keypad Enter in fillMode closes the modal")
+
+    // 24. Fill Mode Selection Guards Against Error State
+    active = true
+    wasClosed = false
+    lastSelectedPassword = ""
+    selectionCount = 0
+    errorMessage = "omawarden engine is outdated"
+    handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(lastSelectedPassword === "", "fillMode Enter does not select a secret while errorMessage is present")
+    check(selectionCount === 0, "fillMode Enter emits no passwordSelected while errorMessage is present")
+    check(wasClosed === false, "fillMode Enter does not close the modal while errorMessage is present")
+    errorMessage = ""
+    handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(lastSelectedPassword === "FillSecret!2026Use", "fillMode Enter selects once errorMessage is clear")
+    check(wasClosed === true, "fillMode Enter closes the modal once errorMessage is clear")
+
+    // 25. Fill Mode Keeps All Generator Options Fully Functional
+    mode = "password"
+    check(mode === "password", "fillMode starts from password mode")
+    passwordLength = 32
+    includeUppercase = true
+    includeLowercase = true
+    includeNumbers = true
+    includeSpecial = false
+    var fillModeEnt = calculateEntropy()
+    check(Math.abs(fillModeEnt - (32 * Math.log(26 + 26 + 10) / Math.LN2)) < 0.5, "fillMode length/charset changes recompute entropy (got " + fillModeEnt.toFixed(2) + ")")
+    mode = "passphrase"
+    passphraseWords = 7
+    var fillModePhraseEnt = calculateEntropy()
+    check(Math.abs(fillModePhraseEnt - 90.405) < 0.1, "fillMode passphrase word count changes recompute entropy (got " + fillModePhraseEnt.toFixed(2) + ")")
+    mode = "password"
+    passwordLength = 20
+    includeSpecial = true
+    passphraseWords = 4
+    fillMode = false
+
+    // 26. Non-Fill Enter Remains Copy-To-Clipboard (backward compatibility)
+    active = true
+    wasClosed = false
+    lastCopiedText = ""
+    lastSelectedPassword = ""
+    selectionCount = 0
+    generatedPassword = "LegacySecret!2026Copy"
+    handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(lastCopiedText === "LegacySecret!2026Copy", "Enter without fillMode still copies to clipboard")
+    check(lastCopiedSensitive === true, "Enter without fillMode marks clipboard copy as sensitive")
+    check(lastCopiedLabel === "password", "Enter without fillMode labels the clipboard copy")
+    check(selectionCount === 0, "Enter without fillMode never emits passwordSelected")
+    check(active === false, "Enter without fillMode still dismisses the modal")
+    check(wasClosed === true, "Enter without fillMode still marks wasClosed")
+
+    // 27. Fill Mode Passphrase Selection Uses The Passphrase Secret
+    fillMode = true
+    mode = "passphrase"
+    active = true
+    wasClosed = false
+    lastCopiedText = ""
+    lastSelectedPassword = ""
+    selectionCount = 0
+    generatedPassword = "fill-mode-diceware-passphrase"
+    handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(lastSelectedPassword === "fill-mode-diceware-passphrase", "fillMode Enter selects the generated passphrase")
+    check(lastCopiedText === "", "fillMode passphrase selection never touches the clipboard")
+    check(wasClosed === true, "fillMode passphrase selection closes the modal")
+    mode = "password"
+    fillMode = false
+
+    // 28. Real Component: fillMode Surface & Keyboard Seam Signal Routing (issue #385)
+    check(genModal.hasOwnProperty("fillMode"), "Real component exposes the fillMode property")
+    check(genModal.fillMode === false, "Real component fillMode defaults to false")
+    check(genModal.primaryActionLabel === "Copy to Clipboard (↵)", "Real component default primary label is 'Copy to Clipboard (↵)'")
+    check(genModal.primaryActionIcon === "\uf0c5", "Real component default primary icon is the copy glyph")
+
+    var realCopies = 0
+    var realSelections = []
+    var realCloses = 0
+    var copyConn = genModal.copyRequested.connect(function(text, isSensitive, label) { realCopies++ })
+    var selConn = genModal.passwordSelected.connect(function(password) { realSelections.push(password) })
+    var closeConn = genModal.closeRequested.connect(function() { realCloses++ })
+    genModal.generatedPassword = "ComponentSecret!2026"
+    genModal.errorMessage = ""
+
+    // Backward compatibility: Enter without fillMode routes through the clipboard.
+    genModal.handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(realCopies === 1, "Real component Enter (non-fill) emits copyRequested once")
+    check(realSelections.length === 0, "Real component Enter (non-fill) never emits passwordSelected")
+    check(realCloses === 1, "Real component Enter (non-fill) emits closeRequested")
+
+    // Fill mode: Enter routes through passwordSelected, never the clipboard.
+    genModal.fillMode = true
+    check(genModal.primaryActionLabel === "Use Password (↵)", "Real component fillMode primary label is 'Use Password (↵)'")
+    check(genModal.primaryActionIcon === "\uf00c", "Real component fillMode primary icon is the check glyph")
+    genModal.handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(realSelections.length === 1 && realSelections[0] === "ComponentSecret!2026", "Real component Enter (fillMode) emits passwordSelected with the generated secret")
+    check(realCopies === 1, "Real component Enter (fillMode) does not emit copyRequested (clipboard untouched)")
+    check(realCloses === 2, "Real component Enter (fillMode) emits closeRequested")
+
+    // Keypad Enter follows the same fill-mode routing.
+    genModal.handleKey(Qt.Key_Enter, Qt.NoModifier)
+    check(realSelections.length === 2 && realSelections[1] === "ComponentSecret!2026", "Real component keypad Enter (fillMode) emits passwordSelected again")
+    check(realCopies === 1, "Real component keypad Enter (fillMode) still does not copy")
+
+    // Error guard parity on the real component.
+    genModal.errorMessage = "boom"
+    genModal.handleKey(Qt.Key_Return, Qt.NoModifier)
+    check(realSelections.length === 2, "Real component Enter (fillMode) guards against errorMessage")
+    genModal.errorMessage = ""
+    genModal.useAndClose()
+    check(realSelections.length === 3, "Real component useAndClose() emits passwordSelected once errorMessage is clear")
+    genModal.generatedPassword = ""
+    genModal.fillMode = false
+
+    // 29. Real Component: All Generator Options Remain Functional In fillMode
+    var realGenOpts = []
+    var optsConn = genModal.generateRequested.connect(function(opts) { realGenOpts.push(opts) })
+    genModal.fillMode = true
+    genModal.passwordLength = 32
+    genModal.includeSpecial = false
+    genModal.regenerate()
+    var lastOpts = realGenOpts[realGenOpts.length - 1]
+    check(lastOpts && lastOpts.mode === "password" && lastOpts.length === 32 && lastOpts.uppercase === true && lastOpts.special === false, "fillMode regenerate forwards adjusted length/charset options to the engine")
+
+    // Mode switch stays available in fillMode (Ctrl+Tab keyboard seam).
+    genModal.handleKey(Qt.Key_Tab, Qt.ControlModifier)
+    check(genModal.mode === "passphrase", "Ctrl+Tab switches to passphrase mode while fillMode is enabled")
+    genModal.passphraseWords = 7
+    genModal.passphraseSeparator = "_"
+    genModal.passphraseCapitalize = true
+    genModal.regenerate()
+    lastOpts = realGenOpts[realGenOpts.length - 1]
+    check(lastOpts && lastOpts.mode === "passphrase" && lastOpts.words === 7 && lastOpts.separator === "_" && lastOpts.capitalize === true, "fillMode passphrase options (words/separator/capitalize) reach the engine")
+    check(genModal.avoidAmbiguous === false, "fillMode retains the avoidAmbiguous toggle")
+
+    // Restore defaults for later sections.
+    genModal.passwordLength = 20
+    genModal.includeSpecial = true
+    genModal.passphraseWords = 4
+    genModal.passphraseSeparator = "-"
+    genModal.passphraseCapitalize = false
+    genModal.mode = "password"
+    genModal.fillMode = false
 
     console.log("PasswordGeneratorModal Tests Completed: " + (failures === 0 ? "ALL PASSED" : failures + " FAILURES"))
     Qt.exit(failures === 0 ? 0 : 1)
