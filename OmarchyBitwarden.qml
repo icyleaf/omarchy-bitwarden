@@ -1249,6 +1249,16 @@ Item {
     root.showPasswordGeneratorModal = true
   }
 
+  function closePasswordGeneratorModal() {
+    root.showPasswordGeneratorModal = false
+    root.passwordGeneratorFillMode = false
+    if (cipherEditorComponent) cipherEditorComponent.isGeneratingPassword = false
+    if (passwordGenProc.running) {
+      passwordGenProc.isCanceled = true
+      passwordGenProc.running = false
+    }
+  }
+
   function openCipherCreateModal(cipherType) {
     if (!root.authState || root.authState.status !== "unlocked") return
     root.cipherEditorType = cipherType === "note" ? "note" : "login"
@@ -2694,7 +2704,7 @@ Item {
               root.deleteCipherItem = null
             }
           } else if (root.showPasswordGeneratorModal) {
-            root.showPasswordGeneratorModal = false
+            root.closePasswordGeneratorModal()
           } else if (root.showCipherEditor) {
             if (cipherEditorComponent) cipherEditorComponent.handleKey(Qt.Key_Escape, Qt.NoModifier)
           } else if (root.showPasswordHistoryModal) {
@@ -2788,7 +2798,7 @@ Item {
 
         if (root.showPasswordGeneratorModal) {
           if (event.key === Qt.Key_Escape) {
-            root.showPasswordGeneratorModal = false
+            root.closePasswordGeneratorModal()
             event.accepted = true
           }
           return
@@ -2826,18 +2836,18 @@ Item {
             root.requestFieldCopy((event.modifiers & Qt.ControlModifier) ? "totp" : "primary")
             event.accepted = true
           }
-        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search" && !root.hasActiveModal) {
           root.cycleCategory(true)
           event.accepted = true
-        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search" && !root.hasActiveModal) {
           root.cycleCategory(false)
           event.accepted = true
-        } else if (event.key === Qt.Key_Down && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Down && root.effectiveView === "search" && !root.hasActiveModal) {
           if (root.filteredItems.length > 0) {
             root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
           }
           event.accepted = true
-        } else if (event.key === Qt.Key_Up && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Up && root.effectiveView === "search" && !root.hasActiveModal) {
           if (root.filteredItems.length > 0) {
             root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
           }
@@ -3358,18 +3368,11 @@ Item {
           root.passwordGeneratorFillMode = false
         }
         onUpgradeRequested: {
-          root.showPasswordGeneratorModal = false
-          root.passwordGeneratorFillMode = false
+          root.closePasswordGeneratorModal()
           root.installPackage(root.enginePackage || "omawarden")
         }
         onCloseRequested: {
-          root.showPasswordGeneratorModal = false
-          root.passwordGeneratorFillMode = false
-          if (cipherEditorComponent) cipherEditorComponent.isGeneratingPassword = false
-          if (passwordGenProc.running) {
-            passwordGenProc.isCanceled = true
-            passwordGenProc.running = false
-          }
+          root.closePasswordGeneratorModal()
         }
       }
 
@@ -3588,8 +3591,8 @@ Item {
       onStreamFinished: {
         if (cipherEditProc.revision !== root.vaultRevision) return
         if (!root.authState || root.authState.status !== "unlocked") {
-          root.showCipherFormModal = false
-          root.cipherFormEditItem = null
+          root.showCipherEditor = false
+          root.cipherEditorEditItem = null
           return
         }
         var raw = (text || "").trim()
@@ -3607,10 +3610,10 @@ Item {
         var errMsg = (data && data.error) ? data.error : ""
         if (!errMsg) errMsg = cipherEditProc.lastStderr.replace(/^Error:\s*/i, "")
         if (!errMsg) errMsg = "Cipher update failed."
-        // Keep the modal open so the user can correct the conflict and retry.
-        if (cipherFormModalComponent) {
-          cipherFormModalComponent.isBusy = false
-          cipherFormModalComponent.errorMessage = errMsg
+        // Keep the editor open so the user can correct the conflict and retry.
+        if (cipherEditorComponent) {
+          cipherEditorComponent.isBusy = false
+          cipherEditorComponent.errorMessage = errMsg
         } else {
           root.errorMessage = errMsg
         }
@@ -3627,10 +3630,10 @@ Item {
       if (cipherEditProc.errorReported) return
       if (cipherEditProc.revision !== root.vaultRevision) return
       root.isBusy = false
-      if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
+      if (cipherEditorComponent) cipherEditorComponent.isBusy = false
       if (code !== 0) {
-        if (cipherFormModalComponent && root.showCipherFormModal) {
-          cipherFormModalComponent.errorMessage = "Process exited with error code " + code
+        if (cipherEditorComponent && root.showCipherEditor) {
+          cipherEditorComponent.errorMessage = "Process exited with error code " + code
         } else if (!root.errorMessage) {
           root.errorMessage = "Cipher update failed."
         }
@@ -3745,49 +3748,6 @@ Item {
     }
   }
 
-  Process {
-    id: cipherGenProc
-    command: []
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (!cipherFormModalComponent) return
-        cipherFormModalComponent.isGeneratingPassword = false
-        var out = (text || "").trim()
-        if (!out) return
-        try {
-          var data = JSON.parse(out)
-          if (data && data.ok) {
-            cipherFormModalComponent.errorMessage = ""
-            cipherFormModalComponent.setGeneratedPassword(data.password || "")
-          } else if (data && data.error) {
-            cipherFormModalComponent.errorMessage = data.error
-          }
-        } catch (e) {
-          cipherFormModalComponent.errorMessage = "Failed to parse generated password."
-        }
-      }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.handleProcessStderr(text, "omawarden:generate")
-        if (!cipherFormModalComponent) return
-        cipherFormModalComponent.isGeneratingPassword = false
-        var err = (text || "").trim()
-        if (err && !cipherFormModalComponent.errorMessage) {
-          cipherFormModalComponent.errorMessage = err.replace(/^Error:\s*/i, "")
-        }
-      }
-    }
-    onExited: function(code) {
-      if (!cipherFormModalComponent) return
-      cipherFormModalComponent.isGeneratingPassword = false
-      if (code !== 0 && !cipherFormModalComponent.errorMessage) {
-        cipherFormModalComponent.errorMessage = "Failed to generate password."
-      }
-    }
-  }
 
   Process {
     id: sshKeyActionProc

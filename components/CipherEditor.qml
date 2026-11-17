@@ -776,7 +776,6 @@ ScrollView {
           activeFocusOnTab: true
           text: editorRoot.cipherName
           onTextChanged: editorRoot.cipherName = text
-          Keys.onReturnPressed: editorRoot.submit()
         }
       }
     }
