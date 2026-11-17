@@ -148,6 +148,11 @@ pub fn validate_socket_path(path: &Path) -> std::io::Result<()> {
 /// The monotonically increasing integer version of the Daemon Protocol wire format.
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 
+/// The monotonically increasing integer version of cipher mutation schema capabilities.
+/// Version 1 represents legacy ciphers (pure login/note fields without custom fields or multi-URI modifications).
+/// Version 2 adds support for custom fields and multiple URIs.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
 /// The minimum protocol version this client/server understands.
 /// Version 0 represents legacy unversioned daemons.
 pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 0;
