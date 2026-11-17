@@ -349,25 +349,22 @@ Item {
   // Form (issue #386); the selected secret lands in the draft instead of the
   // clipboard.
   property bool passwordGeneratorFillMode: false
-  property bool showCipherFormModal: false
-  property string cipherFormType: "login"
-  property string cipherFormDefaultFolderId: ""
-  // Non-null while the cipher form is editing an existing personal cipher.
-  property var cipherFormEditItem: null
-  // Inspector-Embedded Cipher Creation Form (issue #386): creation drafts live in
-  // the right-hand Inspector column instead of the centered modal. It is not a
-  // blocking modal, but it does own the keyboard while active.
+  // Inspector-Embedded Cipher Form (issues #386, #387): create and edit drafts
+  // live in the right-hand Inspector column instead of a centered modal. It is
+  // not a blocking modal, but it does own the keyboard while active.
   property bool showCipherEditor: false
   property string cipherEditorType: "login"
   property string cipherEditorDefaultFolderId: ""
-  // Set after a successful create so the reloaded list can select the new row.
+  // Non-null while the Inspector Form is editing an existing personal cipher.
+  property var cipherEditorEditItem: null
+  // Set after a successful create/edit so the reloaded list can select the row.
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
   property var deleteCipherItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
   // shortcuts are suspended while a draft is being edited.
-  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal || root.showCipherEditor || root.showDeleteCipherModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -464,11 +461,9 @@ Item {
     root.showPasswordHistoryModal = false
     root.activePasswordHistoryItem = null
 
-    root.showCipherFormModal = false
-    root.cipherFormDefaultFolderId = ""
-    root.cipherFormEditItem = null
     root.showCipherEditor = false
     root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = null
     root.pendingSelectItemId = ""
     if (cipherCreateProc.running) {
       cipherCreateProc.running = false
@@ -477,9 +472,6 @@ Item {
     if (cipherEditProc.running) {
       cipherEditProc.running = false
       root.isBusy = false
-    }
-    if (cipherGenProc.running) {
-      cipherGenProc.running = false
     }
 
     root.showDeleteCipherModal = false
@@ -571,11 +563,9 @@ Item {
       root.showSshKeyModal = false
       root.showPasswordHistoryModal = false
       root.showPasswordGeneratorModal = false
-      root.showCipherFormModal = false
-      root.cipherFormDefaultFolderId = ""
-      root.cipherFormEditItem = null
       root.showCipherEditor = false
       root.cipherEditorDefaultFolderId = ""
+      root.cipherEditorEditItem = null
       root.pendingSelectItemId = ""
       root.showDeleteCipherModal = false
       root.deleteCipherItem = null
@@ -651,11 +641,9 @@ Item {
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
     root.showPasswordGeneratorModal = false
-    root.showCipherFormModal = false
-    root.cipherFormDefaultFolderId = ""
-    root.cipherFormEditItem = null
     root.showCipherEditor = false
     root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = null
     root.pendingSelectItemId = ""
     root.showDeleteCipherModal = false
     root.deleteCipherItem = null
@@ -1230,12 +1218,6 @@ Item {
     }
   }
 
-  onShowCipherFormModalChanged: {
-    if (!root.showCipherFormModal && !root.hasActiveModal) {
-      root.restoreSearchFocus()
-    }
-  }
-
   onShowCipherEditorChanged: {
     if (!root.showCipherEditor && !root.hasActiveModal) {
       root.restoreSearchFocus()
@@ -1269,18 +1251,15 @@ Item {
 
   function openCipherCreateModal(cipherType) {
     if (!root.authState || root.authState.status !== "unlocked") return
-    root.cipherFormType = cipherType === "note" ? "note" : "login"
+    root.cipherEditorType = cipherType === "note" ? "note" : "login"
     var scope = root.activeFolderScope || "all"
-    root.cipherFormDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
-    root.cipherFormEditItem = null
+    root.cipherEditorDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
+    root.cipherEditorEditItem = null
     // Creation drafts render inside the Inspector, not a centered modal (#386).
-    root.cipherEditorType = root.cipherFormType
-    root.cipherEditorDefaultFolderId = root.cipherFormDefaultFolderId
     root.showActionPalette = false
     root.showTypePicker = false
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
-    root.showCipherFormModal = false
     root.showCipherEditor = true
   }
 
@@ -1293,14 +1272,16 @@ Item {
       root.errorMessage = "Organization ciphers are read-only."
       return
     }
-    root.cipherFormType = typeName === "note" ? "note" : "login"
-    root.cipherFormDefaultFolderId = ""
-    root.cipherFormEditItem = item
+    // Edit drafts render in place inside the Inspector (#387). The original
+    // item is installed before `showCipherEditor` so the form prefills from it.
+    root.cipherEditorType = typeName === "note" ? "note" : "login"
+    root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = item
     root.showActionPalette = false
+    root.showTypePicker = false
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
-    root.showCipherEditor = false
-    root.showCipherFormModal = true
+    root.showCipherEditor = true
   }
 
   // Returns the read-only error for ciphers the Overlay must not mutate, or an
@@ -1324,8 +1305,8 @@ Item {
     root.showActionPalette = false
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
-    root.showCipherFormModal = false
     root.showCipherEditor = false
+    root.cipherEditorEditItem = null
     root.showDeleteCipherModal = true
   }
 
@@ -1511,8 +1492,8 @@ Item {
   function handleCipherCreateSuccess(data) {
     root.isBusy = false
     if (cipherEditorComponent) cipherEditorComponent.isBusy = false
-    root.showCipherFormModal = false
     root.showCipherEditor = false
+    root.cipherEditorEditItem = null
 
     var receipt = (data && data.item) ? data.item : {}
     var newId = receipt.id || ""
@@ -1536,12 +1517,12 @@ Item {
   function submitCipherEdit(payload) {
     if (!payload || cipherEditProc.running) return
     if (!root.authState || root.authState.status !== "unlocked") return
-    var item = root.cipherFormEditItem
+    var item = root.cipherEditorEditItem
     if (!item || !item.id) return
     root.isBusy = true
-    if (cipherFormModalComponent) {
-      cipherFormModalComponent.isBusy = true
-      cipherFormModalComponent.errorMessage = ""
+    if (cipherEditorComponent) {
+      cipherEditorComponent.isBusy = true
+      cipherEditorComponent.errorMessage = ""
     }
     cipherEditProc.revision = root.vaultRevision
     cipherEditProc.errorReported = false
@@ -1558,13 +1539,13 @@ Item {
 
   function handleCipherEditSuccess(data) {
     root.isBusy = false
-    if (cipherFormModalComponent) cipherFormModalComponent.isBusy = false
-    root.showCipherFormModal = false
+    if (cipherEditorComponent) cipherEditorComponent.isBusy = false
+    root.showCipherEditor = false
 
     var receipt = (data && data.item) ? data.item : {}
     var editedId = receipt.id || cipherEditProc.itemId
     var editedName = receipt.name || cipherEditProc.editedName
-    root.cipherFormEditItem = null
+    root.cipherEditorEditItem = null
     root.pendingSelectItemId = editedId
     root.revealCreatedCipher(cipherEditProc.editedType, cipherEditProc.editedFolderId)
 
@@ -1579,19 +1560,6 @@ Item {
     root.invalidateVaultList()
     if (vaultListProc.running) vaultListProc.running = false
     root.loadVaultItems()
-  }
-
-  function generateCipherPassword() {
-    if (!cipherFormModalComponent) return
-    var cliVer = (root.cliHealth && root.cliHealth.version) ? root.cliHealth.version : ""
-    if (cliVer && root.compareSemVer(cliVer, root.minimumGeneratorEngineVersion) < 0) {
-      cipherFormModalComponent.isGeneratingPassword = false
-      cipherFormModalComponent.errorMessage = "omawarden engine is outdated (v" + cliVer + "). Please upgrade omawarden to >= " + root.minimumGeneratorEngineVersion + " to support credential generation."
-      return
-    }
-    if (cipherGenProc.running) cipherGenProc.running = false
-    cipherGenProc.command = [root.helperPath, "generate", "--json", "-l", "16"]
-    cipherGenProc.running = true
   }
 
   onSelectedItemChanged: root.handleSelectedItemChanged()
@@ -2725,11 +2693,6 @@ Item {
               root.showDeleteCipherModal = false
               root.deleteCipherItem = null
             }
-          } else if (root.showCipherFormModal) {
-            if (!cipherFormModalComponent || !cipherFormModalComponent.isBusy) {
-              root.showCipherFormModal = false
-              root.cipherFormEditItem = null
-            }
           } else if (root.showPasswordGeneratorModal) {
             root.showPasswordGeneratorModal = false
           } else if (root.showCipherEditor) {
@@ -2794,15 +2757,6 @@ Item {
           if (event.key === Qt.Key_Escape && (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy)) {
             root.showDeleteCipherModal = false
             root.deleteCipherItem = null
-            event.accepted = true
-          }
-          return
-        }
-
-        if (root.showCipherFormModal) {
-          if (event.key === Qt.Key_Escape && (!cipherFormModalComponent || !cipherFormModalComponent.isBusy)) {
-            root.showCipherFormModal = false
-            root.cipherFormEditItem = null
             event.accepted = true
           }
           return
@@ -3105,15 +3059,17 @@ Item {
                 borderColor: root.borderColor
               }
 
-              // Inspector-Embedded Cipher Creation Form (issue #386). Creation
+              // Inspector-Embedded Cipher Form (issues #386, #387): create and edit
               // drafts render in place, keeping the vault list visible.
               CipherEditor {
                 id: cipherEditorComponent
                 anchors.fill: parent
                 active: root.showCipherEditor
+                mode: root.cipherEditorEditItem ? "edit" : "create"
                 cipherType: root.cipherEditorType
                 folders: root.getAvailableFolders()
                 defaultFolderId: root.cipherEditorDefaultFolderId
+                originalItem: root.cipherEditorEditItem
                 isEngineOutdated: root.isGeneratorEngineOutdated
                 engineVersion: (root.cliHealth && root.cliHealth.version) || ""
                 requiredVersion: root.minimumGeneratorEngineVersion
@@ -3123,10 +3079,14 @@ Item {
                 muted: root.muted
                 cardBackground: Commons.Color.popups.background
                 borderColor: root.borderColor
-                onSubmitRequested: function(payload) { root.submitCipherCreate(payload) }
+                onSubmitRequested: function(payload) {
+                  if (root.cipherEditorEditItem) root.submitCipherEdit(payload)
+                  else root.submitCipherCreate(payload)
+                }
                 onGeneratePasswordRequested: { root.openPasswordGeneratorForCipherEditor() }
                 onCancelRequested: {
                   root.showCipherEditor = false
+                  root.cipherEditorEditItem = null
                   root.cipherEditorDefaultFolderId = ""
                 }
               }
@@ -3409,37 +3369,6 @@ Item {
           if (passwordGenProc.running) {
             passwordGenProc.isCanceled = true
             passwordGenProc.running = false
-          }
-        }
-      }
-
-      // 9. Create/Edit Login and Secure Note Modal (zero-argv stdin contract)
-      CipherFormModal {
-        id: cipherFormModalComponent
-        active: root.showCipherFormModal
-        mode: root.cipherFormEditItem ? "edit" : "create"
-        cipherType: root.cipherFormType
-        folders: root.getAvailableFolders()
-        defaultFolderId: root.cipherFormDefaultFolderId
-        originalItem: root.cipherFormEditItem
-        isEngineOutdated: root.isGeneratorEngineOutdated
-        engineVersion: (root.cliHealth && root.cliHealth.version) || ""
-        requiredVersion: root.minimumGeneratorEngineVersion
-        fontFamily: root.fontFamily
-        foreground: root.foreground
-        accent: root.accent
-        muted: root.muted
-        cardBackground: Commons.Color.popups.background
-        borderColor: Commons.Color.popups.border
-        onSubmitRequested: function(payload) {
-          if (root.cipherFormEditItem) root.submitCipherEdit(payload)
-          else root.submitCipherCreate(payload)
-        }
-        onGeneratePasswordRequested: root.generateCipherPassword()
-        onCloseRequested: {
-          if (!cipherFormModalComponent.isBusy) {
-            root.showCipherFormModal = false
-            root.cipherFormEditItem = null
           }
         }
       }

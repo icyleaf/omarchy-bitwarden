@@ -24,10 +24,10 @@ Item {
   property bool showSshKeyModal: false
   property bool showPasswordHistoryModal: false
   property bool showPasswordGeneratorModal: false
-  property bool showCipherFormModal: false
+  property bool showCipherEditor: false
   property bool showDeleteCipherModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showTypePicker || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal || showDeleteCipherModal
+  readonly property bool hasActiveModal: showActionPalette || showTypePicker || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherEditor || showDeleteCipherModal
 
   property int searchFocusRestoredCount: 0
 
@@ -120,18 +120,18 @@ Item {
     showPasswordGeneratorModal = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Password Generator modal")
 
-    // 6. Cipher creation modal active
-    showCipherFormModal = true
-    check(hasActiveModal === true, "hasActiveModal is true when showCipherFormModal is true")
-    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Cipher Form modal")
-    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Cipher Form modal")
+    // 6. Cipher Editor (Inspector Form) active
+    showCipherEditor = true
+    check(hasActiveModal === true, "hasActiveModal is true when showCipherEditor is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Cipher Editor")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Cipher Editor")
 
     searchFocusRestoredCount = 0
     simulateFocusRestore()
-    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Cipher Form modal is active")
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Cipher Editor is active")
 
-    showCipherFormModal = false
-    check(hasActiveModal === false, "hasActiveModal is false after closing Cipher Form modal")
+    showCipherEditor = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Cipher Editor")
 
     // 6b. Cipher delete confirmation modal active
     showDeleteCipherModal = true

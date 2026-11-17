@@ -4,7 +4,7 @@ import qs.Commons as Commons
 import "../components" as Components
 
 // Regression coverage for the Inspector header action controls and the
-// CipherFormModal custom-field add buttons:
+// CipherEditor custom-field add buttons:
 //  - exactly one favorite indicator (the interactive star, no passive badge)
 //  - the delete control uses the same trash glyph as Settings
 //  - Edit is an icon button, not a text button
@@ -52,10 +52,17 @@ Item {
     })
   }
 
-  Components.CipherFormModal {
-    id: form
+  Components.CipherEditor {
+    id: editor
+    width: 500
+    height: 600
     active: true
     cipherType: "login"
+    folders: [
+      { id: "f1", name: "Work" },
+      { id: "f2", name: "Personal" }
+    ]
+    defaultFolderId: ""
     foreground: latteFg
     accent: latteAccent
     muted: latteMuted
@@ -125,10 +132,10 @@ Item {
       }
       check(countText(inspector, "Edit") === 0, "no text 'Edit' button remains")
 
-      // 4. Custom-field add buttons must contain their icon + label.
+      // 4. Custom-field add buttons (CipherEditor) must contain their icon + label.
       for (var type = 0; type < 3; type++) {
-        var button = findChildByName(form, "addFieldButton_" + type)
-        var row = findChildByName(form, "addFieldRow_" + type)
+        var button = findChildByName(editor, "editorAddFieldButton_" + type)
+        var row = findChildByName(editor, "editorAddFieldRow_" + type)
         check(button !== null, "custom field add button " + type + " exists")
         check(row !== null, "custom field add row " + type + " exists")
         if (button && row) {

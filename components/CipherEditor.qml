@@ -4,13 +4,16 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
 
-// Inspector-embedded creation form for personal Login and Secure Note ciphers
-// (issue #386). It replaces the centered `CipherFormModal` for creation, so the
-// vault list stays visible while the right-hand Inspector hosts the draft.
+// Inspector-embedded cipher form for personal Login and Secure Note ciphers
+// (issues #386, #387). Creation and edit drafts render in the right-hand
+// Inspector column, so the vault list stays visible and no centered modal owns
+// the screen.
 //
 // Secrets are only ever emitted through `submitRequested`; the Overlay pipes the
-// payload to `omawarden vault create --stdin --json`, never via argv. The
-// component never writes to the clipboard on its own.
+// payload to `omawarden vault create --stdin --json` or
+// `omawarden vault edit <id> --stdin --json`, never via argv. In edit mode the
+// payload is a minimal dirty diff against `originalItem`. The component never
+// writes to the clipboard on its own.
 //
 // Keyboard: Ctrl+S saves, Esc cancels, Ctrl+G opens the Password Generator in
 // fill mode (#385). Cancelling a dirty draft raises an inline discard prompt
@@ -19,9 +22,14 @@ ScrollView {
   id: editorRoot
 
   property bool active: false
+  property string mode: "create" // "create" | "edit"
   property string cipherType: "login" // "login" | "note"
   property var folders: [] // [{ id, name }]
   property string defaultFolderId: ""
+  // In edit mode this is the selected vault item. Saving diffs against it.
+  property var originalItem: null
+  // Linked (type 3) fields are read-only and never enter the update payload.
+  property var linkedFields: []
 
   property color foreground: Commons.Color.foreground
   property color accent: Commons.Color.accent
@@ -41,9 +49,10 @@ ScrollView {
 
   readonly property color textOnAccent: StatusPalette.textOn(accent)
   readonly property bool isLogin: cipherType === "login"
-  readonly property string title: isLogin ? "New Login" : "New Secure Note"
+  readonly property bool isEdit: mode === "edit"
+  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : "New Secure Note")
   // Recomputed on every form mutation so the discard guard stays accurate even
-  // when the user reverts their edits back to a pristine draft.
+  // when the user reverts their edits back to the original cipher.
   property bool isDirty: false
 
   // Editable form state.
@@ -91,40 +100,119 @@ ScrollView {
     return ""
   }
 
-  function resetForm() {
+  function originalFields() {
+    var out = []
+    var src = (originalItem && originalItem.fields) ? originalItem.fields : []
+    for (var i = 0; i < src.length; i++) {
+      var field = src[i] || {}
+      out.push({
+        name: String(field.name || ""),
+        value: String(field.value || ""),
+        type: Number(field.type || 0)
+      })
+    }
+    return out
+  }
+
+  function originalUriValues() {
+    var out = []
+    if (!originalItem || !originalItem.login || !originalItem.login.uris) return out
+    var src = originalItem.login.uris
+    for (var i = 0; i < src.length; i++) {
+      var raw = src[i]
+      var value = (typeof raw === "string") ? raw : ((raw && raw.uri) ? raw.uri : "")
+      value = String(value || "").trim()
+      if (value.length > 0) out.push(value)
+    }
+    return out
+  }
+
+  // Clears every plaintext value without repopulating from `originalItem`.
+  // Called when the form closes so cancelled, saved, and locked drafts do not
+  // linger in memory (security.md: secrets must not outlive the editor).
+  function clearDraft() {
     errorMessage = ""
     isBusy = false
     isGeneratingPassword = false
     discardPromptVisible = false
     cipherName = ""
+    folderId = ""
     username = ""
     password = ""
     passwordRevealed = false
     notes = ""
     uriModel.clear()
     fieldModel.clear()
-    uriModel.append({ uri: "" })
-    // The active folder scope pre-selects a folder, but that default alone must
-    // not make a pristine draft look dirty.
-    folderId = normalizeFolderId(defaultFolderId)
+    linkedFields = []
+    isDirty = false
+  }
+
+  function resetForm() {
+    clearDraft()
+
+    var linked = []
+    if (isEdit && originalItem) {
+      cipherName = String(originalItem.name || "")
+      // Keep the stored folder id even if the folder list is momentarily
+      // incomplete, so an edit never silently moves the cipher to No Folder.
+      folderId = String(originalItem.folder_id || "")
+      notes = String(originalItem.notes || "")
+
+      if (isLogin && originalItem.login) {
+        username = String(originalItem.login.username || "")
+        password = String(originalItem.login.password || "")
+        var uris = originalItem.login.uris || []
+        for (var u = 0; u < uris.length; u++) {
+          var rawUri = uris[u]
+          var uriValue = (typeof rawUri === "string") ? rawUri : ((rawUri && rawUri.uri) ? rawUri.uri : "")
+          uriModel.append({ uri: String(uriValue || "") })
+        }
+      }
+
+      var fields = originalFields()
+      for (var f = 0; f < fields.length; f++) {
+        if (fields[f].type === 3) {
+          linked.push(fields[f])
+        } else {
+          fieldModel.append({
+            name: fields[f].name,
+            value: fields[f].value,
+            type: fields[f].type,
+            revealed: false
+          })
+        }
+      }
+    } else {
+      // The active folder scope pre-selects a folder, but that default alone
+      // must not make a pristine draft look dirty.
+      folderId = normalizeFolderId(defaultFolderId)
+    }
+
+    if (uriModel.count === 0) uriModel.append({ uri: "" })
+    linkedFields = linked
     recomputeDirty()
   }
 
   onActiveChanged: {
-    // Reset on every transition: opening initialises a pristine draft, and
-    // closing scrubs the plaintext secrets/notes out of memory (security.md:
-    // cancelled, saved, and locked drafts must not linger).
-    resetForm()
     if (active) {
+      // Opening initialises a pristine create draft or prefills the edit diff.
+      resetForm()
       Qt.callLater(function() {
         if (titleInput) titleInput.forceActiveFocus()
       })
+    } else {
+      // Closing scrubs the plaintext secrets/notes out of memory.
+      clearDraft()
     }
   }
 
-  // A draft is dirty once the user typed anything or added structure. Folder
-  // defaults and blank URI rows are not user intent, so they stay clean.
+  // A create draft is dirty once the user typed anything or added structure;
+  // folder defaults and blank URI rows are not user intent, so they stay clean.
+  // An edit draft is dirty only when it differs from the original cipher.
   function computeDirty() {
+    if (isEdit) {
+      return Object.keys(buildEditPayload(String(cipherName || "").trim())).length > 0
+    }
     if (String(cipherName || "").trim() !== "") return true
     if (String(notes || "") !== "") return true
     if (String(folderId || "") !== String(normalizeFolderId(defaultFolderId) || "")) return true
@@ -291,6 +379,8 @@ ScrollView {
       }
     }
 
+    if (isEdit && originalItem) return buildEditPayload(trimmedName)
+
     var payload = {
       cipher_type: cipherType,
       name: trimmedName,
@@ -325,11 +415,102 @@ ScrollView {
     return payload
   }
 
+  // Minimal dirty diff against the cipher being edited. An empty object means
+  // the user changed nothing, so the caller can return to view mode without a
+  // subprocess.
+  function buildEditPayload(trimmedName) {
+    var payload = {}
+    var original = originalItem || {}
+
+    if (trimmedName !== String(original.name || "")) payload.name = trimmedName
+
+    var originalFolder = String(original.folder_id || "")
+    var currentFolder = String(folderId || "")
+    if (currentFolder !== originalFolder) payload.folder_id = currentFolder
+
+    var originalNotes = String(original.notes || "")
+    if (String(notes || "") !== originalNotes) payload.notes = String(notes || "")
+
+    if (isLogin) {
+      var login = original.login || {}
+
+      if (String(username || "") !== String(login.username || "")) {
+        payload.username = String(username || "")
+      }
+      if (String(password || "") !== String(login.password || "")) {
+        payload.password = String(password || "")
+      }
+
+      var originalUris = originalUriValues()
+      var currentUris = []
+      for (var u = 0; u < uriModel.count; u++) {
+        var uri = String(uriModel.get(u).uri || "").trim()
+        if (uri.length > 0) currentUris.push(uri)
+      }
+      var urisMatch = originalUris.length === currentUris.length
+      if (urisMatch) {
+        for (var c = 0; c < currentUris.length; c++) {
+          if (currentUris[c] !== originalUris[c]) {
+            urisMatch = false
+            break
+          }
+        }
+      }
+      if (!urisMatch) {
+        if (currentUris.length === 0 && originalUris.length > 0) payload.clear_uris = true
+        else payload.uris = currentUris
+      }
+    }
+
+    // Linked (type 3) fields are deliberately absent from both `fields` and
+    // `remove_fields`, so the daemon preserves them untouched.
+    var originalEditable = []
+    var originalFieldList = originalFields()
+    for (var o = 0; o < originalFieldList.length; o++) {
+      if (originalFieldList[o].type !== 3) originalEditable.push(originalFieldList[o])
+    }
+
+    var currentNames = {}
+    var upserts = []
+    for (var i = 0; i < fieldModel.count; i++) {
+      var item = fieldModel.get(i)
+      var name = String(item.name || "").trim()
+      var value = String(item.value || "")
+      currentNames[name] = true
+
+      var match = null
+      for (var m = 0; m < originalEditable.length; m++) {
+        if (originalEditable[m].name === name) {
+          match = originalEditable[m]
+          break
+        }
+      }
+      if (!match || match.type !== item.type || match.value !== value) {
+        upserts.push({ name: name, value: value, type: item.type })
+      }
+    }
+
+    var removals = []
+    for (var r = 0; r < originalEditable.length; r++) {
+      if (!currentNames[originalEditable[r].name]) removals.push(originalEditable[r].name)
+    }
+
+    if (removals.length > 0) payload.remove_fields = removals
+    if (upserts.length > 0) payload.fields = upserts
+
+    return payload
+  }
+
   function submit() {
     if (isBusy || discardPromptVisible) return
     errorMessage = ""
     var payload = buildPayload()
     if (!payload) return
+    if (isEdit && Object.keys(payload).length === 0) {
+      // Nothing changed: return to Inspector view mode without a subprocess.
+      cancelRequested()
+      return
+    }
     submitRequested(payload)
   }
 
@@ -1088,6 +1269,7 @@ ScrollView {
 
             RowLayout {
               id: addFieldRow
+              objectName: "editorAddFieldRow_" + modelData.type
               anchors.centerIn: parent
               spacing: 4
 
@@ -1306,6 +1488,74 @@ ScrollView {
           }
         }
       }
+
+      // Linked (type 3) fields are read-only: they reference other item
+      // properties and must never be rewritten by the edit diff.
+      Repeater {
+        model: editorRoot.linkedFields
+
+        delegate: ColumnLayout {
+          required property var modelData
+          Layout.fillWidth: true
+          spacing: 4
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+
+            Rectangle {
+              implicitHeight: 22
+              implicitWidth: linkedTypeLabel.implicitWidth + 10
+              radius: 3
+              color: StatusPalette.tint(StatusPalette.trace, 0.15)
+              border.color: StatusPalette.trace
+              border.width: 1
+
+              Text {
+                id: linkedTypeLabel
+                anchors.centerIn: parent
+                text: "Linked"
+                color: StatusPalette.labelOnTint(StatusPalette.trace, 0.15, editorRoot.cardBackground)
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            Text {
+              text: modelData.name || "Field"
+              color: editorRoot.muted
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+              Layout.fillWidth: true
+            }
+
+            Text {
+              text: "read-only"
+              color: editorRoot.muted
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Rectangle {
+            Layout.fillWidth: true
+            height: 30
+            radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.04)
+            border.color: editorRoot.borderColor
+            border.width: 1
+
+            Text {
+              anchors.fill: parent
+              anchors.leftMargin: 8
+              anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter
+              text: modelData.value || ""
+              color: editorRoot.muted
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+          }
+        }
+      }
     }
 
     // Footer actions
@@ -1366,7 +1616,7 @@ ScrollView {
           }
 
           Text {
-            text: editorRoot.isBusy ? "Creating..." : "Save"
+            text: editorRoot.isBusy ? (editorRoot.isEdit ? "Saving..." : "Creating...") : (editorRoot.isEdit ? "Save Changes" : "Save")
             color: editorRoot.textOnAccent
             font.pixelSize: Style.font.bodySmall
             font.weight: Font.DemiBold
