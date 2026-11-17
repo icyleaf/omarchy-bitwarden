@@ -26,6 +26,7 @@ ScrollView {
   property color borderColor: Commons.Color.menu.border
   property string fontFamily: ""
   property bool showWebsiteIcons: false
+  property bool isFavoriteMutating: false
   readonly property int keyPixelSize: Style.font.caption
   readonly property int valuePixelSize: Style.font.body
 
@@ -33,6 +34,9 @@ ScrollView {
   signal viewAttachmentRequested(var item, var att)
   signal downloadAttachmentRequested(var item, var att)
   signal exportSshKeyRequested(var item)
+  signal editRequested(var item)
+  signal favoriteToggled(var item)
+  signal deleteRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
   signal togglePrivateKeyRevealed()
@@ -522,95 +526,125 @@ ScrollView {
             spacing: 6
 
             Text {
+              id: titleText
+              objectName: "titleText"
               text: inspectorRoot.item ? (inspectorRoot.item.name || "Untitled") : ""
               color: inspectorRoot.foreground
               font.pixelSize: Style.font.body
               font.weight: Font.DemiBold
               elide: Text.ElideRight
               Layout.fillWidth: true
-              Layout.preferredWidth: 0
+              Layout.maximumWidth: Math.ceil(implicitWidth) + 2
+              Layout.alignment: Qt.AlignVCenter
             }
 
-            // Monochrome Favorite Badge
-            Rectangle {
-              visible: Boolean(inspectorRoot.item && inspectorRoot.item.favorite)
-              implicitHeight: 18
-              implicitWidth: favRow.implicitWidth + 10
-              radius: 3
-              color: Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.08)
-              border.color: inspectorRoot.borderColor
-              border.width: 1
-
-              RowLayout {
-                id: favRow
-                anchors.centerIn: parent
-                spacing: 3
-                Text {
-                  text: "\uf005"
-                  font.family: inspectorRoot.fontFamily
-                  font.pixelSize: Style.fontPx(0.75)
-                  color: inspectorRoot.muted
-                }
-                Text {
-                  text: "Favorite"
-                  color: inspectorRoot.muted
-                  font.pixelSize: Style.font.caption
-                  font.weight: Font.Medium
-                }
-              }
+            GhostIconButton {
+              objectName: "favoriteButton"
+              visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+              isBusy: inspectorRoot.isFavoriteMutating
+              enabled: !inspectorRoot.isFavoriteMutating
+              Layout.alignment: Qt.AlignVCenter
+              iconText: (inspectorRoot.item && inspectorRoot.item.favorite) ? "\uf005" : "\uf006"
+              iconColor: (inspectorRoot.item && inspectorRoot.item.favorite) ? StatusPalette.favorite : inspectorRoot.muted
+              tooltip: inspectorRoot.isFavoriteMutating ? "Updating favorite..." : ((inspectorRoot.item && inspectorRoot.item.favorite) ? "Remove from favorites (Ctrl+B)" : "Add to favorites (Ctrl+B)")
+              fontFamily: inspectorRoot.fontFamily
+              onClicked: inspectorRoot.favoriteToggled(inspectorRoot.item)
             }
 
-            // Organization Badge
-            Rectangle {
-              visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
-              implicitHeight: 18
-              implicitWidth: orgText.implicitWidth + 8
-              radius: 3
-              color: StatusPalette.tint(StatusPalette.organization, 0.2)
-              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
-              border.width: 1
+            Item {
+              Layout.fillWidth: true
+            }
+          }
 
-              Text {
-                id: orgText
-                anchors.centerIn: parent
-                text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
-                font.family: inspectorRoot.fontFamily
-                color: StatusPalette.organization
-                font.pixelSize: Style.font.caption
-                font.weight: Font.Medium
-              }
+          RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: 0
+            spacing: 6
+
+            Text {
+              objectName: "categoryLabel"
+              text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
+              color: inspectorRoot.muted
+              font.pixelSize: Style.font.bodySmall
+              Layout.alignment: Qt.AlignVCenter
             }
 
             // Folder Badge
             Rectangle {
+              objectName: "folderBadge"
               visible: Boolean(inspectorRoot.item && inspectorRoot.item.folder_name)
               implicitHeight: 18
-              implicitWidth: folderText.implicitWidth + 8
+              implicitWidth: Math.min(140, folderText.implicitWidth + 8)
               radius: 3
               color: StatusPalette.tint(StatusPalette.folder, 0.2)
               border.color: StatusPalette.tint(StatusPalette.folder, 0.5)
               border.width: 1
+              Layout.alignment: Qt.AlignVCenter
 
               Text {
                 id: folderText
                 anchors.centerIn: parent
+                width: Math.min(132, implicitWidth)
                 text: "\uf07b " + (inspectorRoot.item ? (inspectorRoot.item.folder_name || "") : "")
                 font.family: inspectorRoot.fontFamily
                 color: StatusPalette.folder
                 font.pixelSize: Style.font.caption
                 font.weight: Font.Medium
+                elide: Text.ElideRight
               }
             }
-          }
 
-          Text {
-            text: inspectorRoot.item ? inspectorRoot.getItemCategoryLabel(inspectorRoot.item) : ""
-            color: inspectorRoot.muted
-            font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
-            Layout.fillWidth: true
-            Layout.preferredWidth: 0
+            // Organization Badge
+            Rectangle {
+              objectName: "orgBadge"
+              visible: Boolean(inspectorRoot.item && inspectorRoot.item.organization_name)
+              implicitHeight: 18
+              implicitWidth: Math.min(160, orgText.implicitWidth + 8)
+              radius: 3
+              color: StatusPalette.tint(StatusPalette.organization, 0.2)
+              border.color: StatusPalette.tint(StatusPalette.organization, 0.5)
+              border.width: 1
+              Layout.alignment: Qt.AlignVCenter
+
+              Text {
+                id: orgText
+                anchors.centerIn: parent
+                width: Math.min(152, implicitWidth)
+                text: "\uf1ad " + (inspectorRoot.item ? (inspectorRoot.item.organization_name || "") : "")
+                font.family: inspectorRoot.fontFamily
+                color: StatusPalette.organization
+                font.pixelSize: Style.font.caption
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+              }
+            }
+
+            Item {
+              Layout.fillWidth: true
+            }
           }
+        }
+
+        // Edit and delete controls for mutable ciphers
+        GhostIconButton {
+          objectName: "editButton"
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf044"
+          iconColor: inspectorRoot.accent
+          tooltip: "Edit item (Ctrl+E)"
+          fontFamily: inspectorRoot.fontFamily
+          onClicked: inspectorRoot.editRequested(inspectorRoot.item)
+        }
+
+        GhostIconButton {
+          objectName: "deleteButton"
+          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf1f8"
+          tooltip: "Delete item (Ctrl+D)"
+          fontFamily: inspectorRoot.fontFamily
+          onClicked: inspectorRoot.deleteRequested(inspectorRoot.item)
         }
       }
 

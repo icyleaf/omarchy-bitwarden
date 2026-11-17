@@ -126,6 +126,14 @@ _Avoid_: Command menu, quick actions
 The side panel within the overlay that reveals details, masked secrets, and metadata for the selected cipher.
 _Avoid_: Details pane, info view, sidebar
 
+**Inspector Form**:
+The inline editable state within the Inspector panel for drafting or modifying personal Login and Secure Note ciphers without opening a blocking modal dialog.
+_Avoid_: Create window, edit popup, modal form
+
+**Type Picker**:
+The lightweight keyboard-driven selector (`Ctrl+N`) for quickly choosing between creating a Login or Secure Note cipher.
+_Avoid_: Creation modal, type dialog, prompt window
+
 **Theme Tokens**:
 The reactive, system-wide color primitives provided by the Omarchy shell (`qs.Commons.Color`) that dynamically adapt to the active desktop theme (dark or light).
 _Avoid_: Hardcoded hex codes, custom color schemes, fixed color palettes

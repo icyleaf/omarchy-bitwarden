@@ -20,11 +20,14 @@ Item {
   property var selectedItem: ({ id: "item1", name: "Sample Item" })
 
   property bool showActionPalette: false
+  property bool showTypePicker: false
   property bool showSshKeyModal: false
   property bool showPasswordHistoryModal: false
   property bool showPasswordGeneratorModal: false
+  property bool showCipherEditor: false
+  property bool showDeleteCipherModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal
+  readonly property bool hasActiveModal: showActionPalette || showTypePicker || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherEditor || showDeleteCipherModal
 
   property int searchFocusRestoredCount: 0
 
@@ -91,6 +94,19 @@ Item {
     showActionPalette = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Action Palette")
 
+    // 4b. Type Picker active
+    showTypePicker = true
+    check(hasActiveModal === true, "hasActiveModal is true when showTypePicker is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Type Picker")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Type Picker")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Type Picker is active")
+
+    showTypePicker = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Type Picker")
+
     // 5. Password Generator modal active
     showPasswordGeneratorModal = true
     check(hasActiveModal === true, "hasActiveModal is true when showPasswordGeneratorModal is true")
@@ -104,12 +120,38 @@ Item {
     showPasswordGeneratorModal = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Password Generator modal")
 
-    // 5. No modals: focus restore executes
+    // 6. Cipher Editor (Inspector Form) active
+    showCipherEditor = true
+    check(hasActiveModal === true, "hasActiveModal is true when showCipherEditor is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Cipher Editor")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Cipher Editor")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Cipher Editor is active")
+
+    showCipherEditor = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Cipher Editor")
+
+    // 6b. Cipher delete confirmation modal active
+    showDeleteCipherModal = true
+    check(hasActiveModal === true, "hasActiveModal is true when showDeleteCipherModal is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Delete Cipher modal")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Delete Cipher modal")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Delete Cipher modal is active")
+
+    showDeleteCipherModal = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Delete Cipher modal")
+
+    // 7. No modals: focus restore executes
     searchFocusRestoredCount = 0
     simulateFocusRestore()
     check(searchFocusRestoredCount === 1, "Background focus restore proceeds when no modals are active")
 
-    // 6. Test legacy unguarded behavior vs guarded behavior
+    // 8. Test legacy unguarded behavior vs guarded behavior
     // The bug was: condition only checked !showActionPalette
     var legacyGuardSshModal = (!showActionPalette) // would be true even if showSshKeyModal is true!
     showSshKeyModal = true

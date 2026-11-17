@@ -2,6 +2,8 @@ singleton StatusPalette 1.0 StatusPalette.qml
 ActionPaletteModal 1.0 ActionPaletteModal.qml
 AuthView 1.0 AuthView.qml
 CategoryTabBar 1.0 CategoryTabBar.qml
+CipherEditor 1.0 CipherEditor.qml
+DeleteCipherModal 1.0 DeleteCipherModal.qml
 DependencyCheckView 1.0 DependencyCheckView.qml
 EmptyInspector 1.0 EmptyInspector.qml
 FooterBar 1.0 FooterBar.qml
@@ -16,4 +18,5 @@ SettingsModal 1.0 SettingsModal.qml
 SshApprovalModal 1.0 SshApprovalModal.qml
 SshKeyModal 1.0 SshKeyModal.qml
 ToastAlert 1.0 ToastAlert.qml
+TypePickerModal 1.0 TypePickerModal.qml
 VaultItemList 1.0 VaultItemList.qml
