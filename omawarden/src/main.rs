@@ -139,6 +139,26 @@ fn cipher_update_payload_has_login_fields(payload: &Value) -> bool {
         .any(|key| payload.get(*key).is_some())
 }
 
+fn cipher_mutation_requires_schema_v2(request: &Value) -> bool {
+    request
+        .get("fields")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+        || request
+            .get("remove_fields")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        || request
+            .get("add_uris")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        || request
+            .get("clear_uris")
+            .is_some_and(|v| v.as_bool().unwrap_or(false))
+        || (request.get("action").and_then(Value::as_str) == Some("cipher_update")
+            && request.get("uris").is_some())
+}
+
 /// Emit a vault command failure in whichever envelope the caller asked for.
 fn emit_vault_error(json: bool, message: &str) {
     if json {
@@ -2334,9 +2354,12 @@ fn main() -> ExitCode {
                                 "username": username,
                                 "password": *password_val,
                                 "notes": notes,
-                                "uris": uris,
                                 "folder_id": folder_id,
                             });
+                            if !uris.is_empty() {
+                                req["uris"] = json!(uris);
+                                req["login"] = json!({ "uris": uris });
+                            }
                             if !custom_fields.is_empty() {
                                 req["fields"] = json!(custom_fields);
                             }
@@ -4067,14 +4090,14 @@ fn main() -> ExitCode {
 }
 
 fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
-    use omawarden::daemon::{dispatch_daemon_request, DispatchError};
+    use omawarden::daemon::{dispatch_daemon_request, DispatchError, CURRENT_SCHEMA_VERSION};
     let reject = |reason: &str| json!({"ok":false, "outcome":"rejected", "error":reason});
     if let Err(e @ DispatchError::IncompatibleProtocol { .. }) =
         omawarden::daemon::ensure_daemon_running()
     {
         return Err(reject(&e.to_string()));
     }
-    let ping = match dispatch_daemon_request(&json!({"action":"ping"})) {
+    let mut ping = match dispatch_daemon_request(&json!({"action":"ping"})) {
         Ok(p) => p,
         Err(DispatchError::IncompatibleProtocol { .. }) => {
             return Err(reject(
@@ -4083,6 +4106,34 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         }
         Err(_) => return Err(reject("Daemon unavailable.")),
     };
+
+    let running_schema = ping
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u32;
+
+    if cipher_mutation_requires_schema_v2(request) && running_schema < CURRENT_SCHEMA_VERSION {
+        // Attempt on-demand auto-restart of stale standalone daemon
+        let stop_req = json!({ "action": "stop", "admin": true });
+        match dispatch_daemon_request(&stop_req) {
+            Ok(stop_res) if stop_res["ok"] == true => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Err(e) = omawarden::daemon::ensure_daemon_running() {
+                    return Err(reject(&format!("Could not restart the daemon: {e}")));
+                }
+                ping = match dispatch_daemon_request(&json!({"action":"ping"})) {
+                    Ok(p) => p,
+                    Err(_) => return Err(reject("Daemon unavailable after restart.")),
+                };
+            }
+            _ => {
+                return Err(reject(
+                    "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
+                ));
+            }
+        }
+    }
+
     if ping["unlocked"] != true {
         let (password, ..) = read_auth_payload();
         if password.is_empty()
@@ -4115,6 +4166,15 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         DispatchError::LaunchFailed(msg) => reject(&format!("Could not start the daemon: {msg}")),
     })?;
     if reply["ok"] == false {
+        let err_str = reply.get("error").and_then(Value::as_str).unwrap_or("");
+        if (err_str.contains("Invalid cipher fields")
+            || err_str.contains("Invalid cipher update fields"))
+            && running_schema < CURRENT_SCHEMA_VERSION
+        {
+            return Err(reject(
+                "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
+            ));
+        }
         return Err(reply);
     }
     if reply["ok"] != true || reply["item"]["id"].as_str().is_none_or(str::is_empty) {

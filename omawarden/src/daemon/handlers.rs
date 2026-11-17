@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::crypto::{Engine, BASE64};
 
-use super::protocol::{get_socket_path, CURRENT_PROTOCOL_VERSION};
+use super::protocol::{get_socket_path, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION};
 use super::server::{get_peer_pid, verify_peer_credentials};
 use super::state::{should_touch_activity, DaemonState};
 
@@ -206,6 +206,7 @@ pub fn handle_client_with_peer(
             "ok": true,
             "pong": true,
             "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "schema_version": CURRENT_SCHEMA_VERSION,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
             "unlock_context": state.vault_mgr.unlock_context(),
