@@ -328,6 +328,8 @@ Item {
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
   property var currentAvailableActions: []
+  // Type picker (Ctrl+N): quick Login vs Secure Note creation selector.
+  property bool showTypePicker: false
   property bool showSshKeyModal: false
   property string sshKeyModalMode: "create"
   property var sshKeyModalItem: null
@@ -352,7 +354,7 @@ Item {
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
   property var deleteCipherItem: null
-  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal || root.showDeleteCipherModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherFormModal || root.showDeleteCipherModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -443,6 +445,8 @@ Item {
     root.showActionPalette = false
     root.actionPaletteIndex = 0
     root.currentAvailableActions = []
+
+    root.showTypePicker = false
 
     root.showPasswordHistoryModal = false
     root.activePasswordHistoryItem = null
@@ -548,6 +552,7 @@ Item {
       root.clearSensitiveState()
     } else {
       root.showActionPalette = false
+      root.showTypePicker = false
       root.showSshKeyModal = false
       root.showPasswordHistoryModal = false
       root.showPasswordGeneratorModal = false
@@ -625,6 +630,7 @@ Item {
     totpGenProc.itemId = ""
     totpGenProc.running = false
     root.showActionPalette = false
+    root.showTypePicker = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
     root.showPasswordGeneratorModal = false
@@ -1230,6 +1236,7 @@ Item {
     root.cipherFormDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
     root.cipherFormEditItem = null
     root.showActionPalette = false
+    root.showTypePicker = false
     root.showSshKeyModal = false
     root.showPasswordGeneratorModal = false
     root.showCipherFormModal = true
@@ -2547,7 +2554,7 @@ Item {
         sequence: "Ctrl+N"
         enabled: root.opened && root.effectiveView === "search" && !root.hasActiveModal
         onActivated: {
-          root.openCipherCreateModal(root.activeCategory === "note" ? "note" : "login")
+          root.showTypePicker = true
         }
       }
 
@@ -2645,7 +2652,9 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showDeleteCipherModal) {
+          if (root.showTypePicker) {
+            typePickerModalComponent.dismiss()
+          } else if (root.showDeleteCipherModal) {
             if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
               root.showDeleteCipherModal = false
               root.deleteCipherItem = null
@@ -2703,6 +2712,14 @@ Item {
             event.accepted = true
             return
           }
+        }
+
+        if (root.showTypePicker) {
+          if (event.key === Qt.Key_Escape) {
+            typePickerModalComponent.dismiss()
+            event.accepted = true
+          }
+          return
         }
 
         if (root.showDeleteCipherModal) {
@@ -2807,7 +2824,7 @@ Item {
             root.openPasswordGeneratorModal("password")
             event.accepted = true
           } else if (event.key === Qt.Key_N && root.effectiveView === "search" && !root.hasActiveModal) {
-            root.openCipherCreateModal(root.activeCategory === "note" ? "note" : "login")
+            root.showTypePicker = true
             event.accepted = true
           } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.toggleItemRevealed()
@@ -3186,6 +3203,23 @@ Item {
           }
         }
         onCloseRequested: { root.showActionPalette = false }
+      }
+
+      // 5b. Type Picker Modal Overlay (Ctrl+N): pick Login or Secure Note
+      TypePickerModal {
+        id: typePickerModalComponent
+        active: root.showTypePicker
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onTypeSelected: function(cipherType) {
+          root.showTypePicker = false
+          root.openCipherCreateModal(cipherType)
+        }
+        onCloseRequested: { root.showTypePicker = false }
       }
 
       // 6. SSH Key Management Modal Overlay (Create, Import, Export)

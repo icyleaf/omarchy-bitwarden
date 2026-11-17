@@ -222,8 +222,10 @@ Item {
     check(modalLine.indexOf("root.showCipherFormModal") !== -1,
           "hasActiveModal includes the cipher form modal")
 
-    check(src.indexOf("root.openCipherCreateModal(root.activeCategory === \"note\" ? \"note\" : \"login\")") !== -1,
-          "Ctrl+N opens Secure Note on the note tab and Login otherwise")
+    check(src.indexOf("root.showTypePicker = true") !== -1,
+          "Ctrl+N opens the Type Picker instead of creating directly")
+    check(src.indexOf("root.openCipherCreateModal(cipherType)") !== -1,
+          "Type Picker selection routes into cipher creation")
     check(src.indexOf('sequence: "Ctrl+N"') !== -1, "Ctrl+N shortcut is declared")
     check(src.indexOf('"Create Login"') !== -1, "action palette exposes Create Login")
     check(src.indexOf('"Create Secure Note"') !== -1, "action palette exposes Create Secure Note")

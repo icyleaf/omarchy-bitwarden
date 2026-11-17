@@ -18,4 +18,5 @@ SettingsModal 1.0 SettingsModal.qml
 SshApprovalModal 1.0 SshApprovalModal.qml
 SshKeyModal 1.0 SshKeyModal.qml
 ToastAlert 1.0 ToastAlert.qml
+TypePickerModal 1.0 TypePickerModal.qml
 VaultItemList 1.0 VaultItemList.qml

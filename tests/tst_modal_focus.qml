@@ -20,13 +20,14 @@ Item {
   property var selectedItem: ({ id: "item1", name: "Sample Item" })
 
   property bool showActionPalette: false
+  property bool showTypePicker: false
   property bool showSshKeyModal: false
   property bool showPasswordHistoryModal: false
   property bool showPasswordGeneratorModal: false
   property bool showCipherFormModal: false
   property bool showDeleteCipherModal: false
 
-  readonly property bool hasActiveModal: showActionPalette || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal || showDeleteCipherModal
+  readonly property bool hasActiveModal: showActionPalette || showTypePicker || showSshKeyModal || showPasswordHistoryModal || showPasswordGeneratorModal || showCipherFormModal || showDeleteCipherModal
 
   property int searchFocusRestoredCount: 0
 
@@ -92,6 +93,19 @@ Item {
 
     showActionPalette = false
     check(hasActiveModal === false, "hasActiveModal is false after closing Action Palette")
+
+    // 4b. Type Picker active
+    showTypePicker = true
+    check(hasActiveModal === true, "hasActiveModal is true when showTypePicker is true")
+    check(canTriggerScopeShortcut() === false, "Scope shortcuts inhibited during Type Picker")
+    check(canTriggerToggleRevealed() === false, "Toggle revealed inhibited during Type Picker")
+
+    searchFocusRestoredCount = 0
+    simulateFocusRestore()
+    check(searchFocusRestoredCount === 0, "Background focus restore is inhibited when Type Picker is active")
+
+    showTypePicker = false
+    check(hasActiveModal === false, "hasActiveModal is false after closing Type Picker")
 
     // 5. Password Generator modal active
     showPasswordGeneratorModal = true
