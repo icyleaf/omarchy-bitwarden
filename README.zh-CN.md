@@ -85,6 +85,10 @@
 | <kbd>Ctrl</kbd> + <kbd>U</kbd>         | 复制用户名                                                 |
 | <kbd>Ctrl</kbd> + <kbd>T</kbd>         | 切换字段/秘密明文与掩码展示（密码、密钥、卡号等）          |
 | <kbd>Ctrl</kbd> + <kbd>H</kbd>         | 查看当前登录项的历史密码记录                               |
+| <kbd>Ctrl</kbd> + <kbd>N</kbd>         | 打开快速类型选择器新建 Login 或 Secure Note 条目                           |
+| <kbd>Ctrl</kbd> + <kbd>E</kbd>         | 在检查器表单中就地编辑当前选中的条目                                       |
+| <kbd>Ctrl</kbd> + <kbd>B</kbd>         | 快速切换当前选中条目的收藏状态                                             |
+| <kbd>Ctrl</kbd> + <kbd>D</kbd>         | 删除当前选中条目（默认移至回收站软删除，支持彻底删除）                     |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd>         | 在系统默认浏览器中打开登录网址                             |
 | <kbd>Ctrl</kbd> + <kbd>K</kbd>         | 打开动作面板（复制用户名、TOTP、PIN 码、密码历史等）       |
 | <kbd>Ctrl</kbd> + <kbd>G</kbd>         | 打开内置密码与密语生成器                                   |
@@ -461,20 +465,27 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] 自选开启的 `quick_unlock` 设置（`omawarden config set --quick-unlock true|false`），覆盖层设置面板带安全说明开关
 - [x] 随包分发 Polkit Policy（`/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`）；主密码始终作为终极安全兜底
 
-### 阶段四：规划中（密码库条目新建）
+### 阶段四：已完成（密码库条目新建与内嵌编辑）
 
-- [ ] 覆盖层条目新建模态窗口（支持 Login, Secure Note, Card, Identity 四大核心类型）
-- [ ] 基于用户主密钥的客户端密文载荷加密（AES-256-CBC / HMAC）
-- [ ] Bitwarden REST API POST `/ciphers` 创建接口对接与静默会话自动续期
-- [ ] 创建成功后本地零知识密文缓存即时追加与索引同步
-- [ ] 深度联动阶段二生成器实现创建凭据时的内联密码生成
+- [x] 覆盖层检查器内嵌编辑表单（`CipherEditor.qml`）与快速类型选择器（<kbd>Ctrl</kbd>+<kbd>N</kbd>，支持 Login 与 Secure Note）
+- [x] 基于用户主密钥的客户端密文载荷加密（AES-256-CBC / HMAC）
+- [x] Bitwarden REST API POST `/ciphers` 创建与 PUT `/ciphers/{id}` 更新接口对接及静默会话自动续期
+- [x] 创建与更新后本地零知识密文缓存与内存索引即时同步
+- [x] 深度联动阶段二生成器实现创建与编辑表单时的内联密码生成与一键填充
+- [x] 零参数标准输入安全契约（`omawarden vault edit <target> --stdin --json`），杜绝进程参数明文泄露
+- [x] 条目就地编辑（账号密码、备注、多条动态 URI、自定义文本/隐藏/布尔字段、文件夹归属调整）
+- [x] 动态自定义字段支持（文本、隐藏、布尔字段及严格的反序列化安全校验）
+- [ ] Card 与 Identity 类型新建与编辑（计划后续迭代支持）
 
-### 阶段五：规划中（密码库条目生命周期与维护）
+### 阶段五：进行中（密码库条目生命周期、回收站与删除管理）
 
-- [ ] 条目就地编辑（更新登录凭据、卡片、备注及自定义字段）
-- [ ] 文件夹与组织集合重新归属分类调整
-- [ ] 条目安全删除与回收站（软删除）管理
-- [ ] 客户端条目修改冲突校验与服务器同步对齐
+- [x] CLI 回收站（Trash）列表与检索（`omawarden vault list --trash`、`vault search --trash`）
+- [x] 回收站条目一键恢复（`omawarden vault restore <target>`）与缓存/索引即时更新
+- [x] 作用域隔离的永久彻底删除（`omawarden vault delete <target> --trash`）
+- [x] 覆盖层软删除与永久删除确认模态窗口（<kbd>Ctrl</kbd>+<kbd>D</kbd>）
+- [x] 快捷收藏切换（<kbd>Ctrl</kbd>+<kbd>B</kbd>、检查器星标按钮及动作面板）
+- [x] 混部版本守护进程能力协商与严格反序列化校验，防止扩展字段静默丢弃
+- [ ] 组织集合重新归属与协作条目修改
 
 ### 阶段六：远期规划（系统自动化与生物识别）
 

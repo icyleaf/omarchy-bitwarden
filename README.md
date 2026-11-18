@@ -85,6 +85,10 @@ With **Remember Last Search State** off, the overlay opens with an empty search 
 | <kbd>Ctrl</kbd> + <kbd>U</kbd>         | Copy username                                                             |
 | <kbd>Ctrl</kbd> + <kbd>T</kbd>         | Toggle field / secret visibility (passwords, keys, card codes, etc.)      |
 | <kbd>Ctrl</kbd> + <kbd>H</kbd>         | Open password history modal for the selected login item                   |
+| <kbd>Ctrl</kbd> + <kbd>N</kbd>         | Open Type Picker to create a new Login or Secure Note item                |
+| <kbd>Ctrl</kbd> + <kbd>E</kbd>         | Edit the selected item in the Inspector form                              |
+| <kbd>Ctrl</kbd> + <kbd>B</kbd>         | Toggle favorite status for the selected item                              |
+| <kbd>Ctrl</kbd> + <kbd>D</kbd>         | Delete the selected item (defaults to Trash / soft-delete)                 |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd>         | Open primary website URL in default browser                               |
 | <kbd>Ctrl</kbd> + <kbd>K</kbd>         | Open Action Palette (Copy username, TOTP, PIN, Org Name, History, etc.)    |
 | <kbd>Ctrl</kbd> + <kbd>G</kbd>         | Open built-in Password & Passphrase Generator                             |
@@ -461,20 +465,27 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Opt-in `quick_unlock` setting (`omawarden config set --quick-unlock true|false`) with an overlay toggle and honest trade-off disclosure
 - [x] Packaged polkit policy (`/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`); master password always remains as fallback. Manual/dev installs: copy that file to the same directory yourself, and remove the pre-rename `org.omarchy.bitwarden.policy` if it is still there (packaged upgrades do both via `packaging/omawarden-policy.install`); a daemon restart picks the new action id up.
 
-### Phase 4: Planned (Vault Item Creation)
+### Phase 4: Completed (Vault Item Creation & In-Place Editing)
 
-- [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
-- [ ] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
-- [ ] Bitwarden REST API POST `/ciphers` creation integration with auto-session renewal
-- [ ] Local zero-knowledge ciphertext cache synchronization upon creation
-- [ ] Integration with Phase 2 password generator for inline credential creation
+- [x] In-place Inspector cipher editor (`CipherEditor.qml`) & Type Picker modal (<kbd>Ctrl</kbd>+<kbd>N</kbd>) for Login and Secure Note
+- [x] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
+- [x] Bitwarden REST API POST `/ciphers` and PUT `/ciphers/{id}` integration with auto-session renewal
+- [x] Local zero-knowledge ciphertext cache and memory index synchronization upon creation and mutation
+- [x] Integration with Phase 2 password generator for inline credential creation & fill workflow
+- [x] Zero-argv stdin edit contract (`omawarden vault edit <target> --stdin --json`) preventing secret leakage in process arguments
+- [x] In-place item editing (credentials, notes, dynamic URI list, custom text/hidden/boolean fields, folder assignment)
+- [x] Dynamic custom fields support (Text, Hidden, and Boolean types with strict fail-closed deserialization)
+- [ ] Card and Identity creation & editing (planned for subsequent iteration)
 
-### Phase 5: Planned (Vault Item Mutation & Lifecycle)
+### Phase 5: In Progress (Vault Item Lifecycle, Trash & Deletion)
 
-- [ ] In-place item editing (updating login credentials, cards, notes, custom fields)
-- [ ] Folder and organization collection reassignment
-- [ ] Secure item deletion & soft-delete (Recycle Bin) management
-- [ ] Client-side cipher update validation and server sync reconciliation
+- [x] CLI Trash inspection and search (`omawarden vault list --trash`, `vault search --trash`)
+- [x] Cipher restoration from Trash (`omawarden vault restore <target>`) with automatic cache/index reconciliation
+- [x] Scoped permanent deletion (`omawarden vault delete <target> --trash`)
+- [x] Overlay soft-delete and permanent delete confirmation modal (<kbd>Ctrl</kbd>+<kbd>D</kbd>)
+- [x] Quick favorite toggle (<kbd>Ctrl</kbd>+<kbd>B</kbd>, Inspector star icon, and Action Palette)
+- [x] Mixed-version daemon capability negotiation and fail-closed deserialization guard against data loss
+- [ ] Organization collection reassignment & shared cipher mutation
 
 ### Phase 6: Future (Desktop Automation & Biometrics)
 
