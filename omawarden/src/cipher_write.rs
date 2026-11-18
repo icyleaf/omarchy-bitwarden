@@ -62,6 +62,9 @@ pub(crate) struct CipherCreateDraft {
     #[serde(default)]
     #[zeroize(skip)]
     pub(crate) client: Option<Value>,
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub(crate) mutation: Option<Value>,
     #[serde(default, rename = "type")]
     pub(crate) raw_type: Option<CipherTypeField>,
     #[serde(default)]
@@ -98,6 +101,9 @@ pub(crate) struct CipherUpdateDraft {
     #[serde(default)]
     #[zeroize(skip)]
     pub(crate) client: Option<Value>,
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub(crate) mutation: Option<Value>,
     pub(crate) id: Option<String>,
     pub(crate) target: Option<String>,
     pub(crate) name: Option<String>,
@@ -125,8 +131,13 @@ impl VaultManager {
             .storage_mgr
             .load_existing()
             .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
+        let req_payload = if let Some(inner) = request.get("mutation").cloned() {
+            inner
+        } else {
+            request
+        };
         let mut payload = {
-            let draft: CipherCreateDraft = serde_json::from_value(request)
+            let draft: CipherCreateDraft = serde_json::from_value(req_payload)
                 .map_err(|_| WriteError::Rejected("Invalid cipher fields.".into()))?;
             let has_org = draft
                 .organization_id
@@ -309,7 +320,12 @@ impl VaultManager {
             .load_existing()
             .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
 
-        let draft: CipherUpdateDraft = serde_json::from_value(request)
+        let req_payload = if let Some(inner) = request.get("mutation").cloned() {
+            inner
+        } else {
+            request
+        };
+        let draft: CipherUpdateDraft = serde_json::from_value(req_payload)
             .map_err(|_| WriteError::Rejected("Invalid cipher update fields.".into()))?;
 
         let (target_id, target_name, base_cipher) = {

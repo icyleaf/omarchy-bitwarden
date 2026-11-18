@@ -140,23 +140,32 @@ fn cipher_update_payload_has_login_fields(payload: &Value) -> bool {
 }
 
 fn cipher_mutation_requires_schema_v2(request: &Value) -> bool {
-    request
+    let has_fields = request
         .get("fields")
         .and_then(Value::as_array)
         .is_some_and(|a| !a.is_empty())
         || request
             .get("remove_fields")
             .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty())
-        || request
-            .get("add_uris")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty())
+            .is_some_and(|a| !a.is_empty());
+    let has_edit_uris = request
+        .get("add_uris")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
         || request
             .get("clear_uris")
             .is_some_and(|v| v.as_bool().unwrap_or(false))
         || (request.get("action").and_then(Value::as_str) == Some("cipher_update")
-            && request.get("uris").is_some())
+            && request.get("uris").is_some());
+    let has_unconverted_create_uris = request.get("action").and_then(Value::as_str)
+        == Some("cipher_create")
+        && request
+            .get("uris")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        && request.get("login").and_then(|l| l.get("uris")).is_none();
+
+    has_fields || has_edit_uris || has_unconverted_create_uris
 }
 
 /// Emit a vault command failure in whichever envelope the caller asked for.
@@ -2560,6 +2569,28 @@ fn main() -> ExitCode {
                             }
 
                             val["action"] = json!("cipher_create");
+                            let is_login = match val.get("type").and_then(Value::as_u64) {
+                                Some(1) => true,
+                                Some(_) => false,
+                                None => val
+                                    .get("cipher_type")
+                                    .and_then(Value::as_str)
+                                    .is_none_or(|t| t == "login"),
+                            };
+                            if is_login
+                                && val
+                                    .get("fields")
+                                    .and_then(Value::as_array)
+                                    .is_none_or(|a| a.is_empty())
+                            {
+                                if let Some(uris) = val.get("uris") {
+                                    if val.get("login").is_none() {
+                                        val["login"] = json!({ "uris": uris });
+                                    } else if val["login"].get("uris").is_none() {
+                                        val["login"]["uris"] = uris.clone();
+                                    }
+                                }
+                            }
                             let name = val
                                 .get("name")
                                 .and_then(|v| v.as_str())
@@ -4125,6 +4156,15 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
                     Ok(p) => p,
                     Err(_) => return Err(reject("Daemon unavailable after restart.")),
                 };
+                let restarted_schema = ping
+                    .get("schema_version")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as u32;
+                if restarted_schema < CURRENT_SCHEMA_VERSION {
+                    return Err(reject(
+                        "The running daemon was restarted, but the active executable does not support custom fields or advanced URI mutations. Check OMA_DAEMON_BIN or update your installation.",
+                    ));
+                }
             }
             _ => {
                 return Err(reject(
@@ -4157,7 +4197,20 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         }
     }
     let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the mutation. Sync the vault before trying again."});
-    let reply = dispatch_daemon_request(request).map_err(|e| match e {
+    let (mutation_req, uses_envelope) = if cipher_mutation_requires_schema_v2(request) {
+        let mut env = json!({
+            "action": request.get("action").cloned().unwrap_or_else(|| json!("cipher_update")),
+            "mutation": request,
+        });
+        if let Some(client) = request.get("client") {
+            env["client"] = client.clone();
+        }
+        (env, true)
+    } else {
+        (request.clone(), false)
+    };
+
+    let reply = dispatch_daemon_request(&mutation_req).map_err(|e| match e {
         DispatchError::NotSent => reject("Could not send the request to the daemon."),
         DispatchError::Unconfirmed => unknown(),
         DispatchError::IncompatibleProtocol { .. } => {
@@ -4167,9 +4220,12 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
     })?;
     if reply["ok"] == false {
         let err_str = reply.get("error").and_then(Value::as_str).unwrap_or("");
-        if (err_str.contains("Invalid cipher fields")
+        if ((err_str.contains("Invalid cipher fields")
             || err_str.contains("Invalid cipher update fields"))
-            && running_schema < CURRENT_SCHEMA_VERSION
+            && running_schema < CURRENT_SCHEMA_VERSION)
+            || (uses_envelope
+                && (err_str.contains("Target cipher ID or name is required")
+                    || err_str.contains("Cipher name is required")))
         {
             return Err(reject(
                 "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
