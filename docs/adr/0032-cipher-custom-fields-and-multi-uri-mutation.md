@@ -74,6 +74,23 @@ For scripted automation and non-interactive execution:
   - Resolves target custom fields by exact or case-insensitive name match.
   - Transmits sensitive values (Hidden fields) to the platform clipboard under active Clipboard Guard protection with automatic TTL zeroization.
 
+### 5. Mixed-Version Wire Safety & Fail-Closed Envelope Architecture
+To prevent silent field dropping when modern clients communicate with older running daemons (Issue #382), while strictly preventing action name proliferation (`_v2`, `_v3`):
+- **Canonical Action Invariant**:
+  `cipher_create` and `cipher_update` remain the canonical, unversioned action names across all clients and protocol versions.
+- **Monotonic Application Schema Version (`schema_version`)**:
+  - The daemon exposes integer `schema_version: 2` in `ping` responses atop `protocol_version: 1`. Daemons omitting this field are classified as schema `1` (legacy plain login/note only).
+  - Schema `1` represents baseline credentials and notes without custom fields or dynamic multi-URI arrays.
+  - Schema `2` represents dynamic custom fields (`fields`, `remove_fields`) and multi-URI mutations (`uris`, `add_uris`, `clear_uris`).
+- **Backward-Compatible Plain Login URI Normalization**:
+  When creating a plain login cipher with multiple URIs but no custom fields, the payload is normalized to populate `login.uris` alongside top-level `uris`. Schema-1 daemons persist the nested URIs without data loss.
+- **Fail-Closed Mutation Envelope for Schema-2 Mutations**:
+  - Mutations requiring schema-2 features (custom fields or URI modifications) encapsulate draft attributes within a nested `mutation` payload: `{"action": "cipher_update", "mutation": { "id": "...", "fields": [...] }}`.
+  - Modern schema-2 daemons extract the inner `mutation` payload and deserialize it under strict `#[serde(deny_unknown_fields)]`.
+  - Legacy schema-1 daemons (e.g. encountered during in-flight process handovers or socket proxying) expect flat `target`/`id` or `name` fields. Because these identifiers are encapsulated in `mutation`, legacy daemons immediately fail closed with `"Target cipher ID or name is required."` (on edit) or `"Cipher name is required."` (on create) before dispatching any HTTP or cache write.
+- **Post-Restart Schema Re-Validation**:
+  When standalone daemons are restarted via `ensure_daemon_running()`, the client must re-inspect the post-restart `ping` response and assert `restarted_schema >= CURRENT_SCHEMA_VERSION`. If the restarted binary remains on schema 1, the client fails closed with explicit configuration guidance rather than proceeding to write.
+
 ## Consequences
 
 ### Positive

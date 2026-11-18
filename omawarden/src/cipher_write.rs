@@ -125,8 +125,13 @@ impl VaultManager {
             .storage_mgr
             .load_existing()
             .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
+        let req_payload = if let Some(inner) = request.get("mutation").cloned() {
+            inner
+        } else {
+            request
+        };
         let mut payload = {
-            let draft: CipherCreateDraft = serde_json::from_value(request)
+            let draft: CipherCreateDraft = serde_json::from_value(req_payload)
                 .map_err(|_| WriteError::Rejected("Invalid cipher fields.".into()))?;
             let has_org = draft
                 .organization_id
@@ -309,7 +314,12 @@ impl VaultManager {
             .load_existing()
             .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
 
-        let draft: CipherUpdateDraft = serde_json::from_value(request)
+        let req_payload = if let Some(inner) = request.get("mutation").cloned() {
+            inner
+        } else {
+            request
+        };
+        let draft: CipherUpdateDraft = serde_json::from_value(req_payload)
             .map_err(|_| WriteError::Rejected("Invalid cipher update fields.".into()))?;
 
         let (target_id, target_name, base_cipher) = {

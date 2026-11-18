@@ -231,16 +231,44 @@ impl MockOldDaemon {
                             "fields": [{ "name": "Existing", "value": "original", "type": 0 }]
                         }
                     }),
-                    "cipher_create" => json!({
-                        "ok": true,
-                        "outcome": "saved",
-                        "item": { "id": "created-legacy-id", "revisionDate": "2026-11-17T00:00:00Z" }
-                    }),
-                    "cipher_update" => json!({
-                        "ok": true,
-                        "outcome": "saved",
-                        "item": { "id": target_id, "revisionDate": "2026-11-17T00:00:00Z" }
-                    }),
+                    "cipher_create" => {
+                        let name = req.get("name").and_then(Value::as_str).unwrap_or("");
+                        if !name.trim().is_empty() {
+                            json!({
+                                "ok": true,
+                                "outcome": "saved",
+                                "item": { "id": "created-legacy-id", "revisionDate": "2026-11-17T00:00:00Z" }
+                            })
+                        } else {
+                            json!({
+                                "ok": false,
+                                "outcome": "rejected",
+                                "error": "Cipher name is required.",
+                                "protocol_version": 1
+                            })
+                        }
+                    }
+                    "cipher_update" => {
+                        let target = req
+                            .get("target")
+                            .or_else(|| req.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if !target.trim().is_empty() {
+                            json!({
+                                "ok": true,
+                                "outcome": "saved",
+                                "item": { "id": target_id, "revisionDate": "2026-11-17T00:00:00Z" }
+                            })
+                        } else {
+                            json!({
+                                "ok": false,
+                                "outcome": "rejected",
+                                "error": "Target cipher ID or name is required.",
+                                "protocol_version": 1
+                            })
+                        }
+                    }
                     other => json!({
                         "ok": false,
                         "error": format!("Unknown action: {}", other),
@@ -489,6 +517,239 @@ fn test_legacy_plain_login_create_accepted_by_old_daemon() {
     // Verify nested login.uris is provided so old daemons don't drop the URI
     assert_eq!(req["login"]["uris"][0], "https://plain.example");
     assert!(api.accept().is_err());
+}
+
+#[test]
+fn test_legacy_plain_login_create_via_stdin_json_with_uris_normalized() {
+    let (temp, api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    let socket = dir.join("omawarden.sock");
+
+    let mock_daemon = MockOldDaemon::start(socket, "seed-id", "Seed", false);
+
+    let input_json = json!({
+        "type": 1,
+        "name": "JSON URI",
+        "username": "fixture-user",
+        "uris": ["https://json-new.example"]
+    })
+    .to_string();
+
+    let mut child = make_command(dir)
+        .args(["vault", "create", "--stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input_json.as_bytes()).unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "CLI must succeed on plain login JSON create"
+    );
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout_str).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["outcome"], "saved");
+
+    let actions = mock_daemon.received_actions.lock().unwrap();
+    let create_action = actions.iter().find(|a| {
+        a.get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "cipher_create")
+    });
+    assert!(create_action.is_some());
+    let req = create_action.unwrap();
+    assert_eq!(req["action"], "cipher_create");
+    // Nested login.uris must be normalized so legacy daemons retain the URI
+    assert_eq!(
+        req["login"]["uris"][0], "https://json-new.example",
+        "JSON create must normalize plain login uris to login.uris for legacy compatibility"
+    );
+    assert!(api.accept().is_err());
+}
+
+#[test]
+fn test_restarted_daemon_with_insufficient_schema_fails_closed() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    let socket = dir.join("omawarden.sock");
+
+    // Start initial old daemon (standalone, can be stopped with admin: true)
+    let _mock_daemon = MockOldDaemon::start(socket, "seed-id", "Seed", false);
+
+    // Create a mock legacy executable named 'omawarden' in a subfolder
+    let legacy_bin_dir = dir.join("legacy_bin");
+    fs::create_dir_all(&legacy_bin_dir).unwrap();
+    let legacy_exe = legacy_bin_dir.join("omawarden");
+    let script = r#"#!/usr/bin/env python3
+import socket, sys, os, json
+
+sock_path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), "omawarden.sock")
+if os.path.exists(sock_path):
+    os.remove(sock_path)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(sock_path)
+s.listen(5)
+while True:
+    conn, _ = s.accept()
+    data = conn.recv(4096).decode('utf-8')
+    if not data:
+        conn.close()
+        continue
+    req = json.loads(data)
+    action = req.get("action")
+    if action == "ping":
+        resp = {"ok": True, "pong": True, "protocol_version": 1, "schema_version": 1, "unlocked": True, "version": "0.12.0-dev"}
+    elif action == "stop":
+        resp = {"ok": True, "protocol_version": 1}
+        conn.sendall((json.dumps(resp) + "\n").encode('utf-8'))
+        conn.close()
+        break
+    else:
+        resp = {"ok": True, "outcome": "saved", "item": {"id": "restarted-id"}}
+    conn.sendall((json.dumps(resp) + "\n").encode('utf-8'))
+    conn.close()
+"#;
+    fs::write(&legacy_exe, script).unwrap();
+    fs::set_permissions(&legacy_exe, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = make_command(dir);
+    cmd.env("OMA_DAEMON_BIN", &legacy_exe);
+    let output = cmd
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "Should Fail After Restart",
+            "--username",
+            "user",
+            "--password",
+            "pass",
+            "--field",
+            "Key=Val",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "Must fail when restarted daemon still has schema 1"
+    );
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout_str).unwrap();
+    assert_eq!(parsed["ok"], false);
+    let err_msg = parsed["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("restarted") && err_msg.contains("does not support custom fields"),
+        "Expected post-restart rejection message, got: {err_msg}"
+    );
+}
+
+#[test]
+fn test_legacy_daemon_rejects_v2_mutation_envelope_without_writing() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let socket = dir.join("omawarden.sock");
+
+    seed_cipher_in_cache(
+        dir,
+        &user_key,
+        "seed-id",
+        "Seed",
+        "octocat",
+        &["https://original.example"],
+        &[("Existing", "original", 0)],
+    );
+
+    // Mock a daemon that initially answered schema 2 (or socket handover to legacy)
+    // The legacy daemon requires flat `id` or `target`.
+    let _mock_daemon = MockOldDaemon::start(socket, "seed-id", "Seed", true);
+
+    // Run edit adding custom field + favorite true
+    let output = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            "seed-id",
+            "--field",
+            "NewField=NewVal",
+            "--favorite",
+            "true",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "Must fail closed when mutation requires schema 2 but encounters legacy daemon"
+    );
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout_str).unwrap();
+    assert_eq!(parsed["ok"], false);
+    let err_msg = parsed["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("The running daemon does not support custom fields")
+            || err_msg.contains("Target cipher ID or name is required"),
+        "Expected fail-closed error, got: {err_msg}"
+    );
+    assert!(
+        api.accept().is_err(),
+        "Zero HTTP writes must reach upstream when legacy daemon rejects envelope"
+    );
+}
+
+#[test]
+fn test_legacy_login_create_via_stdin_json_with_custom_fields_rejected_on_stale_in_process() {
+    let (temp, _api, _server_url, _user_key) = setup_test_environment();
+    let dir = temp.path();
+    let socket = dir.join("omawarden.sock");
+
+    let _mock_daemon = MockOldDaemon::start(socket, "seed-id", "Seed", true);
+
+    let input_json = json!({
+        "type": 1,
+        "name": "JSON Custom",
+        "username": "fixture-user",
+        "uris": ["https://json-new.example"],
+        "fields": [{"name": "Key", "value": "Val", "type": 0}]
+    })
+    .to_string();
+
+    let mut child = make_command(dir)
+        .args(["vault", "create", "--stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input_json.as_bytes()).unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "Must fail when JSON create includes custom fields against stale daemon"
+    );
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout_str).unwrap();
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("The running daemon does not support custom fields or advanced URI mutations"));
 }
 
 #[test]
