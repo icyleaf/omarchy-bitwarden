@@ -62,9 +62,6 @@ pub(crate) struct CipherCreateDraft {
     #[serde(default)]
     #[zeroize(skip)]
     pub(crate) client: Option<Value>,
-    #[serde(default)]
-    #[zeroize(skip)]
-    pub(crate) mutation: Option<Value>,
     #[serde(default, rename = "type")]
     pub(crate) raw_type: Option<CipherTypeField>,
     #[serde(default)]
@@ -101,9 +98,6 @@ pub(crate) struct CipherUpdateDraft {
     #[serde(default)]
     #[zeroize(skip)]
     pub(crate) client: Option<Value>,
-    #[serde(default)]
-    #[zeroize(skip)]
-    pub(crate) mutation: Option<Value>,
     pub(crate) id: Option<String>,
     pub(crate) target: Option<String>,
     pub(crate) name: Option<String>,

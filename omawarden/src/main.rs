@@ -2569,10 +2569,12 @@ fn main() -> ExitCode {
                             }
 
                             val["action"] = json!("cipher_create");
-                            let is_login = match val.get("type").and_then(Value::as_u64) {
-                                Some(1) => true,
-                                Some(_) => false,
-                                None => val
+                            let is_login = match val.get("type") {
+                                Some(Value::Number(n)) => n.as_u64() == Some(1),
+                                Some(Value::String(s)) => {
+                                    s == "1" || s.eq_ignore_ascii_case("login")
+                                }
+                                _ => val
                                     .get("cipher_type")
                                     .and_then(Value::as_str)
                                     .is_none_or(|t| t == "login"),
@@ -4225,7 +4227,10 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
             && running_schema < CURRENT_SCHEMA_VERSION)
             || (uses_envelope
                 && (err_str.contains("Target cipher ID or name is required")
-                    || err_str.contains("Cipher name is required")))
+                    || err_str.contains("Missing cipher target")
+                    || err_str.contains("Cipher name is required")
+                    || err_str.contains("Invalid cipher fields")
+                    || err_str.contains("Invalid cipher update fields")))
         {
             return Err(reject(
                 "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
