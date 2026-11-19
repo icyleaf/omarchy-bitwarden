@@ -9,7 +9,7 @@ Previously, Omawarden's ephemeral clipboard management was tightly coupled to th
 This tight coupling introduced several architectural limitations:
 1. **Platform Lock-In**: Running Omawarden on non-Wayland desktop sessions (X11) or operating systems (macOS, Windows) was impossible without breaking clipboard operations.
 2. **Brittle Integration Testing**: Verifying clipboard features required creating shell scripts simulating `wl-copy` on disk and spawning subprocesses rather than utilizing pure in-memory test doubles.
-3. **MIME & Selection Ownership Semantics**: Wayland's `wl-copy` acts as an active selection owner that forks into the background and exits when another application overwrites the selection. Other operating systems and tools (e.g., macOS `pbcopy`, X11 `xclip`) operate synchronously and terminate immediately after setting the pasteboard.
+3. **MIME & Selection Ownership Semantics**: Wayland's `wl-copy` and X11's `xclip` fork into the background to own the selection and exit after another application takes over. On macOS, `pbcopy` writes to the centralized pasteboard and exits.
 
 ## Decision
 
@@ -37,6 +37,7 @@ We decouple the clipboard subsystem into a two-tier architecture:
 - **Selection-Monitoring Providers (`WlClipboardProvider`, `X11ClipboardProvider`)**: Both Wayland (`wl-copy`) and X11 (`xclip`) act as persistent selection owners that fork into the background and terminate when another application acquires the selection (`SelectionClear`). The holder adopts child processes (`PR_SET_CHILD_SUBREAPER`) and reaps the forked provider upon selection loss via `waitpid`, releasing holds and session locks early. On TTL expiration, the holder terminates its own process group (`revoke()`) without acquiring a fresh empty selection, ensuring newer external selections are never overwritten.
 - **Timer-Driven Providers (`MacOsClipboardProvider`, `MockClipboardProvider`)**: For platforms with centralized pasteboard architectures where writers terminate immediately (e.g. macOS `pbcopy`), the holder tracks pasteboard state changes (`changeCount`) or parks until the expiry timer triggers.
 - **macOS Scheme A Selection Protection**: On macOS (`MacOsClipboardProvider`), `pbcopy` writes to the centralized pasteboard and exits immediately. To prevent clobbering replacement clipboard selections upon TTL expiry, `MacOsClipboardProvider` tracks `[NSPasteboard generalPasteboard].changeCount`. If `changeCount` increments after Omawarden's copy, the TTL expiry clearing step is safely skipped.
+- **Explicit session revocation**: Lock and logout cleanup still call the provider's `clear()` when clipboard cleanup is needed and the output gate is held. This is separate from TTL expiry.
 
 ### 3. Resolution Chain & Overrides
 - Resolves providers in the following precedence order:

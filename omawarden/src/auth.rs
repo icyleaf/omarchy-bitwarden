@@ -136,9 +136,17 @@ pub struct AuthResult {
     pub ok: bool,
     pub status: Option<String>,
     pub session: Option<String>,
+    /// Whether this lock durably published a shared output epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epoch_advanced: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_epoch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
     pub error: Option<String>,
+    /// Non-fatal diagnostics after a confirmed operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_factor_required: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,9 +167,49 @@ pub struct AuthManager {
     pub storage_mgr: StorageManager,
     pub keyring_mgr: KeyringManager,
     pub config_mgr: Option<ConfigManager>,
+    #[cfg(test)]
+    pub(crate) lock_epoch_dir: Option<std::path::PathBuf>,
+}
+
+/// The daemon reply proves it advanced the shared epoch only when it reports a
+/// successful lock and includes the transition's epoch. Older daemons omit the
+/// field, so the caller must apply the local fallback instead.
+fn lock_reply_shared_epoch(reply: Option<&serde_json::Value>) -> Option<u64> {
+    let reply = reply.filter(|reply| {
+        reply["ok"] == true
+            && reply
+                .get("epoch_advanced")
+                .is_none_or(|advanced| advanced == true)
+    })?;
+    reply.get("lock_epoch").and_then(serde_json::Value::as_u64)
 }
 
 impl AuthManager {
+    fn confirm_lock_owner(
+        &self,
+        reply: Option<&serde_json::Value>,
+    ) -> std::io::Result<Option<crate::daemon::DaemonOwnerGuard>> {
+        if reply.is_some_and(|reply| reply["ok"] == true) {
+            Ok(None)
+        } else {
+            crate::daemon::guard_absent_daemon(&self.storage_mgr.file_path).map(Some)
+        }
+    }
+
+    fn advance_local_lock_epoch(&self) -> std::io::Result<u64> {
+        // Hold the output gate when available. Its failure leaves cleanup
+        // pending, but the independent epoch guard can still revoke old copies.
+        let _outputs = crate::daemon::lock_session_outputs().ok();
+        #[cfg(test)]
+        let store = match self.lock_epoch_dir.as_deref() {
+            Some(dir) => crate::lock_epoch::LockEpochStore::new(dir),
+            None => crate::lock_epoch::store(),
+        };
+        #[cfg(not(test))]
+        let store = crate::lock_epoch::store();
+        store.advance().map(|epoch| epoch.value())
+    }
+
     pub fn new(
         server_url: &str,
         storage_mgr: Option<StorageManager>,
@@ -207,6 +255,8 @@ impl AuthManager {
             storage_mgr: sm,
             keyring_mgr: keyring_mgr.unwrap_or_default(),
             config_mgr,
+            #[cfg(test)]
+            lock_epoch_dir: None,
         }
     }
 
@@ -982,10 +1032,23 @@ impl AuthManager {
         let reply = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "lock"
         }));
-        self.keyring_mgr
-            .for_storage(&storage)
-            .clear_token(KIND_ACCESS_TOKEN);
-        if !reply.is_some_and(|reply| reply["outputs_cleared"] == true) {
+        let local_owner = match self.confirm_lock_owner(reply.as_ref()) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return AuthResult {
+                    error: Some(format!("Could not confirm the vault lock. {error}")),
+                    ..Default::default()
+                };
+            }
+        };
+        let epoch = match lock_reply_shared_epoch(reply.as_ref()) {
+            Some(epoch) => Ok(epoch),
+            None => self.advance_local_lock_epoch(),
+        };
+        if !reply
+            .as_ref()
+            .is_some_and(|reply| reply["outputs_cleared"] == true)
+        {
             if let Err(error) = crate::clipboard::revoke_session_outputs() {
                 crate::log_warn!(
                     "omawarden:auth",
@@ -993,11 +1056,20 @@ impl AuthManager {
                 );
             }
         }
+        drop(local_owner);
+        self.keyring_mgr
+            .for_storage(&storage)
+            .clear_token(KIND_ACCESS_TOKEN);
         crate::log_info!("omawarden:auth", "Vault locked.");
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
             session: None,
+            epoch_advanced: Some(epoch.is_ok()),
+            lock_epoch: epoch.as_ref().ok().copied(),
+            warning: epoch.err().map(|error| {
+                format!("Vault locked. Shared output revocation is unconfirmed. {error}")
+            }),
             ..Default::default()
         }
     }
@@ -1009,6 +1081,12 @@ impl AuthManager {
             // guard. Revoke A before they can see the signed-out cache.
             let locked =
                 crate::daemon::send_daemon_request(&serde_json::json!({ "action": "lock" }));
+            let _owner = self.confirm_lock_owner(locked.as_ref())?;
+            // Apply the hard-lock epoch transition before cache removal so a
+            // later cache failure cannot leave queued offline copies valid.
+            if lock_reply_shared_epoch(locked.as_ref()).is_none() {
+                self.advance_local_lock_epoch()?;
+            }
             // The explicit wipe also covers a daemon with a separate quick-unlock handler.
             let _ = crate::daemon::send_daemon_request(
                 &serde_json::json!({ "action": "wipe_quick_unlock" }),
@@ -1020,7 +1098,10 @@ impl AuthManager {
                 .stage_durable(&VaultStorage::default())?
                 .persist(&self.storage_mgr.file_path)
                 .map_err(|error| error.error)?;
-            let outputs = if locked.is_some_and(|reply| reply["outputs_cleared"] == true) {
+            let outputs = if locked
+                .as_ref()
+                .is_some_and(|reply| reply["outputs_cleared"] == true)
+            {
                 Ok(())
             } else {
                 crate::clipboard::revoke_session_outputs()
@@ -1318,6 +1399,7 @@ esac
 
     #[test]
     fn test_auth_manager_status_and_lock() {
+        let _environment = crate::env_lock();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_auth_data.json");
         let storage_mgr = StorageManager::new(storage_path);
@@ -1355,6 +1437,105 @@ esac
         let logout_res = auth_mgr.logout();
         assert!(logout_res.ok);
         assert_eq!(logout_res.status.as_deref(), Some("unauthenticated"));
+    }
+
+    fn read_lock_epoch(epoch_dir: &std::path::Path) -> String {
+        fs::read_to_string(epoch_dir.join("omawarden.lock-epoch")).unwrap()
+    }
+
+    #[test]
+    fn lock_without_daemon_advances_the_shared_epoch() {
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        env.remove("WAYLAND_DISPLAY");
+        env.remove("WAYLAND_SOCKET");
+        let dir = tempdir().unwrap();
+        let mut auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(StorageManager::new(dir.path().join("data.json"))),
+            Some(create_test_mock_keyring(dir.path())),
+        );
+        auth.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "40").unwrap();
+
+        let result = auth.lock();
+
+        assert!(result.ok);
+        assert_eq!(read_lock_epoch(epoch_dir.path()), "41");
+    }
+
+    #[test]
+    fn logout_advances_the_epoch_before_a_cache_removal_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::env_lock();
+        let runtime = tempdir().unwrap();
+        let epoch_dir = tempdir().unwrap();
+        let mut env = crate::test_support::EnvGuard::new();
+        env.set("XDG_RUNTIME_DIR", runtime.path());
+        let dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let cache = cache_dir.path().join("data.json");
+        let active = "11111111111111111111111111111111";
+        fs::write(
+            &cache,
+            serde_json::json!({
+                "server_url": "https://fixture.invalid",
+                "user_email": "fixture@example.invalid",
+                "credential_id": active,
+                "enc_user_key": "2.dummy_iv|dummy_ct|dummy_mac"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Make the cache readable and credential markers writable, but leave
+        // the parent without write permission so replacing data.json fails.
+        let credentials = cache.with_extension("credentials");
+        fs::create_dir(&credentials).unwrap();
+        for marker in [active, "legacy"] {
+            fs::write(credentials.join(marker), []).unwrap();
+        }
+        fs::write(cache_dir.path().join("data.account.lock"), []).unwrap();
+        fs::write(cache_dir.path().join("data.daemon.lock"), []).unwrap();
+        let mut auth = AuthManager::new(
+            "https://fixture.invalid",
+            Some(StorageManager::new(cache)),
+            Some(create_test_mock_keyring(dir.path())),
+        );
+        auth.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+        fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "50").unwrap();
+        fs::set_permissions(cache_dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = auth.logout();
+
+        fs::set_permissions(cache_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!result.ok);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Could not complete logout")));
+        assert_eq!(read_lock_epoch(epoch_dir.path()), "51");
+    }
+
+    #[test]
+    fn daemon_lock_reply_must_carry_the_epoch_to_skip_the_local_fallback() {
+        assert!(lock_reply_shared_epoch(None).is_none());
+        assert!(lock_reply_shared_epoch(Some(&serde_json::json!({"ok": true}))).is_none());
+        assert!(
+            lock_reply_shared_epoch(Some(&serde_json::json!({"ok": false, "lock_epoch": 7})))
+                .is_none()
+        );
+        assert!(lock_reply_shared_epoch(Some(&serde_json::json!({
+            "ok": true, "lock_epoch": 7, "epoch_advanced": false
+        })))
+        .is_none());
+        assert_eq!(
+            lock_reply_shared_epoch(Some(&serde_json::json!({"ok": true, "lock_epoch": 7}))),
+            Some(7)
+        );
     }
 
     #[test]

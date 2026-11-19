@@ -2,6 +2,45 @@
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
+/// Restores process environment variables when dropped, including on panic.
+/// The caller must hold [`crate::env_lock`].
+pub(crate) struct EnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvGuard {
+    pub(crate) fn new() -> Self {
+        Self { saved: Vec::new() }
+    }
+
+    fn remember(&mut self, key: &'static str) {
+        if !self.saved.iter().any(|(saved, _)| *saved == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+    }
+
+    pub(crate) fn set(&mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) {
+        self.remember(key);
+        std::env::set_var(key, value);
+    }
+
+    pub(crate) fn remove(&mut self, key: &'static str) {
+        self.remember(key);
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        while let Some((key, value)) = self.saved.pop() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 pub(crate) const CREDENTIAL_ID: &str = "11111111111111111111111111111111";
 
 #[derive(Default)]
