@@ -1836,32 +1836,34 @@ fn test_standalone_daemon_rejects_stop_without_admin() {
 }
 
 #[test]
-fn test_standalone_daemon_accepts_stop_with_admin() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("daemon_data.json");
-    let storage_mgr = StorageManager::new(path);
-    let state = Arc::new(DaemonState::new(storage_mgr, 15));
-    state.set_in_process(false);
+fn test_standalone_admin_stop_with_known_or_unknown_peer_pid() {
+    let external_pid = if std::process::id() == 1 { 2 } else { 1 };
+    for peer_pid in [Some(external_pid), None] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon_data.json");
+        let storage_mgr = StorageManager::new(path);
+        let state = Arc::new(DaemonState::new(storage_mgr, 15));
+        state.set_in_process(false);
 
-    let (mut client, server) = UnixStream::pair().unwrap();
-    let st = state.clone();
-    // Simulate external caller PID: 99999 with admin: true
-    let handle = std::thread::spawn(move || {
-        let _ = handle_client_with_peer(server, st, Some(99999));
-    });
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client_with_peer(server, st, peer_pid);
+        });
 
-    let payload = format!("{}\n", json!({ "action": "stop", "admin": true }));
-    client.write_all(payload.as_bytes()).unwrap();
-    client.flush().unwrap();
+        let payload = format!("{}\n", json!({ "action": "stop", "admin": true }));
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
 
-    let mut reader = BufReader::new(client);
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    handle.join().unwrap();
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
 
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["ok"], true);
-    assert!(state.shutdown.is_shutting_down());
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["ok"], true, "peer_pid={peer_pid:?}: {resp}");
+        assert!(state.shutdown.is_shutting_down(), "peer_pid={peer_pid:?}");
+    }
 }
 
 #[test]
