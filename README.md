@@ -76,6 +76,8 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 
 ## Keyboard Shortcuts
 
+With **Remember Last Search State** off, the overlay opens with an empty search box. Reopen it within 30 seconds to select the same item by ID and copy another field. This shortcut requires an engine that reports the vault’s lock generation. With the setting on, the overlay keeps the full search and selection while the vault is unlocked. Locking, signing out, or changing servers clears the remembered state.
+
 | Shortcut                               | Description                                                               |
 | :------------------------------------- | :------------------------------------------------------------------------ |
 | <kbd>Enter</kbd>                       | Copy primary credential (Password / Card Number / Public Key)             |
@@ -83,6 +85,10 @@ In the following scenarios, `rbw` holds clear advantages, allowing users to choo
 | <kbd>Ctrl</kbd> + <kbd>U</kbd>         | Copy username                                                             |
 | <kbd>Ctrl</kbd> + <kbd>T</kbd>         | Toggle field / secret visibility (passwords, keys, card codes, etc.)      |
 | <kbd>Ctrl</kbd> + <kbd>H</kbd>         | Open password history modal for the selected login item                   |
+| <kbd>Ctrl</kbd> + <kbd>N</kbd>         | Open Type Picker to create a new Login or Secure Note item                |
+| <kbd>Ctrl</kbd> + <kbd>E</kbd>         | Edit the selected item in the Inspector form                              |
+| <kbd>Ctrl</kbd> + <kbd>B</kbd>         | Toggle favorite status for the selected item                              |
+| <kbd>Ctrl</kbd> + <kbd>D</kbd>         | Delete the selected item (defaults to Trash / soft-delete)                 |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd>         | Open primary website URL in default browser                               |
 | <kbd>Ctrl</kbd> + <kbd>K</kbd>         | Open Action Palette (Copy username, TOTP, PIN, Org Name, History, etc.)    |
 | <kbd>Ctrl</kbd> + <kbd>G</kbd>         | Open built-in Password & Passphrase Generator                             |
@@ -340,6 +346,49 @@ flowchart TD
 
 ---
 
+## Server Compatibility & Capability Discovery
+
+`omawarden` interrogates the connected server's `GET /api/config` endpoint to detect its identity, versions, and active feature flags, then evaluates them against a declarative **Server Capability Matrix**. Results are cached locally (non-sensitive metadata only) and exposed through `omawarden server capabilities` and `omawarden doctor`.
+
+```bash
+# Inspect the connected server flavor, versions, and evaluated capability matrix
+omawarden server capabilities
+
+# Machine-readable output for scripts
+omawarden server capabilities --json
+
+# Force re-discovery from the network
+omawarden server capabilities --refresh
+```
+
+### Supported server version tiers
+
+`omawarden` supports **Official Bitwarden Cloud** (`vault.bitwarden.com` / `vault.bitwarden.eu`) and self-hosted **Bitwarden** / **Vaultwarden** servers. Vaultwarden support is tiered by release:
+
+| Vaultwarden version | Support tier |
+| --- | --- |
+| `>= 1.37.4` | **Recommended**: native SSH Key (Cipher Type 5) support without experimental flags |
+| `>= 1.33.0` | SSH Key support behind `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent` |
+| `>= 1.32.0` | WebAuthn / OTP support |
+| `>= 1.28.0` | **Minimum baseline**: Argon2id KDF and modern identity prelogin |
+| `< 1.28.0` | Unsupported: `omawarden doctor` warns that the server is below the minimum baseline |
+
+Both the nested server identity (`server.name`) and the Bitwarden compatibility version (`version`) are captured from `/api/config`. Because Vaultwarden stopped emitting its release version in the nested `server.version` after `1.32.1`, the Vaultwarden release is read from a flavor-gated `GET /api/version` probe (on official Bitwarden that endpoint carries a calendar-style version and is never recorded as a vendor version). When the upstream `featureStates` omits `ssh-key-vault-item`, the matrix is evaluated by flavor and version:
+
+| Server | Tier | `ssh-key-vault-item` (flag absent) |
+| --- | --- | --- |
+| **Vaultwarden** | `>= 1.37.4` | `supported` (graduated to GA; experimental flag removed upstream) |
+| **Vaultwarden** | `1.33.0 ..= 1.37.3` | `disabled` (enable via `EXPERIMENTAL_CLIENT_FEATURE_FLAGS=ssh-key-vault-item,ssh-agent`) |
+| **Vaultwarden** | `< 1.33.0` | `unsupported` (upgrade to `>= 1.33.0`, recommended `>= 1.37.4`) |
+| **Official Bitwarden** (Cloud or `server.name == "Bitwarden"`) | compatibility `>= 2024.12.0` | `supported` |
+| **Official Bitwarden** | compatibility `< 2024.12.0` | `unsupported` |
+
+An explicit boolean in `featureStates["ssh-key-vault-item"]` always takes precedence (`true` → `supported`, `false` → `disabled`) regardless of flavor or version.
+
+> **Vaultwarden self-hosters on `>= 1.37.4`**: remove obsolete `ssh-key-vault-item` and `ssh-agent` entries from `EXPERIMENTAL_CLIENT_FEATURE_FLAGS`, as upstream 1.37.4+ rejects them and emits startup warnings. Only `ssh-agent-v2` (if desired) remains flag-gated.
+
+---
+
 ## Password & Passphrase Generator
 
 Generate cryptographically secure passwords or EFF Diceware passphrases directly in the overlay (<kbd>Ctrl</kbd>+<kbd>G</kbd>) or via the CLI.
@@ -416,20 +465,27 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Opt-in `quick_unlock` setting (`omawarden config set --quick-unlock true|false`) with an overlay toggle and honest trade-off disclosure
 - [x] Packaged polkit policy (`/usr/share/polkit-1/actions/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy`); master password always remains as fallback. Manual/dev installs: copy that file to the same directory yourself, and remove the pre-rename `org.omarchy.bitwarden.policy` if it is still there (packaged upgrades do both via `packaging/omawarden-policy.install`); a daemon restart picks the new action id up.
 
-### Phase 4: Planned (Vault Item Creation)
+### Phase 4: Completed (Vault Item Creation & In-Place Editing)
 
-- [ ] New item creation modal in Overlay (Login, Secure Note, Card, Identity)
-- [ ] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
-- [ ] Bitwarden REST API POST `/ciphers` creation integration with auto-session renewal
-- [ ] Local zero-knowledge ciphertext cache synchronization upon creation
-- [ ] Integration with Phase 2 password generator for inline credential creation
+- [x] In-place Inspector cipher editor (`CipherEditor.qml`) & Type Picker modal (<kbd>Ctrl</kbd>+<kbd>N</kbd>) for Login and Secure Note
+- [x] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
+- [x] Bitwarden REST API POST `/ciphers` and PUT `/ciphers/{id}` integration with auto-session renewal
+- [x] Local zero-knowledge ciphertext cache and memory index synchronization upon creation and mutation
+- [x] Integration with Phase 2 password generator for inline credential creation & fill workflow
+- [x] Zero-argv stdin edit contract (`omawarden vault edit <target> --stdin --json`) preventing secret leakage in process arguments
+- [x] In-place item editing (credentials, notes, dynamic URI list, custom text/hidden/boolean fields, folder assignment)
+- [x] Dynamic custom fields support (Text, Hidden, and Boolean types with strict fail-closed deserialization)
+- [ ] Card and Identity creation & editing (planned for subsequent iteration)
 
-### Phase 5: Planned (Vault Item Mutation & Lifecycle)
+### Phase 5: In Progress (Vault Item Lifecycle, Trash & Deletion)
 
-- [ ] In-place item editing (updating login credentials, cards, notes, custom fields)
-- [ ] Folder and organization collection reassignment
-- [ ] Secure item deletion & soft-delete (Recycle Bin) management
-- [ ] Client-side cipher update validation and server sync reconciliation
+- [x] CLI Trash inspection and search (`omawarden vault list --trash`, `vault search --trash`)
+- [x] Cipher restoration from Trash (`omawarden vault restore <target>`) with automatic cache/index reconciliation
+- [x] Scoped permanent deletion (`omawarden vault delete <target> --trash`)
+- [x] Overlay soft-delete and permanent delete confirmation modal (<kbd>Ctrl</kbd>+<kbd>D</kbd>)
+- [x] Quick favorite toggle (<kbd>Ctrl</kbd>+<kbd>B</kbd>, Inspector star icon, and Action Palette)
+- [x] Mixed-version daemon capability negotiation and fail-closed deserialization guard against data loss
+- [ ] Organization collection reassignment & shared cipher mutation
 
 ### Phase 6: Future (Desktop Automation & Biometrics)
 

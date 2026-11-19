@@ -3,13 +3,12 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
-import qs.Ui
 import "./components"
 import "./components/IconPolicy.js" as IconPolicy
 import "./components/CardFormatter.js" as CardFormatter
+import "./components/CipherMutation.js" as CipherMutation
 
 Item {
   id: root
@@ -294,6 +293,30 @@ Item {
   property string activeVaultScope: "all"
   property string activeFolderScope: "all"
   property int selectedIndex: 0
+  property string rememberedItemId: ""
+  property double selectionExpiresAt: 0
+  property bool checkingCachedSession: false
+  property var pendingFieldCopy: null
+  property bool updatingResults: false
+  property int vaultRevision: 0
+
+  Timer {
+    id: selectionExpiry
+    interval: 30000
+    onTriggered: root.forgetSelection()
+  }
+
+  function forgetSelection() {
+    selectionExpiry.stop()
+    root.rememberedItemId = ""
+    root.selectionExpiresAt = 0
+  }
+
+  function recentItemId() {
+    // A suspended event loop may not have delivered the timer yet.
+    if (root.rememberedItemId && Date.now() >= root.selectionExpiresAt) root.forgetSelection()
+    return root.rememberedItemId
+  }
 
   // Details Inspector State
   property bool showPasswordRevealed: false
@@ -305,6 +328,8 @@ Item {
   property bool showActionPalette: false
   property int actionPaletteIndex: 0
   property var currentAvailableActions: []
+  // Type picker (Ctrl+N): quick Login vs Secure Note creation selector.
+  property bool showTypePicker: false
   property bool showSshKeyModal: false
   property string sshKeyModalMode: "create"
   property var sshKeyModalItem: null
@@ -320,7 +345,26 @@ Item {
   property var activePasswordHistoryItem: null
   property bool showPasswordGeneratorModal: false
   property string passwordGeneratorModalMode: "password"
-  readonly property bool hasActiveModal: root.showActionPalette || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal
+  // True while the Password Generator is opened in fill mode for the Inspector
+  // Form (issue #386); the selected secret lands in the draft instead of the
+  // clipboard.
+  property bool passwordGeneratorFillMode: false
+  // Inspector-Embedded Cipher Form (issues #386, #387): create and edit drafts
+  // live in the right-hand Inspector column instead of a centered modal. It is
+  // not a blocking modal, but it does own the keyboard while active.
+  property bool showCipherEditor: false
+  property string cipherEditorType: "login"
+  property string cipherEditorDefaultFolderId: ""
+  // Non-null while the Inspector Form is editing an existing personal cipher.
+  property var cipherEditorEditItem: null
+  // Set after a successful create/edit so the reloaded list can select the row.
+  property string pendingSelectItemId: ""
+  property bool showDeleteCipherModal: false
+  property var deleteCipherItem: null
+  // `hasActiveModal` is the overlay's single "a sub-interaction owns the
+  // keyboard" gate. The Inspector Form is included so global search and list
+  // shortcuts are suspended while a draft is being edited.
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -344,12 +388,16 @@ Item {
   readonly property color muted: Commons.Color.muted
   readonly property string fontFamily: Style.font.menuFamily
 
-  readonly property var selectedItem: {
+  readonly property var highlightedItem: {
     if (filteredItems && filteredItems.length > 0 && selectedIndex >= 0 && selectedIndex < filteredItems.length) {
       return filteredItems[selectedIndex]
     }
     return null
   }
+
+  // Keep navigation responsive while the existing status probe validates the
+  // cached session. Credential consumers see a selection only after that check.
+  readonly property var selectedItem: root.checkingCachedSession ? null : root.highlightedItem
 
   readonly property string effectiveView: {
     if (dependenciesMissing && currentView !== "settings") return "dependency_check"
@@ -376,10 +424,20 @@ Item {
     })
   }
 
-  function clearSensitiveState() {
+  function invalidateVaultList() {
+    ++root.vaultRevision
     root.rawVaultItems = []
     root.filteredItems = []
     root.lastVaultItemsRawText = ""
+  }
+
+  function clearSensitiveState() {
+    root.forgetSelection()
+    root.pendingFieldCopy = null
+    if (vaultSyncProc.running && vaultSyncProc.revision === root.vaultRevision) root.isBusy = false
+    root.invalidateVaultList()
+    root.isLoadingVault = false
+    root.checkingCachedSession = false
     root.lastSyncTime = 0
     root.searchQuery = ""
     root.activeCategory = "all"
@@ -398,8 +456,31 @@ Item {
     root.actionPaletteIndex = 0
     root.currentAvailableActions = []
 
+    root.showTypePicker = false
+
     root.showPasswordHistoryModal = false
     root.activePasswordHistoryItem = null
+
+    root.showCipherEditor = false
+    root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = null
+    root.pendingSelectItemId = ""
+    if (cipherCreateProc.running) {
+      cipherCreateProc.running = false
+      root.isBusy = false
+    }
+    if (cipherEditProc.running) {
+      cipherEditProc.running = false
+      root.isBusy = false
+    }
+
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+    if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
+    if (cipherDeleteProc.running) {
+      cipherDeleteProc.running = false
+      root.isBusy = false
+    }
 
     root.showPasswordGeneratorModal = false
     if (passwordGeneratorModalComponent) {
@@ -413,9 +494,18 @@ Item {
 
     root.showSshKeyModal = false
     root.sshKeyModalItem = null
+    root.sshApprovalPrompt = null
+    root.sshApprovalRemaining = 0
+    if (root.authState.lock_generation) root.sshApprovalOnly = false
+
+    clipCopyProc.secret = ""
+    clipCopyProc.successMessage = ""
+    clipCopyProc.running = false
 
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
+    attachmentProc.activeAttachmentId = ""
+    attachmentProc.activeItemId = ""
 
     root.twoFactorProvider = 0
     root.availableTwoFactorProviders = []
@@ -435,10 +525,13 @@ Item {
         return
       }
       root.sshApprovalOnly = true
-      root.refreshSshApprovals()
+    }
+    if (!root.opened && !root.sshApprovalOnly && root.rawVaultItems.length && root.authState.lock_generation) {
+      root.checkingCachedSession = true
+      // A probe already in flight predates this reopen; its exit starts a fresh one.
+      if (authStatusProc.running) authStatusProc.revision = -1
     }
     root.sshDenyingOnClose = false
-    root.opened = true
     root.errorMessage = ""
     root.statusMessage = ""
     root.currentView = "auto"
@@ -457,13 +550,25 @@ Item {
         root.selectedIndex = 0
       }
     }
+    if (!canRemember && !root.opened && !root.sshApprovalOnly && root.recentItemId()) {
+      var recentIndex = root.filteredItems.findIndex(item => item.id === root.rememberedItemId)
+      root.selectedIndex = Math.max(0, recentIndex)
+      root.forgetSelection()
+    }
     if (!root.authState || root.authState.status !== "unlocked") {
       root.clearSensitiveState()
     } else {
       root.showActionPalette = false
+      root.showTypePicker = false
       root.showSshKeyModal = false
       root.showPasswordHistoryModal = false
       root.showPasswordGeneratorModal = false
+      root.showCipherEditor = false
+      root.cipherEditorDefaultFolderId = ""
+      root.cipherEditorEditItem = null
+      root.pendingSelectItemId = ""
+      root.showDeleteCipherModal = false
+      root.deleteCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
       root.showCardNumberRevealed = false
@@ -475,6 +580,8 @@ Item {
       root.currentAvailableActions = []
       root.currentTotp = ({ code: "", ttl: 30, period: 30 })
     }
+    root.opened = true
+    if (root.sshApprovalOnly) root.refreshSshApprovals()
     root.checkDependencies()
     if (!root.dependenciesMissing) {
       root.refreshHealth()
@@ -496,6 +603,7 @@ Item {
 
   function refreshSshApprovals() {
     if (sshPendingProc.running) return
+    sshPendingProc.revision = root.vaultRevision
     sshPendingProc.command = [root.helperPath, "ssh-agent", "pending"]
     sshPendingProc.running = true
   }
@@ -510,6 +618,13 @@ Item {
   }
 
   function close() {
+    // dismiss() and shell.hide() may both call close for one dismissal.
+    if (root.opened && !root.sshApprovalOnly && root.effectiveView === "search" && root.selectedItem && root.authState.lock_generation
+        && root.config && root.config.remember_last_search !== true) {
+      root.rememberedItemId = root.selectedItem.id
+      root.selectionExpiresAt = Date.now() + selectionExpiry.interval
+      selectionExpiry.restart()
+    }
     // Closing the window without answering counts as Deny.
     if (root.sshApprovalPrompt) {
       root.sshDenyingOnClose = true
@@ -517,11 +632,21 @@ Item {
     }
     root.sshApprovalOnly = false
     root.opened = false
+    root.pendingFieldCopy = null
+    root.checkingCachedSession = false
+    totpGenProc.itemId = ""
     totpGenProc.running = false
     root.showActionPalette = false
+    root.showTypePicker = false
     root.showSshKeyModal = false
     root.showPasswordHistoryModal = false
     root.showPasswordGeneratorModal = false
+    root.showCipherEditor = false
+    root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = null
+    root.pendingSelectItemId = ""
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -549,6 +674,12 @@ Item {
   function toggle() {
     if (root.opened) root.dismiss()
     else root.open("{}")
+  }
+
+  function applyConfig(data) {
+    if (root.config && root.config.server_url !== data.server_url) root.clearSensitiveState()
+    if (data.remember_last_search === true) root.forgetSelection()
+    root.config = data
   }
 
   function refreshConfig() {
@@ -627,6 +758,7 @@ Item {
 
   function refreshAuthStatus() {
     if (authStatusProc.running) return
+    authStatusProc.revision = root.vaultRevision
     authStatusProc.command = [
       "sh", "-c",
       "if command -v \"$1\" >/dev/null 2>&1 || [ -x \"$1\" ]; then exec \"$1\" auth status; else exit 127; fi",
@@ -660,6 +792,7 @@ Item {
     root.lastSyncWasManual = !isBackground
     root.isBusy = true
     root.statusMessage = "Syncing vault with Bitwarden..."
+    vaultSyncProc.revision = root.vaultRevision
     vaultSyncProc.command = [root.helperPath, "vault", "sync"]
     vaultSyncProc.running = true
   }
@@ -694,6 +827,8 @@ Item {
   }
 
   function loadVaultItems() {
+    if (vaultListProc.running || root.authState.status !== "unlocked" || !root.authState.has_session) return
+    vaultListProc.revision = root.vaultRevision
     root.logInfo("omarchy:vault", "Loading vault items from local daemon/engine...")
     root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
@@ -834,7 +969,7 @@ Item {
   }
 
   function filterVaultItems(resetSelection) {
-    var currentId = (root.selectedItem && !resetSelection) ? root.selectedItem.id : null
+    var currentId = (root.highlightedItem && !resetSelection) ? root.highlightedItem.id : null
     var q = (root.searchQuery || "").trim().toLowerCase()
     var cat = root.activeCategory
     var vs = root.activeVaultScope || "all"
@@ -922,8 +1057,6 @@ Item {
       out.push(res[j].item)
     }
 
-    root.filteredItems = out
-
     var targetIndex = 0
     if (currentId && out.length > 0) {
       for (var k = 0; k < out.length; k++) {
@@ -933,7 +1066,11 @@ Item {
         }
       }
     }
+    // Publish the rows and their new index together to selection side effects.
+    root.updatingResults = true
+    root.filteredItems = out
     root.selectedIndex = targetIndex
+    root.updatingResults = false
     root.handleSelectedItemChanged()
   }
 
@@ -1017,6 +1154,10 @@ Item {
   onSelectedIndexChanged: root.handleSelectedItemChanged()
 
   function handleSelectedItemChanged() {
+    if (!root.opened || root.updatingResults) return
+    if (root.pendingFieldCopy && (!root.highlightedItem || root.pendingFieldCopy.id !== root.highlightedItem.id)) {
+      root.pendingFieldCopy = null
+    }
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1077,19 +1218,370 @@ Item {
     }
   }
 
+  onShowCipherEditorChanged: {
+    if (!root.showCipherEditor && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
+  onShowDeleteCipherModalChanged: {
+    if (!root.showDeleteCipherModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+
   function openPasswordGeneratorModal(mode) {
     root.passwordGeneratorModalMode = mode || "password"
+    // A manual invocation copies to the clipboard; only the Inspector Form
+    // routes the generator through fill mode.
+    root.passwordGeneratorFillMode = false
     root.showActionPalette = false
     root.showPasswordGeneratorModal = true
+  }
+
+  // Opens the Password Generator (#385) in fill mode for the Inspector Form:
+  // the selected secret lands in the draft password field instead of clipboard.
+  function openPasswordGeneratorForCipherEditor() {
+    if (!root.showCipherEditor) return
+    root.passwordGeneratorModalMode = "password"
+    root.passwordGeneratorFillMode = true
+    root.showActionPalette = false
+    root.showPasswordGeneratorModal = true
+  }
+
+  function closePasswordGeneratorModal() {
+    root.showPasswordGeneratorModal = false
+    root.passwordGeneratorFillMode = false
+    if (cipherEditorComponent) cipherEditorComponent.isGeneratingPassword = false
+    if (passwordGenProc.running) {
+      passwordGenProc.isCanceled = true
+      passwordGenProc.running = false
+    }
+  }
+
+  function openCipherCreateModal(cipherType) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.cipherEditorType = cipherType === "note" ? "note" : "login"
+    var scope = root.activeFolderScope || "all"
+    root.cipherEditorDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
+    root.cipherEditorEditItem = null
+    // Creation drafts render inside the Inspector, not a centered modal (#386).
+    root.showActionPalette = false
+    root.showTypePicker = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherEditor = true
+  }
+
+  function openCipherEditModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item) return
+    var typeName = item.type_name || ""
+    if (typeName !== "login" && typeName !== "note") return
+    if (item.organization_id) {
+      root.errorMessage = "Organization ciphers are read-only."
+      return
+    }
+    // Edit drafts render in place inside the Inspector (#387). The original
+    // item is installed before `showCipherEditor` so the form prefills from it.
+    root.cipherEditorType = typeName === "note" ? "note" : "login"
+    root.cipherEditorDefaultFolderId = ""
+    root.cipherEditorEditItem = item
+    root.showActionPalette = false
+    root.showTypePicker = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherEditor = true
+  }
+
+  // Returns the read-only error for ciphers the Overlay must not mutate, or an
+  // empty string when the cipher can be favorited/deleted.
+  function cipherMutationGuard(item) {
+    if (!CipherMutation.isMutableType(item)) return ""
+    if (CipherMutation.isOrganizationOwned(item)) return "Organization ciphers are read-only."
+    return ""
+  }
+
+  function openDeleteCipherModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item) return
+    var guard = root.cipherMutationGuard(item)
+    if (guard) {
+      root.errorMessage = guard
+      return
+    }
+    if (!CipherMutation.canMutate(item)) return
+    root.deleteCipherItem = item
+    root.showActionPalette = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherEditor = false
+    root.cipherEditorEditItem = null
+    root.showDeleteCipherModal = true
+  }
+
+  // Applies the optimistic favorite flag to both the raw list and the visible
+  // rows. Rollback simply calls this again with the previous value.
+  function applyCipherFavorite(itemId, favorite) {
+    root.updatingResults = true
+    root.rawVaultItems = CipherMutation.withFavorite(root.rawVaultItems, itemId, favorite)
+    root.filteredItems = CipherMutation.withFavorite(root.filteredItems, itemId, favorite)
+    root.updatingResults = false
+    root.updateAvailableActions()
+  }
+
+  function toggleCipherFavorite(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item || !item.id) return
+    var guard = root.cipherMutationGuard(item)
+    if (guard) {
+      root.errorMessage = guard
+      return
+    }
+    if (!CipherMutation.canMutate(item)) return
+    if (cipherFavoriteProc.running) {
+      root.statusMessage = "Favorite update in progress..."
+      return
+    }
+
+    var itemId = item.id
+    var itemName = item.name || ""
+    var previousFavorite = Boolean(item.favorite)
+    var nextFavorite = CipherMutation.nextFavorite(item)
+
+    root.applyCipherFavorite(itemId, nextFavorite)
+    cipherFavoriteProc.revision = root.vaultRevision
+    cipherFavoriteProc.errorReported = false
+    cipherFavoriteProc.lastStderr = ""
+    cipherFavoriteProc.itemId = itemId
+    cipherFavoriteProc.itemName = itemName
+    cipherFavoriteProc.previousFavorite = previousFavorite
+    cipherFavoriteProc.nextFavorite = nextFavorite
+    cipherFavoriteProc.payload = JSON.stringify({ favorite: nextFavorite })
+    // The update travels over stdin so no secret ever reaches argv.
+    cipherFavoriteProc.command = [root.helperPath, "vault", "edit", itemId, "--stdin", "--json"]
+    cipherFavoriteProc.running = true
+  }
+
+  function handleCipherFavoriteSuccess(data) {
+    var name = cipherFavoriteProc.itemName
+    var next = cipherFavoriteProc.nextFavorite
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Favorite change for '" + name + "' saved on the server. Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = next ? ("Added '" + name + "' to favorites.") : ("Removed '" + name + "' from favorites.")
+  }
+
+  function handleCipherFavoriteFailure(message) {
+    root.applyCipherFavorite(cipherFavoriteProc.itemId, cipherFavoriteProc.previousFavorite)
+    root.statusMessage = ""
+    root.errorMessage = message
+  }
+
+  function submitCipherDelete(permanent) {
+    var item = root.deleteCipherItem
+    if (!item || !item.id || cipherDeleteProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.isBusy = true
+    if (deleteCipherModalComponent) {
+      deleteCipherModalComponent.isBusy = true
+      deleteCipherModalComponent.errorMessage = ""
+    }
+    cipherDeleteProc.revision = root.vaultRevision
+    cipherDeleteProc.errorReported = false
+    cipherDeleteProc.lastStderr = ""
+    cipherDeleteProc.itemId = item.id
+    cipherDeleteProc.itemName = item.name || ""
+    cipherDeleteProc.permanent = Boolean(permanent)
+    var cmd = [root.helperPath, "vault", "delete", item.id, "--yes", "--json"]
+    if (permanent) cmd.push("--permanent")
+    cipherDeleteProc.command = cmd
+    cipherDeleteProc.running = true
+  }
+
+  function handleCipherDeleteSuccess(data) {
+    root.isBusy = false
+    if (deleteCipherModalComponent) deleteCipherModalComponent.isBusy = false
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+
+    var name = cipherDeleteProc.itemName
+    var verb = cipherDeleteProc.permanent ? "permanently deleted" : "moved to Trash"
+    if (data && data.outcome === "deleted_needs_sync") {
+      root.statusMessage = "Cipher '" + name + "' " + verb + ". Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = "Cipher '" + name + "' " + verb + "."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function handleCipherDeleteFailure(message) {
+    root.isBusy = false
+    if (deleteCipherModalComponent) {
+      deleteCipherModalComponent.isBusy = false
+      deleteCipherModalComponent.errorMessage = message
+    } else {
+      root.errorMessage = message
+    }
+  }
+
+  function getAvailableFolders() {
+    var items = root.rawVaultItems || []
+    var seen = {}
+    var list = []
+    for (var i = 0; i < items.length; i++) {
+      var id = items[i].folder_id
+      if (!id || seen[id]) continue
+      seen[id] = true
+      list.push({ id: id, name: items[i].folder_name || "Folder" })
+    }
+    list.sort(function(a, b) {
+      return a.name.localeCompare(b.name)
+    })
+    return list
+  }
+
+  function submitCipherCreate(payload) {
+    if (!payload || cipherCreateProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.isBusy = true
+    // Creation drafts live in the Inspector Form (#386), never the modal.
+    if (cipherEditorComponent) {
+      cipherEditorComponent.isBusy = true
+      cipherEditorComponent.errorMessage = ""
+    }
+    cipherCreateProc.revision = root.vaultRevision
+    cipherCreateProc.errorReported = false
+    cipherCreateProc.lastStderr = ""
+    cipherCreateProc.createdType = payload.cipher_type === "note" ? "note" : "login"
+    cipherCreateProc.createdFolderId = payload.folder_id || ""
+    cipherCreateProc.createdName = payload.name || ""
+    cipherCreateProc.payload = JSON.stringify(payload)
+    // Secrets travel over stdin only: argv stays free of plaintext.
+    cipherCreateProc.command = [root.helperPath, "vault", "create", "--stdin", "--json"]
+    cipherCreateProc.running = true
+  }
+
+  function revealCreatedCipher(cipherType, folderId) {
+    // Drop only the filters that would hide the new personal cipher.
+    if (root.searchQuery) root.searchQuery = ""
+    if (root.activeVaultScope !== "all" && root.activeVaultScope !== "personal") {
+      root.activeVaultScope = "all"
+    }
+    var category = cipherType === "note" ? "note" : "login"
+    if (root.activeCategory !== "all" && root.activeCategory !== category) {
+      root.activeCategory = "all"
+    }
+    if (root.activeFolderScope !== "all") {
+      var scopeMatches = root.activeFolderScope === "none" ? !folderId : root.activeFolderScope === folderId
+      if (!scopeMatches) root.activeFolderScope = "all"
+    }
+  }
+
+  function applyPendingCipherSelection() {
+    var id = root.pendingSelectItemId
+    if (!id) return false
+    var rows = root.filteredItems || []
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].id === id) {
+        root.pendingSelectItemId = ""
+        root.selectedIndex = i
+        return true
+      }
+    }
+    // The reload that carried this id may predate the server receipt; keep it
+    // for the next reload instead of silently losing the selection.
+    return false
+  }
+
+  function handleCipherCreateSuccess(data) {
+    root.isBusy = false
+    if (cipherEditorComponent) cipherEditorComponent.isBusy = false
+    root.showCipherEditor = false
+    root.cipherEditorEditItem = null
+
+    var receipt = (data && data.item) ? data.item : {}
+    var newId = receipt.id || ""
+    var createdName = cipherCreateProc.createdName
+    root.pendingSelectItemId = newId
+    root.revealCreatedCipher(cipherCreateProc.createdType, cipherCreateProc.createdFolderId)
+
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Cipher '" + createdName + "' saved on the server. Sync the vault to refresh the local copy."
+      // The sync completion reloads the list and applies the pending selection.
+      root.syncVault(true, true)
+      return
+    }
+
+    root.statusMessage = "Cipher '" + createdName + "' created."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function submitCipherEdit(payload) {
+    if (!payload || cipherEditProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    var item = root.cipherEditorEditItem
+    if (!item || !item.id) return
+    root.isBusy = true
+    if (cipherEditorComponent) {
+      cipherEditorComponent.isBusy = true
+      cipherEditorComponent.errorMessage = ""
+    }
+    cipherEditProc.revision = root.vaultRevision
+    cipherEditProc.errorReported = false
+    cipherEditProc.lastStderr = ""
+    cipherEditProc.itemId = item.id
+    cipherEditProc.editedName = payload.name || item.name || ""
+    cipherEditProc.editedType = item.type_name === "note" ? "note" : "login"
+    cipherEditProc.editedFolderId = (payload.folder_id !== undefined) ? String(payload.folder_id || "") : String(item.folder_id || "")
+    cipherEditProc.payload = JSON.stringify(payload)
+    // Secrets travel over stdin only: argv carries just the resolved item id.
+    cipherEditProc.command = [root.helperPath, "vault", "edit", item.id, "--stdin", "--json"]
+    cipherEditProc.running = true
+  }
+
+  function handleCipherEditSuccess(data) {
+    root.isBusy = false
+    if (cipherEditorComponent) cipherEditorComponent.isBusy = false
+    root.showCipherEditor = false
+
+    var receipt = (data && data.item) ? data.item : {}
+    var editedId = receipt.id || cipherEditProc.itemId
+    var editedName = receipt.name || cipherEditProc.editedName
+    root.cipherEditorEditItem = null
+    root.pendingSelectItemId = editedId
+    root.revealCreatedCipher(cipherEditProc.editedType, cipherEditProc.editedFolderId)
+
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Cipher '" + editedName + "' saved on the server. Sync the vault to refresh the local copy."
+      // The sync completion reloads the list and applies the pending selection.
+      root.syncVault(true, true)
+      return
+    }
+
+    root.statusMessage = "Cipher '" + editedName + "' updated."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
   }
 
   onSelectedItemChanged: root.handleSelectedItemChanged()
 
   function updateTotpForSelected() {
+    if (!root.opened || root.sshApprovalOnly) return
     var item = root.selectedItem
     if (item && item.login && (item.login.totp || item.login.has_totp)) {
-      totpGenProc.running = false
-      totpGenProc.secret = ""
+      if (totpGenProc.itemId !== item.id) root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+      if (totpGenProc.running) return
+      totpGenProc.itemId = item.id
+      totpGenProc.revision = root.vaultRevision
       totpGenProc.command = [root.helperPath, "totp", item.id]
       totpGenProc.running = true
     } else {
@@ -1108,8 +1600,13 @@ Item {
     root.activeCategory = root.categoryList[idx]
   }
 
-  function copyToClipboard(text, isSensitive, label) {
-    if (!text) return
+  function copyToClipboard(text, isSensitive, label, standalone) {
+    if (!text || clipCopyProc.running) return
+    root.statusMessage = ""
+    if (!standalone && !root.authState.lock_generation) {
+      root.errorMessage = "Vault session is changing. Try copying again after it unlocks."
+      return
+    }
     if (root.cliHealth && root.cliHealth.clipboard_available === false) {
       root.errorMessage = "Wayland clipboard utility 'wl-copy' not found. Please install 'wl-clipboard'."
       root.logWarn("omarchy:clipboard", root.errorMessage)
@@ -1117,17 +1614,43 @@ Item {
     }
     root.logInfo("omarchy:clipboard", "Copying " + (label || "item") + " to clipboard (sensitive: " + isSensitive + ")")
     var cmd = [root.helperPath, "copy", "--stdin"]
+    if (!standalone) cmd.push("--expected-lock-generation", root.authState.lock_generation)
     if (isSensitive) {
       cmd.push("--sensitive")
     }
-    var ttl = (root.config && root.config.clipboard_clear_seconds) || 30
-    if (ttl) {
-      cmd.push("--timeout", String(ttl))
-    }
+    var ttl = root.config && root.config.clipboard_clear_seconds != null ? root.config.clipboard_clear_seconds : 30
+    cmd.push("--timeout", String(ttl))
+    clipCopyProc.successMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive && ttl > 0 ? (" (clears in " + ttl + "s)") : "") + "."
     clipCopyProc.secret = JSON.stringify({ text: String(text) })
+    clipCopyProc.revision = root.vaultRevision
     clipCopyProc.command = cmd
     clipCopyProc.running = true
-    root.statusMessage = "Copied " + (label || "value") + " to clipboard" + (isSensitive ? (" (clears in " + ttl + "s)") : "") + "."
+  }
+
+  // Capture intent, never field contents. An early keypress is discarded if
+  // the selection or session changes before it can be served.
+  function requestFieldCopy(field) {
+    var row = root.highlightedItem
+    if (!root.opened || root.hasActiveModal || root.effectiveView !== "search" || !row) return
+    if (field === "totp" && !(row.login && (row.login.totp || row.login.has_totp))) return
+    root.pendingFieldCopy = { id: row.id, field: field }
+    root.finishPendingCopy()
+  }
+
+  function finishPendingCopy() {
+    var request = root.pendingFieldCopy
+    if (!request || root.checkingCachedSession) return
+    var item = root.selectedItem
+    if (!item || item.id !== request.id || !root.opened || root.effectiveView !== "search" || root.hasActiveModal) {
+      root.pendingFieldCopy = null
+      return
+    }
+    if (request.field === "totp" && !root.currentTotp.code) return
+    root.pendingFieldCopy = null
+    if (request.field === "totp") {
+      if (root.currentTotp.ttl > 0) root.copyItemTotp(item)
+    } else if (request.field === "username") root.copyItemUsername(item)
+    else root.executePrimaryAction(item)
   }
 
   function executePrimaryAction(item) {
@@ -1324,6 +1847,8 @@ Item {
   function getAvailableActions(item) {
     var actions = []
     if (!item) {
+      actions.push({ label: "Create Login", icon: "\uf067", shortcut: "Ctrl+N", action: function() { root.openCipherCreateModal("login") } })
+      actions.push({ label: "Create Secure Note", icon: "\uf0f6", shortcut: "", action: function() { root.openCipherCreateModal("note") } })
       actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
       actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
       actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
@@ -1465,6 +1990,27 @@ Item {
       if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
     }
 
+    if (item.type_name === "login" || item.type_name === "note") {
+      actions.push({
+        label: "Edit Item",
+        icon: "\uf044",
+        shortcut: "Ctrl+E",
+        action: function() { root.openCipherEditModal(item) }
+      })
+      actions.push({
+        label: item.favorite ? "Unfavorite Item" : "Favorite Item",
+        icon: item.favorite ? "\uf005" : "\uf006",
+        shortcut: "Ctrl+B",
+        action: function() { root.toggleCipherFavorite(item) }
+      })
+      actions.push({
+        label: "Delete Item",
+        icon: "\uf1f8",
+        shortcut: "Ctrl+D",
+        action: function() { root.openDeleteCipherModal(item) }
+      })
+    }
+
     if (item.notes) {
       actions.push({ label: "Copy Notes", icon: "\uf0f6", shortcut: "", action: function() { root.copyToClipboard(item.notes, false, "notes") } })
     }
@@ -1602,6 +2148,8 @@ Item {
       })
     }
 
+    actions.push({ label: "Create Login", icon: "\uf067", shortcut: "Ctrl+N", action: function() { root.openCipherCreateModal("login") } })
+    actions.push({ label: "Create Secure Note", icon: "\uf0f6", shortcut: "", action: function() { root.openCipherCreateModal("note") } })
     actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
     actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
@@ -1613,11 +2161,12 @@ Item {
   }
 
   function viewAttachment(item, att) {
-    if (!item || !att) return
+    if (!item || !att || attachmentProc.running || !root.authState.lock_generation) return
     root.logInfo("omarchy:attachment", "Requesting preview for " + (att.fileName || "attachment"))
     root.loadingAttachmentId = (att.id || att.fileName || "loading")
     attachmentProc.activeAttachmentId = att.id || ""
     attachmentProc.activeItemId = item.id || ""
+    attachmentProc.revision = root.vaultRevision
     attachmentProc.command = [
       root.helperPath,
       "attachment",
@@ -1625,13 +2174,14 @@ Item {
       "--item-id", item.id,
       "--attachment-id", att.id,
       "--filename", att.fileName || "attachment",
+      "--expected-lock-generation", root.authState.lock_generation,
       "--preview"
     ]
     attachmentProc.running = true
   }
 
   function downloadAttachment(item, att) {
-    if (!item || !att) return
+    if (!item || !att || attachmentProc.running || !root.authState.lock_generation) return
     root.logInfo("omarchy:attachment", "Requesting download for " + (att.fileName || "attachment"))
     root.statusMessage = "Downloading attachment " + (att.fileName || "") + "..."
     var cmd = [
@@ -1640,11 +2190,13 @@ Item {
       "download",
       "--item-id", item.id,
       "--attachment-id", att.id,
-      "--filename", att.fileName || "attachment"
+      "--filename", att.fileName || "attachment",
+      "--expected-lock-generation", root.authState.lock_generation
     ]
     if (root.config && root.config.download_dir) {
       cmd.push("--output-dir", root.config.download_dir)
     }
+    attachmentProc.revision = root.vaultRevision
     attachmentProc.command = cmd
     attachmentProc.running = true
   }
@@ -1783,7 +2335,7 @@ Item {
     }
     report += "```\n"
 
-    root.copyToClipboard(report, false, "Diagnostics report")
+    root.copyToClipboard(report, false, "Diagnostics report", true)
     root.statusMessage = "Diagnostics report copied to clipboard."
   }
 
@@ -2023,15 +2575,43 @@ Item {
       }
 
       Shortcut {
+        sequence: "Ctrl+N"
+        enabled: root.opened && root.effectiveView === "search" && !root.hasActiveModal
+        onActivated: {
+          root.showTypePicker = true
+        }
+      }
+
+      // Inspector Form (issue #386): the draft owns the keyboard, so its own
+      // shortcuts are gated on the form, not on the modal guard. They stay
+      // disabled while the generator modal overlays the draft so a save or a
+      // second generate cannot fire behind it.
+      Shortcut {
+        sequence: "Ctrl+S"
+        enabled: root.opened && root.showCipherEditor && !root.showPasswordGeneratorModal
+        onActivated: {
+          if (cipherEditorComponent) cipherEditorComponent.handleKey(Qt.Key_S, Qt.ControlModifier)
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+G"
+        enabled: root.opened && root.showCipherEditor && !root.showPasswordGeneratorModal
+        onActivated: {
+          if (cipherEditorComponent) cipherEditorComponent.handleKey(Qt.Key_G, Qt.ControlModifier)
+        }
+      }
+
+      Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal
-        onActivated: root.copyItemTotp(root.selectedItem)
+        enabled: root.opened && root.effectiveView === "search" && root.highlightedItem !== null && !root.hasActiveModal
+        onActivated: root.requestFieldCopy("totp")
       }
 
       Shortcut {
         sequence: "Ctrl+U"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal
-        onActivated: root.copyItemUsername(root.selectedItem)
+        enabled: root.opened && root.effectiveView === "search" && root.highlightedItem !== null && !root.hasActiveModal
+        onActivated: root.requestFieldCopy("username")
       }
 
       Shortcut {
@@ -2048,9 +2628,28 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+E"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.hasActiveModal
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
         onActivated: {
-          root.openSshKeyModal("export", root.selectedItem)
+          var item = root.selectedItem
+          if (!item) return
+          if (item.type_name === "ssh_key") root.openSshKeyModal("export", item)
+          else root.openCipherEditModal(item)
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+B"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        onActivated: {
+          if (root.selectedItem) root.toggleCipherFavorite(root.selectedItem)
+        }
+      }
+
+      Shortcut {
+        sequence: "Ctrl+D"
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        onActivated: {
+          if (root.selectedItem) root.openDeleteCipherModal(root.selectedItem)
         }
       }
 
@@ -2097,8 +2696,17 @@ Item {
         sequence: "Escape"
         enabled: root.opened
         onActivated: {
-          if (root.showPasswordGeneratorModal) {
-            root.showPasswordGeneratorModal = false
+          if (root.showTypePicker) {
+            typePickerModalComponent.dismiss()
+          } else if (root.showDeleteCipherModal) {
+            if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
+              root.showDeleteCipherModal = false
+              root.deleteCipherItem = null
+            }
+          } else if (root.showPasswordGeneratorModal) {
+            root.closePasswordGeneratorModal()
+          } else if (root.showCipherEditor) {
+            if (cipherEditorComponent) cipherEditorComponent.handleKey(Qt.Key_Escape, Qt.NoModifier)
           } else if (root.showPasswordHistoryModal) {
             root.showPasswordHistoryModal = false
           } else if (root.showSshKeyModal) {
@@ -2147,6 +2755,23 @@ Item {
           }
         }
 
+        if (root.showTypePicker) {
+          if (event.key === Qt.Key_Escape) {
+            typePickerModalComponent.dismiss()
+            event.accepted = true
+          }
+          return
+        }
+
+        if (root.showDeleteCipherModal) {
+          if (event.key === Qt.Key_Escape && (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy)) {
+            root.showDeleteCipherModal = false
+            root.deleteCipherItem = null
+            event.accepted = true
+          }
+          return
+        }
+
         if (root.showSshKeyModal) {
           if (event.key === Qt.Key_Escape) {
             root.showSshKeyModal = false
@@ -2173,7 +2798,15 @@ Item {
 
         if (root.showPasswordGeneratorModal) {
           if (event.key === Qt.Key_Escape) {
-            root.showPasswordGeneratorModal = false
+            root.closePasswordGeneratorModal()
+            event.accepted = true
+          }
+          return
+        }
+
+        if (root.showCipherEditor) {
+          if (event.key === Qt.Key_Escape) {
+            if (cipherEditorComponent) cipherEditorComponent.handleKey(Qt.Key_Escape, Qt.NoModifier)
             event.accepted = true
           }
           return
@@ -2199,32 +2832,29 @@ Item {
           }
           event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-          if (root.effectiveView === "search" && root.selectedItem) {
-            root.executePrimaryAction(root.selectedItem)
+          if (root.effectiveView === "search" && root.highlightedItem) {
+            root.requestFieldCopy((event.modifiers & Qt.ControlModifier) ? "totp" : "primary")
             event.accepted = true
           }
-        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Tab && root.effectiveView === "search" && !root.hasActiveModal) {
           root.cycleCategory(true)
           event.accepted = true
-        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Backtab && root.effectiveView === "search" && !root.hasActiveModal) {
           root.cycleCategory(false)
           event.accepted = true
-        } else if (event.key === Qt.Key_Down && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Down && root.effectiveView === "search" && !root.hasActiveModal) {
           if (root.filteredItems.length > 0) {
             root.selectedIndex = (root.selectedIndex + 1) % root.filteredItems.length
           }
           event.accepted = true
-        } else if (event.key === Qt.Key_Up && root.effectiveView === "search") {
+        } else if (event.key === Qt.Key_Up && root.effectiveView === "search" && !root.hasActiveModal) {
           if (root.filteredItems.length > 0) {
             root.selectedIndex = (root.selectedIndex - 1 + root.filteredItems.length) % root.filteredItems.length
           }
           event.accepted = true
         } else if (event.modifiers & Qt.ControlModifier) {
-          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
-            root.copyItemTotp(root.selectedItem)
-            event.accepted = true
-          } else if (event.key === Qt.Key_U && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
-            root.copyItemUsername(root.selectedItem)
+          if (event.key === Qt.Key_U && root.effectiveView === "search" && root.highlightedItem && !root.hasActiveModal) {
+            root.requestFieldCopy("username")
             event.accepted = true
           } else if (event.key === Qt.Key_K && root.effectiveView === "search" && !root.hasActiveModal) {
             root.actionPaletteIndex = 0
@@ -2233,14 +2863,24 @@ Item {
           } else if (event.key === Qt.Key_G && root.effectiveView === "search" && !root.hasActiveModal) {
             root.openPasswordGeneratorModal("password")
             event.accepted = true
+          } else if (event.key === Qt.Key_N && root.effectiveView === "search" && !root.hasActiveModal) {
+            root.showTypePicker = true
+            event.accepted = true
           } else if (event.key === Qt.Key_T && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.toggleItemRevealed()
             event.accepted = true
           } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.openFirstWebsite(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && root.selectedItem.type_name === "ssh_key" && !root.hasActiveModal) {
-            root.openSshKeyModal("export", root.selectedItem)
+          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            if (root.selectedItem.type_name === "ssh_key") root.openSshKeyModal("export", root.selectedItem)
+            else root.openCipherEditModal(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_B && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            root.toggleCipherFavorite(root.selectedItem)
+            event.accepted = true
+          } else if (event.key === Qt.Key_D && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+            root.openDeleteCipherModal(root.selectedItem)
             event.accepted = true
           } else if (event.key === Qt.Key_H && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             if (root.selectedItem.login && root.selectedItem.login.password_history && root.selectedItem.login.password_history.length > 0) {
@@ -2294,21 +2934,14 @@ Item {
           onVaultScopeSelected: function(scope) { root.activeVaultScope = scope }
           onFolderScopeSelected: function(scope) { root.activeFolderScope = scope }
           onCreateSshKeyRequested: { root.openSshKeyModal("create", null) }
+          onCreateCipherRequested: function(cipherType) { root.openCipherCreateModal(cipherType) }
           onImportSshKeyRequested: { root.openSshKeyModal("import", null) }
           onClearSearchRequested: {
             root.searchQuery = ""
             root.filterVaultItems()
           }
-          onCopyUsernameRequested: {
-            if (root.selectedItem) {
-              root.copyItemUsername(root.selectedItem)
-            }
-          }
-          onCopyTotpRequested: {
-            if (root.selectedItem) {
-              root.copyItemTotp(root.selectedItem)
-            }
-          }
+          onCopyUsernameRequested: root.requestFieldCopy("username")
+          onCopyTotpRequested: root.requestFieldCopy("totp")
           onOpenUrlRequested: {
             if (root.selectedItem) {
               root.openFirstWebsite(root.selectedItem)
@@ -2360,7 +2993,7 @@ Item {
               onItemSelected: function(idx) { root.selectedIndex = idx }
               onItemTriggered: function(idx) {
                 root.selectedIndex = idx
-                root.executePrimaryAction(root.selectedItem)
+                root.requestFieldCopy("primary")
               }
             }
 
@@ -2381,8 +3014,9 @@ Item {
                 anchors.fill: parent
                 serverUrl: root.effectiveServerUrl
                 showWebsiteIcons: root.showWebsiteIcons
-                visible: root.selectedItem !== null
+                visible: root.selectedItem !== null && !root.showCipherEditor
                 item: root.selectedItem
+                isFavoriteMutating: cipherFavoriteProc.running && cipherFavoriteProc.itemId === (root.selectedItem ? root.selectedItem.id : "")
                 currentTotp: root.currentTotp
                 showPasswordRevealed: root.showPasswordRevealed
                 showPrivateKeyRevealed: root.showPrivateKeyRevealed
@@ -2400,6 +3034,9 @@ Item {
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
                 onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
+                onEditRequested: function(item) { root.openCipherEditModal(item) }
+                onFavoriteToggled: function(item) { root.toggleCipherFavorite(item) }
+                onDeleteRequested: function(item) { root.openDeleteCipherModal(item) }
                 onClosePreviewRequested: {
                   var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
                   root.activeAttachmentPreview = null
@@ -2422,7 +3059,7 @@ Item {
               // Empty Selection State View
               EmptyInspector {
                 anchors.fill: parent
-                visible: root.selectedItem === null
+                visible: root.selectedItem === null && !root.showCipherEditor
                 rawVaultItems: root.rawVaultItems
                 authState: root.authState
                 fontFamily: root.fontFamily
@@ -2430,6 +3067,38 @@ Item {
                 accent: root.accent
                 muted: root.muted
                 borderColor: root.borderColor
+              }
+
+              // Inspector-Embedded Cipher Form (issues #386, #387): create and edit
+              // drafts render in place, keeping the vault list visible.
+              CipherEditor {
+                id: cipherEditorComponent
+                anchors.fill: parent
+                active: root.showCipherEditor
+                mode: root.cipherEditorEditItem ? "edit" : "create"
+                cipherType: root.cipherEditorType
+                folders: root.getAvailableFolders()
+                defaultFolderId: root.cipherEditorDefaultFolderId
+                originalItem: root.cipherEditorEditItem
+                isEngineOutdated: root.isGeneratorEngineOutdated
+                engineVersion: (root.cliHealth && root.cliHealth.version) || ""
+                requiredVersion: root.minimumGeneratorEngineVersion
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                accent: root.accent
+                muted: root.muted
+                cardBackground: Commons.Color.popups.background
+                borderColor: root.borderColor
+                onSubmitRequested: function(payload) {
+                  if (root.cipherEditorEditItem) root.submitCipherEdit(payload)
+                  else root.submitCipherCreate(payload)
+                }
+                onGeneratePasswordRequested: { root.openPasswordGeneratorForCipherEditor() }
+                onCancelRequested: {
+                  root.showCipherEditor = false
+                  root.cipherEditorEditItem = null
+                  root.cipherEditorDefaultFolderId = ""
+                }
               }
             }
           }
@@ -2469,7 +3138,7 @@ Item {
                 root.doCheckFido2Status()
               }
             }
-            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl) }
+            onCopyRequested: function(txt, lbl) { root.copyToClipboard(txt, false, lbl, true) }
             onLoginApiKeyRequested: function(cId, cSec) { root.doLoginApiKey(cId, cSec) }
             onSendTwoFactorEmailRequested: function(email, pwd) { root.doSendTwoFactorEmail(email, pwd) }
             onCheckFido2StatusRequested: { root.doCheckFido2Status() }
@@ -2502,6 +3171,7 @@ Item {
             latestReleaseNotes: root.latestReleaseNotes
             latestReleaseUrl: root.latestReleaseUrl
             latestReleaseTitle: root.latestReleaseTitle
+            overlayVersion: (root.manifest && root.manifest.version) ? (root.manifest.version) : ""
             isCheckingUpdate: root.isCheckingUpdate
             updateCheckStatus: root.updateCheckStatus
             fontFamily: root.fontFamily
@@ -2607,6 +3277,23 @@ Item {
         onCloseRequested: { root.showActionPalette = false }
       }
 
+      // 5b. Type Picker Modal Overlay (Ctrl+N): pick Login or Secure Note
+      TypePickerModal {
+        id: typePickerModalComponent
+        active: root.showTypePicker
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onTypeSelected: function(cipherType) {
+          root.showTypePicker = false
+          root.openCipherCreateModal(cipherType)
+        }
+        onCloseRequested: { root.showTypePicker = false }
+      }
+
       // 6. SSH Key Management Modal Overlay (Create, Import, Export)
       SshKeyModal {
         id: sshKeyModalComponent
@@ -2659,6 +3346,7 @@ Item {
         id: passwordGeneratorModalComponent
         active: root.showPasswordGeneratorModal
         mode: root.passwordGeneratorModalMode
+        fillMode: root.passwordGeneratorFillMode
         isEngineOutdated: root.isGeneratorEngineOutdated
         engineVersion: (root.cliHealth && root.cliHealth.version) || ""
         requiredVersion: root.minimumGeneratorEngineVersion
@@ -2669,16 +3357,41 @@ Item {
         cardBackground: Commons.Color.popups.background
         borderColor: Commons.Color.popups.border
         onGenerateRequested: function(opts) { root.generatePasswordOrPassphrase(opts) }
-        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
-        onUpgradeRequested: {
+        onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label, true) }
+        onPasswordSelected: function(password) {
+          // Fill mode (#386): the secret lands in the Inspector Form draft and
+          // never touches the system clipboard.
           root.showPasswordGeneratorModal = false
+          if (root.passwordGeneratorFillMode && cipherEditorComponent) {
+            cipherEditorComponent.setGeneratedPassword(password)
+          }
+          root.passwordGeneratorFillMode = false
+        }
+        onUpgradeRequested: {
+          root.closePasswordGeneratorModal()
           root.installPackage(root.enginePackage || "omawarden")
         }
         onCloseRequested: {
-          root.showPasswordGeneratorModal = false
-          if (passwordGenProc.running) {
-            passwordGenProc.isCanceled = true
-            passwordGenProc.running = false
+          root.closePasswordGeneratorModal()
+        }
+      }
+
+      // 10. Delete confirmation for personal Login and Secure Note ciphers.
+      DeleteCipherModal {
+        id: deleteCipherModalComponent
+        active: root.showDeleteCipherModal
+        itemName: root.deleteCipherItem ? (root.deleteCipherItem.name || "Untitled") : ""
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onConfirmRequested: function(permanent) { root.submitCipherDelete(permanent) }
+        onCloseRequested: {
+          if (!deleteCipherModalComponent.isBusy) {
+            root.showDeleteCipherModal = false
+            root.deleteCipherItem = null
           }
         }
       }
@@ -2785,6 +3498,258 @@ Item {
   }
 
   Process {
+    id: cipherCreateProc
+    property string payload: ""
+    property int revision: 0
+    property string createdType: "login"
+    property string createdFolderId: ""
+    property string createdName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherCreateProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showCipherFormModal = false
+          root.showCipherEditor = false
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherCreateProc.errorReported = true
+          root.handleCipherCreateSuccess(data)
+          return
+        }
+        cipherCreateProc.errorReported = true
+        root.isBusy = false
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherCreateProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher creation failed."
+        if (cipherEditorComponent) {
+          cipherEditorComponent.isBusy = false
+          cipherEditorComponent.errorMessage = errMsg
+        } else {
+          root.errorMessage = errMsg
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherCreateProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherCreateProc.errorReported) return
+      if (cipherCreateProc.revision !== root.vaultRevision) return
+      root.isBusy = false
+      if (cipherEditorComponent) cipherEditorComponent.isBusy = false
+      if (code !== 0) {
+        if (cipherEditorComponent && root.showCipherEditor) {
+          cipherEditorComponent.errorMessage = "Process exited with error code " + code
+        } else if (!root.errorMessage) {
+          root.errorMessage = "Cipher creation failed."
+        }
+      }
+    }
+  }
+
+  Process {
+    id: cipherEditProc
+    property string payload: ""
+    property int revision: 0
+    property string itemId: ""
+    property string editedType: "login"
+    property string editedFolderId: ""
+    property string editedName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherEditProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showCipherEditor = false
+          root.cipherEditorEditItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherEditProc.errorReported = true
+          root.handleCipherEditSuccess(data)
+          return
+        }
+        cipherEditProc.errorReported = true
+        root.isBusy = false
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherEditProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher update failed."
+        // Keep the editor open so the user can correct the conflict and retry.
+        if (cipherEditorComponent) {
+          cipherEditorComponent.isBusy = false
+          cipherEditorComponent.errorMessage = errMsg
+        } else {
+          root.errorMessage = errMsg
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherEditProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherEditProc.errorReported) return
+      if (cipherEditProc.revision !== root.vaultRevision) return
+      root.isBusy = false
+      if (cipherEditorComponent) cipherEditorComponent.isBusy = false
+      if (code !== 0) {
+        if (cipherEditorComponent && root.showCipherEditor) {
+          cipherEditorComponent.errorMessage = "Process exited with error code " + code
+        } else if (!root.errorMessage) {
+          root.errorMessage = "Cipher update failed."
+        }
+      }
+    }
+  }
+
+  Process {
+    id: cipherFavoriteProc
+    property string payload: ""
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property bool previousFavorite: false
+    property bool nextFavorite: false
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherFavoriteProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") return
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherFavoriteProc.errorReported = true
+          root.handleCipherFavoriteSuccess(data)
+          return
+        }
+        cipherFavoriteProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherFavoriteProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Favorite update failed."
+        root.handleCipherFavoriteFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherFavoriteProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherFavoriteProc.errorReported) return
+      if (cipherFavoriteProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherFavoriteFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+  Process {
+    id: cipherDeleteProc
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property bool permanent: false
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherDeleteProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showDeleteCipherModal = false
+          root.deleteCipherItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherDeleteProc.errorReported = true
+          root.handleCipherDeleteSuccess(data)
+          return
+        }
+        cipherDeleteProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherDeleteProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Cipher deletion failed."
+        root.handleCipherDeleteFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherDeleteProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherDeleteProc.errorReported) return
+      if (cipherDeleteProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherDeleteFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+
+  Process {
     id: sshKeyActionProc
     property string actionType: "create"
     property string actionName: ""
@@ -2807,7 +3772,9 @@ Item {
 
         if (jsonRes && jsonRes.ok) {
           root.showSshKeyModal = false
-          if (sshKeyActionProc.actionType === "create") {
+          if (jsonRes.outcome === "saved_needs_sync") {
+            root.statusMessage = "SSH key saved on the server. Sync the vault to refresh the local copy."
+          } else if (sshKeyActionProc.actionType === "create") {
             root.statusMessage = "SSH key '" + sshKeyActionProc.actionName + "' generated successfully."
             root.loadVaultItems()
           } else if (sshKeyActionProc.actionType === "import") {
@@ -2844,10 +3811,17 @@ Item {
   }
   Process {
     id: sshPendingProc
+    property int revision: 0
     command: []
+    onExited: {
+      if (sshPendingProc.revision !== root.vaultRevision && root.opened) {
+        Qt.callLater(root.refreshSshApprovals)
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (sshPendingProc.revision !== root.vaultRevision) return
         var prompts = []
         try {
           var data = JSON.parse((text || "").trim() || "{}")
@@ -2899,7 +3873,7 @@ Item {
           var cleanText = (text || "").trim()
           if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
-          root.config = data
+          root.applyConfig(data)
           if (data.remember_email !== undefined) {
             root.rememberEmailChecked = (data.remember_email !== false)
           }
@@ -2933,7 +3907,7 @@ Item {
           var cleanSetText = (text || "").trim()
           if (cleanSetText.length === 0) return
           var data = JSON.parse(cleanSetText)
-          root.config = data
+          root.applyConfig(data)
           root.showWebsiteIcons = IconPolicy.resolve(true, data.show_website_icons)
           root.checkUpdatesEnabled = (data.check_updates !== false)
           root.statusMessage = "Configuration saved successfully."
@@ -2952,7 +3926,10 @@ Item {
     }
     onExited: function(code) {
       root.isBusy = false
-      if (code !== 0) root.statusMessage = "Error saving configuration."
+      if (code !== 0) {
+        root.statusMessage = "Error saving configuration."
+        root.refreshAuthStatus()
+      }
     }
   }
 
@@ -3087,19 +4064,28 @@ Item {
 
   Process {
     id: authStatusProc
+    property int revision: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (authStatusProc.revision !== root.vaultRevision) return
         try {
           var cleanText = (text || "").trim()
-          if (cleanText.length === 0) return
           var data = JSON.parse(cleanText)
           if (data && data.status) {
             var wasNotUnlocked = (root.authState.status !== "unlocked")
+            if (root.authState.server_url !== data.server_url
+                || (root.authState.lock_generation && root.authState.lock_generation !== data.lock_generation)
+                || (root.authState.user_id && root.authState.user_id !== data.user_id)
+                || (root.authState.user_email && root.authState.user_email !== data.user_email)) {
+              root.clearSensitiveState()
+            }
             root.authState = data
-            if (data.status === "unlocked") {
-              if (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0) {
+            if (data.status === "unlocked" && data.has_session) {
+              root.checkingCachedSession = false
+              root.finishPendingCopy()
+              if (root.opened && (wasNotUnlocked || !root.rawVaultItems || root.rawVaultItems.length === 0)) {
                 root.loadVaultItems()
                 root.syncVault(true, false)
               }
@@ -3120,6 +4106,8 @@ Item {
                 }
               }
             })
+          } else {
+            throw new Error("Missing auth status")
           }
         } catch (e) {
           root.clearSensitiveState()
@@ -3130,6 +4118,9 @@ Item {
             has_session: false
           })
           root.logError("omarchy:auth", "Failed to parse auth status: " + e)
+        } finally {
+          // This reply may itself have invalidated the vault on a lock or server change.
+          authStatusProc.revision = root.vaultRevision
         }
       }
     }
@@ -3138,6 +4129,10 @@ Item {
       onStreamFinished: root.handleProcessStderr(text, "omawarden:auth")
     }
     onExited: function(code) {
+      if (authStatusProc.revision !== root.vaultRevision) {
+        Qt.callLater(function() { if (root.opened) root.refreshAuthStatus() })
+        return
+      }
       if (code !== 0) {
         root.clearSensitiveState()
         root.authState = ({
@@ -3219,20 +4214,21 @@ Item {
         try {
           var data = JSON.parse(text)
           if (data.ok) {
+            root.clearSensitiveState()
+            root.sshApprovalOnly = false
+            // Activation has passed the output gate, so the previous helper
+            // cannot be partway through a plaintext write here.
+            attachmentProc.running = false
             var statusVal = data.status || "unlocked"
             if (statusVal === "locked") {
-              root.statusMessage = "API Key authenticated. Please enter Master Password to unlock."
+              root.statusMessage = "Signed in. Enter your master password to unlock."
             } else {
               root.statusMessage = "Logged in successfully."
             }
-            root.searchQuery = ""
             root.show2FAField = false
             root.isNewDeviceVerification = false
-            root.twoFactorProvider = 0
-            root.availableTwoFactorProviders = []
             root.fido2Status = ""
             if (authViewComponent) {
-              authViewComponent.clearInputs()
               authViewComponent.show2FAField = false
               authViewComponent.isNewDeviceVerification = false
               authViewComponent.twoFactorProvider = 0
@@ -3441,6 +4437,10 @@ Item {
           user_email: "",
           has_session: false
         })
+        try {
+          var result = JSON.parse(text)
+          if (result && result.ok === false && result.error) root.errorMessage = String(result.error)
+        } catch (e) {}
         root.refreshAuthStatus()
         root.isBusy = false
       }
@@ -3456,10 +4456,12 @@ Item {
 
   Process {
     id: vaultSyncProc
+    property int revision: 0
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (vaultSyncProc.revision !== root.vaultRevision) return
         root.isBusy = false
         try {
           var res = JSON.parse(text)
@@ -3499,9 +4501,12 @@ Item {
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
+      onStreamFinished: {
+        if (vaultSyncProc.revision === root.vaultRevision) root.handleProcessStderr(text, "omawarden:vault")
+      }
     }
     onExited: function(code) {
+      if (vaultSyncProc.revision !== root.vaultRevision) return
       root.isBusy = false
       if (code !== 0 && !root.errorMessage) {
         root.errorMessage = "Vault sync failed."
@@ -3512,12 +4517,19 @@ Item {
 
   Process {
     id: vaultListProc
+    property int revision: 0
     command: []
+    onExited: {
+      if (vaultListProc.revision !== root.vaultRevision) Qt.callLater(function() {
+        if (root.opened && root.effectiveView === "search" && !root.rawVaultItems.length) root.loadVaultItems()
+      })
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (vaultListProc.revision !== root.vaultRevision) return
+        root.isLoadingVault = false
         try {
-          root.isLoadingVault = false
           if (!root.authState || root.authState.status !== "unlocked") {
             root.clearSensitiveState()
             return
@@ -3551,6 +4563,7 @@ Item {
             if (!fFound) root.activeFolderScope = "all"
           }
           root.filterVaultItems(false)
+          root.applyPendingCipherSelection()
           Qt.callLater(function() {
             if (root.opened && root.effectiveView === "search" && searchHeader && searchHeader.searchField && !root.hasActiveModal) {
               searchHeader.searchField.forceActiveFocus()
@@ -3570,9 +4583,17 @@ Item {
   Process {
     id: clipCopyProc
     property string secret: ""
+    property string successMessage: ""
+    property int revision: 0
+    onExited: function(code, exitStatus) {
+      if (clipCopyProc.revision !== root.vaultRevision) return
+      secret = ""
+      root.statusMessage = code === 0 && exitStatus === 0 ? successMessage : "Failed to copy to clipboard."
+      successMessage = ""
+    }
     stdinEnabled: true
     onStarted: {
-      if (secret) {
+      if (clipCopyProc.revision === root.vaultRevision && secret) {
         write(secret + "\n")
         secret = ""
       }
@@ -3586,24 +4607,24 @@ Item {
 
   Process {
     id: totpGenProc
-    property string secret: ""
-    stdinEnabled: true
-    onStarted: {
-      if (secret) {
-        write(secret + "\n")
-        secret = ""
+    property string itemId: ""
+    property int revision: 0
+    onExited: {
+      if (root.selectedItem && (totpGenProc.itemId !== root.selectedItem.id || totpGenProc.revision !== root.vaultRevision)) {
+        if (root.opened) Qt.callLater(root.updateTotpForSelected)
       }
     }
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.authState || root.authState.status !== "unlocked") {
-          root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+        if (!root.opened || !root.selectedItem || root.selectedItem.id !== totpGenProc.itemId
+            || totpGenProc.revision !== root.vaultRevision || root.authState.status !== "unlocked") return
+        var cleanText = (text || "").trim()
+        if (!cleanText) {
+          if (root.pendingFieldCopy && root.pendingFieldCopy.field === "totp") root.pendingFieldCopy = null
           return
         }
-        var cleanText = (text || "").trim()
-        if (!cleanText) return
         try {
           var res = JSON.parse(cleanText)
           if (res && res.code) {
@@ -3615,6 +4636,7 @@ Item {
           root.currentTotp = ({ code: "Invalid Secret", ttl: 0, period: 30 })
           root.logError("omarchy:totp", "Failed to parse TOTP response: " + e)
         }
+        root.finishPendingCopy()
       }
     }
     stderr: StdioCollector {
@@ -3630,12 +4652,14 @@ Item {
 
   Process {
     id: attachmentProc
+    property int revision: 0
     property string activeAttachmentId: ""
     property string activeItemId: ""
     command: []
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (attachmentProc.revision !== root.vaultRevision) return
         root.loadingAttachmentId = ""
         if (!root.authState || root.authState.status !== "unlocked") {
           root.activeAttachmentPreview = null
@@ -3665,9 +4689,12 @@ Item {
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleProcessStderr(text, "omawarden:attachment")
+      onStreamFinished: {
+        if (attachmentProc.revision === root.vaultRevision) root.handleProcessStderr(text, "omawarden:attachment")
+      }
     }
     onExited: function(code) {
+      if (attachmentProc.revision !== root.vaultRevision) return
       root.loadingAttachmentId = ""
       if (code !== 0 && !root.errorMessage) root.errorMessage = "Attachment command failed."
     }

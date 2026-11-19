@@ -281,12 +281,32 @@ Rectangle {
 
     // 3. Bottom Right: Plain version info + Engine Download / Update badges
     RowLayout {
-      spacing: 3
+      spacing: 4
 
       Text {
         text: "Omarchy Bitwarden " + footerRoot.overlayVersion
         color: footerRoot.muted
         font.pixelSize: Style.font.caption
+      }
+
+      Rectangle {
+        objectName: "overlayDevBadge"
+        visible: Boolean(footerRoot.overlayVersion && (footerRoot.overlayVersion.indexOf("-dev") !== -1 || footerRoot.overlayVersion.indexOf(".dev") !== -1))
+        implicitHeight: 14
+        implicitWidth: overlayDevBadgeText.implicitWidth + 8
+        radius: 3
+        color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.15)
+        border.color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.4)
+        border.width: 1
+
+        Text {
+          id: overlayDevBadgeText
+          anchors.centerIn: parent
+          text: "DEV"
+          color: footerRoot.accent
+          font.pixelSize: Style.fontPx(0.65)
+          font.weight: Font.Bold
+        }
       }
 
       Text {
@@ -300,6 +320,26 @@ Rectangle {
         text: "Omawarden " + footerRoot.backendVersion
         color: footerRoot.muted
         font.pixelSize: Style.font.caption
+      }
+
+      Rectangle {
+        objectName: "backendDevBadge"
+        visible: footerRoot.isEngineInstalled && !footerRoot.updateAvailable && Boolean(footerRoot.backendVersion && (footerRoot.backendVersion.indexOf("-dev") !== -1 || footerRoot.backendVersion.indexOf(".dev") !== -1))
+        implicitHeight: 14
+        implicitWidth: backendDevBadgeText.implicitWidth + 8
+        radius: 3
+        color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.15)
+        border.color: Qt.rgba(footerRoot.accent.r, footerRoot.accent.g, footerRoot.accent.b, 0.4)
+        border.width: 1
+
+        Text {
+          id: backendDevBadgeText
+          anchors.centerIn: parent
+          text: "DEV"
+          color: footerRoot.accent
+          font.pixelSize: Style.fontPx(0.65)
+          font.weight: Font.Bold
+        }
       }
 
       // Installing Engine Indicator

@@ -44,6 +44,43 @@ Daemon Unix Domain Socket requests and responses adhere to the same schema conve
 - Request: `{ "action": "<command_name>", ...args }`
 - Response: `{ "ok": true, ... }` or `{ "ok": false, "error": "<msg>" }`
 
+#### Daemon `stop` Action Contract
+
+The `stop` action coordinates daemon shutdown under ADR-0028:
+
+- **Request Schema**:
+  ```json
+  {
+    "action": "stop",
+    "admin": true
+  }
+  ```
+  - `admin` (*boolean, optional, default: false*): Administrative authorization token required when stopping a standalone daemon from an external process.
+- **Success Response**:
+  ```json
+  {
+    "ok": true,
+    "protocol_version": 1
+  }
+  ```
+- **Error Responses**:
+  - In-process daemon rejection:
+    ```json
+    {
+      "ok": false,
+      "error": "Access denied: cannot terminate in-process daemon hosted by an external application",
+      "protocol_version": 1
+    }
+    ```
+  - Standalone unauthorized rejection:
+    ```json
+    {
+      "ok": false,
+      "error": "Access denied: stopping the daemon requires explicit administrative authorization (admin: true)",
+      "protocol_version": 1
+    }
+    ```
+
 ---
 
 ## 2. Frontend (QML) Invocation & Error Rules

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -29,6 +30,22 @@ pub struct AttachmentResponse {
     pub text_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+impl AttachmentResponse {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.into()),
+            path: None,
+            filename: None,
+            action: None,
+            is_image: None,
+            is_text: None,
+            text_content: None,
+            size: None,
+        }
+    }
 }
 
 /// Compares two URLs to verify they share the exact same origin (scheme, host, and port).
@@ -94,54 +111,62 @@ pub fn is_safe_path_component(s: &str) -> bool {
         && !s.contains('\0')
 }
 
-pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
-    let base = if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir)
-            .join("omarchy-bitwarden")
-            .join("attachments")
-    } else {
-        #[cfg(unix)]
-        let uid = unsafe { libc::getuid() };
-        #[cfg(not(unix))]
-        let uid = 1000;
-        PathBuf::from(format!("/tmp/omarchy-bitwarden-{}/attachments", uid))
-    };
+fn preview_root() -> PathBuf {
+    crate::daemon::get_runtime_dir().join("omarchy-bitwarden/scoped-attachments")
+}
 
-    match item_id {
-        Some(id) if is_safe_path_component(id) => base.join(id),
-        _ => base,
+fn remove_preview_dir(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
-pub fn clear_preview_attachments(item_id: Option<&str>) {
-    #[cfg(test)]
-    if item_id.is_none() {
-        return;
-    }
-
-    if let Some(id) = item_id {
-        if !is_safe_path_component(id) {
-            crate::log_warn!(
-                "omawarden:attachment",
-                "Refusing preview cleanup for unsafe item id"
-            );
-            return;
+/// Delete every managed preview under the output gate, including old layouts.
+pub(crate) fn clear_preview_attachments() -> io::Result<()> {
+    remove_preview_dir(&preview_root())?;
+    remove_preview_dir(&crate::daemon::get_runtime_dir().join("omarchy-bitwarden/attachments"))?;
+    #[cfg(not(test))]
+    {
+        // SAFETY: getuid takes no arguments.
+        let uid = unsafe { libc::getuid() };
+        use std::os::unix::fs::MetadataExt;
+        // Legacy locations are in a shared temp directory. Verify the
+        // parent before accessing its children.
+        for legacy in [
+            PathBuf::from(format!("/tmp/omarchy-bitwarden-{uid}")),
+            PathBuf::from("/tmp/omarchy-bitwarden"),
+        ] {
+            match fs::symlink_metadata(&legacy) {
+                Ok(metadata) if metadata.uid() == uid && metadata.is_dir() => {
+                    remove_preview_dir(&legacy.join("attachments"))?;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
+    Ok(())
+}
 
-    let dir = get_preview_dir(item_id);
-    if dir.exists() {
-        let _ = fs::remove_dir_all(&dir);
+/// Clear previews explicitly, or clear one item's previews in the active slot.
+pub fn clean_previews(item_id: Option<&str>) -> io::Result<()> {
+    let _output = crate::daemon::lock_session_outputs()?;
+    if let Some(id) = item_id {
+        if !is_safe_path_component(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid preview item ID",
+            ));
+        }
+        let storage = StorageManager::default().load();
+        if let Some(slot) = storage.scoped_credential_id() {
+            remove_preview_dir(&preview_root().join(slot).join(id))?;
+        }
+        return Ok(());
     }
-    // Also clean up legacy /tmp/omarchy-bitwarden/attachments if present
-    let legacy_dir = if let Some(id) = item_id {
-        PathBuf::from("/tmp/omarchy-bitwarden/attachments").join(id)
-    } else {
-        PathBuf::from("/tmp/omarchy-bitwarden/attachments")
-    };
-    if legacy_dir.exists() {
-        let _ = fs::remove_dir_all(&legacy_dir);
-    }
+    clear_preview_attachments()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,7 +178,7 @@ pub fn get_attachment(
     open_file: bool,
     preview: bool,
     session_token: Option<&str>,
-    _legacy_param: Option<&str>,
+    expected_lock_generation: Option<&str>,
     notify: bool,
 ) -> AttachmentResponse {
     if item_id.is_empty() || attachment_id.is_empty() {
@@ -184,6 +209,15 @@ pub fn get_attachment(
         };
     }
 
+    let session = match crate::daemon::output_session() {
+        Ok(session) => session,
+        Err(error) => return AttachmentResponse::failed(error.to_string()),
+    };
+    let generation = session.lock_generation;
+    if expected_lock_generation.is_some_and(|expected| expected.parse() != Ok(generation)) {
+        return AttachmentResponse::failed("Vault session changed. Retry the attachment request.");
+    }
+
     let cfg = ConfigManager::new(None).load();
     let max_attachment_bytes = if cfg.max_attachment_size_mb > 0 {
         cfg.max_attachment_size_mb.saturating_mul(1024 * 1024)
@@ -192,6 +226,9 @@ pub fn get_attachment(
     };
     let storage_mgr = StorageManager::default();
     let storage = storage_mgr.load();
+    if storage.scoped_credential_id() != Some(&session.credential_id) {
+        return AttachmentResponse::failed("Vault account changed. Retry the attachment request.");
+    }
 
     let mut expected_size: Option<u64> = storage
         .ciphers
@@ -221,9 +258,7 @@ pub fn get_attachment(
 
     let initial_token = session_token
         .map(|s| s.to_string())
-        .or_else(|| keyring_mgr.get_token(initial_server_url, crate::keyring::KIND_ACCESS_TOKEN))
-        .or_else(|| keyring_mgr.get_session(initial_server_url))
-        .or_else(|| storage.access_token.clone());
+        .or_else(|| keyring_mgr.for_storage(&storage).access_token());
 
     let token_val = match initial_token {
         Some(ref t) if !t.is_empty() && !crate::auth::is_jwt_expired(t) => Some(t.clone()),
@@ -262,8 +297,12 @@ pub fn get_attachment(
             .unwrap_or_else(|| format!("attachment_{}", attachment_id))
     };
 
+    let preview_dir = preview_root()
+        .join(&session.credential_id)
+        .join(item_id)
+        .join(attachment_id);
     let target_dir = if open_file || preview {
-        get_preview_dir(Some(item_id))
+        preview_dir.clone()
     } else {
         let dest_dir_str = output_dir.unwrap_or(&cfg.download_dir);
         let expanded = if dest_dir_str.starts_with('~') {
@@ -297,56 +336,30 @@ pub fn get_attachment(
 
     let dest_path = target_dir.join(&safe_filename);
 
-    let preview_cached_path = get_preview_dir(Some(item_id)).join(&safe_filename);
-
-    // Fast-path: Check if already previewed or downloaded to avoid duplicate network requests
-    if (!open_file && !preview) && preview_cached_path.is_file() {
-        if preview_cached_path != dest_path {
-            let _ = fs::copy(&preview_cached_path, &dest_path);
-            let _ = crate::fs_util::ensure_secure_permissions(&dest_path, 0o600);
-        }
-        if let Ok(cached_bytes) = fs::read(&dest_path) {
-            if is_cached_file_valid(&dest_path, expected_size, &cached_bytes) {
-                return build_attachment_response(
-                    &dest_path,
-                    &safe_filename,
-                    &target_dir,
-                    open_file,
-                    preview,
-                    notify,
-                    &cached_bytes,
-                );
+    let cached_path = preview_dir.join(&safe_filename);
+    match read_cached_attachment(generation, &cached_path, expected_size) {
+        Ok(Some(cached_bytes)) => {
+            let result = if cached_path == dest_path {
+                crate::daemon::guard_session_output(generation)
             } else {
-                crate::log_warn!(
-                    "omawarden:attachment",
-                    "Cached attachment {:?} is dirty or un-decrypted ciphertext. Purging and re-downloading.",
-                    dest_path
-                );
-                let _ = fs::remove_file(&dest_path);
-                let _ = fs::remove_file(&preview_cached_path);
-            }
+                publish_attachment(generation, &dest_path, &cached_bytes)
+            };
+            let _output = match result {
+                Ok(gate) => gate,
+                Err(error) => return AttachmentResponse::failed(error.to_string()),
+            };
+            return build_attachment_response(
+                &dest_path,
+                &safe_filename,
+                &target_dir,
+                open_file,
+                preview,
+                notify,
+                &cached_bytes,
+            );
         }
-    } else if (open_file || preview) && dest_path.is_file() {
-        if let Ok(cached_bytes) = fs::read(&dest_path) {
-            if is_cached_file_valid(&dest_path, expected_size, &cached_bytes) {
-                return build_attachment_response(
-                    &dest_path,
-                    &safe_filename,
-                    &target_dir,
-                    open_file,
-                    preview,
-                    notify,
-                    &cached_bytes,
-                );
-            } else {
-                crate::log_warn!(
-                    "omawarden:attachment",
-                    "Cached attachment {:?} is dirty or un-decrypted ciphertext. Purging and re-downloading.",
-                    dest_path
-                );
-                let _ = fs::remove_file(&dest_path);
-            }
-        }
+        Ok(None) => {}
+        Err(error) => return AttachmentResponse::failed(error.to_string()),
     }
 
     // Direct HTTP download via REST API
@@ -355,10 +368,7 @@ pub fn get_attachment(
     } else {
         &cfg.server_url
     };
-    let effective_id_url = cfg
-        .identity_url
-        .as_deref()
-        .or(storage.identity_url.as_deref());
+    let effective_id_url = storage.credential_identity_url(cfg.identity_url.as_deref());
     let env_urls = crate::api::EnvironmentUrls::resolve(raw_server_url, effective_id_url);
 
     let download_url = format!(
@@ -691,11 +701,11 @@ pub fn get_attachment(
 
     // Resolve attachment key and decrypt binary attachment blob
     let att_key: Option<crate::crypto::SymmetricCryptoKey> = {
-        crate::daemon::ensure_daemon_running();
         if let Some(resp) = crate::daemon::send_daemon_request(&serde_json::json!({
             "action": "get_attachment_key",
             "item_id": item_id,
-            "attachment_id": attachment_id
+            "attachment_id": attachment_id,
+            "expected_lock_generation": generation
         })) {
             if let Some(key_b64) = resp.get("key_b64").and_then(|v| v.as_str()) {
                 if let Ok(key_bytes) = BASE64.decode(key_b64) {
@@ -745,19 +755,10 @@ pub fn get_attachment(
         };
     };
 
-    if let Err(e) = crate::fs_util::atomic_write_file(&dest_path, &bytes, 0o600) {
-        return AttachmentResponse {
-            ok: false,
-            error: Some(format!("Failed to write downloaded file: {}", e)),
-            path: None,
-            filename: None,
-            action: None,
-            is_image: None,
-            is_text: None,
-            text_content: None,
-            size: None,
-        };
-    }
+    let _output = match publish_attachment(generation, &dest_path, &bytes) {
+        Ok(gate) => gate,
+        Err(error) => return AttachmentResponse::failed(error.to_string()),
+    };
 
     build_attachment_response(
         &dest_path,
@@ -770,38 +771,68 @@ pub fn get_attachment(
     )
 }
 
+fn publish_attachment(generation: u64, path: &Path, bytes: &[u8]) -> std::io::Result<fs::File> {
+    let output = crate::daemon::guard_session_output(generation)?;
+    crate::fs_util::atomic_write_file(path, bytes, 0o600)?;
+    Ok(output)
+}
+
+fn read_cached_attachment(
+    generation: u64,
+    path: &Path,
+    expected_size: Option<u64>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    if is_cached_file_valid(path, expected_size, &bytes) {
+        return Ok(Some(bytes));
+    }
+    let _output = crate::daemon::guard_session_output(generation)?;
+    crate::log_warn!(
+        "omawarden:attachment",
+        "Cached attachment {:?} is dirty or un-decrypted ciphertext. Purging and re-downloading.",
+        path
+    );
+    let _ = fs::remove_file(path);
+    Ok(None)
+}
+
 fn attempt_attachment_token_refresh(
     server_url: &str,
     storage_mgr: &StorageManager,
     keyring_mgr: &KeyringManager,
     storage: &VaultStorage,
 ) -> Option<String> {
-    let effective_id_url = if server_url.is_empty() || server_url == storage.server_url {
+    let effective_id_url = if server_url.is_empty()
+        || server_url == crate::keyring::normalize_server_url(&storage.server_url)
+    {
         storage.identity_url.as_deref()
     } else {
         None
     };
     let api_client =
         crate::api::BitwardenApiClient::with_identity_url(server_url, effective_id_url);
+    let keyring = keyring_mgr.for_storage(storage);
 
     // 1. Try refresh_token
-    let refresh_token = keyring_mgr
-        .get_token(server_url, crate::keyring::KIND_REFRESH_TOKEN)
-        .or_else(|| storage.refresh_token.clone());
+    let refresh_token = keyring.refresh_token();
 
     if let Some(ref ref_tok) = refresh_token {
         if let Ok(tok_resp) = api_client.refresh_token_grant(ref_tok) {
-            persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
-            return Some(tok_resp.access_token);
+            if persist_attachment_tokens(storage_mgr, keyring_mgr, storage, &tok_resp) {
+                return Some(tok_resp.access_token);
+            }
         }
     }
 
     // 2. Try client_credentials via client_id + client_secret in Keyring
     if let Some(ref cid) = storage.client_id {
-        if let Some(sec) = keyring_mgr.get_api_secret(server_url, cid) {
+        if let Some(sec) = keyring.api_secret() {
             if let Ok(tok_resp) = api_client.login_apikey(cid, &sec) {
-                persist_attachment_tokens(server_url, storage_mgr, keyring_mgr, &tok_resp);
-                return Some(tok_resp.access_token);
+                if persist_attachment_tokens(storage_mgr, keyring_mgr, storage, &tok_resp) {
+                    return Some(tok_resp.access_token);
+                }
             }
         }
     }
@@ -810,40 +841,39 @@ fn attempt_attachment_token_refresh(
 }
 
 fn persist_attachment_tokens(
-    server_url: &str,
     storage_mgr: &StorageManager,
     keyring_mgr: &KeyringManager,
+    expected: &VaultStorage,
     tok_resp: &crate::api::TokenResponse,
-) {
-    let mut fresh_st = storage_mgr.load();
-    let s_url = if !fresh_st.server_url.is_empty() {
-        fresh_st.server_url.as_str()
-    } else {
-        server_url
+) -> bool {
+    let Ok(_account) = storage_mgr.account_guard() else {
+        return false;
     };
+    let Ok(mut fresh_st) = storage_mgr.load_existing() else {
+        return false;
+    };
+    if !fresh_st.same_active_slot(expected) {
+        return false;
+    }
     if keyring_mgr.is_available() {
-        let s1 = keyring_mgr.store_token(
-            s_url,
-            crate::keyring::KIND_ACCESS_TOKEN,
-            &tok_resp.access_token,
-        );
+        let keyring = keyring_mgr.for_storage(&fresh_st);
+        let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
         let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
-            keyring_mgr.store_token(s_url, crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+            keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
         } else {
-            keyring_mgr.clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
+            keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
             true
         };
         if s1 && s2 {
-            fresh_st.access_token = None;
-            fresh_st.refresh_token = None;
+            if fresh_st.access_token.is_some() || fresh_st.refresh_token.is_some() {
+                fresh_st.access_token = None;
+                fresh_st.refresh_token = None;
+                return storage_mgr.save(&fresh_st).is_ok();
+            }
+            return true;
         }
-        // Keyring store failed: drop the tokens instead of stashing them in
-        // this short-lived copy. VaultStorage never serializes them to disk
-        // (skip_serializing), and nothing else reads them from here — same
-        // fail-closed posture as vault.rs.
     }
-    // No keyring at all: tokens are dropped for the same reason.
-    let _ = storage_mgr.save(&fresh_st);
+    false
 }
 
 fn is_cached_file_valid(path: &Path, expected_encrypted_size: Option<u64>, bytes: &[u8]) -> bool {
@@ -1053,6 +1083,114 @@ fn build_attachment_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::CREDENTIAL_ID;
+
+    fn unlocked_daemon() -> crate::test_support::TestDaemon {
+        let vault = std::sync::Arc::new(crate::vault::VaultManager::new("", None, None));
+        vault.storage.write().unwrap().credential_id = Some(CREDENTIAL_ID.into());
+        *vault.is_unlocked.write().unwrap() = true;
+        crate::test_support::TestDaemon::start(vault)
+    }
+
+    #[test]
+    fn attachment_cannot_publish_plaintext_after_account_activation() {
+        let _lock = crate::env_lock();
+        let cache = tempfile::tempdir().unwrap();
+        let storage = StorageManager::new(cache.path().join("data.json"));
+        storage
+            .save(&VaultStorage {
+                server_url: "https://vault.fixture.invalid".into(),
+                user_email: "previous@example.invalid".into(),
+                credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vault = std::sync::Arc::new(crate::vault::VaultManager::new(
+            "",
+            Some(storage.clone()),
+            None,
+        ));
+        *vault.is_unlocked.write().unwrap() = true;
+        let daemon = crate::test_support::TestDaemon::start(vault);
+        let generation = crate::daemon::output_session().unwrap().lock_generation;
+        let download_dir = tempfile::tempdir().unwrap();
+        let preview = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("item/attachment")
+            .join("preview.txt");
+        let download = download_dir.path().join("download.txt");
+        fs::write(&download, "user's completed download").unwrap();
+
+        let context = daemon.state.vault_mgr.unlock_context();
+        let login = crate::account_activation::LoginConnection::begin(Some(&context)).unwrap();
+        let candidate = storage.lease_candidate(&login.attempt_id).unwrap();
+        candidate
+            .write_candidate(&VaultStorage {
+                server_url: "https://vault.fixture.invalid".into(),
+                user_email: "next@example.invalid".into(),
+                credential_id: Some(login.attempt_id.clone()),
+                last_sync: Some("fixture".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(login.activate(&storage).is_ok());
+        assert!(!daemon.state.vault_mgr.is_unlocked());
+        // Even a newly unlocked account must refuse the previous output.
+        *daemon.state.vault_mgr.is_unlocked.write().unwrap() = true;
+        let current = crate::daemon::output_session().unwrap().lock_generation;
+        assert_ne!(current, generation);
+        for path in [&preview, &download] {
+            assert!(publish_attachment(generation, path, b"late plaintext").is_err());
+        }
+        assert!(!preview.exists());
+        assert_eq!(
+            fs::read_to_string(&download).unwrap(),
+            "user's completed download"
+        );
+        publish_attachment(current, &download, b"current plaintext").unwrap();
+        assert_eq!(fs::read_to_string(&download).unwrap(), "current plaintext");
+    }
+
+    #[test]
+    fn attachment_token_cleanup_preserves_latest_ciphers_and_rejects_old_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        let initial = serde_json::json!({
+            "server_url":"https://fixture.invalid", "user_email":"fixture@example.invalid",
+            "access_token":"legacy", "ciphers":[], "credential_id":crate::test_support::CREDENTIAL_ID
+        });
+        fs::write(&manager.file_path, initial.to_string()).unwrap();
+        let expected = manager.load();
+        let mut latest = initial;
+        latest["ciphers"] = serde_json::json!([{"id":"created"}]);
+        fs::write(&manager.file_path, latest.to_string()).unwrap();
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = store ]; then /bin/cat >/dev/null; fi\n",
+        );
+        let keyring = KeyringManager::new(script.to_str().unwrap());
+        let response =
+            serde_json::from_value(serde_json::json!({"access_token":"new", "expires_in":3600}))
+                .unwrap();
+        assert!(persist_attachment_tokens(
+            &manager, &keyring, &expected, &response
+        ));
+        assert_eq!(manager.load().ciphers[0]["id"], "created");
+        assert!(manager.load().access_token.is_none());
+        let mut other = manager.load();
+        other.credential_id = Some("22222222222222222222222222222222".into());
+        manager.save(&other).unwrap();
+        assert!(!persist_attachment_tokens(
+            &manager, &keyring, &expected, &response
+        ));
+        other.user_email = "other@example.invalid".into();
+        manager.save(&other).unwrap();
+        assert!(!persist_attachment_tokens(
+            &manager, &keyring, &expected, &response
+        ));
+        assert_eq!(manager.load().user_email, "other@example.invalid");
+    }
 
     #[test]
     fn test_missing_ids() {
@@ -1093,6 +1231,7 @@ mod tests {
 
     #[test]
     fn test_missing_session_or_network_error() {
+        let _lock = crate::env_lock();
         let res = get_attachment(
             "item1", "att1", "file.txt", None, false, false, None, None, false,
         );
@@ -1103,6 +1242,7 @@ mod tests {
 
     #[test]
     fn test_safe_filename_fallback() {
+        let _lock = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().to_str().unwrap();
         let res = get_attachment(
@@ -1122,17 +1262,35 @@ mod tests {
     }
 
     #[test]
-    fn test_cached_preview_download_reuse() {
+    fn cached_preview_download_uses_only_the_active_slot() {
+        let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
         let temp_dir = tempfile::tempdir().unwrap();
         let dl_target = temp_dir.path().to_str().unwrap();
+        let storage = StorageManager::new(temp_dir.path().join("data.json"));
+        storage
+            .save(&VaultStorage {
+                credential_id: Some(CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
 
         // Create a simulated preview cache file in preview_dir/test_file.txt
-        let preview_dir = get_preview_dir(Some("test_item_999"));
+        let preview_dir = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("test_item_999/att_999");
         let _ = fs::create_dir_all(&preview_dir);
         let preview_file = preview_dir.join("test_file.txt");
         let _ = fs::write(&preview_file, b"cached attachment secret content 12345");
 
+        let old_dir = preview_root().join("22222222222222222222222222222222/test_item_999/att_999");
+        fs::create_dir_all(&old_dir).unwrap();
+        let old_file = old_dir.join("test_file.txt");
+        fs::write(&old_file, b"old account attachment").unwrap();
+
         // Now download the attachment without network access (using fake token)
+        let old_data_dir = std::env::var_os("OMAWARDEN_DATA_DIR");
+        std::env::set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
         let res = get_attachment(
             "test_item_999",
             "att_999",
@@ -1144,6 +1302,12 @@ mod tests {
             None,
             false,
         );
+        let cleaned = clean_previews(Some("test_item_999"));
+        if let Some(old_data_dir) = old_data_dir {
+            std::env::set_var("OMAWARDEN_DATA_DIR", old_data_dir);
+        } else {
+            std::env::remove_var("OMAWARDEN_DATA_DIR");
+        }
 
         assert!(
             res.ok,
@@ -1175,42 +1339,32 @@ mod tests {
             );
         }
 
-        // Cleanup
-        let _ = fs::remove_file(&preview_file);
+        cleaned.unwrap();
+        assert!(!preview_file.exists());
+        assert_eq!(
+            fs::read_to_string(&old_file).unwrap(),
+            "old account attachment"
+        );
     }
 
     #[test]
     fn test_zero_byte_poisoned_cache_is_pruned_and_rejected() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let dl_target = temp_dir.path().to_str().unwrap();
-
-        // Create a 0-byte corrupt preview file
-        let preview_dir = get_preview_dir(Some("test_item_empty"));
+        let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
+        let preview_dir = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("test_item_empty/attachment");
         let _ = fs::create_dir_all(&preview_dir);
         let preview_file = preview_dir.join("empty.txt");
         let _ = fs::write(&preview_file, b"");
 
-        // Attempting to download should prune the 0-byte poisoned file and reject returning empty cache
-        let res = get_attachment(
-            "test_item_empty",
-            "att_empty",
-            "empty.txt",
-            Some(dl_target),
-            false,
-            false,
-            Some("fake_token"),
-            None,
-            false,
-        );
-
-        // Should not treat 0-byte file as valid cached download
+        let generation = crate::daemon::output_session().unwrap().lock_generation;
+        assert!(read_cached_attachment(generation, &preview_file, None)
+            .unwrap()
+            .is_none());
         assert!(
             !preview_file.exists(),
             "0-byte poisoned cache file should have been removed"
-        );
-        assert!(
-            !res.ok,
-            "Download with fake token should fail instead of returning 0-byte cached file"
         );
     }
 
@@ -1247,49 +1401,40 @@ mod tests {
 
     #[test]
     fn test_dirty_raw_ciphertext_cache_is_pruned() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let dl_target = temp_dir.path().to_str().unwrap();
-
-        // Create a dirty preview file containing raw EncArrayBuffer
-        let preview_dir = get_preview_dir(Some("test_item_dirty"));
+        let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
+        let preview_dir = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("test_item_dirty/attachment");
         let _ = fs::create_dir_all(&preview_dir);
         let preview_file = preview_dir.join("photo.jpg");
         let mut raw_ct = vec![0x02u8; 200];
         raw_ct[0] = 0x02; // encType
         let _ = fs::write(&preview_file, &raw_ct);
 
-        let res = get_attachment(
-            "test_item_dirty",
-            "att_dirty",
-            "photo.jpg",
-            Some(dl_target),
-            false,
-            true, // preview
-            Some("fake_token"),
-            None,
-            false,
-        );
-
-        // Dirty cache file must be purged and not returned as valid preview
+        let generation = crate::daemon::output_session().unwrap().lock_generation;
+        assert!(read_cached_attachment(generation, &preview_file, None)
+            .unwrap()
+            .is_none());
         assert!(
             !preview_file.exists(),
             "Dirty ciphertext cache file should have been deleted"
-        );
-        assert!(
-            !res.ok,
-            "Should not return dirty cached ciphertext as preview"
         );
     }
 
     #[test]
     fn test_clear_preview_attachments() {
-        let preview_dir = get_preview_dir(Some("test_item_clear"));
+        let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
+        let preview_dir = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("test_item_clear/attachment");
         let _ = fs::create_dir_all(&preview_dir);
         let preview_file = preview_dir.join("secret.jpg");
         let _ = fs::write(&preview_file, b"secret decrypted payload");
         assert!(preview_file.exists());
 
-        clear_preview_attachments(Some("test_item_clear"));
+        clean_previews(None).unwrap();
         assert!(!preview_file.exists());
         assert!(!preview_dir.exists());
     }
@@ -1306,11 +1451,6 @@ mod tests {
         assert!(!is_safe_path_component("/home/user/Documents"));
         assert!(!is_safe_path_component("a\\b"));
         assert!(!is_safe_path_component("a\0b"));
-
-        // A traversal item id must never escape the attachments base directory
-        let base = get_preview_dir(None);
-        assert_eq!(get_preview_dir(Some("/etc")), base);
-        assert_eq!(get_preview_dir(Some("../../escape")), base);
 
         // Traversal ids are refused by get_attachment before any path is built
         let res = get_attachment(
@@ -1334,7 +1474,7 @@ mod tests {
         let victim = tempfile::tempdir().unwrap();
         let marker = victim.path().join("marker.txt");
         fs::write(&marker, b"keep").unwrap();
-        clear_preview_attachments(Some(victim.path().to_str().unwrap()));
+        assert!(clean_previews(Some(victim.path().to_str().unwrap())).is_err());
         assert!(marker.exists());
     }
 
@@ -1375,6 +1515,7 @@ mod tests {
     #[test]
     fn test_attachment_download_rejects_oversized_advertised_content_length() {
         let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1399,7 +1540,11 @@ mod tests {
         // Set up temporary data directory with data.json pointing to our mock server
         let data_dir = tempfile::tempdir().unwrap();
         let data_json = data_dir.path().join("data.json");
-        std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
+        std::fs::write(
+            &data_json,
+            serde_json::json!({"server_url":server_url, "credential_id":CREDENTIAL_ID}).to_string(),
+        )
+        .unwrap();
 
         let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
         std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
@@ -1437,6 +1582,7 @@ mod tests {
     #[test]
     fn test_attachment_download_rejects_stream_overflow() {
         let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1476,7 +1622,11 @@ mod tests {
         // Set up temporary data directory with data.json pointing to our mock server
         let data_dir = tempfile::tempdir().unwrap();
         let data_json = data_dir.path().join("data.json");
-        std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
+        std::fs::write(
+            &data_json,
+            serde_json::json!({"server_url":server_url, "credential_id":CREDENTIAL_ID}).to_string(),
+        )
+        .unwrap();
 
         let old_config_dir = std::env::var("XDG_CONFIG_HOME").ok();
         let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();

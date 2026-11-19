@@ -19,8 +19,24 @@ The system FreeDesktop Secret Service store used to persist tokens and credentia
 _Avoid_: Keychain, token cache, credential store
 
 **Clipboard Guard**:
-The ephemeral Wayland clipboard manager that enforces automatic time-to-live clearing of copied secrets.
+The ephemeral clipboard subsystem that enforces automatic time-to-live clearing and secure revocation of copied secrets across supported display and OS clipboard providers.
 _Avoid_: Clipboard manager, clipboard watcher
+
+**Clipboard Provider**:
+A platform-specific clipboard backend adapter responsible for low-level clipboard copy, clear, and availability checks.
+_Avoid_: Clipboard backend, clipboard wrapper, clipboard helper
+
+**Daemon Protocol**:
+The framed JSON wire interface exposed over the local Unix domain socket by Omawarden, versioned with a monotonically increasing integer (`protocol_version`) to govern compatibility between clients and the resident daemon independently of build commit hashes.
+_Avoid_: Socket API, daemon version, API version
+
+**Capability Discovery**:
+The background interrogation of the upstream server's `/api/config` and `/api/version` endpoints during sync and initialization to detect server versions, active feature flags, and API deprecations without blocking core vault operations.
+_Avoid_: Feature probing, version sniffing, server polling
+
+**Server Capability Matrix**:
+The declarative specification in Omawarden mapping upstream Bitwarden and Vaultwarden feature flags (`featureStates`) and API versions to local engine capabilities, feature gates, and deprecation statuses.
+_Avoid_: Feature checklist, server flag list, compat table
 
 ### Vault & Cryptography
 
@@ -56,6 +72,14 @@ _Avoid_: Profile, personal info
 An encrypted arbitrary text note cipher.
 _Avoid_: Note, text file, memo
 
+**Custom Field**:
+An arbitrary user-defined key-value attribute attached to a vault cipher, categorized as Text, Hidden (masked secret), Boolean (toggle), or Linked.
+_Avoid_: Extra property, custom property, metadata field, user attribute
+
+**Login URI**:
+A website or service uniform resource identifier associated with a Login cipher, evaluated against target application domains or hosts using configured match detection rules.
+_Avoid_: Website URL, login URL, web link, target address
+
 **SSH Key**:
 An OpenSSH cryptographic keypair cipher (Type 5) containing private key, public key, and SHA256 fingerprint.
 _Avoid_: Keyfile, SSH credential
@@ -80,6 +104,10 @@ _Avoid_: Shared folder, group
 A user-defined organizational container for grouping personal or organization ciphers.
 _Avoid_: Category, directory
 
+**Trash**:
+The holding state for soft-deleted ciphers awaiting restoration to the active vault or permanent destruction.
+_Avoid_: Recycle bin, trash folder, deleted items
+
 **Password Generator**:
 The cryptographic engine within Omawarden that generates random passwords and passphrases using OS entropy.
 _Avoid_: Secret generator, randomizer
@@ -97,6 +125,14 @@ _Avoid_: Command menu, quick actions
 **Inspector**:
 The side panel within the overlay that reveals details, masked secrets, and metadata for the selected cipher.
 _Avoid_: Details pane, info view, sidebar
+
+**Inspector Form**:
+The inline editable state within the Inspector panel for drafting or modifying personal Login and Secure Note ciphers without opening a blocking modal dialog.
+_Avoid_: Create window, edit popup, modal form
+
+**Type Picker**:
+The lightweight keyboard-driven selector (`Ctrl+N`) for quickly choosing between creating a Login or Secure Note cipher.
+_Avoid_: Creation modal, type dialog, prompt window
 
 **Theme Tokens**:
 The reactive, system-wide color primitives provided by the Omarchy shell (`qs.Commons.Color`) that dynamically adapt to the active desktop theme (dark or light).

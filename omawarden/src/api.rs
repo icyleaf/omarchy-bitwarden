@@ -187,7 +187,7 @@ pub struct SyncResponse {
     pub folders: Vec<Value>,
     #[serde(default)]
     pub collections: Vec<Value>,
-    #[serde(default)]
+    // An empty vault must be explicit before sync can replace the local cache.
     pub ciphers: Vec<Value>,
 }
 
@@ -770,6 +770,17 @@ pub fn build_http_client_for_url_with_config(
     target_url: Option<&str>,
     config_override: Option<&crate::config::Config>,
 ) -> Result<Client, ApiError> {
+    http_client_builder(timeout, client_context, target_url, config_override)?
+        .build()
+        .map_err(ApiError::from)
+}
+
+pub(crate) fn http_client_builder(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+    target_url: Option<&str>,
+    config_override: Option<&crate::config::Config>,
+) -> Result<reqwest::blocking::ClientBuilder, ApiError> {
     let mut default_headers = reqwest::header::HeaderMap::new();
     let ua_str = format_user_agent(client_context);
     let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
@@ -831,9 +842,7 @@ pub fn build_http_client_for_url_with_config(
         }
     }
 
-    builder
-        .build()
-        .map_err(|e| ApiError::Http(format!("Failed to build HTTP client: {}", e)))
+    Ok(builder)
 }
 
 pub struct BitwardenApiClient {
@@ -1345,7 +1354,32 @@ impl BitwardenApiClient {
             ));
         }
 
-        read_response_json::<SyncResponse>(&mut resp, MAX_SYNC_BODY_SIZE)
+        let content_len = resp.content_length();
+        let body = read_response_limited(&mut resp, content_len, MAX_SYNC_BODY_SIZE)?;
+        // Serde can also decode a struct from a positional JSON array.
+        let first_byte = body.iter().find(|byte| !byte.is_ascii_whitespace());
+        if first_byte != Some(&b'{') {
+            return Err(ApiError::Json("Sync response must be a JSON object".into()));
+        }
+        serde_json::from_slice(&body).map_err(|e| ApiError::Json(e.to_string()))
+    }
+
+    /// A redirect or transparent transport retry could submit a second create.
+    pub(crate) fn for_cipher_write(
+        server: &str,
+        context: Option<&ClientContext>,
+    ) -> Result<Self, ApiError> {
+        let urls = EnvironmentUrls::resolve(server, None);
+        let client = http_client_builder(Duration::from_secs(30), context, Some(server), None)?
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
+        Ok(Self {
+            server_url: urls.base_url.clone(),
+            urls,
+            client,
+            client_init_error: None,
+        })
     }
 
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
@@ -1369,6 +1403,109 @@ impl BitwardenApiClient {
         }
 
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
+    pub fn update_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        payload: &Value,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}", self.urls.api_url, id);
+        let mut resp = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Update cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
+    /// Deletes a cipher. For a soft delete, returns the server-reported
+    /// `deletedDate` when the response carries one, so the local cache can
+    /// keep the authoritative timestamp; `None` means the caller stamps it.
+    pub fn delete_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        permanent: bool,
+    ) -> Result<Option<String>, ApiError> {
+        let client = self.get_client()?;
+        let url = if permanent {
+            format!("{}/ciphers/{}", self.urls.api_url, id)
+        } else {
+            format!("{}/ciphers/{}/delete", self.urls.api_url, id)
+        };
+        let req = if permanent {
+            client.delete(&url)
+        } else {
+            client.put(&url).header("Content-Length", "0")
+        };
+        let mut resp = req
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Delete cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        if permanent {
+            return Ok(None);
+        }
+        let body = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&body) else {
+            return Ok(None);
+        };
+        Ok(value
+            .get("deletedDate")
+            .or_else(|| value.get("DeletedDate"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    }
+
+    /// Restore a soft-deleted cipher from the Trash (`PUT /ciphers/{id}/restore`).
+    pub fn restore_cipher(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/restore", self.urls.api_url, id);
+        let mut resp = client
+            .put(&url)
+            .header("Content-Length", "0")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Restore cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1460,15 +1597,15 @@ pub fn decrypt_sync_ciphers_with_context(
     let mut items = Vec::new();
 
     for c in ciphers {
-        // Filter out soft-deleted items (items in Trash / Recycle Bin)
-        let is_deleted = c
+        // Retain soft-deleted items (Trash / Recycle Bin) and tag them with
+        // their deletion timestamp instead of dropping them. Active callers
+        // filter on `deleted_at`; `--trash` surfaces the rest.
+        let deleted_at = c
             .get("deletedDate")
             .or_else(|| c.get("DeletedDate"))
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        if is_deleted {
-            continue;
-        }
+            .or_else(|| c.get("deleted_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let id = c
             .get("id")
@@ -2039,6 +2176,7 @@ pub fn decrypt_sync_ciphers_with_context(
             favorite,
             created_at,
             updated_at,
+            deleted_at,
             folder_id,
             folder_name,
             organization_id: org_id_opt,
@@ -2070,6 +2208,23 @@ mod tests {
 
     type Aes256CbcEnc = cbc::Encryptor<Aes256>;
     type HmacSha256 = Hmac<Sha256>;
+
+    #[test]
+    fn incomplete_sync_response_requires_a_cipher_array() {
+        for body in [
+            "{}",
+            r#"{"error":"snapshot unavailable"}"#,
+            r#"{"ciphers":null}"#,
+            r#"{"ciphers":{}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SyncResponse>(body).is_err(),
+                "{body}"
+            );
+        }
+        let empty = serde_json::from_str::<SyncResponse>(r#"{"ciphers":[]}"#).unwrap();
+        assert!(empty.ciphers.is_empty());
+    }
 
     fn encrypt_test_string(plaintext: &str, key: &SymmetricCryptoKey) -> String {
         let iv = [2u8; 16];
@@ -2219,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_soft_deleted_ciphers() {
+    fn test_retains_soft_deleted_ciphers_with_deleted_at() {
         let raw_user_key = [9u8; 64];
         let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
 
@@ -2238,9 +2393,14 @@ mod tests {
             }),
         ];
 
+        // Soft-deleted ciphers are retained for the Trash, tagged with their
+        // deletion timestamp instead of being dropped during decryption.
         let items = decrypt_sync_ciphers(&ciphers, &user_key);
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, "active-1");
+        assert!(items[0].deleted_at.is_none());
+        assert_eq!(items[1].id, "deleted-1");
+        assert_eq!(items[1].deleted_at.as_deref(), Some("2024-01-01T00:00:00Z"));
     }
 
     #[test]
@@ -4008,5 +4168,213 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
             .unwrap_err()
             .to_string()
             .contains("No recognized private key found"));
+    }
+
+    #[test]
+    fn test_delete_cipher_soft_and_permanent_http_calls() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_url = format!("http://{}", addr);
+
+        let client = BitwardenApiClient::for_cipher_write(&server_url, None).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("PUT /api/ciphers/uuid-1/delete HTTP/1.1"));
+
+            let mut has_auth = false;
+            let mut has_cl_zero = false;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if line
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth = true;
+                }
+                if line.to_lowercase().starts_with("content-length: 0") {
+                    has_cl_zero = true;
+                }
+            }
+            assert!(has_auth);
+            assert!(has_cl_zero);
+
+            let body = r#"{"deletedDate":"2026-11-10T00:00:00.000Z"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&mut stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            assert!(line2.starts_with("DELETE /api/ciphers/uuid-2 HTTP/1.1"));
+
+            let mut has_auth2 = false;
+            loop {
+                line2.clear();
+                reader2.read_line(&mut line2).unwrap();
+                if line2 == "\r\n" {
+                    break;
+                }
+                if line2
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth2 = true;
+                }
+            }
+            assert!(has_auth2);
+
+            let response2 = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}";
+            stream2.write_all(response2.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+        });
+
+        let soft_res = client.delete_cipher("test-token", "uuid-1", false);
+        assert_eq!(
+            soft_res.unwrap().as_deref(),
+            Some("2026-11-10T00:00:00.000Z"),
+            "a soft delete must surface the server timestamp"
+        );
+
+        let hard_res = client.delete_cipher("test-token", "uuid-2", true);
+        assert_eq!(
+            hard_res.unwrap(),
+            None,
+            "a permanent delete has no timestamp"
+        );
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_update_cipher_http_calls_and_concurrency_conflict() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_url = format!("http://{}", addr);
+
+        let client = BitwardenApiClient::for_cipher_write(&server_url, None).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            // Call 1: Success 200 OK
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+
+            let mut has_auth = false;
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if line
+                    .to_lowercase()
+                    .starts_with("authorization: bearer test-token")
+                {
+                    has_auth = true;
+                }
+                if let Some(val) = line.to_lowercase().strip_prefix("content-length:") {
+                    content_length = val.trim().parse().unwrap();
+                }
+            }
+            assert!(has_auth);
+            assert!(content_length > 0);
+
+            let mut body_bytes = vec![0u8; content_length];
+            reader.read_exact(&mut body_bytes).unwrap();
+            let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(body_json["id"], "uuid-edit");
+            assert_eq!(body_json["lastKnownRevisionDate"], "2026-11-09T00:00:00Z");
+
+            let body_str = "{\"id\":\"uuid-edit\",\"name\":\"EncName\",\"type\":1,\"notes\":null}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body_str.len(),
+                body_str
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            // Call 2: 409 Conflict
+            let (mut stream2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(&mut stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            assert!(line2.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+            let conflict_body = "{\"error\":\"revision conflict\"}";
+            let conflict_resp = format!(
+                "HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                conflict_body.len(),
+                conflict_body
+            );
+            stream2.write_all(conflict_resp.as_bytes()).unwrap();
+            stream2.flush().unwrap();
+
+            // Call 3: 400 Bad Request with revision mismatch
+            let (mut stream3, _) = listener.accept().unwrap();
+            let mut reader3 = BufReader::new(&mut stream3);
+            let mut line3 = String::new();
+            reader3.read_line(&mut line3).unwrap();
+            assert!(line3.starts_with("PUT /api/ciphers/uuid-edit HTTP/1.1"));
+            let bad_req_body = "{\"message\":\"revision date mismatch\"}";
+            let bad_req_resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                bad_req_body.len(),
+                bad_req_body
+            );
+            stream3.write_all(bad_req_resp.as_bytes()).unwrap();
+            stream3.flush().unwrap();
+        });
+
+        let payload = serde_json::json!({
+            "id": "uuid-edit",
+            "name": "EncName",
+            "type": 1,
+            "lastKnownRevisionDate": "2026-11-09T00:00:00Z"
+        });
+
+        // 1. Success
+        let res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(res.is_ok());
+        let res_val = res.unwrap();
+        assert_eq!(res_val["id"], "uuid-edit");
+
+        // 2. 409 Conflict
+        let conflict_res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(matches!(
+            conflict_res,
+            Err(ApiError::HttpStatus(reqwest::StatusCode::CONFLICT, _))
+        ));
+
+        // 3. 400 Bad Request with revision
+        let bad_req_res = client.update_cipher("test-token", "uuid-edit", &payload);
+        assert!(matches!(
+            bad_req_res,
+            Err(ApiError::HttpStatus(reqwest::StatusCode::BAD_REQUEST, ref msg)) if msg.contains("revision date mismatch")
+        ));
+
+        handle.join().unwrap();
     }
 }

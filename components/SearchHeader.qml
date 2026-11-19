@@ -25,6 +25,7 @@ ColumnLayout {
   property string activeFolderScope: "all"
 
   signal categorySelected(string category)
+  signal createCipherRequested(string cipherType)
   signal vaultScopeSelected(string scope)
   signal folderScopeSelected(string scope)
   signal clearSearchRequested()
@@ -161,6 +162,9 @@ ColumnLayout {
     color: Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08)
     border.color: searchInputField.activeFocus ? searchHeaderRoot.accent : searchHeaderRoot.borderColor
     border.width: 1
+    // While a sub-interaction (modal or the Inspector Form) owns the keyboard,
+    // the left-side search input is suspended so drafts cannot filter the list.
+    enabled: !searchHeaderRoot.modalsActive
 
     RowLayout {
       anchors.fill: parent
@@ -354,6 +358,39 @@ ColumnLayout {
     }
 
     Item { Layout.fillWidth: true }
+
+    // Cipher creation action (Login / Secure Note tabs)
+    RowLayout {
+      visible: searchHeaderRoot.activeCategory === "login" || searchHeaderRoot.activeCategory === "note"
+      spacing: 4
+
+      Rectangle {
+        implicitWidth: 18
+        implicitHeight: 18
+        radius: 4
+        color: createCipherMouse.containsMouse ? Qt.rgba(searchHeaderRoot.foreground.r, searchHeaderRoot.foreground.g, searchHeaderRoot.foreground.b, 0.08) : "transparent"
+
+        Text {
+          anchors.centerIn: parent
+          text: "\uf067"
+          font.family: searchHeaderRoot.fontFamily
+          font.pixelSize: Style.font.caption
+          color: createCipherMouse.containsMouse ? searchHeaderRoot.foreground : searchHeaderRoot.muted
+        }
+
+        MouseArea {
+          id: createCipherMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: searchHeaderRoot.createCipherRequested(searchHeaderRoot.activeCategory === "note" ? "note" : "login")
+
+          ToolTip.visible: containsMouse
+          ToolTip.delay: 300
+          ToolTip.text: searchHeaderRoot.activeCategory === "note" ? "New Secure Note" : "New Login"
+        }
+      }
+    }
 
     // SSH Key Category Actions
     RowLayout {

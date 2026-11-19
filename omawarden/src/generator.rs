@@ -394,10 +394,13 @@ mod tests {
     #[test]
     fn test_generate_passphrase_defaults() {
         let options = PassphraseOptions::default();
+        assert_eq!(options.words, DEFAULT_PASSPHRASE_WORDS);
+        assert_eq!(options.separator, "-");
+
         let res = generate_passphrase(&options).expect("failed to generate passphrase");
         assert_eq!(res.secret_type, "passphrase");
-        let words: Vec<&str> = res.value.split('-').collect();
-        assert_eq!(words.len(), DEFAULT_PASSPHRASE_WORDS);
+        // EFF words like "yo-yo" can contribute additional hyphens.
+        assert!(res.value.matches('-').count() >= options.words - 1);
         assert!((res.entropy - 51.7).abs() < 1.0);
     }
 

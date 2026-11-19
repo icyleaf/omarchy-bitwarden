@@ -1,8 +1,12 @@
+mod account_activation;
 pub mod api;
 pub mod attachment;
 pub mod auth;
+pub mod capabilities;
+mod cipher_write;
 pub mod clipboard;
 pub mod config;
+mod credential_slots;
 pub mod crypto;
 pub mod daemon;
 pub mod fs_util;
@@ -15,10 +19,18 @@ pub mod logging;
 pub mod polkit;
 pub mod ssh;
 pub mod ssh_agent;
+mod ssh_write;
 pub mod storage;
 pub mod totp;
 pub mod vault;
+mod vault_cache;
+mod vault_sync;
 pub mod webauthn;
+
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod vault_publication_tests;
 
 /// Serialises tests that change process-wide environment variables, and tests
 /// whose result depends on them, so they don't race under the parallel runner.

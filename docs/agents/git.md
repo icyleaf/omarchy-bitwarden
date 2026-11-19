@@ -99,3 +99,35 @@ All implementation and bugfix tasks must follow a strict branch-and-PR workflow 
    - Review and merge the Release PR on GitHub using **Merge commit** (to preserve full Git commit history between `develop` and `main`).
      > **Warning**: **Never use Squash merge on Release PRs targeting `main`!** Squash merging squashes all conventional commits into a single commit, causing `git-cliff` on `main` to lose individual `feat`, `fix`, `sec` commits when generating release notes.
    - Upon merging to `main`, the **Auto Tag on Release** workflow (`.github/workflows/auto-tag.yml`) automatically detects version changes, tags the release (`omawarden-<version>` and/or `omarchy-bitwarden-<version>`), dispatches the build and package workflows (`release-omawarden.yml` / `release-plugin.yml`), and automatically syncs `main` back into `develop` to keep branch histories aligned.
+
+7. **Initiating Next Development Cycle (`bump-dev`)**:
+   - Once a release is tagged and `main` is synced back to `develop`, initiate the next development cycle on `develop`:
+     ```bash
+     git checkout develop && git pull
+     mise run bump-dev all <next_cli_ver>-dev <next_plugin_ver>-dev
+     # e.g., mise run bump-dev all 0.12.0-dev 0.15.0-dev
+     git push origin develop
+     ```
+   - `mise run bump-dev` creates a `bump(dev):` commit. The **Auto Release PR** workflow explicitly ignores `-dev` bumps, preventing premature Release PRs.
+   - Development builds automatically display a `DEV` pill badge in the Overlay footer and Settings view, and update notifications are suppressed.
+
+8. **Emergency Hotfix Lifecycle (Patching `main` directly)**:
+   - When a critical bug in production requires an immediate patch release while `develop` contains unreleased next-version features:
+     1. Branch directly off `main`:
+        ```bash
+        git checkout main && git pull
+        git checkout -b fix/<description>
+        ```
+     2. Implement the fix, run `./scripts/test-all.sh`.
+     3. Bump patch version on the hotfix branch:
+        ```bash
+        mise run bump plugin <patch_version>   # e.g., 0.14.1
+        # or mise run bump all <cli_patch> <plugin_patch>
+        ```
+     4. Push and open PR targeting `main`:
+        ```bash
+        git push -u origin HEAD
+        gh pr create --base main --title "fix: <description>" --body "Closes #<issue>"
+        ```
+     5. After review and merge with Merge commit, `auto-tag.yml` tags the patch release, publishes artifacts, and automatically syncs `main` back into `develop`.
+     6. `develop` retains its ongoing `-dev` cycle without disruption.

@@ -11,6 +11,7 @@ QtObject {
     return Math.max(1, Math.round(fontBaseSize * mult))
   }
   readonly property QtObject font: QtObject {
+    readonly property string menuFamily: "sans-serif"
     readonly property int caption: root.fontPx(0.833)
     readonly property int bodySmall: root.fontPx(0.917)
     readonly property int body: root.fontPx(1)

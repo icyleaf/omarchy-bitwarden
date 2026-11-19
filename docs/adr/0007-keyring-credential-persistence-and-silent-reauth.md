@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+[ADR 0027](0027-conditional-vault-snapshot-publication.md) supersedes the
+legacy lookup and cleanup rules with scoped credential references.
+
 ## Context
 In previous releases, `omawarden` persisted OAuth2 `access_token` and `refresh_token` in plaintext inside `~/.config/omarchy/plugins/icyleaf.bitwarden/data.json`. Although protected with `0600` file permissions, writing bearer tokens to disk exposes credentials to filesystem inspection, backups, or sync utilities, violating pure zero-knowledge local storage principles.
 

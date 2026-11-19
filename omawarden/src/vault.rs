@@ -11,7 +11,7 @@ use crate::crypto::{
 use crate::keyring::KeyringManager;
 use crate::storage::{StorageManager, VaultStorage};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SshMetadata {
     pub is_ssh_key: bool,
     pub key_type: String,
@@ -21,7 +21,7 @@ pub struct SshMetadata {
     pub passphrase: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct VaultItem {
     pub id: String,
     pub name: String,
@@ -35,6 +35,8 @@ pub struct VaultItem {
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,6 +60,13 @@ pub struct VaultItem {
     #[serde(default)]
     pub attachments: Vec<Value>,
     pub search_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum CipherTargetResolution {
+    Exact(Box<VaultItem>),
+    Ambiguous(Vec<VaultItem>),
+    NotFound(String),
 }
 
 pub fn is_fuzzy_match(pattern: &str, text: &str) -> bool {
@@ -277,8 +286,7 @@ pub struct VaultManager {
     /// before decrypting and aborts if a wipe landed mid-restore, so a hard
     /// lock racing a restore can never be overridden.
     pub quick_unlock_epoch: std::sync::atomic::AtomicU64,
-    /// Bumped each time an unlocked vault locks (hard or soft), so a caller
-    /// can tell lock cycles apart without having watched the transitions.
+    /// Bumped on account activation and when an unlocked vault locks.
     lock_generation: std::sync::atomic::AtomicU64,
     /// `enc_user_key` as it was when the key was retained. That wrapping is
     /// unique per account *and* per master password, so comparing it on
@@ -293,6 +301,12 @@ pub struct VaultManager {
     /// commit section (which re-checks the epoch under the guard), making
     /// wipe-vs-restore mutually exclusive at the commit point.
     pub restore_guard: std::sync::Mutex<()>,
+    #[cfg(test)]
+    pub(crate) before_unlock_publication: crate::test_support::PausePoint,
+    #[cfg(test)]
+    pub(crate) cache_validated: crate::test_support::PausePoint,
+    #[cfg(test)]
+    pub(crate) before_activation_persist: std::sync::OnceLock<fn(&tempfile::NamedTempFile)>,
 }
 
 impl VaultManager {
@@ -341,9 +355,16 @@ impl VaultManager {
             is_unlocked: RwLock::new(false),
             quick_unlock_key: RwLock::new(None),
             quick_unlock_epoch: std::sync::atomic::AtomicU64::new(0),
-            lock_generation: std::sync::atomic::AtomicU64::new(0),
+            // Clients compare generations across daemon restarts as well as soft locks.
+            lock_generation: std::sync::atomic::AtomicU64::new(rand::random::<u64>() >> 1),
             quick_unlock_user_key_wrap: RwLock::new(None),
             restore_guard: std::sync::Mutex::new(()),
+            #[cfg(test)]
+            before_unlock_publication: Default::default(),
+            #[cfg(test)]
+            cache_validated: Default::default(),
+            #[cfg(test)]
+            before_activation_persist: Default::default(),
         }
     }
 
@@ -351,42 +372,182 @@ impl VaultManager {
         self.is_unlocked.read().map(|g| *g).unwrap_or(false)
     }
 
-    /// Which lock cycle the vault is in. Changes only when an unlocked vault
-    /// locks; locking an already locked vault leaves it alone.
+    /// Which account and lock cycle the vault is in.
     pub fn lock_generation(&self) -> u64 {
         self.lock_generation
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn purge_decrypted_state(&self) {
-        if let Ok(mut unl) = self.is_unlocked.write() {
-            if *unl {
-                self.lock_generation
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            *unl = false;
+    pub(crate) fn output_session(&self) -> Option<crate::daemon::OutputSession> {
+        let unlocked = self.is_unlocked.read().ok()?;
+        if !*unlocked {
+            return None;
         }
+        let storage = self.storage.read().ok()?;
+        Some(crate::daemon::OutputSession {
+            lock_generation: self.lock_generation(),
+            credential_id: storage.scoped_credential_id()?.to_owned(),
+        })
+    }
+
+    fn purge_decrypted_state(&self) -> bool {
+        let mut unlocked = self.is_unlocked.write().unwrap_or_else(|e| e.into_inner());
+        if *unlocked {
+            self.lock_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        *unlocked = false;
         if let Ok(mut items) = self.decrypted_items.write() {
             items.clear();
         }
         if let Ok(mut key) = self.user_key.write() {
             *key = None;
         }
-        crate::attachment::clear_preview_attachments(None);
+        drop(unlocked);
+        if let Err(error) = crate::clipboard::revoke_session_outputs() {
+            crate::log_warn!(
+                "omawarden:vault",
+                "Vault locked. Session output cleanup is pending. {error}"
+            );
+            return false;
+        }
+        true
     }
 
     /// Full lock: purges decrypted state AND the quick-unlock slot. This is
     /// the fail-safe default — retention happens only through soft_lock().
     pub fn lock(&self) {
-        // Order matters. wipe_quick_unlock takes restore_guard and bumps the
-        // epoch, which is what makes an in-flight quick_unlock_restore abort
-        // instead of committing. Purging first would leave a window where a
-        // restore commit lands between the purge and the wipe: the vault
-        // would end up unlocked with the decrypted items and user key back,
-        // and the wipe (which only clears the slot) would not undo it. The
-        // hard lock must therefore invalidate restores before it purges.
-        self.wipe_quick_unlock();
-        self.purge_decrypted_state();
+        let _restore = self.restore_guard.lock().unwrap_or_else(|e| e.into_inner());
+        self.hard_lock_inner();
+    }
+
+    /// Revoke the current plaintext and retained key under restore_guard.
+    pub(crate) fn hard_lock_inner(&self) -> bool {
+        self.wipe_quick_unlock_inner();
+        self.purge_decrypted_state()
+    }
+
+    pub(crate) fn activate_account(
+        &self,
+        base: &crate::storage::CacheSnapshot,
+        replacement: VaultStorage,
+        expected_context: &str,
+        reset_session: impl FnOnce(),
+    ) -> Result<Option<String>, String> {
+        use crate::account_activation::SESSION_CHANGED;
+        let id = replacement
+            .scoped_credential_id()
+            .ok_or("Invalid login credential ID")?
+            .to_owned();
+        let staged = self
+            .storage_mgr
+            .stage_durable(&replacement)
+            .map_err(|_| "Cannot stage the account cache")?;
+        let account = self
+            .storage_mgr
+            .account_guard()
+            .map_err(|_| "Cannot secure the account cache")?;
+        if !base.is_current(&self.storage_mgr).unwrap_or(false) {
+            return Err("Vault cache changed during login. Sign in again.".into());
+        }
+        let retire_legacy =
+            base.storage.scoped_credential_id().is_none() && base.storage.has_login_metadata();
+        self.storage_mgr
+            .remember_credentials(&base.storage, retire_legacy)
+            .map_err(|_| "Cannot track the previous credentials")?;
+
+        let context = {
+            let _restore = self
+                .restore_guard
+                .lock()
+                .map_err(|_| "Vault state unavailable")?;
+            if self.unlock_context() != expected_context {
+                return Err(SESSION_CHANGED.into());
+            }
+            let _outputs = crate::daemon::lock_session_outputs()
+                .map_err(|_| "Cannot secure output from the previous vault session")?;
+            if self.is_unlocked()
+                && !self
+                    .storage
+                    .read()
+                    .is_ok_and(|storage| storage.same_active_slot(&base.storage))
+            {
+                return Err(SESSION_CHANGED.into());
+            }
+            // Revoke outputs before rename, including when the daemon dies
+            // before sending its receipt. A failed rename can clear outputs
+            // while leaving the previous account active.
+            crate::clipboard::clear_session_outputs().map_err(|error| {
+                format!("Could not clear the previous vault outputs. Retry sign-in after clearing them. {error}")
+            })?;
+            {
+                let mut unlocked = self
+                    .is_unlocked
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                let mut storage = self
+                    .storage
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                let mut items = self
+                    .decrypted_items
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                let mut key = self
+                    .user_key
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                let mut retained = self
+                    .quick_unlock_key
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                let mut binding = self
+                    .quick_unlock_user_key_wrap
+                    .write()
+                    .map_err(|_| "Vault state unavailable")?;
+                #[cfg(test)]
+                if let Some(hook) = self.before_activation_persist.get() {
+                    hook(&staged);
+                }
+                staged
+                    .persist(&self.storage_mgr.file_path)
+                    .map_err(|_| "Cannot save the account cache")?;
+                // Once rename succeeds, readers must see B locked even if the directory fsync fails.
+                *unlocked = false;
+                self.lock_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.quick_unlock_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                items.clear();
+                *key = None;
+                *retained = None;
+                *binding = None;
+                *storage = replacement;
+            }
+            reset_session();
+            self.unlock_context()
+        };
+        let retired = self.storage_mgr.retired_credentials(Some(&id));
+        drop(account);
+        match retired {
+            Ok(slots) => {
+                if let Err(error) = crate::credential_slots::erase_retired(slots, &self.keyring_mgr)
+                {
+                    crate::log_warn!(
+                        "omawarden:auth",
+                        "Account published. Previous credential cleanup pending. {error}"
+                    );
+                }
+                Ok(Some(context))
+            }
+            Err(error) => {
+                crate::log_warn!(
+                    "omawarden:auth",
+                    "Account published. Previous credential cleanup pending. {error}"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Soft lock (ADR-0025): purge everything a hard lock purges, except the
@@ -461,6 +622,10 @@ impl VaultManager {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        self.wipe_quick_unlock_inner();
+    }
+
+    pub(crate) fn wipe_quick_unlock_inner(&self) {
         self.quick_unlock_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut slot) = self.quick_unlock_key.write() {
@@ -472,6 +637,13 @@ impl VaultManager {
         }
     }
 
+    fn discard_retained_key(&self, expected: &str) {
+        let _restore = self.restore_guard.lock().unwrap_or_else(|e| e.into_inner());
+        if self.unlock_context() == expected {
+            self.wipe_quick_unlock_inner();
+        }
+    }
+
     /// Re-unlock from the retained key (ADR-0025): same decryption path as
     /// unlock(), minus the master-password KDF. The slot keeps its key
     /// untouched; a wipe landing mid-restore aborts via the epoch guard and
@@ -479,9 +651,13 @@ impl VaultManager {
     /// the same guard wipe_quick_unlock holds) instead of being silently
     /// overridden.
     pub fn quick_unlock_restore(&self) -> Result<usize, String> {
-        let epoch_before = self
-            .quick_unlock_epoch
-            .load(std::sync::atomic::Ordering::SeqCst);
+        self.quick_unlock_restore_in_context(&self.unlock_context())
+    }
+
+    pub(crate) fn quick_unlock_restore_in_context(&self, expected: &str) -> Result<usize, String> {
+        if self.unlock_context() != expected {
+            return Err("Vault session changed during quick unlock.".into());
+        }
         let key = {
             let slot = self
                 .quick_unlock_key
@@ -491,7 +667,26 @@ impl VaultManager {
         }
         .ok_or_else(|| "No key retained for quick unlock".to_string())?;
 
-        let fresh_storage = self.storage_mgr.load();
+        let base = self
+            .storage_mgr
+            .cache_snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+        let fresh_storage = &base.storage;
+        if let Err(error) = fresh_storage.check_unlock_credentials() {
+            self.discard_retained_key(expected);
+            return Err(error.into());
+        }
+        if !self
+            .storage
+            .read()
+            .is_ok_and(|s| s.scoped_credential_id() == fresh_storage.scoped_credential_id())
+        {
+            self.discard_retained_key(expected);
+            return Err(
+                "The retained key no longer matches this vault; unlock with the master password."
+                    .into(),
+            );
+        }
         if fresh_storage.enc_user_key.is_none() {
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
@@ -503,7 +698,10 @@ impl VaultManager {
             &key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
 
         // Fail closed on a stale key (server-side rotation, password change
         // elsewhere, account switch while soft-locked): decryption failures
@@ -527,7 +725,7 @@ impl VaultManager {
                             "omawarden:vault",
                             "Retained key fails to decrypt the private key; wiping quick unlock"
                         );
-                        self.wipe_quick_unlock();
+                        self.discard_retained_key(expected);
                         return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
                     }
                 }
@@ -581,7 +779,7 @@ impl VaultManager {
                     "omawarden:vault",
                     "Retained key fails to decrypt any personal cipher; wiping quick unlock"
                 );
-                self.wipe_quick_unlock();
+                self.discard_retained_key(expected);
                 return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
             }
             if candidates == 0 {
@@ -608,7 +806,7 @@ impl VaultManager {
                         "omawarden:vault",
                         "Retained key cannot be verified against this vault; wiping quick unlock"
                     );
-                    self.wipe_quick_unlock();
+                    self.discard_retained_key(expected);
                     return Err("The retained key no longer matches this vault; unlock with the master password.".to_string());
                 }
             }
@@ -620,11 +818,7 @@ impl VaultManager {
         // first, then the commit runs under restore_guard with the epoch
         // re-checked inside — wipe_quick_unlock holds the same guard, so a
         // wipe can no longer interleave between this check and the writes.
-        if self
-            .quick_unlock_epoch
-            .load(std::sync::atomic::Ordering::SeqCst)
-            != epoch_before
-        {
+        if self.unlock_context() != expected {
             crate::log_warn!(
                 "omawarden:vault",
                 "Vault was locked during quick unlock; aborting restore"
@@ -632,35 +826,52 @@ impl VaultManager {
             return Err("The vault was locked during unlock. Try again.".to_string());
         }
 
+        #[cfg(test)]
+        self.before_unlock_publication.reach();
+
         {
+            let _account = self
+                .storage_mgr
+                .account_guard()
+                .map_err(|e| format!("Cannot secure the vault cache: {e}"))?;
             let _restore = match self.restore_guard.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if self
-                .quick_unlock_epoch
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != epoch_before
-            {
+            if self.unlock_context() != expected {
                 crate::log_warn!(
                     "omawarden:vault",
                     "Vault was locked during quick unlock; aborting restore"
                 );
                 return Err("The vault was locked during unlock. Try again.".to_string());
             }
+            if !base
+                .is_current(&self.storage_mgr)
+                .map_err(|e| format!("Cannot verify the vault cache: {e}"))?
+            {
+                return Err("Vault cache changed during unlock. Please retry.".into());
+            }
 
-            if let Ok(mut dec_items) = self.decrypted_items.write() {
-                *dec_items = items;
-            }
-            if let Ok(mut key_slot) = self.user_key.write() {
-                *key_slot = Some(key);
-            }
-            if let Ok(mut unl) = self.is_unlocked.write() {
-                *unl = true;
-            }
-            if let Ok(mut st) = self.storage.write() {
-                *st = fresh_storage;
-            }
+            let mut unlocked = self
+                .is_unlocked
+                .write()
+                .map_err(|_| "Vault state unavailable")?;
+            let mut storage = self
+                .storage
+                .write()
+                .map_err(|_| "Vault state unavailable")?;
+            let mut index = self
+                .decrypted_items
+                .write()
+                .map_err(|_| "Vault state unavailable")?;
+            let mut user_key = self
+                .user_key
+                .write()
+                .map_err(|_| "Vault state unavailable")?;
+            *index = items;
+            *user_key = Some(key);
+            *storage = base.storage;
+            *unlocked = true;
             // The retained slot is intentionally left untouched: it still
             // holds the same key, and rewriting it would resurrect a key a
             // concurrent wipe just destroyed.
@@ -675,7 +886,34 @@ impl VaultManager {
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
-        let fresh_storage = self.storage_mgr.load();
+        self.unlock_in_context(password, &self.unlock_context(), None)
+    }
+
+    pub(crate) fn unlock_context(&self) -> String {
+        format!(
+            "{}:{}",
+            self.lock_generation(),
+            self.quick_unlock_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
+    pub(crate) fn unlock_in_context(
+        &self,
+        password: &str,
+        expected: &str,
+        credential_id: Option<&str>,
+    ) -> Result<usize, String> {
+        if self.unlock_context() != expected {
+            return Err(
+                "Vault session changed during login. Unlock explicitly to continue.".into(),
+            );
+        }
+        let base = self
+            .storage_mgr
+            .cache_snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?;
+        let fresh_storage = &base.storage;
         if fresh_storage.enc_user_key.is_none() {
             crate::log_error!(
                 "omawarden:vault",
@@ -683,13 +921,17 @@ impl VaultManager {
             );
             return Err("Account not logged in or missing encryption keys.".to_string());
         }
+        fresh_storage.check_unlock_credentials()?;
+        if credential_id.is_some() && fresh_storage.scoped_credential_id() != credential_id {
+            return Err("Vault account changed during unlock.".into());
+        }
 
         let user_key = self
             .storage_mgr
-            .unlock_user_key(password, &fresh_storage)
+            .unlock_user_key(password, fresh_storage)
             .map_err(|e| {
                 crate::log_warn!("omawarden:vault", "Unlock user key failed: {:?}", e);
-                format!("Unlock failed: {:?}", e)
+                e.to_string()
             })?;
 
         let items = decrypt_sync_ciphers_with_context(
@@ -699,186 +941,73 @@ impl VaultManager {
             &user_key,
             fresh_storage.enc_private_key.as_deref(),
         );
-        let count = items.len();
+        let count = items
+            .iter()
+            .filter(|item| item.deleted_at.is_none())
+            .count();
+        #[cfg(test)]
+        self.before_unlock_publication.reach();
+        let _account = self
+            .storage_mgr
+            .account_guard()
+            .map_err(|e| format!("Cannot secure the vault cache: {e}"))?;
+        let _restore = self
+            .restore_guard
+            .lock()
+            .map_err(|_| "Vault state unavailable")?;
+        if self.unlock_context() != expected {
+            return Err(
+                "Vault session changed during login. Unlock explicitly to continue.".into(),
+            );
+        }
+        if !base
+            .is_current(&self.storage_mgr)
+            .map_err(|e| format!("Cannot verify the vault cache: {e}"))?
+        {
+            return Err("Vault cache changed during unlock. Please retry.".into());
+        }
 
-        if let Ok(mut dec_items) = self.decrypted_items.write() {
-            *dec_items = items;
-        }
-        if let Ok(mut key) = self.user_key.write() {
-            *key = Some(user_key.clone());
-        }
+        let mut unlocked = self
+            .is_unlocked
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
+        let mut storage = self
+            .storage
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
+        let mut index = self
+            .decrypted_items
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
+        let mut key = self
+            .user_key
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
+        let mut retained = self
+            .quick_unlock_key
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
+        let mut binding = self
+            .quick_unlock_user_key_wrap
+            .write()
+            .map_err(|_| "Vault state unavailable")?;
         // If a soft lock retained a key earlier, keep that copy current with
         // the key now in use (e.g. after a server-side key rotation) and
         // rebind it to the wrapping that came with this unlock.
-        let account_wrap = fresh_storage.enc_user_key.clone();
-        if let Ok(mut slot) = self.quick_unlock_key.write() {
-            if slot.is_some() {
-                *slot = Some(user_key);
-                if let Ok(mut wrap) = self.quick_unlock_user_key_wrap.write() {
-                    *wrap = account_wrap;
-                }
-            }
+        if retained.is_some() {
+            *retained = Some(user_key.clone());
+            *binding = fresh_storage.enc_user_key.clone();
         }
-        if let Ok(mut unl) = self.is_unlocked.write() {
-            *unl = true;
-        }
-        if let Ok(mut st) = self.storage.write() {
-            *st = fresh_storage;
-        }
+        *index = items;
+        *key = Some(user_key);
+        *storage = base.storage;
+        *unlocked = true;
 
         crate::log_info!(
             "omawarden:vault",
             "Decrypted and cached {} items in memory.",
             count
         );
-        Ok(count)
-    }
-
-    pub fn sync(&self) -> Result<usize, String> {
-        self.sync_with_client(None)
-    }
-
-    pub fn sync_with_client(
-        &self,
-        client_context: Option<&ClientContext>,
-    ) -> Result<usize, String> {
-        crate::log_info!(
-            "omawarden:vault",
-            "Starting vault synchronization with server..."
-        );
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
-
-        let initial_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        let active_token = match initial_token {
-            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
-            Some(_) => {
-                crate::log_info!(
-                    "omawarden:vault",
-                    "Access token is expired, attempting renewal..."
-                );
-                self.renew_session_with_client(client_context)?
-            }
-            None => {
-                let has_refresh = self
-                    .keyring_mgr
-                    .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-                    .is_some()
-                    || storage.refresh_token.is_some();
-                let has_api_secret = storage
-                    .client_id
-                    .as_ref()
-                    .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-                    .is_some();
-                if has_refresh || has_api_secret {
-                    self.renew_session_with_client(client_context)?
-                } else {
-                    crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
-                    return Err("Session token missing. Please log in.".to_string());
-                }
-            }
-        };
-
-        let sync_resp_res = client.sync_vault(&active_token);
-
-        let sync_resp = match sync_resp_res {
-            Ok(resp) => resp,
-            Err(ApiError::HttpStatus(code, _))
-                if code == reqwest::StatusCode::UNAUTHORIZED
-                    || code == reqwest::StatusCode::FORBIDDEN =>
-            {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP {} on sync. Attempting session renewal...",
-                    code
-                );
-                let renewed_token = self.renew_session_with_client(client_context)?;
-                client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
-                    format!("Sync failed: {:?}", e)
-                })?
-            }
-            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP 401/403 on sync. Attempting session renewal..."
-                );
-                let renewed_token = self.renew_session_with_client(client_context)?;
-                client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
-                    format!("Sync failed: {:?}", e)
-                })?
-            }
-            Err(e) => {
-                crate::log_error!("omawarden:vault", "Sync failed: {:?}", e);
-                return Err(format!("Sync failed: {:?}", e));
-            }
-        };
-
-        let count = sync_resp.ciphers.len();
-        let mut updated = self.storage_mgr.load();
-        updated.ciphers = sync_resp.ciphers;
-        updated.folders = sync_resp.folders;
-        updated.collections = sync_resp.collections;
-        if let Some(ref prof) = sync_resp.profile {
-            if let Some(orgs) = prof.get("organizations").and_then(|v| v.as_array()) {
-                updated.organizations = orgs.clone();
-            }
-        }
-        updated.last_sync = Some(chrono::Utc::now().to_rfc3339());
-
-        self.storage_mgr
-            .save(&updated)
-            .map_err(|e| format!("Failed to save storage: {:?}", e))?;
-
-        if let Ok(key_guard) = self.user_key.read() {
-            if let Some(user_key) = key_guard.as_ref() {
-                let items = decrypt_sync_ciphers_with_context(
-                    &updated.ciphers,
-                    &updated.folders,
-                    &updated.organizations,
-                    user_key,
-                    updated.enc_private_key.as_deref(),
-                );
-                if let Ok(mut dec_items) = self.decrypted_items.write() {
-                    *dec_items = items;
-                }
-            }
-        }
-
-        if let Ok(mut st) = self.storage.write() {
-            *st = updated;
-        }
-
-        crate::log_info!(
-            "omawarden:vault",
-            "Vault sync complete. {} ciphers, {} folders saved.",
-            count,
-            self.storage.read().map(|s| s.folders.len()).unwrap_or(0)
-        );
-
         Ok(count)
     }
 
@@ -891,26 +1020,33 @@ impl VaultManager {
         client_context: Option<&ClientContext>,
     ) -> Result<String, String> {
         let storage = self.storage_mgr.load();
+        self.renew_for_account(&storage, client_context, self.lock_generation())
+    }
+
+    pub(crate) fn renew_for_account(
+        &self,
+        storage: &VaultStorage,
+        client_context: Option<&ClientContext>,
+        generation: u64,
+    ) -> Result<String, String> {
+        if storage.credential_id.is_none() {
+            return Err("Please log in again to use account-scoped credentials.".into());
+        }
         let s_url = if !storage.server_url.is_empty() {
             &storage.server_url
         } else {
             &self.server_url
         };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
+        let id_url = storage.credential_identity_url(self.identity_url.as_deref());
         let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
+        let keyring = self.keyring_mgr.for_storage(storage);
 
         let mut had_credentials = false;
         let mut auth_failed = false;
         let mut last_error = None;
 
         // 1. Try refresh_token grant
-        let refresh_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-            .or_else(|| storage.refresh_token.clone());
+        let refresh_token = keyring.refresh_token();
 
         if let Some(ref ref_tok) = refresh_token {
             had_credentials = true;
@@ -921,7 +1057,7 @@ impl VaultManager {
             match client.refresh_token_grant(ref_tok) {
                 Ok(tok_resp) => {
                     crate::log_info!("omawarden:vault", "Token refresh grant successful.");
-                    self.persist_renewed_tokens(&tok_resp);
+                    self.persist_renewed_tokens(storage, generation, &tok_resp)?;
                     return Ok(tok_resp.access_token);
                 }
                 Err(ApiError::AuthFailed(msg)) => {
@@ -956,7 +1092,7 @@ impl VaultManager {
 
         // 2. Try client_credentials grant via client_id + client_secret in Keyring
         if let Some(ref cid) = storage.client_id {
-            if let Some(sec) = self.keyring_mgr.get_api_secret(s_url, cid) {
+            if let Some(sec) = keyring.api_secret() {
                 had_credentials = true;
                 crate::log_info!(
                     "omawarden:vault",
@@ -968,7 +1104,7 @@ impl VaultManager {
                             "omawarden:vault",
                             "Silent re-authentication via API key successful."
                         );
-                        self.persist_renewed_tokens(&tok_resp);
+                        self.persist_renewed_tokens(storage, generation, &tok_resp)?;
                         return Ok(tok_resp.access_token);
                     }
                     Err(ApiError::AuthFailed(msg)) => {
@@ -1006,12 +1142,12 @@ impl VaultManager {
         }
 
         if !had_credentials {
-            self.purge_credentials_and_lock();
+            self.purge_credentials_and_lock(storage, generation);
             return Err("Session token missing. Please log in.".to_string());
         }
 
         if auth_failed {
-            self.purge_credentials_and_lock();
+            self.purge_credentials_and_lock(storage, generation);
             return Err(
                 "Session expired or credentials rejected. Please log in again.".to_string(),
             );
@@ -1022,32 +1158,43 @@ impl VaultManager {
         }))
     }
 
-    fn persist_renewed_tokens(&self, tok_resp: &crate::api::TokenResponse) {
-        let mut updated_storage = self.storage_mgr.load();
-        let s_url = if !updated_storage.server_url.is_empty() {
-            &updated_storage.server_url
-        } else {
-            &self.server_url
-        };
+    fn persist_renewed_tokens(
+        &self,
+        storage: &VaultStorage,
+        generation: u64,
+        tok_resp: &crate::api::TokenResponse,
+    ) -> Result<(), String> {
+        let _account_guard = self.storage_mgr.account_guard().map_err(|_| {
+            self.lock();
+            "Cannot secure renewed session state"
+        })?;
+        let mut updated_storage = self.storage_mgr.load_existing().map_err(|_| {
+            self.revoke_account(storage, generation);
+            "Vault cache unavailable"
+        })?;
+        if generation != self.lock_generation() || !storage.same_active_slot(&updated_storage) {
+            return Err("Session changed during token renewal".into());
+        }
         if self.keyring_mgr.is_available() {
-            let s1 = self.keyring_mgr.store_token(
-                s_url,
-                crate::keyring::KIND_ACCESS_TOKEN,
-                &tok_resp.access_token,
-            );
+            let keyring = self.keyring_mgr.for_storage(&updated_storage);
+            let s1 = keyring.store_token(crate::keyring::KIND_ACCESS_TOKEN, &tok_resp.access_token);
             let s2 = if let Some(ref new_ref) = tok_resp.refresh_token {
-                self.keyring_mgr
-                    .store_token(s_url, crate::keyring::KIND_REFRESH_TOKEN, new_ref)
+                keyring.store_token(crate::keyring::KIND_REFRESH_TOKEN, new_ref)
             } else {
-                self.keyring_mgr
-                    .clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
+                keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
                 true
             };
             if s1 && s2 {
-                updated_storage.access_token = None;
-                updated_storage.refresh_token = None;
-                let _ = self.storage_mgr.save(&updated_storage);
-                return;
+                if updated_storage.access_token.is_some() || updated_storage.refresh_token.is_some()
+                {
+                    updated_storage.access_token = None;
+                    updated_storage.refresh_token = None;
+                    self.storage_mgr.save(&updated_storage).map_err(|_| {
+                        self.revoke_account(storage, generation);
+                        "Failed to save renewed session state"
+                    })?;
+                }
+                return Ok(());
             }
         }
 
@@ -1055,51 +1202,47 @@ impl VaultManager {
             "omawarden:vault",
             "Keyring not available or failed to store renewed tokens. Locking session."
         );
-        self.purge_credentials_and_lock();
+        self.revoke_account(storage, generation);
+        Err("Failed to store renewed credentials in the keyring".into())
     }
 
-    fn purge_credentials_and_lock(&self) {
-        let mut updated = self.storage_mgr.load();
-        let s_url = if !updated.server_url.is_empty() {
-            &updated.server_url
-        } else {
-            &self.server_url
-        };
-        self.keyring_mgr
-            .clear_token(s_url, crate::keyring::KIND_ACCESS_TOKEN);
-        self.keyring_mgr
-            .clear_token(s_url, crate::keyring::KIND_REFRESH_TOKEN);
-        self.keyring_mgr.clear_session(s_url);
-        updated.access_token = None;
-        updated.refresh_token = None;
-        let _ = self.storage_mgr.save(&updated);
-        self.lock();
-        crate::attachment::clear_preview_attachments(None);
-    }
-
-    pub fn get_items(&self) -> Vec<VaultItem> {
-        let is_unlocked = self.is_unlocked();
-        if !is_unlocked {
-            if let Some(daemon_resp) =
-                crate::daemon::send_daemon_request(&serde_json::json!({ "action": "list" }))
-            {
-                if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
-                    return items;
-                }
-            }
-            return Vec::new();
+    fn purge_credentials_and_lock(&self, expected: &VaultStorage, generation: u64) {
+        match self.storage_mgr.account_guard() {
+            Ok(_guard) => self.revoke_account(expected, generation),
+            Err(_) => self.lock(),
         }
-        self.decrypted_items
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
     }
 
-    /// Name and SSH data of the unlocked vault's SSH key items, without
-    /// copying the rest of the vault. Empty while locked, and never asks the
-    /// daemon: the SSH agent runs inside it.
-    pub fn ssh_key_items(&self) -> Vec<(String, SshMetadata)> {
-        if !self.is_unlocked() {
+    fn revoke_account(&self, expected: &VaultStorage, generation: u64) {
+        let disk = self.storage_mgr.load_existing();
+        if self.lock_generation() != generation
+            || disk.as_ref().is_ok_and(|s| !s.same_active_slot(expected))
+        {
+            return;
+        }
+        self.lock();
+        let keyring = self.keyring_mgr.for_storage(expected);
+        keyring.clear_token(crate::keyring::KIND_ACCESS_TOKEN);
+        keyring.clear_token(crate::keyring::KIND_REFRESH_TOKEN);
+        if let Ok(mut updated) = disk {
+            updated.access_token = None;
+            updated.refresh_token = None;
+            let _ = self.storage_mgr.save(&updated);
+        }
+    }
+
+    /// Active items only: Trash items are never served to active operations.
+    pub fn get_items(&self) -> Vec<VaultItem> {
+        self.get_items_by_state(false)
+    }
+
+    /// Items in the requested state: active (`trash == false`) or Trash
+    /// (`trash == true`). Empty while locked.
+    pub fn get_items_by_state(&self, trash: bool) -> Vec<VaultItem> {
+        let Ok(unlocked) = self.is_unlocked.read() else {
+            return Vec::new();
+        };
+        if !*unlocked {
             return Vec::new();
         }
         self.decrypted_items
@@ -1107,6 +1250,30 @@ impl VaultManager {
             .map(|items| {
                 items
                     .iter()
+                    .filter(|item| item.deleted_at.is_some() == trash)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Name and SSH data of the unlocked vault's active SSH key items, without
+    /// copying the rest of the vault. Empty while locked, and never asks the
+    /// daemon: the SSH agent runs inside it. Trashed keys are excluded so the
+    /// agent never signs with a soft-deleted key.
+    pub fn ssh_key_items(&self) -> Vec<(String, SshMetadata)> {
+        let Ok(unlocked) = self.is_unlocked.read() else {
+            return Vec::new();
+        };
+        if !*unlocked {
+            return Vec::new();
+        }
+        self.decrypted_items
+            .read()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| i.deleted_at.is_none())
                     .filter_map(|i| Some((i.name.clone(), i.ssh_key.clone()?)))
                     .collect()
             })
@@ -1114,21 +1281,18 @@ impl VaultManager {
     }
 
     pub fn search_items(&self, query: &str, category: Option<&str>) -> Vec<VaultItem> {
-        let is_unlocked = self.is_unlocked();
-        if !is_unlocked {
-            if let Some(daemon_resp) = crate::daemon::send_daemon_request(&serde_json::json!({
-                "action": "search",
-                "query": query,
-                "category": category
-            })) {
-                if let Ok(items) = serde_json::from_value::<Vec<VaultItem>>(daemon_resp) {
-                    return items;
-                }
-            }
-            return Vec::new();
-        }
-        let items = self.decrypted_items.read().unwrap().clone();
-        self.search(&items, query, category)
+        self.search_items_by_state(query, category, false)
+    }
+
+    /// Search only within the requested state: active (`trash == false`) or
+    /// Trash (`trash == true`).
+    pub fn search_items_by_state(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        trash: bool,
+    ) -> Vec<VaultItem> {
+        self.search(&self.get_items_by_state(trash), query, category)
     }
 
     pub fn resolve_attachment_key(
@@ -1136,6 +1300,10 @@ impl VaultManager {
         item_id: &str,
         attachment_id: &str,
     ) -> Option<SymmetricCryptoKey> {
+        let unlocked = self.is_unlocked.read().ok()?;
+        if !*unlocked {
+            return None;
+        }
         let user_key_guard = self.user_key.read().ok()?;
         let user_key = user_key_guard.as_ref()?;
         let storage_guard = self.storage.read().ok()?;
@@ -1158,6 +1326,14 @@ impl VaultManager {
             .ciphers
             .iter()
             .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(item_id))?;
+        // A soft-deleted cipher must never yield an attachment key.
+        if cipher
+            .get("deletedDate")
+            .or_else(|| cipher.get("DeletedDate"))
+            .is_some_and(|v| !v.is_null())
+        {
+            return None;
+        }
 
         let org_id_opt = cipher.get("organizationId").and_then(|v| v.as_str());
         let mut base_key = user_key.clone();
@@ -1231,166 +1407,11 @@ impl VaultManager {
     }
 
     pub fn get_user_key(&self) -> Option<SymmetricCryptoKey> {
-        self.user_key.read().ok().and_then(|k| k.clone())
-    }
-
-    pub fn create_ssh_key(
-        &self,
-        name: &str,
-        ssh_key_data: &crate::ssh::GeneratedSshKey,
-        notes: Option<&str>,
-        folder_id: Option<&str>,
-        user_key: &SymmetricCryptoKey,
-    ) -> Result<VaultItem, String> {
-        self.create_ssh_key_with_client(name, ssh_key_data, notes, folder_id, user_key, None)
-    }
-
-    pub fn create_ssh_key_with_client(
-        &self,
-        name: &str,
-        ssh_key_data: &crate::ssh::GeneratedSshKey,
-        notes: Option<&str>,
-        folder_id: Option<&str>,
-        user_key: &SymmetricCryptoKey,
-        client_context: Option<&ClientContext>,
-    ) -> Result<VaultItem, String> {
-        let storage = self.storage_mgr.load();
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let initial_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| storage.access_token.clone());
-
-        let active_token = match initial_token {
-            Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
-            Some(_) => {
-                crate::log_info!(
-                    "omawarden:vault",
-                    "Access token is expired for create_ssh_key, attempting renewal..."
-                );
-                self.renew_session_with_client(client_context)?
-            }
-            None => self.renew_session_with_client(client_context)?,
-        };
-
-        let enc_name = user_key
-            .encrypt_string(name)
-            .map_err(|e| format!("Failed to encrypt item name: {:?}", e))?;
-
-        let enc_notes = if let Some(n) = notes.filter(|s| !s.is_empty()) {
-            Some(
-                user_key
-                    .encrypt_string(n)
-                    .map_err(|e| format!("Failed to encrypt notes: {:?}", e))?,
-            )
-        } else {
-            None
-        };
-
-        let enc_private_key = user_key
-            .encrypt_string(&ssh_key_data.private_key)
-            .map_err(|e| format!("Failed to encrypt private key: {:?}", e))?;
-
-        let enc_public_key = user_key
-            .encrypt_string(&ssh_key_data.public_key)
-            .map_err(|e| format!("Failed to encrypt public key: {:?}", e))?;
-
-        let enc_fingerprint = user_key
-            .encrypt_string(&ssh_key_data.fingerprint)
-            .map_err(|e| format!("Failed to encrypt fingerprint: {:?}", e))?;
-
-        let payload = json!({
-            "type": 5,
-            "folderId": folder_id,
-            "organizationId": null,
-            "name": enc_name,
-            "notes": enc_notes,
-            "favorite": false,
-            "reprompt": 0,
-            "sshKey": {
-                "privateKey": enc_private_key,
-                "publicKey": enc_public_key,
-                "keyFingerprint": enc_fingerprint,
-            }
-        });
-
-        let s_url = if !storage.server_url.is_empty() {
-            &storage.server_url
-        } else {
-            &self.server_url
-        };
-        let id_url = self
-            .identity_url
-            .as_deref()
-            .or(storage.identity_url.as_deref());
-        let client = BitwardenApiClient::with_options(s_url, id_url, client_context);
-
-        let created_cipher = match client.create_cipher(&active_token, &payload) {
-            Ok(c) => c,
-            Err(ApiError::HttpStatus(code, _))
-                if code == reqwest::StatusCode::UNAUTHORIZED
-                    || code == reqwest::StatusCode::FORBIDDEN =>
-            {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP {} creating SSH key. Attempting session renewal...",
-                    code
-                );
-                let renewed = self.renew_session_with_client(client_context)?;
-                client
-                    .create_cipher(&renewed, &payload)
-                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
-            }
-            Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
-                crate::log_warn!(
-                    "omawarden:vault",
-                    "HTTP 401/403 creating SSH key. Attempting session renewal..."
-                );
-                let renewed = self.renew_session_with_client(client_context)?;
-                client
-                    .create_cipher(&renewed, &payload)
-                    .map_err(|e| format!("Failed to create SSH key on server: {:?}", e))?
-            }
-            Err(e) => return Err(format!("Failed to create SSH key on server: {:?}", e)),
-        };
-
-        // Update local storage data.json
-        let mut updated_storage = self.storage_mgr.load();
-        updated_storage.ciphers.push(created_cipher.clone());
-        let _ = self.storage_mgr.save(&updated_storage);
-
-        // Decrypt the created item into a VaultItem
-        let decrypted_items = decrypt_sync_ciphers_with_context(
-            &[created_cipher],
-            &updated_storage.folders,
-            &updated_storage.organizations,
-            user_key,
-            updated_storage.enc_private_key.as_deref(),
-        );
-
-        let decrypted_item = decrypted_items
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Failed to decrypt newly created cipher item".to_string())?;
-
-        // Update in-memory items if unlocked
-        if let Ok(mut items) = self.decrypted_items.write() {
-            items.push(decrypted_item.clone());
+        let unlocked = self.is_unlocked.read().ok()?;
+        if !*unlocked {
+            return None;
         }
-
-        crate::log_info!(
-            "omawarden:vault",
-            "Successfully created and stored SSH key '{}' ({})",
-            decrypted_item.name,
-            decrypted_item.id
-        );
-
-        Ok(decrypted_item)
+        self.user_key.read().ok().and_then(|k| k.clone())
     }
 
     pub fn find_item(&self, query: &str, category: Option<&str>) -> Option<VaultItem> {
@@ -1442,34 +1463,224 @@ impl VaultManager {
         None
     }
 
+    pub fn resolve_cipher_target_candidates(
+        &self,
+        target: &str,
+    ) -> Result<CipherTargetResolution, String> {
+        self.resolve_cipher_target_candidates_by_state(target, false)
+    }
+
+    /// Resolve `<target>` exclusively against one vault state. Trash-scoped
+    /// resolution never sees active items, so a trashed cipher sharing a name
+    /// with an active one stays unambiguous.
+    pub fn resolve_cipher_target_candidates_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<CipherTargetResolution, String> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err("Target cipher cannot be empty.".to_string());
+        }
+
+        let items = self.get_items_by_state(trash);
+        if let Some(resolution) = Self::match_cipher_candidates(&items, trimmed) {
+            return Ok(resolution);
+        }
+
+        if trash {
+            // Cross-state diagnostic: an active cipher with this target was
+            // never trashed, so it cannot be restored.
+            let active = self.get_items_by_state(false);
+            if let Some(CipherTargetResolution::Exact(item)) =
+                Self::match_cipher_candidates(&active, trimmed)
+            {
+                return Ok(CipherTargetResolution::NotFound(format!(
+                    "Cipher '{}' is not in the trash.",
+                    item.name
+                )));
+            }
+            return Ok(CipherTargetResolution::NotFound(format!(
+                "Cipher '{}' not found in trash.",
+                target
+            )));
+        }
+
+        Ok(CipherTargetResolution::NotFound(format!(
+            "Cipher '{}' not found in vault.",
+            target
+        )))
+    }
+
+    /// Active-scoped resolution for `delete` / `edit` mutations. When the
+    /// target is missing from the active vault but present in the Trash,
+    /// returns an actionable cross-state diagnostic instead of "not found".
+    pub fn resolve_cipher_target_candidates_for_active_mutation(
+        &self,
+        target: &str,
+        purpose: &str,
+    ) -> Result<CipherTargetResolution, String> {
+        let resolution = self.resolve_cipher_target_candidates_by_state(target, false)?;
+        if !matches!(resolution, CipherTargetResolution::NotFound(_)) {
+            return Ok(resolution);
+        }
+
+        let trashed = self.get_items_by_state(true);
+        if let Some(CipherTargetResolution::Exact(item)) =
+            Self::match_cipher_candidates(&trashed, target.trim())
+        {
+            let message = match purpose {
+                "edit" | "editing" => format!(
+                    "Cipher '{}' is in the trash and cannot be edited. Restore it first with 'omawarden vault restore'.",
+                    item.name
+                ),
+                _ => format!(
+                    "Cipher '{}' is already in the trash. Use --trash to permanently delete it or 'omawarden vault restore' to restore it.",
+                    item.name
+                ),
+            };
+            return Ok(CipherTargetResolution::NotFound(message));
+        }
+
+        Ok(resolution)
+    }
+
+    fn match_cipher_candidates(
+        items: &[VaultItem],
+        trimmed: &str,
+    ) -> Option<CipherTargetResolution> {
+        // 1. Exact ID or 32-character hex ID match
+        let is_id_match = |item_id: &str, target_val: &str| -> bool {
+            if item_id.eq_ignore_ascii_case(target_val) {
+                return true;
+            }
+            if target_val.len() == 32 && item_id.len() == 36 && !target_val.contains('-') {
+                let stripped: String = item_id.chars().filter(|&c| c != '-').collect();
+                return stripped.eq_ignore_ascii_case(target_val);
+            }
+            if target_val.len() == 36 && item_id.len() == 32 && target_val.contains('-') {
+                let stripped: String = target_val.chars().filter(|&c| c != '-').collect();
+                return item_id.eq_ignore_ascii_case(&stripped);
+            }
+            false
+        };
+
+        let id_matches: Vec<_> = items
+            .iter()
+            .filter(|i| is_id_match(&i.id, trimmed))
+            .cloned()
+            .collect();
+        if id_matches.len() == 1 {
+            return Some(CipherTargetResolution::Exact(Box::new(
+                id_matches[0].clone(),
+            )));
+        }
+        if id_matches.len() > 1 {
+            return Some(CipherTargetResolution::Ambiguous(id_matches));
+        }
+
+        // 2. Exact Name match (case-insensitive)
+        let exact_name_matches: Vec<_> = items
+            .iter()
+            .filter(|i| i.name.eq_ignore_ascii_case(trimmed))
+            .cloned()
+            .collect();
+        if exact_name_matches.len() == 1 {
+            return Some(CipherTargetResolution::Exact(Box::new(
+                exact_name_matches[0].clone(),
+            )));
+        }
+        if exact_name_matches.len() > 1 {
+            return Some(CipherTargetResolution::Ambiguous(exact_name_matches));
+        }
+
+        // 3. ID prefix match (unique prefix, at least 4 characters)
+        let is_id_prefix_match = |item_id: &str, target_val: &str| -> bool {
+            if target_val.len() < 4 {
+                return false;
+            }
+            if item_id
+                .to_lowercase()
+                .starts_with(&target_val.to_lowercase())
+            {
+                return true;
+            }
+            let stripped_target: String = target_val.chars().filter(|&c| c != '-').collect();
+            let stripped_id: String = item_id.chars().filter(|&c| c != '-').collect();
+            stripped_target.len() >= 4
+                && stripped_id
+                    .to_lowercase()
+                    .starts_with(&stripped_target.to_lowercase())
+        };
+
+        let id_prefix_matches: Vec<_> = items
+            .iter()
+            .filter(|i| is_id_prefix_match(&i.id, trimmed))
+            .cloned()
+            .collect();
+        if id_prefix_matches.len() == 1 {
+            return Some(CipherTargetResolution::Exact(Box::new(
+                id_prefix_matches[0].clone(),
+            )));
+        }
+        if id_prefix_matches.len() > 1 {
+            return Some(CipherTargetResolution::Ambiguous(id_prefix_matches));
+        }
+
+        // 4. Substring (fuzzy) match (case-insensitive)
+        let lower = trimmed.to_lowercase();
+        let sub_matches: Vec<_> = items
+            .iter()
+            .filter(|i| i.name.to_lowercase().contains(&lower))
+            .cloned()
+            .collect();
+        if sub_matches.len() == 1 {
+            return Some(CipherTargetResolution::Exact(Box::new(
+                sub_matches[0].clone(),
+            )));
+        }
+        if sub_matches.len() > 1 {
+            return Some(CipherTargetResolution::Ambiguous(sub_matches));
+        }
+
+        None
+    }
+
+    pub fn resolve_cipher_target(&self, target: &str) -> Result<VaultItem, String> {
+        self.resolve_cipher_target_by_state(target, false)
+    }
+
+    /// Resolve a single cipher in the requested state, or fail closed with a
+    /// candidate list when the target is ambiguous.
+    pub fn resolve_cipher_target_by_state(
+        &self,
+        target: &str,
+        trash: bool,
+    ) -> Result<VaultItem, String> {
+        match self.resolve_cipher_target_candidates_by_state(target, trash)? {
+            CipherTargetResolution::Exact(item) => Ok(*item),
+            CipherTargetResolution::Ambiguous(candidates) => {
+                let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+                Err(format!(
+                    "Multiple ciphers matched '{}': [{}]. Specify by ID or narrower name.",
+                    target,
+                    ids.join(", ")
+                ))
+            }
+            CipherTargetResolution::NotFound(err) => Err(err),
+        }
+    }
+
     pub fn find_ssh_key(&self, id_or_name: &str) -> Option<VaultItem> {
         self.find_item(id_or_name, Some("ssh_key"))
     }
 
     pub fn get_status(&self) -> Value {
-        let is_unlocked = self.is_unlocked();
         let fresh_storage = self.storage_mgr.load();
-        let s_url = if !fresh_storage.server_url.is_empty() {
-            &fresh_storage.server_url
-        } else {
-            &self.server_url
-        };
-        let active_token = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_ACCESS_TOKEN)
-            .or_else(|| self.keyring_mgr.get_session(s_url))
-            .or_else(|| fresh_storage.access_token.clone());
-
-        let has_refresh = self
-            .keyring_mgr
-            .get_token(s_url, crate::keyring::KIND_REFRESH_TOKEN)
-            .is_some()
-            || fresh_storage.refresh_token.is_some();
-        let has_api_secret = fresh_storage
-            .client_id
-            .as_ref()
-            .and_then(|cid| self.keyring_mgr.get_api_secret(s_url, cid))
-            .is_some();
+        let keyring = self.keyring_mgr.for_storage(&fresh_storage);
+        let active_token = keyring.access_token();
+        let has_refresh = keyring.refresh_token().is_some();
+        let has_api_secret = keyring.api_secret().is_some();
 
         let has_valid_token = if let Some(ref tok) = active_token {
             !crate::auth::is_jwt_expired(tok) || has_refresh || has_api_secret
@@ -1477,11 +1688,33 @@ impl VaultManager {
             has_refresh || has_api_secret
         };
 
-        let status = if !has_valid_token {
-            "unauthenticated"
-        } else if is_unlocked {
+        // A lock increments the generation under this same write lock.
+        let (is_unlocked, generation, count) = self
+            .is_unlocked
+            .read()
+            .map(|unlocked| {
+                let current = *unlocked
+                    && fresh_storage.scoped_credential_id().is_some()
+                    && self
+                        .storage
+                        .read()
+                        .is_ok_and(|s| s.same_active_slot(&fresh_storage));
+                let count = if current {
+                    self.decrypted_items
+                        .read()
+                        .map(|items| items.iter().filter(|i| i.deleted_at.is_none()).count())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                (current, self.lock_generation(), count)
+            })
+            .unwrap_or_default();
+        let status = if is_unlocked {
             "unlocked"
-        } else if fresh_storage.enc_user_key.is_some() {
+        } else if fresh_storage.scoped_credential_id().is_some()
+            && (has_valid_token || fresh_storage.enc_user_key.is_some())
+        {
             "locked"
         } else {
             "unauthenticated"
@@ -1493,10 +1726,12 @@ impl VaultManager {
             "server_url": fresh_storage.server_url,
             "user_email": fresh_storage.user_email,
             "user_id": fresh_storage.user_id,
+            "credential_id": fresh_storage.credential_id,
             "last_sync": fresh_storage.last_sync,
-            "is_unlocked": is_unlocked && has_valid_token,
+            "is_unlocked": is_unlocked,
+            "lock_generation": generation.to_string(),
             "has_session": has_valid_token,
-            "items_count": if has_valid_token { self.decrypted_items.read().map(|i| i.len()).unwrap_or(0) } else { 0 },
+            "items_count": count,
         })
     }
 
@@ -1560,6 +1795,12 @@ impl VaultManager {
                 .get("updated_at")
                 .or_else(|| raw.get("revisionDate"))
                 .or_else(|| raw.get("revision_date"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let deleted_at = raw
+                .get("deletedDate")
+                .or_else(|| raw.get("DeletedDate"))
+                .or_else(|| raw.get("deleted_at"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
@@ -1627,6 +1868,7 @@ impl VaultManager {
                 favorite,
                 created_at,
                 updated_at,
+                deleted_at,
                 folder_id,
                 folder_name: None,
                 organization_id,
@@ -1926,6 +2168,7 @@ pub(crate) mod tests {
         let storage = VaultStorage {
             server_url: "https://vault.example.com".to_string(),
             user_email: email.to_string(),
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             kdf: Some(0),
             kdf_iterations: Some(600_000),
             enc_user_key: Some(enc_user_key),
@@ -2002,6 +2245,24 @@ pub(crate) mod tests {
         vault.unlock("master-pw").unwrap();
         vault.lock();
         assert!(!vault.quick_unlock_available());
+    }
+
+    #[test]
+    fn quick_unlock_wipes_the_key_when_the_cache_has_no_scoped_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = seeded_vault(dir.path(), "master-pw");
+        let mut storage = vault.storage_mgr.load();
+        vault.unlock("master-pw").unwrap();
+        assert!(vault.soft_lock());
+
+        storage.credential_id = None;
+        vault.storage_mgr.save(&storage).unwrap();
+        let result = vault.quick_unlock_restore();
+        assert!(result.unwrap_err().contains("Sign in again"));
+        assert!(!vault.quick_unlock_available());
+        assert!(!vault.is_unlocked());
+        assert!(vault.user_key.read().unwrap().is_none());
+        assert!(vault.get_items().is_empty());
     }
 
     #[test]
@@ -2503,13 +2764,17 @@ pub(crate) mod tests {
             "unauthenticated"
         );
 
+        let cycle = st["lock_generation"].as_str().unwrap();
+        assert_eq!(vault_mgr.get_status()["lock_generation"], cycle);
+        *vault_mgr.is_unlocked.write().unwrap() = true;
         vault_mgr.lock();
+        assert_ne!(vault_mgr.get_status()["lock_generation"], cycle);
         assert!(!vault_mgr.is_unlocked());
         let sync_err = vault_mgr.sync();
         assert!(sync_err.is_err());
         assert_eq!(
             sync_err.unwrap_err(),
-            "Session token missing. Please log in."
+            "Please log in again to use account-scoped credentials."
         );
     }
 
@@ -2518,12 +2783,15 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault_sync_locked.json");
         let storage_mgr = StorageManager::new(path.clone());
-        let legacy_json = serde_json::json!({
-            "access_token": "fake_test_token"
+        let fixture = serde_json::json!({
+            "server_url": "http://127.0.0.1:9",
+            "user_email": "fixture@example.invalid",
+            "credential_id": crate::test_support::CREDENTIAL_ID,
         });
-        std::fs::write(&path, legacy_json.to_string()).unwrap();
-
-        let dummy_keyring = KeyringManager::new("/nonexistent-keyring");
+        std::fs::write(&path, fixture.to_string()).unwrap();
+        let script = dir.path().join("secret-tool");
+        crate::write_test_executable(&script, "#!/bin/sh\necho fake_test_token\n");
+        let dummy_keyring = KeyringManager::new(script.to_str().unwrap());
         let vault_mgr =
             VaultManager::new("http://127.0.0.1:9", Some(storage_mgr), Some(dummy_keyring));
         assert!(!vault_mgr.is_unlocked());
@@ -2595,6 +2863,116 @@ pub(crate) mod tests {
 
         let not_found_cat = vault_mgr.find_item("Deploy Key", Some("login"));
         assert!(not_found_cat.is_none());
+    }
+
+    #[test]
+    fn test_resolve_cipher_target() {
+        let raw_items = vec![
+            json!({
+                "id": "c7694fca-443b-417f-94ad-7be20b694406",
+                "name": "GitHub Account",
+                "type": 1,
+            }),
+            json!({
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "name": "GitLab Personal",
+                "type": 1,
+            }),
+            json!({
+                "id": "cccc1111-cccc-cccc-cccc-cccccccccccc",
+                "name": "Duplicate Name",
+                "type": 1,
+            }),
+            json!({
+                "id": "cccc2222-dddd-dddd-dddd-dddddddddddd",
+                "name": "Duplicate Name",
+                "type": 1,
+            }),
+        ];
+        let vault_mgr = VaultManager::new("http://127.0.0.1:9", None, None);
+        let items = vault_mgr.parse_raw_items(&raw_items);
+        *vault_mgr.decrypted_items.write().unwrap() = items;
+        *vault_mgr.is_unlocked.write().unwrap() = true;
+
+        // 1. Exact 36-char UUID match
+        let found = vault_mgr
+            .resolve_cipher_target("c7694fca-443b-417f-94ad-7be20b694406")
+            .unwrap();
+        assert_eq!(found.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 2. 32-char hex match (without hyphens)
+        let found_hex = vault_mgr
+            .resolve_cipher_target("c7694fca443b417f94ad7be20b694406")
+            .unwrap();
+        assert_eq!(found_hex.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 3. Exact name match (case-insensitive)
+        let found_name = vault_mgr.resolve_cipher_target("github account").unwrap();
+        assert_eq!(found_name.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 4. Unique ID prefix match (with and without hyphens)
+        let found_prefix = vault_mgr.resolve_cipher_target("c7694fca").unwrap();
+        assert_eq!(found_prefix.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        let found_prefix_uuid = vault_mgr.resolve_cipher_target("c7694fca-443b").unwrap();
+        assert_eq!(found_prefix_uuid.id, "c7694fca-443b-417f-94ad-7be20b694406");
+
+        // 5. Substring (fuzzy) match
+        let found_sub = vault_mgr.resolve_cipher_target("gitlab").unwrap();
+        assert_eq!(found_sub.id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+
+        // 6. Ambiguous exact name match fails closed
+        let err_ambig_exact = vault_mgr
+            .resolve_cipher_target("Duplicate Name")
+            .unwrap_err();
+        assert!(err_ambig_exact.contains("Multiple ciphers matched 'Duplicate Name'"));
+
+        // 7. Ambiguous ID prefix match fails closed
+        let err_ambig_prefix = vault_mgr.resolve_cipher_target("cccc").unwrap_err();
+        assert!(err_ambig_prefix.contains("Multiple ciphers matched 'cccc'"));
+
+        // 8. Ambiguous substring match fails closed ("git" matches GitHub Account and GitLab Personal)
+        let err_ambig_sub = vault_mgr.resolve_cipher_target("git").unwrap_err();
+        assert!(err_ambig_sub.contains("Multiple ciphers matched 'git'"));
+
+        // 9. Not found fails closed
+        let err_not_found = vault_mgr.resolve_cipher_target("nonexistent").unwrap_err();
+        assert_eq!(err_not_found, "Cipher 'nonexistent' not found in vault.");
+
+        // 10. Empty target fails closed
+        let err_empty = vault_mgr.resolve_cipher_target("   ").unwrap_err();
+        assert_eq!(err_empty, "Target cipher cannot be empty.");
+
+        // 11. Direct verify CipherTargetResolution variants
+        match vault_mgr
+            .resolve_cipher_target_candidates("GitHub Account")
+            .unwrap()
+        {
+            CipherTargetResolution::Exact(item) => {
+                assert_eq!(item.id, "c7694fca-443b-417f-94ad-7be20b694406");
+            }
+            _ => panic!("Expected Exact"),
+        }
+
+        match vault_mgr
+            .resolve_cipher_target_candidates("Duplicate Name")
+            .unwrap()
+        {
+            CipherTargetResolution::Ambiguous(candidates) => {
+                assert_eq!(candidates.len(), 2);
+            }
+            _ => panic!("Expected Ambiguous"),
+        }
+
+        match vault_mgr
+            .resolve_cipher_target_candidates("does-not-exist")
+            .unwrap()
+        {
+            CipherTargetResolution::NotFound(msg) => {
+                assert!(msg.contains("not found in vault"));
+            }
+            _ => panic!("Expected NotFound"),
+        }
     }
 
     #[test]
@@ -2719,27 +3097,22 @@ esac
         let client_id = "user.reauth-test-id";
         let client_secret = "reauth-secret-val";
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
-
         // Store an EXPIRED access token in Keyring
         let now = chrono::Utc::now().timestamp();
         let past_payload = serde_json::json!({ "exp": now - 300 });
         let past_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&past_payload).unwrap());
         let expired_token = format!("eyJhbGciOiJSUzI1NiJ9.{}.sig", past_b64);
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_ACCESS_TOKEN,
-            &expired_token
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             server_url: server_url.clone(),
             user_email: "reauth@example.com".to_string(),
             client_id: Some(client_id.to_string()),
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, client_secret));
+        assert!(keys.store_token(crate::keyring::KIND_ACCESS_TOKEN, &expired_token));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -2759,7 +3132,7 @@ esac
 
         // Verify the new token is stored in Keyring
         assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_ACCESS_TOKEN),
+            keys.access_token(),
             Some("renewed_access_token_abc123".to_string())
         );
         // Verify disk storage remains zero-plaintext
@@ -2779,7 +3152,7 @@ esac
         let server_url = format!("http://{}", listener.local_addr().unwrap());
 
         let server_handle = thread::spawn(move || {
-            for stream in listener.incoming().take(1) {
+            for stream in listener.incoming().take(2) {
                 let mut stream = stream.unwrap();
                 let mut buf = [0u8; 4096];
                 let n = stream.read(&mut buf).unwrap();
@@ -2864,23 +3237,18 @@ esac
         let client_id = "user.fail-test";
         let client_secret = "secret-val-to-retain";
 
-        // Store API secret in Keyring
-        assert!(mock_keyring.store_api_secret(&server_url, client_id, client_secret));
-
-        // Set refresh token in Keyring and storage
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "revoked_ref_token"
-        ));
-
         let storage = VaultStorage {
+            credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
+            client_id: Some(client_id.into()),
             server_url: server_url.clone(),
             user_email: "fail@example.com".to_string(),
             refresh_token: Some("revoked_ref_token".to_string()),
             ..Default::default()
         };
         storage_mgr.save(&storage).unwrap();
+        let keys = mock_keyring.for_storage(&storage);
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, client_secret));
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "revoked_ref_token"));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -2899,20 +3267,11 @@ esac
         let _ = server_handle.join();
 
         // Keyring tokens purged
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_ACCESS_TOKEN),
-            None
-        );
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_REFRESH_TOKEN),
-            None
-        );
+        assert_eq!(keys.access_token(), None);
+        assert_eq!(keys.refresh_token(), None);
 
         // API secret is preserved
-        assert_eq!(
-            mock_keyring.get_api_secret(&server_url, client_id),
-            Some(client_secret.to_string())
-        );
+        assert_eq!(keys.api_secret(), Some(client_secret.to_string()));
 
         // Storage tokens purged
         let fresh_storage = storage_mgr.load();
@@ -2985,19 +3344,16 @@ esac
 
         let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
 
-        // Set refresh token
-        assert!(mock_keyring.store_token(
-            "http://127.0.0.1:9",
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "valid_ref_token"
-        ));
-
         let legacy_json = serde_json::json!({
+            "credential_id": crate::test_support::CREDENTIAL_ID,
             "server_url": "http://127.0.0.1:9",
             "user_email": "offline@example.com",
             "refresh_token": "valid_ref_token"
         });
         fs::write(&storage_path, legacy_json.to_string()).unwrap();
+        let stored = storage_mgr.load();
+        let keys = mock_keyring.for_storage(&stored);
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
 
         let vault_mgr = VaultManager::new(
             "http://127.0.0.1:9",
@@ -3011,10 +3367,7 @@ esac
         assert!(res.unwrap_err().contains("Network error"));
 
         // Keyring refresh token NOT purged
-        assert_eq!(
-            mock_keyring.get_token("http://127.0.0.1:9", crate::keyring::KIND_REFRESH_TOKEN),
-            Some("valid_ref_token".to_string())
-        );
+        assert_eq!(keys.refresh_token(), Some("valid_ref_token".to_string()));
 
         // Storage tokens NOT purged
         let fresh_storage = storage_mgr.load();
@@ -3112,21 +3465,18 @@ esac
 
         let mock_keyring = KeyringManager::new(script_path.to_str().unwrap());
 
-        // Set refresh token and api secret
-        assert!(mock_keyring.store_token(
-            &server_url,
-            crate::keyring::KIND_REFRESH_TOKEN,
-            "valid_ref_token"
-        ));
-        assert!(mock_keyring.store_api_secret(&server_url, "test_client_id", "test_secret"));
-
         let legacy_json = serde_json::json!({
+            "credential_id": crate::test_support::CREDENTIAL_ID,
             "server_url": server_url.clone(),
             "user_email": "gateway502@example.com",
             "client_id": "test_client_id",
             "refresh_token": "valid_ref_token"
         });
         fs::write(&storage_path, legacy_json.to_string()).unwrap();
+        let stored = storage_mgr.load();
+        let keys = mock_keyring.for_storage(&stored);
+        assert!(keys.store_token(crate::keyring::KIND_REFRESH_TOKEN, "valid_ref_token"));
+        assert!(keys.store_token(crate::keyring::KIND_API_SECRET, "test_secret"));
 
         let vault_mgr = VaultManager::new(
             &server_url,
@@ -3140,14 +3490,8 @@ esac
         assert!(res.unwrap_err().contains("Network error"));
 
         // Keyring refresh token and api secret NOT purged
-        assert_eq!(
-            mock_keyring.get_token(&server_url, crate::keyring::KIND_REFRESH_TOKEN),
-            Some("valid_ref_token".to_string())
-        );
-        assert_eq!(
-            mock_keyring.get_api_secret(&server_url, "test_client_id"),
-            Some("test_secret".to_string())
-        );
+        assert_eq!(keys.refresh_token(), Some("valid_ref_token".to_string()));
+        assert_eq!(keys.api_secret(), Some("test_secret".to_string()));
 
         // Storage tokens NOT purged
         let fresh_storage = storage_mgr.load();
