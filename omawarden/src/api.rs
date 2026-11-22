@@ -402,6 +402,13 @@ pub fn get_device_identifier() -> String {
 
 pub const BITWARDEN_COMPAT_VERSION: &str = "2026.7.0";
 pub const BITWARDEN_CLIENT_NAME: &str = "desktop";
+/// Client identity header used specifically for `/accounts/prelogin`.
+/// Bitwarden US cloud's edge protection intercepts `bitwarden-client-name: desktop`
+/// with non-Electron User-Agents and returns a synthetic generic KDF default (600,000)
+/// instead of the account's actual KDF configuration. Overriding to `cli` (alongside
+/// `bitwarden-client-version`) reaches the real Identity backend while keeping the
+/// global `desktop` identity for authenticated endpoints.
+pub const BITWARDEN_PRELOGIN_CLIENT_NAME: &str = "cli";
 pub const BITWARDEN_DEVICE_TYPE: &str = "8";
 
 /// Client context metadata identifying the calling frontend application.
@@ -907,11 +914,20 @@ impl BitwardenApiClient {
         let fallback_url = format!("{}/accounts/prelogin", self.urls.api_url);
 
         let email_payload = json!({ "email": email.trim().to_lowercase() });
-        let mut resp = client.post(&primary_url).json(&email_payload).send();
+        let send_prelogin = |url: &str| {
+            client
+                .post(url)
+                .header("bitwarden-client-name", BITWARDEN_PRELOGIN_CLIENT_NAME)
+                .header("bitwarden-client-version", BITWARDEN_COMPAT_VERSION)
+                .json(&email_payload)
+                .send()
+        };
+
+        let mut resp = send_prelogin(&primary_url);
 
         if let Ok(ref r) = resp {
             if r.status() == reqwest::StatusCode::NOT_FOUND {
-                resp = client.post(&fallback_url).json(&email_payload).send();
+                resp = send_prelogin(&fallback_url);
             }
         }
 
@@ -3055,6 +3071,252 @@ mod tests {
         }
         let _ = handle.join();
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_client_prelogin_uses_cli_client_identity_for_real_kdf() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let captured_req = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured_req);
+
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let req_lower = req.to_lowercase();
+                *captured_clone.lock().unwrap() = req_lower.clone();
+
+                // Simulate Bitwarden US cloud edge behavior: desktop client identity gets
+                // generic 600,000 default, whereas cli + client version reaches the backend.
+                let has_cli = req_lower.contains("bitwarden-client-name: cli\r\n");
+                let has_desktop = req_lower.contains("bitwarden-client-name: desktop\r\n");
+                let has_version = req_lower.contains(&format!(
+                    "bitwarden-client-version: {}\r\n",
+                    BITWARDEN_COMPAT_VERSION
+                ));
+
+                let body = if has_cli && !has_desktop && has_version {
+                    r#"{"kdf":0,"kdfIterations":1000000,"kdfMemory":null,"kdfParallelism":null}"#
+                } else {
+                    r#"{"kdf":0,"kdfIterations":600000,"kdfMemory":null,"kdfParallelism":null}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("user@example.com").unwrap();
+        let _ = handle.join();
+
+        let req_lower = captured_req.lock().unwrap().clone();
+        assert_eq!(
+            req_lower.matches("bitwarden-client-name:").count(),
+            1,
+            "Expected exactly one bitwarden-client-name header, got:\n{}",
+            req_lower
+        );
+        assert!(
+            req_lower.contains("bitwarden-client-name: cli\r\n"),
+            "Expected prelogin to override bitwarden-client-name to cli, got:\n{}",
+            req_lower
+        );
+        assert_eq!(
+            req_lower.matches("bitwarden-client-version:").count(),
+            1,
+            "Expected exactly one bitwarden-client-version header, got:\n{}",
+            req_lower
+        );
+        assert_eq!(res.kdf, Some(0));
+        assert_eq!(res.kdf_iterations, Some(1_000_000));
+    }
+
+    #[test]
+    fn test_client_prelogin_fallback_preserves_cli_client_identity() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let requests_clone = Arc::clone(&requests);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                requests_clone.lock().unwrap().push(req.clone());
+
+                if req.contains("post /identity/accounts/prelogin") {
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("post /api/accounts/prelogin") {
+                    let body = if req.contains("bitwarden-client-name: cli\r\n")
+                        && !req.contains("bitwarden-client-name: desktop\r\n")
+                    {
+                        r#"{"kdf":0,"kdfIterations":1000000}"#
+                    } else {
+                        r#"{"kdf":0,"kdfIterations":600000}"#
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("fallback@example.com").unwrap();
+        let _ = handle.join();
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        for req in captured.iter() {
+            assert!(
+                req.contains("bitwarden-client-name: cli\r\n"),
+                "Expected cli client identity on prelogin request, got:\n{}",
+                req
+            );
+            assert!(
+                !req.contains("bitwarden-client-name: desktop\r\n"),
+                "Unexpected desktop client identity on prelogin request, got:\n{}",
+                req
+            );
+        }
+        assert_eq!(res.kdf_iterations, Some(1_000_000));
+    }
+
+    #[test]
+    fn test_login_password_non_default_kdf_uses_cli_prelogin_and_desktop_token() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let email = "user@example.com";
+        let password = "correct-horse-battery-staple";
+        let account_iterations = 100_001u32;
+
+        let expected_master_key = derive_master_key(
+            email,
+            password,
+            KdfType::Pbkdf2Sha256,
+            account_iterations,
+            None,
+            None,
+        )
+        .unwrap();
+        let expected_password_hash = derive_master_password_hash(&expected_master_key, password);
+
+        // Stretch master key via HKDF-SHA256 (matching SymmetricCryptoKey::decrypt_with_master_key)
+        let hkdf = hkdf::Hkdf::<sha2::Sha256>::from_prk(expected_master_key.as_slice()).unwrap();
+        let mut stretched = [0u8; 64];
+        hkdf.expand(b"enc", &mut stretched[..32]).unwrap();
+        hkdf.expand(b"mac", &mut stretched[32..]).unwrap();
+        let stretched_key = SymmetricCryptoKey::from_raw_bytes(&stretched).unwrap();
+        let raw_user_key = vec![0x42u8; 64];
+        let enc_user_key = stretched_key.encrypt(&raw_user_key).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let token_headers = Arc::new(Mutex::new(String::new()));
+        let token_headers_clone = Arc::clone(&token_headers);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let req_lower = req.to_lowercase();
+
+                if req_lower.contains("post /identity/accounts/prelogin") {
+                    let iterations = if req_lower.contains("bitwarden-client-name: cli\r\n")
+                        && !req_lower.contains("bitwarden-client-name: desktop\r\n")
+                    {
+                        account_iterations
+                    } else {
+                        600_000
+                    };
+                    let body = format!(r#"{{"kdf":0,"kdfIterations":{}}}"#, iterations);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req_lower.contains("post /identity/connect/token") {
+                    *token_headers_clone.lock().unwrap() = req_lower.clone();
+                    let body_part = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                    let submitted_pw = url::form_urlencoded::parse(body_part.as_bytes())
+                        .find(|(k, _)| k == "password")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap_or_default();
+
+                    if submitted_pw == expected_password_hash {
+                        let body = serde_json::json!({
+                            "access_token": "test-access-token",
+                            "expires_in": 3600,
+                            "token_type": "Bearer",
+                            "Key": enc_user_key,
+                            "Kdf": 0,
+                            "KdfIterations": account_iterations
+                        })
+                        .to_string();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    } else {
+                        let body = r#"{"error":"invalid_grant","error_description":"Invalid username, email, or master password."}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let (token_resp, _user_key) = client
+            .login_password(email, password, None, None, None)
+            .expect("Expected login_password to succeed with non-default KDF");
+        let _ = handle.join();
+
+        assert_eq!(token_resp.kdf_iterations, Some(account_iterations));
+        let token_req = token_headers.lock().unwrap();
+        assert!(
+            token_req.contains("bitwarden-client-name: desktop\r\n"),
+            "Expected /connect/token to preserve desktop client identity, got:\n{}",
+            token_req
+        );
     }
 
     #[test]
