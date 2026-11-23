@@ -20,7 +20,8 @@ pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub(crate) struct CredentialSlot {
+#[doc(hidden)]
+pub struct CredentialSlot {
     marker: PathBuf,
     name: String,
     _lease: File,
