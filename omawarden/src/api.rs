@@ -409,7 +409,57 @@ pub const BITWARDEN_CLIENT_NAME: &str = "desktop";
 /// `bitwarden-client-version`) reaches the real Identity backend while keeping the
 /// global `desktop` identity for authenticated endpoints.
 pub const BITWARDEN_PRELOGIN_CLIENT_NAME: &str = "cli";
-pub const BITWARDEN_DEVICE_TYPE: &str = "8";
+
+/// Platform-specific Bitwarden client identity metadata (`deviceType`, `deviceName`,
+/// and `User-Agent` OS token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformIdentity {
+    /// Bitwarden protocol `DeviceType` integer string:
+    /// `6` = Windows Desktop, `7` = macOS Desktop, `8` = Linux Desktop.
+    pub device_type: &'static str,
+    /// Normalized lowercase device name sent in `/connect/token` form payloads.
+    pub device_name: &'static str,
+    /// Human-readable OS token embedded in outbound HTTP `User-Agent` headers.
+    pub user_agent_os: &'static str,
+}
+
+impl PlatformIdentity {
+    pub const MACOS: Self = Self {
+        device_type: "7",
+        device_name: "macos",
+        user_agent_os: "macOS",
+    };
+
+    pub const WINDOWS: Self = Self {
+        device_type: "6",
+        device_name: "windows",
+        user_agent_os: "Windows",
+    };
+
+    pub const LINUX: Self = Self {
+        device_type: "8",
+        device_name: "linux",
+        user_agent_os: "Linux",
+    };
+
+    /// Resolves the Bitwarden platform identity for a Rust `std::env::consts::OS` identifier.
+    pub const fn for_os(os: &str) -> Self {
+        match os.as_bytes() {
+            b"macos" => Self::MACOS,
+            b"windows" => Self::WINDOWS,
+            _ => Self::LINUX,
+        }
+    }
+
+    /// Returns the Bitwarden platform identity for the compiled target operating system.
+    pub const fn current() -> Self {
+        Self::for_os(std::env::consts::OS)
+    }
+}
+
+pub const BITWARDEN_DEVICE_TYPE: &str = PlatformIdentity::current().device_type;
+pub const BITWARDEN_DEVICE_NAME: &str = PlatformIdentity::current().device_name;
+pub const BITWARDEN_USER_AGENT_OS: &str = PlatformIdentity::current().user_agent_os;
 
 /// Client context metadata identifying the calling frontend application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,24 +493,32 @@ impl ClientContext {
     }
 }
 
-/// Formats the User-Agent header string.
+/// Formats the User-Agent header string for the compiled target platform.
 ///
 /// When client metadata is present and valid, returns:
-/// `<ClientName>/<ClientVersion> (Omawarden/<engine_version>; Bitwarden/2026.7.0; Linux)`
+/// `<ClientName>/<ClientVersion> (Omawarden/<engine_version>; Bitwarden/2026.7.0; <OS>)`
 ///
 /// When client metadata is absent or invalid, returns:
-/// `Omawarden/<engine_version> (Bitwarden/2026.7.0; Linux)`
+/// `Omawarden/<engine_version> (Bitwarden/2026.7.0; <OS>)`
 pub fn format_user_agent(context: Option<&ClientContext>) -> String {
+    format_user_agent_for_platform(context, PlatformIdentity::current())
+}
+
+/// Formats the User-Agent header string for an explicit `PlatformIdentity`.
+pub fn format_user_agent_for_platform(
+    context: Option<&ClientContext>,
+    platform: PlatformIdentity,
+) -> String {
     let engine_version = env!("CARGO_PKG_VERSION");
     if let Some(ctx) = context.filter(|c| c.is_valid()) {
         format!(
-            "{}/{} (Omawarden/{}; Bitwarden/{}; Linux)",
-            ctx.name, ctx.version, engine_version, BITWARDEN_COMPAT_VERSION
+            "{}/{} (Omawarden/{}; Bitwarden/{}; {})",
+            ctx.name, ctx.version, engine_version, BITWARDEN_COMPAT_VERSION, platform.user_agent_os
         )
     } else {
         format!(
-            "Omawarden/{} (Bitwarden/{}; Linux)",
-            engine_version, BITWARDEN_COMPAT_VERSION
+            "Omawarden/{} (Bitwarden/{}; {})",
+            engine_version, BITWARDEN_COMPAT_VERSION, platform.user_agent_os
         )
     }
 }
@@ -791,7 +849,11 @@ pub(crate) fn http_client_builder(
     let mut default_headers = reqwest::header::HeaderMap::new();
     let ua_str = format_user_agent(client_context);
     let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
-        reqwest::header::HeaderValue::from_static("Omawarden (Bitwarden/2026.7.0; Linux)")
+        reqwest::header::HeaderValue::from_str(&format!(
+            "Omawarden (Bitwarden/{}; {})",
+            BITWARDEN_COMPAT_VERSION, BITWARDEN_USER_AGENT_OS
+        ))
+        .expect("static fallback User-Agent is valid ASCII")
     });
     default_headers.insert(reqwest::header::USER_AGENT, ua_val);
     default_headers.insert(
@@ -997,9 +1059,9 @@ impl BitwardenApiClient {
         form_params.insert("password", password_hash);
         form_params.insert("scope", "api offline_access".to_string());
         form_params.insert("client_id", "web".to_string());
-        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceType", BITWARDEN_DEVICE_TYPE.to_string());
         form_params.insert("deviceIdentifier", get_device_identifier());
-        form_params.insert("deviceName", "linux".to_string());
+        form_params.insert("deviceName", BITWARDEN_DEVICE_NAME.to_string());
 
         if let Some(otp) = new_device_otp {
             form_params.insert("newDeviceOtp", otp.trim().to_string());
@@ -1273,9 +1335,9 @@ impl BitwardenApiClient {
         form_params.insert("client_id", client_id.trim().to_string());
         form_params.insert("client_secret", client_secret.trim().to_string());
         form_params.insert("scope", "api".to_string());
-        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceType", BITWARDEN_DEVICE_TYPE.to_string());
         form_params.insert("deviceIdentifier", get_device_identifier());
-        form_params.insert("deviceName", "linux".to_string());
+        form_params.insert("deviceName", BITWARDEN_DEVICE_NAME.to_string());
 
         let mut resp = self.post_identity_connect_token(&form_params)?;
         let status = resp.status();
@@ -3457,14 +3519,18 @@ mod tests {
                     let _ = stream.write_all(resp.as_bytes());
                 } else if req.contains("POST /identity/connect/token") {
                     // Verify device parameters in request body
+                    let expected_type = format!("deviceType={}", BITWARDEN_DEVICE_TYPE);
+                    let expected_name = format!("deviceName={}", BITWARDEN_DEVICE_NAME);
                     assert!(
-                        req.contains("deviceType=8"),
-                        "Expected deviceType=8, got: {}",
+                        req.contains(&expected_type),
+                        "Expected {}, got: {}",
+                        expected_type,
                         req
                     );
                     assert!(
-                        req.contains("deviceName=linux"),
-                        "Expected deviceName=linux, got: {}",
+                        req.contains(&expected_name),
+                        "Expected {}, got: {}",
+                        expected_name,
                         req
                     );
                     assert!(
@@ -3974,13 +4040,14 @@ mod tests {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let expected_ua = format!(
-                    "user-agent: Omawarden/{} (Bitwarden/2026.7.0; Linux)",
-                    env!("CARGO_PKG_VERSION")
+                    "user-agent: Omawarden/{} (Bitwarden/2026.7.0; {})",
+                    env!("CARGO_PKG_VERSION"),
+                    BITWARDEN_USER_AGENT_OS
                 );
                 assert!(req.contains(&expected_ua));
                 assert!(req.contains("bitwarden-client-name: desktop"));
                 assert!(req.contains("bitwarden-client-version: 2026.7.0"));
-                assert!(req.contains("device-type: 8"));
+                assert!(req.contains(&format!("device-type: {}", BITWARDEN_DEVICE_TYPE)));
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
             }
         });
@@ -4038,7 +4105,10 @@ mod tests {
         let cli_ua = format_user_agent(None);
         assert_eq!(
             cli_ua,
-            format!("Omawarden/{} (Bitwarden/2026.7.0; Linux)", engine_ver)
+            format!(
+                "Omawarden/{} (Bitwarden/2026.7.0; {})",
+                engine_ver, BITWARDEN_USER_AGENT_OS
+            )
         );
 
         // UI mode (valid client context)
@@ -4047,8 +4117,8 @@ mod tests {
         assert_eq!(
             ui_ua,
             format!(
-                "Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; Linux)",
-                engine_ver
+                "Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                engine_ver, BITWARDEN_USER_AGENT_OS
             )
         );
 
@@ -4057,6 +4127,49 @@ mod tests {
         let fallback_ua = format_user_agent(Some(&invalid_ctx));
         assert_eq!(
             fallback_ua,
+            format!(
+                "Omawarden/{} (Bitwarden/2026.7.0; {})",
+                engine_ver, BITWARDEN_USER_AGENT_OS
+            )
+        );
+    }
+
+    #[test]
+    fn test_platform_identity_and_user_agent_per_os() {
+        let engine_ver = env!("CARGO_PKG_VERSION");
+        let ui_ctx = ClientContext::new("Omarchy_Bitwarden", "0.11.2");
+
+        let mac = PlatformIdentity::for_os("macos");
+        assert_eq!(mac.device_type, "7");
+        assert_eq!(mac.device_name, "macos");
+        assert_eq!(mac.user_agent_os, "macOS");
+        assert_eq!(
+            format_user_agent_for_platform(None, mac),
+            format!("Omawarden/{} (Bitwarden/2026.7.0; macOS)", engine_ver)
+        );
+        assert_eq!(
+            format_user_agent_for_platform(Some(&ui_ctx), mac),
+            format!(
+                "Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; macOS)",
+                engine_ver
+            )
+        );
+
+        let win = PlatformIdentity::for_os("windows");
+        assert_eq!(win.device_type, "6");
+        assert_eq!(win.device_name, "windows");
+        assert_eq!(win.user_agent_os, "Windows");
+        assert_eq!(
+            format_user_agent_for_platform(None, win),
+            format!("Omawarden/{} (Bitwarden/2026.7.0; Windows)", engine_ver)
+        );
+
+        let linux = PlatformIdentity::for_os("linux");
+        assert_eq!(linux.device_type, "8");
+        assert_eq!(linux.device_name, "linux");
+        assert_eq!(linux.user_agent_os, "Linux");
+        assert_eq!(
+            format_user_agent_for_platform(None, linux),
             format!("Omawarden/{} (Bitwarden/2026.7.0; Linux)", engine_ver)
         );
     }
@@ -4148,13 +4261,14 @@ mod tests {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let expected_ua = format!(
-                    "user-agent: Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; Linux)",
-                    env!("CARGO_PKG_VERSION")
+                    "user-agent: Omarchy_Bitwarden/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                    env!("CARGO_PKG_VERSION"),
+                    BITWARDEN_USER_AGENT_OS
                 );
                 assert!(req.contains(&expected_ua));
                 assert!(req.contains("bitwarden-client-name: desktop"));
                 assert!(req.contains("bitwarden-client-version: 2026.7.0"));
-                assert!(req.contains("device-type: 8"));
+                assert!(req.contains(&format!("device-type: {}", BITWARDEN_DEVICE_TYPE)));
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
             }
         });

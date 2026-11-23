@@ -6,7 +6,8 @@ pub mod capabilities;
 mod cipher_write;
 pub mod clipboard;
 pub mod config;
-mod credential_slots;
+#[doc(hidden)]
+pub mod credential_slots;
 pub mod crypto;
 pub mod daemon;
 pub mod fs_util;

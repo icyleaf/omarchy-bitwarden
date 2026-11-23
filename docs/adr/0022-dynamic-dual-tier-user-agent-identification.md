@@ -15,16 +15,20 @@ This static header created several observability and telemetry limitations:
 3. Passing plugin version metadata from the QML frontend via process command-line arguments (`--client-version`) or environment variables (`OMA_CLIENT_VERSION`) posed data exposure risks under Rule 11 of the Security Handbook (Zero-Argv / Zero-Environ for sensitive process boundaries) and would require intrusive manual plumbing across QML `Process` invocation points.
 
 ## Decision
-1. **Dynamic Dual-Tier User-Agent Format**:
-   - Outbound HTTP requests format the `User-Agent` header according to the execution context while preserving standard Bitwarden compatibility headers:
+1. **Dynamic Dual-Tier & Platform-Aware User-Agent Format**:
+   - Outbound HTTP requests format the `User-Agent` header according to the execution context and target operating system (`PlatformIdentity`), while preserving standard Bitwarden compatibility headers:
      - **Pure CLI Mode**:
-       `Omawarden/<engine_version> (Bitwarden/2026.7.0; Linux)`
+       `Omawarden/<engine_version> (Bitwarden/2026.7.0; <OS>)`
      - **UI Overlay Mode**:
-       `Omarchy_Bitwarden/<plugin_version> (Omawarden/<engine_version>; Bitwarden/2026.7.0; Linux)`
+       `Omarchy_Bitwarden/<plugin_version> (Omawarden/<engine_version>; Bitwarden/2026.7.0; <OS>)`
+   - Platform identity (`PlatformIdentity`) maps the compiled target OS to Bitwarden protocol values across HTTP headers (`User-Agent`, `device-type`) and `/connect/token` form payloads (`deviceType`, `deviceName`):
+     - **Windows**: `<OS> = Windows`, `device-type` / `deviceType = 6`, `deviceName = windows`
+     - **macOS**: `<OS> = macOS`, `device-type` / `deviceType = 7`, `deviceName = macos`
+     - **Linux (and other Unix targets)**: `<OS> = Linux`, `device-type` / `deviceType = 8`, `deviceName = linux`
    - Supporting Bitwarden compatibility headers remain standardized:
      - `bitwarden-client-name`: `desktop`
      - `bitwarden-client-version`: `2026.7.0`
-     - `device-type`: `8`
+     - `device-type`: resolved from `PlatformIdentity::current().device_type` (`6`, `7`, or `8`)
 
 2. **Automated Non-Interactive TTY Detection & Plugin Manifest Probing**:
    - The CLI identifies interactive terminal usage via standard output terminal detection (`std::io::stdout().is_terminal()`).

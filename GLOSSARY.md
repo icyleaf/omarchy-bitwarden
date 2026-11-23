@@ -15,8 +15,12 @@ The Spotlight-style floating QML desktop window that provides keyboard-driven se
 _Avoid_: Modal window, popup, main window, app window
 
 **Keyring**:
-The system FreeDesktop Secret Service store used to persist tokens and credentials without writing plaintext to disk.
-_Avoid_: Keychain, token cache, credential store
+The system-backed credential store subsystem (such as FreeDesktop Secret Service on Linux or macOS Keychain) used to persist tokens and API secrets without writing plaintext to disk.
+_Avoid_: Token cache, plaintext credential file, local secret cache
+
+**Keyring Provider**:
+A platform-specific keyring backend adapter responsible for low-level credential storage, attribute-scoped lookup, slot erasure, and availability checks.
+_Avoid_: Keyring backend, keystore wrapper, secret helper
 
 **Clipboard Guard**:
 The ephemeral clipboard subsystem that enforces automatic time-to-live clearing and secure revocation of copied secrets across supported display and OS clipboard providers.

@@ -64,7 +64,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
                     },
                     server_url: server_url.to_string(),
                     server_reachable: false,
-                    keyring_available: which::which("secret-tool").is_ok(),
+                    keyring_available: crate::keyring::KeyringManager::default().is_available(),
                     clipboard_available: crate::clipboard::ClipboardGuard::default().is_available(),
                     error: Some(format!("Client mTLS certificate error: {}", e)),
                     upstream_capabilities: None,
@@ -104,8 +104,10 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
     };
     let server_reachable = reachability_err.is_none();
 
-    // 2. Check Keyring (secret-tool)
-    let keyring_available = which::which("secret-tool").is_ok();
+    // 2. Check Keyring provider
+    let keyring = crate::keyring::KeyringManager::default();
+    let keyring_available = keyring.is_available();
+    let keyring_err = keyring.unavailable_reason();
 
     // 3. Check clipboard provider
     let clipboard = crate::clipboard::ClipboardGuard::default();
@@ -270,7 +272,7 @@ pub fn check_system_health(server_url: &str) -> HealthStatus {
         error: if let Some(err) = reachability_err {
             Some(err)
         } else if !keyring_available {
-            Some("Linux Secret Service (secret-tool) is not available.".to_string())
+            keyring_err
         } else if !clipboard_available {
             clipboard_err
         } else {
@@ -289,5 +291,20 @@ mod tests {
         let status = check_system_health("https://vault.bitwarden.com");
         assert!(status.installed);
         assert!(status.version.is_some());
+    }
+
+    #[test]
+    fn test_system_health_respects_keyring_provider_override() {
+        let _guard = crate::env_lock();
+
+        std::env::set_var("OMA_KEYRING_PROVIDER", "mock");
+        let mock_status = check_system_health("http://127.0.0.1:1");
+        assert!(mock_status.keyring_available);
+
+        std::env::set_var("OMA_KEYRING_PROVIDER", "nonexistent_provider");
+        let unavailable_status = check_system_health("http://127.0.0.1:1");
+        assert!(!unavailable_status.keyring_available);
+
+        std::env::remove_var("OMA_KEYRING_PROVIDER");
     }
 }

@@ -12,8 +12,8 @@ When a Bitwarden identity server requires 2FA:
 
 1. The server returns HTTP 400 with `"error": "invalid_grant"`, `"TwoFactorProviders": [...]`, and optional `"TwoFactorProviders2": {...}`.
 2. For accounts with Email 2FA (provider 1):
-   - The Bitwarden server automatically sends an email containing a 6-digit verification code to the registered email address upon the initial login attempt.
-   - To complete the login, the client must resubmit credentials with `twoFactorProvider=1` and `twoFactorToken=<code>` (or optionally trigger resending the email via `/identity/connect/token` with `twoFactorEmailToken=true`).
+   - When Email 2FA is not the sole/default method (e.g., accounts with both Authenticator TOTP and Email enabled), Bitwarden / Vaultwarden servers do not automatically dispatch the email OTP on the initial `/connect/token` attempt; the client must explicitly call `/api/two-factor/send-email-login` to trigger delivery.
+   - To complete the login, the client must resubmit credentials with `twoFactorProvider=1` and `twoFactorToken=<code>`.
 3. Previously, `omawarden` hardcoded `twoFactorProvider=0` (Authenticator) whenever 2FA was triggered. If a user only had Email 2FA enabled, or preferred Email 2FA, the login failed because provider 0 was rejected by the server (see issue #165).
 
 ## Decision
@@ -36,8 +36,8 @@ When a Bitwarden identity server requires 2FA:
 
 4. **CLI Interactive and Non-Interactive Support**:
    - Update `parse_auth_payload` to parse `two_factor_provider`, `twoFactorProvider`, or `provider` from JSON payloads.
-   - In interactive login mode (`omawarden auth login`), inspect the active providers from the 2FA challenge:
-     - If provider 1 is active, prompt: `Enter Email Two-Factor Verification Code (check your email): `.
+   - In interactive login mode (`omawarden auth login` / `login-password`), inspect the active providers from the 2FA challenge:
+     - If provider 1 (Email) is selected, invoke `AuthManager::send_two_factor_email` **before** prompting so the server dispatches the OTP email (aborting with an actionable error if email dispatch fails), then prompt: `Enter Email Two-Factor Verification Code (check your email): `.
      - If provider 3 is active, prompt: `Touch your YubiKey or enter OTP: `.
      - Otherwise, prompt: `Enter Two-Factor (2FA) Code: `.
 
