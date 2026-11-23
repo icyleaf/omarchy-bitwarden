@@ -1547,12 +1547,16 @@ fn main() -> ExitCode {
                     .map(|c| format!(" (commit {})", c))
                     .unwrap_or_default();
                 println!("  CLI Version:        v{}{}", ver_str, commit_str);
+                let keyring_mgr = KeyringManager::default();
+                let keyring_provider_name = keyring_mgr.provider().name();
                 println!(
                     "  Keyring:            {}",
                     if status.keyring_available {
-                        "[OK] Available (secret-tool)"
+                        format!("[OK] Available ({keyring_provider_name})")
+                    } else if let Some(reason) = keyring_mgr.unavailable_reason() {
+                        format!("[FAIL] Unavailable ({reason})")
                     } else {
-                        "[FAIL] Unavailable"
+                        "[FAIL] Unavailable".to_string()
                     }
                 );
                 println!(

@@ -1,14 +1,23 @@
-use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+pub mod macos;
+pub mod mock;
+pub mod provider;
+pub mod secret_tool;
+
+pub use macos::MacOsKeychainProvider;
+pub use mock::MockKeyringProvider;
+pub use provider::{resolve_provider, KeyringProvider, UnavailableKeyringProvider};
+pub use secret_tool::SecretToolKeyringProvider;
+
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::credential_slots::CredentialSlot;
 use crate::storage::VaultStorage;
 
 pub const SERVICE_NAME: &str = "omarchy-bitwarden";
-const SCOPED_SERVICE_NAME: &str = "omarchy-bitwarden-v2";
+pub(crate) const SCOPED_SERVICE_NAME: &str = "omarchy-bitwarden-v2";
 pub const ACCOUNT_NAME: &str = "session";
 pub const LABEL: &str = "Omarchy Bitwarden Session";
 pub const KIND_ACCESS_TOKEN: &str = "access_token";
@@ -19,29 +28,56 @@ pub fn normalize_server_url(url: &str) -> &str {
     url.trim().trim_end_matches('/')
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeyringManager {
-    pub secret_tool_path: String,
+    provider: Arc<dyn KeyringProvider>,
 }
 
 impl Default for KeyringManager {
     fn default() -> Self {
-        Self::new("secret-tool")
+        Self::with_provider(resolve_provider(None, None))
+    }
+}
+
+impl std::fmt::Debug for KeyringManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyringManager")
+            .field("provider", &self.provider.name())
+            .field("is_available", &self.provider.is_available())
+            .finish()
     }
 }
 
 impl KeyringManager {
-    pub fn new(secret_tool_path: &str) -> Self {
-        let path = which::which(secret_tool_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| secret_tool_path.to_string());
-        Self {
-            secret_tool_path: path,
+    /// Constructs a `KeyringManager` using a legacy `secret-tool` path string or provider name.
+    pub fn new(path_or_provider: &str) -> Self {
+        let path = Path::new(path_or_provider);
+        if path.is_absolute()
+            || path_or_provider.contains('/')
+            || path_or_provider.contains("secret-tool")
+        {
+            Self::with_provider(Arc::new(SecretToolKeyringProvider::new(path_or_provider)))
+        } else {
+            Self::with_provider(resolve_provider(Some(path_or_provider), None))
         }
     }
 
+    /// Constructs a `KeyringManager` with an explicit `KeyringProvider` implementation.
+    pub fn with_provider(provider: Arc<dyn KeyringProvider>) -> Self {
+        Self { provider }
+    }
+
+    /// Accesses the underlying active provider.
+    pub fn provider(&self) -> &Arc<dyn KeyringProvider> {
+        &self.provider
+    }
+
     pub fn is_available(&self) -> bool {
-        which::which(&self.secret_tool_path).is_ok()
+        self.provider.is_available()
+    }
+
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.provider.unavailable_reason()
     }
 
     fn store(
@@ -54,55 +90,15 @@ impl KeyringManager {
         if secret.is_empty() {
             return false;
         }
-        let mut command = Command::new(&self.secret_tool_path);
-        command
-            .arg("store")
-            .arg(format!("--label={label}"))
-            .args(attributes)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if lease.is_some_and(|slot| slot.inherit_in(&mut command).is_err()) {
-            return false;
-        }
-        let Ok(mut child) = command.spawn() else {
-            return false;
-        };
-        let written = child
-            .stdin
-            .take()
-            .is_some_and(|mut stdin| stdin.write_all(secret.as_bytes()).is_ok());
-        child.wait().is_ok_and(|status| status.success()) && written
+        self.provider.store(label, attributes, secret, lease)
     }
 
     fn lookup(&self, attributes: &[&str]) -> Option<String> {
-        let output = Command::new(&self.secret_tool_path)
-            .arg("lookup")
-            .args(attributes)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let secret = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (!secret.is_empty()).then_some(secret)
+        self.provider.lookup(attributes)
     }
 
     fn clear(&self, attributes: &[&str]) -> bool {
-        self.clear_command(attributes)
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    fn clear_command(&self, attributes: &[&str]) -> Command {
-        let mut command = Command::new(&self.secret_tool_path);
-        command
-            .arg("clear")
-            .args(attributes)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command
+        self.provider.clear(attributes)
     }
 
     pub(crate) fn erase_credential_slot(
@@ -110,46 +106,7 @@ impl KeyringManager {
         credential_id: Option<&str>,
         deadline: Instant,
     ) -> io::Result<()> {
-        let scoped;
-        let attributes: &[&str] = if let Some(id) = credential_id {
-            scoped = ["service", SCOPED_SERVICE_NAME, "credential_id", id];
-            &scoped
-        } else {
-            &["service", SERVICE_NAME]
-        };
-        cleanup_time_left(deadline)?;
-        wait_for_cleanup(self.clear_command(attributes).spawn()?, deadline)?;
-
-        // clear may find nothing or leave locked entries behind. Confirm
-        // absence without capturing or logging the search output.
-        let (mut output, writer) = UnixStream::pair()?;
-        let search = Command::new(&self.secret_tool_path)
-            .args(["search", "--all"])
-            .args(attributes)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(OwnedFd::from(writer)))
-            .stderr(Stdio::null())
-            .spawn()?;
-        let read = cleanup_time_left(deadline)
-            .and_then(|remaining| output.set_read_timeout(Some(remaining)))
-            .and_then(|()| output.read(&mut [0]));
-        match read {
-            Ok(0) => {
-                if wait_for_cleanup(search, deadline)?.success() {
-                    return Ok(());
-                }
-            }
-            read => {
-                stop_and_reap(search);
-                if let Err(error) = read {
-                    return Err(match error.kind() {
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => cleanup_timeout(),
-                        _ => error,
-                    });
-                }
-            }
-        }
-        Err(io::Error::other("Could not confirm keyring cleanup"))
+        self.provider.erase_credential_slot(credential_id, deadline)
     }
 
     pub fn store_token(&self, server_url: &str, kind: &str, token: &str) -> bool {
@@ -211,38 +168,6 @@ impl KeyringManager {
             lease: None,
         }
     }
-}
-
-fn cleanup_timeout() -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, "Keyring cleanup timed out")
-}
-
-fn cleanup_time_left(deadline: Instant) -> io::Result<Duration> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(cleanup_timeout());
-    }
-    Ok(remaining)
-}
-
-fn stop_and_reap(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn wait_for_cleanup(mut child: Child, deadline: Instant) -> io::Result<ExitStatus> {
-    let error = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Err(error) => break error,
-            Ok(None) => match cleanup_time_left(deadline) {
-                Ok(remaining) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
-                Err(error) => break error,
-            },
-        }
-    };
-    stop_and_reap(child);
-    Err(error)
 }
 
 fn credential_label(kind: &str) -> &'static str {
@@ -373,8 +298,147 @@ impl<'a> AccountKeyring<'a> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn test_mock_provider_unit_lifecycle() {
+        let mock = Arc::new(MockKeyringProvider::new());
+        let mgr = KeyringManager::with_provider(mock.clone());
+
+        assert!(mgr.is_available());
+        assert_eq!(mgr.provider().name(), "mock");
+        assert!(mgr.unavailable_reason().is_none());
+
+        let server_a = "https://server-a.example";
+        let server_b = "https://server-b.example";
+
+        assert!(mgr.store_token(server_a, KIND_ACCESS_TOKEN, "tok_a"));
+        assert!(mgr.store_token(server_b, KIND_ACCESS_TOKEN, "tok_b"));
+        assert_eq!(
+            mgr.get_token(server_a, KIND_ACCESS_TOKEN),
+            Some("tok_a".to_string())
+        );
+        assert_eq!(
+            mgr.get_token(server_b, KIND_ACCESS_TOKEN),
+            Some("tok_b".to_string())
+        );
+
+        assert!(mgr.clear_token(server_a, KIND_ACCESS_TOKEN));
+        assert_eq!(mgr.get_token(server_a, KIND_ACCESS_TOKEN), None);
+        assert_eq!(
+            mgr.get_token(server_b, KIND_ACCESS_TOKEN),
+            Some("tok_b".to_string())
+        );
+
+        assert!(mgr.clear_all());
+        assert_eq!(mgr.get_token(server_b, KIND_ACCESS_TOKEN), None);
+        assert!(mock.is_empty());
+    }
+
+    #[test]
+    fn test_mock_provider_scoped_slot_and_erase() {
+        let mock = Arc::new(MockKeyringProvider::new());
+        let mgr = KeyringManager::with_provider(mock.clone());
+
+        let storage_a = VaultStorage {
+            server_url: "https://vault.example.com".into(),
+            user_email: "alice@example.com".into(),
+            user_id: Some("uid-alice".into()),
+            credential_id: Some("11111111111111111111111111111111".into()),
+            client_id: Some("user.alice".into()),
+            ..Default::default()
+        };
+        let storage_b = VaultStorage {
+            server_url: "https://vault.example.com".into(),
+            user_email: "bob@example.com".into(),
+            user_id: Some("uid-bob".into()),
+            credential_id: Some("22222222222222222222222222222222".into()),
+            ..Default::default()
+        };
+
+        let slot_a = mgr.for_storage(&storage_a);
+        let slot_b = mgr.for_storage(&storage_b);
+
+        assert!(slot_a.store_token(KIND_ACCESS_TOKEN, "access_a"));
+        assert!(slot_a.store_token(KIND_REFRESH_TOKEN, "refresh_a"));
+        assert!(slot_a.store_token(KIND_API_SECRET, "secret_a"));
+        assert!(slot_b.store_token(KIND_ACCESS_TOKEN, "access_b"));
+
+        assert_eq!(slot_a.access_token().as_deref(), Some("access_a"));
+        assert_eq!(slot_a.refresh_token().as_deref(), Some("refresh_a"));
+        assert_eq!(slot_a.api_secret().as_deref(), Some("secret_a"));
+        assert_eq!(slot_b.access_token().as_deref(), Some("access_b"));
+
+        // Erasing slot A must leave slot B intact.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.erase_credential_slot(Some("11111111111111111111111111111111"), deadline)
+            .unwrap();
+        assert_eq!(slot_a.access_token(), None);
+        assert_eq!(slot_a.refresh_token(), None);
+        assert_eq!(slot_a.api_secret(), None);
+        assert_eq!(slot_b.access_token().as_deref(), Some("access_b"));
+    }
+
+    #[test]
+    fn test_mock_provider_unavailable_fails_closed() {
+        let mock = Arc::new(MockKeyringProvider::new());
+        mock.set_available(false);
+        let mgr = KeyringManager::with_provider(mock);
+
+        assert!(!mgr.is_available());
+        assert!(mgr.unavailable_reason().is_some());
+        assert!(!mgr.store_token("https://bw.local", KIND_ACCESS_TOKEN, "secret"));
+        assert_eq!(mgr.get_token("https://bw.local", KIND_ACCESS_TOKEN), None);
+        assert!(!mgr.clear_token("https://bw.local", KIND_ACCESS_TOKEN));
+        assert!(mgr
+            .erase_credential_slot(None, Instant::now() + Duration::from_secs(1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_provider_resolution_precedence() {
+        let _guard = crate::env_lock();
+
+        std::env::set_var("OMA_KEYRING_PROVIDER", "mock");
+        let env_resolved = resolve_provider(None, None);
+        assert_eq!(env_resolved.name(), "mock");
+        assert!(env_resolved.is_available());
+
+        // Explicit argument overrides environment variable.
+        let explicit = resolve_provider(Some("secret-tool"), None);
+        assert_eq!(explicit.name(), "secret-tool");
+
+        std::env::remove_var("OMA_KEYRING_PROVIDER");
+
+        // OMA_SECRET_TOOL_PATH selects SecretToolKeyringProvider when no provider name is set.
+        std::env::set_var("OMA_SECRET_TOOL_PATH", "/custom/bin/secret-tool");
+        let path_env_resolved = resolve_provider(None, None);
+        assert_eq!(path_env_resolved.name(), "secret-tool");
+        assert!(!path_env_resolved.is_available());
+        std::env::remove_var("OMA_SECRET_TOOL_PATH");
+
+        let unknown = resolve_provider(Some("nonexistent_keyring_provider"), None);
+        assert_eq!(unknown.name(), "unavailable");
+        assert!(!unknown.is_available());
+        assert!(unknown.unavailable_reason().is_some());
+
+        let macos = resolve_provider(Some("macos"), None);
+        assert_eq!(macos.name(), "macos");
+        let keychain_alias = resolve_provider(Some("keychain"), None);
+        assert_eq!(keychain_alias.name(), "macos");
+
+        // KeyringManager::new with provider name resolves through resolve_provider.
+        let mgr_mock = KeyringManager::new("mock");
+        assert_eq!(mgr_mock.provider().name(), "mock");
+        assert!(mgr_mock.is_available());
+
+        // KeyringManager::new with path constructs SecretToolKeyringProvider.
+        let mgr_path = KeyringManager::new("/nonexistent/secret-tool");
+        assert_eq!(mgr_path.provider().name(), "secret-tool");
+        assert!(!mgr_path.is_available());
+    }
 
     #[test]
     fn test_empty_token_store() {
