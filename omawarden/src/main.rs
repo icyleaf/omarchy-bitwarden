@@ -1663,8 +1663,8 @@ fn main() -> ExitCode {
                         } else {
                             read_auth_payload()
                         };
-                    let mut effective_code = stdin_code;
-                    let mut effective_provider = stdin_provider;
+                    let effective_code = stdin_code;
+                    let effective_provider = stdin_provider;
                     let mut effective_new_device_otp = stdin_new_device_otp;
                     let mut res = auth_mgr.login_password(
                         &email,
@@ -1745,34 +1745,30 @@ fn main() -> ExitCode {
                                 *providers.get(idx).unwrap_or(&providers[default_idx])
                             };
 
-                            effective_provider = Some(chosen_provider);
-                            if chosen_provider == 7 {
-                                omawarden::log_info!(
-                                    "omawarden:auth",
-                                    "Requesting WebAuthn challenge from server..."
-                                );
-                                res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
-                            } else {
-                                let prompt_label = match chosen_provider {
-                                    1 => {
-                                        "Enter Email Two-Factor Verification Code (check your email): "
-                                    }
-                                    3 => "Touch your YubiKey or enter OTP: ",
-                                    _ => "Enter Two-Factor (2FA) Code: ",
-                                };
-                                let prompt_code =
-                                    rpassword::prompt_password(prompt_label).unwrap_or_default();
-                                if !prompt_code.trim().is_empty() {
-                                    effective_code = Some(prompt_code.trim().to_string());
-                                    res = auth_mgr.login_password(
+                            res = complete_interactive_two_factor(
+                                chosen_provider,
+                                res,
+                                || {
+                                    eprintln!(
+                                        "Sending two-factor verification code to your email..."
+                                    );
+                                    auth_mgr
+                                        .send_two_factor_email(&email, &pwd)
+                                        .map_err(|e| e.to_string())
+                                },
+                                |prompt_label| {
+                                    rpassword::prompt_password(prompt_label).unwrap_or_default()
+                                },
+                                |code, provider| {
+                                    auth_mgr.login_password(
                                         &email,
                                         &pwd,
-                                        effective_code.as_deref(),
-                                        effective_provider,
+                                        code,
+                                        Some(provider),
                                         None,
-                                    );
-                                }
-                            }
+                                    )
+                                },
+                            );
                         }
                     }
                     if res.ok {
@@ -5086,6 +5082,56 @@ fn ensure_unlocked_user_key(
     Ok(user_key)
 }
 
+fn complete_interactive_two_factor<FEmail, FPrompt, FSubmit>(
+    chosen_provider: i32,
+    initial_result: omawarden::auth::AuthResult,
+    mut send_email: FEmail,
+    mut prompt_code: FPrompt,
+    mut submit_login: FSubmit,
+) -> omawarden::auth::AuthResult
+where
+    FEmail: FnMut() -> Result<(), String>,
+    FPrompt: FnMut(&str) -> String,
+    FSubmit: FnMut(Option<&str>, i32) -> omawarden::auth::AuthResult,
+{
+    if chosen_provider == 7 {
+        omawarden::log_info!(
+            "omawarden:auth",
+            "Requesting WebAuthn challenge from server..."
+        );
+        return submit_login(None, 7);
+    }
+
+    if chosen_provider == 1 {
+        if let Err(err) = send_email() {
+            return omawarden::auth::AuthResult {
+                ok: false,
+                status: Some("two_factor_required".to_string()),
+                error: Some(format!(
+                    "Failed to send two-factor verification email: {err}"
+                )),
+                two_factor_required: Some(true),
+                two_factor_providers: initial_result.two_factor_providers,
+                two_factor_provider: Some(1),
+                two_factor_providers2: initial_result.two_factor_providers2,
+                ..Default::default()
+            };
+        }
+    }
+
+    let prompt_label = match chosen_provider {
+        1 => "Enter Email Two-Factor Verification Code (check your email): ",
+        3 => "Touch your YubiKey or enter OTP: ",
+        _ => "Enter Two-Factor (2FA) Code: ",
+    };
+    let entered = prompt_code(prompt_label);
+    let trimmed = entered.trim();
+    if trimmed.is_empty() {
+        return initial_result;
+    }
+    submit_login(Some(trimmed), chosen_provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6170,5 +6216,103 @@ Bool Field: Active = maybe
         securely_wipe_and_remove(temp);
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_interactive_email_2fa_sends_verification_email_before_prompt() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let initial = omawarden::auth::AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![0, 1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            1,
+            initial,
+            || {
+                events.borrow_mut().push("send_email");
+                Ok(())
+            },
+            |label| {
+                events.borrow_mut().push("prompt");
+                assert!(label.contains("Email"));
+                "123456".to_string()
+            },
+            |code, provider| {
+                events.borrow_mut().push("submit");
+                assert_eq!(code, Some("123456"));
+                assert_eq!(provider, 1);
+                omawarden::auth::AuthResult {
+                    ok: true,
+                    ..Default::default()
+                }
+            },
+        );
+
+        assert!(result.ok);
+        assert_eq!(*events.borrow(), vec!["send_email", "prompt", "submit"]);
+    }
+
+    #[test]
+    fn test_interactive_email_2fa_aborts_prompt_when_send_email_fails() {
+        let mut prompted = false;
+        let initial = omawarden::auth::AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            1,
+            initial,
+            || Err("SMTP unavailable".to_string()),
+            |_| {
+                prompted = true;
+                "000000".to_string()
+            },
+            |_, _| unreachable!("submit should not run when send_email fails"),
+        );
+
+        assert!(!result.ok);
+        assert!(!prompted);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("SMTP unavailable")));
+    }
+
+    #[test]
+    fn test_interactive_totp_2fa_does_not_send_email() {
+        let mut sent_email = false;
+        let initial = omawarden::auth::AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![0, 1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            0,
+            initial,
+            || {
+                sent_email = true;
+                Ok(())
+            },
+            |_| "654321".to_string(),
+            |code, provider| {
+                assert_eq!(code, Some("654321"));
+                assert_eq!(provider, 0);
+                omawarden::auth::AuthResult {
+                    ok: true,
+                    ..Default::default()
+                }
+            },
+        );
+
+        assert!(result.ok);
+        assert!(!sent_email);
     }
 }
