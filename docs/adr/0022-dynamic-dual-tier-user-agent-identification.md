@@ -22,8 +22,8 @@ This static header created several observability and telemetry limitations:
      - **UI Overlay Mode**:
        `Omarchy_Bitwarden/<plugin_version> (Omawarden/<engine_version>; Bitwarden/2026.7.0; <OS>)`
    - Platform identity (`PlatformIdentity`) maps the compiled target OS to Bitwarden protocol values across HTTP headers (`User-Agent`, `device-type`) and `/connect/token` form payloads (`deviceType`, `deviceName`):
-     - **macOS**: `<OS> = macOS`, `device-type` / `deviceType = 6`, `deviceName = macos`
-     - **Windows**: `<OS> = Windows`, `device-type` / `deviceType = 7`, `deviceName = windows`
+     - **Windows**: `<OS> = Windows`, `device-type` / `deviceType = 6`, `deviceName = windows`
+     - **macOS**: `<OS> = macOS`, `device-type` / `deviceType = 7`, `deviceName = macos`
      - **Linux (and other Unix targets)**: `<OS> = Linux`, `device-type` / `deviceType = 8`, `deviceName = linux`
    - Supporting Bitwarden compatibility headers remain standardized:
      - `bitwarden-client-name`: `desktop`

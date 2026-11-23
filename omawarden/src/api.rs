@@ -415,7 +415,7 @@ pub const BITWARDEN_PRELOGIN_CLIENT_NAME: &str = "cli";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformIdentity {
     /// Bitwarden protocol `DeviceType` integer string:
-    /// `6` = macOS Desktop, `7` = Windows Desktop, `8` = Linux Desktop.
+    /// `6` = Windows Desktop, `7` = macOS Desktop, `8` = Linux Desktop.
     pub device_type: &'static str,
     /// Normalized lowercase device name sent in `/connect/token` form payloads.
     pub device_name: &'static str,
@@ -425,13 +425,13 @@ pub struct PlatformIdentity {
 
 impl PlatformIdentity {
     pub const MACOS: Self = Self {
-        device_type: "6",
+        device_type: "7",
         device_name: "macos",
         user_agent_os: "macOS",
     };
 
     pub const WINDOWS: Self = Self {
-        device_type: "7",
+        device_type: "6",
         device_name: "windows",
         user_agent_os: "Windows",
     };
@@ -4140,7 +4140,7 @@ mod tests {
         let ui_ctx = ClientContext::new("Omarchy_Bitwarden", "0.11.2");
 
         let mac = PlatformIdentity::for_os("macos");
-        assert_eq!(mac.device_type, "6");
+        assert_eq!(mac.device_type, "7");
         assert_eq!(mac.device_name, "macos");
         assert_eq!(mac.user_agent_os, "macOS");
         assert_eq!(
@@ -4156,7 +4156,7 @@ mod tests {
         );
 
         let win = PlatformIdentity::for_os("windows");
-        assert_eq!(win.device_type, "7");
+        assert_eq!(win.device_type, "6");
         assert_eq!(win.device_name, "windows");
         assert_eq!(win.user_agent_os, "Windows");
         assert_eq!(
