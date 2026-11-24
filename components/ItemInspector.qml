@@ -1234,14 +1234,14 @@ ScrollView {
           }
 
           Rectangle {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.address2 || inspectorRoot.item.identity.address3 || inspectorRoot.item.identity.city || inspectorRoot.item.identity.state || inspectorRoot.item.identity.postalCode || inspectorRoot.item.identity.country))
             Layout.fillWidth: true
             height: 1
             color: inspectorRoot.borderColor
           }
 
           RowLayout {
-            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.city))
+            visible: Boolean(inspectorRoot.item && inspectorRoot.item.identity && (inspectorRoot.item.identity.address1 || inspectorRoot.item.identity.address2 || inspectorRoot.item.identity.address3 || inspectorRoot.item.identity.city || inspectorRoot.item.identity.state || inspectorRoot.item.identity.postalCode || inspectorRoot.item.identity.country))
             Layout.fillWidth: true
             spacing: 8
 
@@ -1251,7 +1251,8 @@ ScrollView {
               spacing: 2
               Text { text: "Address"; color: inspectorRoot.muted; font.pixelSize: inspectorRoot.keyPixelSize }
               Text {
-                text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
+                objectName: "identityAddressText"
+                text: (inspectorRoot.item && inspectorRoot.item.identity) ? [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.address3, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ") : ""
                 color: inspectorRoot.foreground
                 font.pixelSize: inspectorRoot.valuePixelSize
                 font.weight: Font.Medium
@@ -1265,7 +1266,7 @@ ScrollView {
               iconText: "\uf0c5"
               tooltip: "Copy address"
               onClicked: {
-                var a = [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
+                var a = [inspectorRoot.item.identity.address1, inspectorRoot.item.identity.address2, inspectorRoot.item.identity.address3, inspectorRoot.item.identity.city, inspectorRoot.item.identity.state, inspectorRoot.item.identity.postalCode, inspectorRoot.item.identity.country].filter(Boolean).join(", ")
                 inspectorRoot.copyRequested(a, false, "address")
               }
             }

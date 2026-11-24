@@ -1266,7 +1266,7 @@ Item {
       root.openSshKeyModal("create", null)
       return
     }
-    root.cipherEditorType = (cipherType === "note" || cipherType === "card") ? cipherType : "login"
+    root.cipherEditorType = (cipherType === "note" || cipherType === "card" || cipherType === "identity") ? cipherType : "login"
     var scope = root.activeFolderScope || "all"
     root.cipherEditorDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
     root.cipherEditorEditItem = null
@@ -1543,7 +1543,7 @@ Item {
     cipherEditProc.lastStderr = ""
     cipherEditProc.itemId = item.id
     cipherEditProc.editedName = payload.name || item.name || ""
-    cipherEditProc.editedType = item.type_name === "note" ? "note" : "login"
+    cipherEditProc.editedType = item.type_name || "login"
     cipherEditProc.editedFolderId = (payload.folder_id !== undefined) ? String(payload.folder_id || "") : String(item.folder_id || "")
     cipherEditProc.payload = JSON.stringify(payload)
     // Secrets travel over stdin only: argv carries just the resolved item id.
@@ -1987,7 +1987,7 @@ Item {
       if (item.identity.email) actions.push({ label: "Copy Email (" + item.identity.email + ")", icon: "\uf0e0", shortcut: "↵", action: function() { root.copyToClipboard(item.identity.email, false, "email") } })
       if (item.identity.phone) actions.push({ label: "Copy Phone (" + item.identity.phone + ")", icon: "\uf095", shortcut: "", action: function() { root.copyToClipboard(item.identity.phone, false, "phone") } })
       if (item.identity.company) actions.push({ label: "Copy Company (" + item.identity.company + ")", icon: "\uf1ad", shortcut: "", action: function() { root.copyToClipboard(item.identity.company, false, "company") } })
-      var addrStr = [item.identity.address1, item.identity.city, item.identity.state, item.identity.postalCode, item.identity.country].filter(Boolean).join(", ")
+      var addrStr = [item.identity.address1, item.identity.address2, item.identity.address3, item.identity.city, item.identity.state, item.identity.postalCode, item.identity.country].filter(Boolean).join(", ")
       if (addrStr) actions.push({ label: "Copy Address (" + addrStr + ")", icon: "\uf041", shortcut: "", action: function() { root.copyToClipboard(addrStr, false, "address") } })
       if (item.identity.ssn) actions.push({ label: "Copy SSN", icon: "\uf292", shortcut: "", action: function() { root.copyToClipboard(item.identity.ssn, true, "SSN") } })
       if (item.identity.passportNumber) actions.push({ label: "Copy Passport Number", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.passportNumber, true, "passport") } })

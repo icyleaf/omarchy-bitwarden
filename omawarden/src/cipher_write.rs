@@ -60,6 +60,35 @@ pub(crate) struct CardDraft {
     pub(crate) code: Option<String>,
 }
 
+#[derive(Deserialize, ZeroizeOnDrop, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityDraft {
+    pub(crate) title: Option<String>,
+    #[serde(rename = "firstName", alias = "first_name")]
+    pub(crate) first_name: Option<String>,
+    #[serde(rename = "middleName", alias = "middle_name")]
+    pub(crate) middle_name: Option<String>,
+    #[serde(rename = "lastName", alias = "last_name")]
+    pub(crate) last_name: Option<String>,
+    pub(crate) address1: Option<String>,
+    pub(crate) address2: Option<String>,
+    pub(crate) address3: Option<String>,
+    pub(crate) city: Option<String>,
+    pub(crate) state: Option<String>,
+    #[serde(rename = "postalCode", alias = "postal_code")]
+    pub(crate) postal_code: Option<String>,
+    pub(crate) country: Option<String>,
+    pub(crate) company: Option<String>,
+    pub(crate) email: Option<String>,
+    pub(crate) phone: Option<String>,
+    pub(crate) ssn: Option<String>,
+    pub(crate) username: Option<String>,
+    #[serde(rename = "passportNumber", alias = "passport_number")]
+    pub(crate) passport_number: Option<String>,
+    #[serde(rename = "licenseNumber", alias = "license_number")]
+    pub(crate) license_number: Option<String>,
+}
+
 #[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
 #[serde(untagged)]
 pub(crate) enum CipherTypeField {
@@ -97,6 +126,7 @@ pub(crate) struct CipherCreateDraft {
     pub(crate) favorite: Option<bool>,
     pub(crate) login: Option<LoginDraft>,
     pub(crate) card: Option<CardDraft>,
+    pub(crate) identity: Option<IdentityDraft>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) uri: Option<String>,
@@ -124,6 +154,7 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) add_uris: Option<Vec<LoginUriDraft>>,
     pub(crate) clear_uris: Option<bool>,
     pub(crate) card: Option<CardDraft>,
+    pub(crate) identity: Option<IdentityDraft>,
     pub(crate) fields: Option<Vec<CipherFieldDraft>>,
     pub(crate) remove_fields: Option<Vec<String>>,
     pub(crate) folder_id: Option<String>,
@@ -412,6 +443,11 @@ impl VaultManager {
                     "Card fields can only be updated on card ciphers.".into(),
                 ));
             }
+            if draft.identity.is_some() && cipher_type != 4 {
+                return Err(WriteError::Rejected(
+                    "Identity fields can only be updated on identity ciphers.".into(),
+                ));
+            }
 
             (resolved_item.id, resolved_item.name, cipher_in_storage)
         };
@@ -584,6 +620,15 @@ impl VaultManager {
                 payload["card"] = json!({});
             }
             if apply_card_updates(&mut payload["card"], card_draft, &cipher_key)? {
+                field_changed = true;
+            }
+        }
+
+        if let Some(ref identity_draft) = draft.identity {
+            if !payload["identity"].is_object() {
+                payload["identity"] = json!({});
+            }
+            if apply_identity_updates(&mut payload["identity"], identity_draft, &cipher_key)? {
                 field_changed = true;
             }
         }
@@ -1363,15 +1408,17 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         Login,
         Note,
         Card,
+        Identity,
     }
 
     let resolved_type = match (&draft.raw_type, &draft.cipher_type) {
         (Some(CipherTypeField::Numeric(1)), _) => ResolvedType::Login,
         (Some(CipherTypeField::Numeric(2)), _) => ResolvedType::Note,
         (Some(CipherTypeField::Numeric(3)), _) => ResolvedType::Card,
+        (Some(CipherTypeField::Numeric(4)), _) => ResolvedType::Identity,
         (Some(CipherTypeField::Numeric(other)), _) => {
             return Err(format!(
-                "Unsupported cipher type {other}. Supported types are login (1), secure note (2), and card (3)."
+                "Unsupported cipher type {other}. Supported types are login (1), secure note (2), card (3), and identity (4)."
             ));
         }
         (Some(CipherTypeField::Named(name)), _) | (None, Some(name)) => {
@@ -1379,9 +1426,10 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
                 "login" => ResolvedType::Login,
                 "note" | "secure_note" | "securenote" => ResolvedType::Note,
                 "card" => ResolvedType::Card,
+                "identity" => ResolvedType::Identity,
                 other => {
                     return Err(format!(
-                        "Unsupported cipher type '{other}'. Supported types are login (1), secure note (2), and card (3)."
+                        "Unsupported cipher type '{other}'. Supported types are login (1), secure note (2), card (3), and identity (4)."
                     ));
                 }
             }
@@ -1389,6 +1437,8 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         (None, None) => {
             if draft.card.is_some() {
                 ResolvedType::Card
+            } else if draft.identity.is_some() {
+                ResolvedType::Identity
             } else if draft.login.is_some() || draft.username.is_some() || draft.password.is_some()
             {
                 ResolvedType::Login
@@ -1410,6 +1460,9 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
     }
     if !matches!(resolved_type, ResolvedType::Card) && draft.card.is_some() {
         return Err("Card fields can only be set on card ciphers.".to_string());
+    }
+    if !matches!(resolved_type, ResolvedType::Identity) && draft.identity.is_some() {
+        return Err("Identity fields can only be set on identity ciphers.".to_string());
     }
 
     if matches!(resolved_type, ResolvedType::Note) {
@@ -1440,6 +1493,24 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
             "name": name,
             "notes": notes,
             "card": card_obj
+        });
+        if let Some(ref fields) = encrypted_fields {
+            payload["fields"] = json!(fields);
+        }
+        return Ok(payload);
+    }
+
+    if matches!(resolved_type, ResolvedType::Identity) {
+        let identity_obj = encrypt_identity_object(key, draft.identity.as_ref())?;
+        let mut payload = json!({
+            "type": 4,
+            "folderId": folder_id,
+            "organizationId": null,
+            "favorite": favorite,
+            "reprompt": 0,
+            "name": name,
+            "notes": notes,
+            "identity": identity_obj
         });
         if let Some(ref fields) = encrypted_fields {
             payload["fields"] = json!(fields);
@@ -1652,6 +1723,77 @@ fn apply_card_updates(
     Ok(changed)
 }
 
+fn encrypt_identity_object(
+    key: &SymmetricCryptoKey,
+    identity: Option<&IdentityDraft>,
+) -> Result<Value, String> {
+    Ok(json!({
+        "title": encrypt_optional_field(key, identity.and_then(|i| i.title.as_deref()))?,
+        "firstName": encrypt_optional_field(key, identity.and_then(|i| i.first_name.as_deref()))?,
+        "middleName": encrypt_optional_field(key, identity.and_then(|i| i.middle_name.as_deref()))?,
+        "lastName": encrypt_optional_field(key, identity.and_then(|i| i.last_name.as_deref()))?,
+        "address1": encrypt_optional_field(key, identity.and_then(|i| i.address1.as_deref()))?,
+        "address2": encrypt_optional_field(key, identity.and_then(|i| i.address2.as_deref()))?,
+        "address3": encrypt_optional_field(key, identity.and_then(|i| i.address3.as_deref()))?,
+        "city": encrypt_optional_field(key, identity.and_then(|i| i.city.as_deref()))?,
+        "state": encrypt_optional_field(key, identity.and_then(|i| i.state.as_deref()))?,
+        "postalCode": encrypt_optional_field(key, identity.and_then(|i| i.postal_code.as_deref()))?,
+        "country": encrypt_optional_field(key, identity.and_then(|i| i.country.as_deref()))?,
+        "company": encrypt_optional_field(key, identity.and_then(|i| i.company.as_deref()))?,
+        "email": encrypt_optional_field(key, identity.and_then(|i| i.email.as_deref()))?,
+        "phone": encrypt_optional_field(key, identity.and_then(|i| i.phone.as_deref()))?,
+        "ssn": encrypt_optional_field(key, identity.and_then(|i| i.ssn.as_deref()))?,
+        "username": encrypt_optional_field(key, identity.and_then(|i| i.username.as_deref()))?,
+        "passportNumber": encrypt_optional_field(key, identity.and_then(|i| i.passport_number.as_deref()))?,
+        "licenseNumber": encrypt_optional_field(key, identity.and_then(|i| i.license_number.as_deref()))?,
+    }))
+}
+
+fn apply_identity_updates(
+    target: &mut Value,
+    identity: &IdentityDraft,
+    key: &SymmetricCryptoKey,
+) -> Result<bool, String> {
+    let mut changed = false;
+    changed |= apply_optional_encrypted_field(target, "title", identity.title.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "firstName", identity.first_name.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "middleName", identity.middle_name.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "lastName", identity.last_name.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "address1", identity.address1.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "address2", identity.address2.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "address3", identity.address3.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "city", identity.city.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "state", identity.state.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "postalCode", identity.postal_code.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "country", identity.country.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "company", identity.company.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "email", identity.email.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "phone", identity.phone.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "ssn", identity.ssn.as_deref(), key)?;
+    changed |=
+        apply_optional_encrypted_field(target, "username", identity.username.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(
+        target,
+        "passportNumber",
+        identity.passport_number.as_deref(),
+        key,
+    )?;
+    changed |= apply_optional_encrypted_field(
+        target,
+        "licenseNumber",
+        identity.license_number.as_deref(),
+        key,
+    )?;
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1789,5 +1931,99 @@ mod tests {
         assert!(apply_card_updates(&mut card, &clear_patch, &key).unwrap());
         assert!(card["expMonth"].is_null());
         assert!(card["expYear"].is_null());
+    }
+
+    #[test]
+    fn encrypt_identity_cipher_includes_all_18_fields() {
+        let key = test_key();
+        let draft: CipherCreateDraft = serde_json::from_value(json!({
+            "type": 4,
+            "name": "Work Identity",
+            "notes": "ID notes",
+            "identity": {
+                "title": "Dr",
+                "firstName": "Ada",
+                "middleName": "Augusta",
+                "lastName": "Lovelace",
+                "username": "ada",
+                "company": "Analytical Engines",
+                "ssn": "123-45-6789",
+                "passportNumber": "P998877",
+                "licenseNumber": "DL-42",
+                "email": "ada@example.com",
+                "phone": "+44 20 7946 0958",
+                "address1": "12 St James Sq",
+                "address2": "Floor 2",
+                "address3": "Suite B",
+                "city": "London",
+                "state": "Greater London",
+                "postalCode": "SW1Y 4LB",
+                "country": "UK"
+            }
+        }))
+        .unwrap();
+
+        let payload = encrypt_cipher(&key, &draft).unwrap();
+        assert_eq!(payload["type"], 4);
+        assert_eq!(decrypt_str(&payload["name"], &key), "Work Identity");
+        assert_eq!(decrypt_str(&payload["notes"], &key), "ID notes");
+        for (wire_key, expected) in [
+            ("title", "Dr"),
+            ("firstName", "Ada"),
+            ("middleName", "Augusta"),
+            ("lastName", "Lovelace"),
+            ("username", "ada"),
+            ("company", "Analytical Engines"),
+            ("ssn", "123-45-6789"),
+            ("passportNumber", "P998877"),
+            ("licenseNumber", "DL-42"),
+            ("email", "ada@example.com"),
+            ("phone", "+44 20 7946 0958"),
+            ("address1", "12 St James Sq"),
+            ("address2", "Floor 2"),
+            ("address3", "Suite B"),
+            ("city", "London"),
+            ("state", "Greater London"),
+            ("postalCode", "SW1Y 4LB"),
+            ("country", "UK"),
+        ] {
+            assert_eq!(
+                decrypt_str(&payload["identity"][wire_key], &key),
+                expected,
+                "identity.{wire_key} round-trip mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_merge_identity_preserves_untouched_and_clears_empty() {
+        let key = test_key();
+        let mut identity = json!({
+            "firstName": key.encrypt_string("Ada").unwrap(),
+            "address3": key.encrypt_string("Suite B").unwrap(),
+        });
+        let patch: IdentityDraft = serde_json::from_value(json!({
+            "city": "London",
+            "address3": ""
+        }))
+        .unwrap();
+        assert!(apply_identity_updates(&mut identity, &patch, &key).unwrap());
+        assert_eq!(decrypt_str(&identity["firstName"], &key), "Ada");
+        assert_eq!(decrypt_str(&identity["city"], &key), "London");
+        assert!(identity["address3"].is_null());
+    }
+
+    #[test]
+    fn encrypt_cipher_rejects_identity_fields_on_non_identity() {
+        let key = test_key();
+        let id_on_card: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "card",
+            "name": "Bad",
+            "identity": { "firstName": "Ada" }
+        }))
+        .unwrap();
+        assert!(encrypt_cipher(&key, &id_on_card)
+            .unwrap_err()
+            .contains("Identity fields"));
     }
 }

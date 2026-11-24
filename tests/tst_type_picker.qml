@@ -50,16 +50,18 @@ Item {
     check(modal.visible === false, "hidden when inactive")
     check(modal.selectedIndex === 0, "Login is the default selection")
 
-    // 2. Activation shows the centered picker with Login, Secure Note, Card, and SSH Key
+    // 2. Activation shows the centered picker with all 5 cipher types
     modal.active = true
     check(modal.visible === true, "visible when active")
     check(findText(modal, "Login") !== null, "a Text shows Login")
     check(findText(modal, "Secure Note") !== null, "a Text shows Secure Note")
     check(findText(modal, "Card") !== null, "a Text shows Card")
+    check(findText(modal, "Identity") !== null, "a Text shows Identity")
     check(findText(modal, "SSH Key") !== null, "a Text shows SSH Key")
     check(findText(modal, "L") !== null, "a Text shows the L hint")
     check(findText(modal, "N") !== null, "a Text shows the N hint")
     check(findText(modal, "C") !== null, "a Text shows the C hint")
+    check(findText(modal, "I") !== null, "a Text shows the I hint")
     check(findText(modal, "S") !== null, "a Text shows the S hint")
 
     // 3. Single-key L picks Login immediately and closes the picker
@@ -82,32 +84,40 @@ Item {
     check(selections.length === 3 && selections[2] === "card", "single-key C emits typeSelected(\"card\")")
     check(modal.active === false, "picker closes after picking Card")
 
-    // 5c. Single-key S picks SSH Key immediately
+    // 5c. Single-key I picks Identity immediately
+    modal.active = true
+    modal.handleKey(Qt.Key_I, Qt.NoModifier)
+    check(selections.length === 4 && selections[3] === "identity", "single-key I emits typeSelected(\"identity\")")
+    check(modal.active === false, "picker closes after picking Identity")
+
+    // 5d. Single-key S picks SSH Key immediately
     modal.active = true
     modal.handleKey(Qt.Key_S, Qt.NoModifier)
-    check(selections.length === 4 && selections[3] === "ssh_key", "single-key S emits typeSelected(\"ssh_key\")")
+    check(selections.length === 5 && selections[4] === "ssh_key", "single-key S emits typeSelected(\"ssh_key\")")
     check(modal.active === false, "picker closes after picking SSH Key")
 
-    // 6. Arrow navigation moves across the four choices and Enter confirms
+    // 6. Arrow navigation moves across the five choices and Enter confirms
     modal.active = true
     modal.handleKey(Qt.Key_Down, Qt.NoModifier)
     check(modal.selectedIndex === 1, "Down moves selection to Secure Note")
     modal.handleKey(Qt.Key_Down, Qt.NoModifier)
     check(modal.selectedIndex === 2, "Down moves selection to Card")
     modal.handleKey(Qt.Key_Down, Qt.NoModifier)
-    check(modal.selectedIndex === 3, "Down moves selection to SSH Key")
+    check(modal.selectedIndex === 3, "Down moves selection to Identity")
+    modal.handleKey(Qt.Key_Down, Qt.NoModifier)
+    check(modal.selectedIndex === 4, "Down moves selection to SSH Key")
     modal.handleKey(Qt.Key_Down, Qt.NoModifier)
     check(modal.selectedIndex === 0, "Down wraps back to Login")
     modal.handleKey(Qt.Key_Up, Qt.NoModifier)
-    check(modal.selectedIndex === 3, "Up wraps back to SSH Key")
+    check(modal.selectedIndex === 4, "Up wraps back to SSH Key")
     modal.handleKey(Qt.Key_Return, Qt.NoModifier)
-    check(selections.length === 5 && selections[4] === "ssh_key", "Enter confirms the highlighted option (ssh_key)")
+    check(selections.length === 6 && selections[5] === "ssh_key", "Enter confirms the highlighted option (ssh_key)")
     check(modal.active === false, "picker closes after Enter")
 
     // 7. Enter on the default selection confirms Login
     modal.active = true
     modal.handleKey(Qt.Key_Enter, Qt.NoModifier)
-    check(selections.length === 6 && selections[5] === "login", "Enter confirms Login by default")
+    check(selections.length === 7 && selections[6] === "login", "Enter confirms Login by default")
 
     // 8. Repeated Ctrl+N cycles the selection while the picker is open
     modal.active = true
@@ -116,18 +126,20 @@ Item {
     modal.handleKey(Qt.Key_N, Qt.ControlModifier)
     check(modal.selectedIndex === 2, "Ctrl+N cycles Secure Note -> Card")
     modal.handleKey(Qt.Key_N, Qt.ControlModifier)
-    check(modal.selectedIndex === 3, "Ctrl+N cycles Card -> SSH Key")
+    check(modal.selectedIndex === 3, "Ctrl+N cycles Card -> Identity")
+    modal.handleKey(Qt.Key_N, Qt.ControlModifier)
+    check(modal.selectedIndex === 4, "Ctrl+N cycles Identity -> SSH Key")
     modal.handleKey(Qt.Key_N, Qt.ControlModifier)
     check(modal.selectedIndex === 0, "Ctrl+N cycles SSH Key -> Login")
-    check(selections.length === 6, "cycling with Ctrl+N does not select anything")
+    check(selections.length === 7, "cycling with Ctrl+N does not select anything")
     modal.handleKey(Qt.Key_N, Qt.ControlModifier)
     modal.handleKey(Qt.Key_Return, Qt.NoModifier)
-    check(selections.length === 7 && selections[6] === "note", "Enter after cycling confirms Secure Note")
+    check(selections.length === 8 && selections[7] === "note", "Enter after cycling confirms Secure Note")
 
     // 9. Modifier-stacked letter presses are not single-key shortcuts
     modal.active = true
     modal.handleKey(Qt.Key_L, Qt.ControlModifier)
-    check(selections.length === 7, "Ctrl+L is ignored (not a single-key pick)")
+    check(selections.length === 8, "Ctrl+L is ignored (not a single-key pick)")
     modal.active = false
 
     // 10. Esc dismisses the picker without selecting anything
@@ -136,7 +148,7 @@ Item {
     modal.handleKey(Qt.Key_Escape, Qt.NoModifier)
     check(closeRequests === closesBefore + 1, "Esc emits closeRequested()")
     check(modal.active === false, "Esc closes the picker")
-    check(selections.length === 7, "Esc does not emit typeSelected()")
+    check(selections.length === 8, "Esc does not emit typeSelected()")
 
     // 11. Theme contract: default colors bind to the dynamic theme tokens
     check(modal.foreground === Commons.Color.foreground, "foreground binds to Color.foreground")
