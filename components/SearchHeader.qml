@@ -13,6 +13,7 @@ ColumnLayout {
   property var categoryList: ["all", "login", "card", "identity", "note", "ssh_key"]
   property string activeCategory: "all"
   property var rawVaultItems: []
+  property var vaultFolders: []
   property color background: Commons.Color.menu.background
   property color foreground: Commons.Color.foreground
   property color accent: Commons.Color.accent
@@ -36,6 +37,7 @@ ColumnLayout {
   signal openUrlRequested()
   signal actionPaletteRequested()
   signal editItemRequested()
+  signal manageFoldersRequested()
 
   property alias isScopeDropdownOpen: vaultScopeDropdown.isOpen
   property alias isVaultScopeOpen: vaultScopeDropdown.isOpen
@@ -101,6 +103,12 @@ ColumnLayout {
     var items = searchHeaderRoot.rawVaultItems || []
     var noFolderCount = 0
     var folderMap = {}
+    var knownFolders = searchHeaderRoot.vaultFolders || []
+    for (var k = 0; k < knownFolders.length; k++) {
+      var kf = knownFolders[k]
+      if (!kf || !kf.id) continue
+      folderMap[kf.id] = { id: kf.id, name: kf.name || "Folder", icon: "\uf07b", count: 0 }
+    }
     for (var i = 0; i < items.length; i++) {
       var it = items[i]
       if (!it.folder_id && !it.folder_name) {
@@ -319,6 +327,8 @@ ColumnLayout {
         borderColor: searchHeaderRoot.borderColor
         fontFamily: searchHeaderRoot.fontFamily
         alignRight: true
+        footerActionLabel: "Manage Folders…"
+        onFooterActionRequested: searchHeaderRoot.manageFoldersRequested()
         maxLabelWidth: 110
         Layout.alignment: Qt.AlignVCenter
         onSelected: function(id) {

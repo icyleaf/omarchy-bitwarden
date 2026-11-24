@@ -360,11 +360,13 @@ Item {
   // Set after a successful create/edit so the reloaded list can select the row.
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
+  property bool showFolderManagerModal: false
+  property var vaultFolders: []
   property var deleteCipherItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
   // shortcuts are suspended while a draft is being edited.
-  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showFolderManagerModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -475,6 +477,8 @@ Item {
     }
 
     root.showDeleteCipherModal = false
+    root.showFolderManagerModal = false
+    root.vaultFolders = []
     root.deleteCipherItem = null
     if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
     if (cipherDeleteProc.running) {
@@ -568,6 +572,8 @@ Item {
       root.cipherEditorEditItem = null
       root.pendingSelectItemId = ""
       root.showDeleteCipherModal = false
+    root.showFolderManagerModal = false
+    root.vaultFolders = []
       root.deleteCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
@@ -646,6 +652,8 @@ Item {
     root.cipherEditorEditItem = null
     root.pendingSelectItemId = ""
     root.showDeleteCipherModal = false
+    root.showFolderManagerModal = false
+    root.vaultFolders = []
     root.deleteCipherItem = null
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
@@ -833,6 +841,70 @@ Item {
     root.isLoadingVault = true
     vaultListProc.command = [root.helperPath, "vault", "list"]
     vaultListProc.running = true
+    root.loadFolders()
+  }
+
+  function loadFolders() {
+    if (root.authState.status !== "unlocked" || !root.authState.has_session) return
+    if (folderListProc.running) folderListProc.running = false
+    folderListProc.revision = root.vaultRevision
+    folderListProc.errorReported = false
+    folderListProc.lastStderr = ""
+    folderListProc.command = [root.helperPath, "folder", "list", "--json"]
+    folderListProc.running = true
+  }
+
+  function openFolderManagerModal() {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.loadFolders()
+    root.showFolderManagerModal = true
+  }
+
+  function submitFolderCreate(name) {
+    var trimmed = String(name || "").trim()
+    if (!trimmed || folderMutateProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (folderManagerModalComponent) {
+      folderManagerModalComponent.isBusy = true
+      folderManagerModalComponent.errorMessage = ""
+    }
+    folderMutateProc.operation = "create"
+    folderMutateProc.targetFolderId = ""
+    folderMutateProc.errorReported = false
+    folderMutateProc.lastStderr = ""
+    folderMutateProc.command = [root.helperPath, "folder", "create", trimmed, "--json"]
+    folderMutateProc.running = true
+  }
+
+  function submitFolderRename(folderId, newName) {
+    var trimmed = String(newName || "").trim()
+    if (!folderId || !trimmed || folderMutateProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (folderManagerModalComponent) {
+      folderManagerModalComponent.isBusy = true
+      folderManagerModalComponent.errorMessage = ""
+    }
+    folderMutateProc.operation = "rename"
+    folderMutateProc.targetFolderId = folderId
+    folderMutateProc.errorReported = false
+    folderMutateProc.lastStderr = ""
+    folderMutateProc.command = [root.helperPath, "folder", "edit", folderId, "--name", trimmed, "--json"]
+    folderMutateProc.running = true
+  }
+
+  function submitFolderDelete(folderId) {
+    if (!folderId || folderMutateProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (folderManagerModalComponent) {
+      folderManagerModalComponent.isBusy = true
+      folderManagerModalComponent.errorMessage = ""
+    }
+    folderMutateProc.operation = "delete"
+    folderMutateProc.targetFolderId = folderId
+    folderMutateProc.errorReported = false
+    folderMutateProc.lastStderr = ""
+    folderMutateProc.command = [root.helperPath, "folder", "delete", folderId, "--yes", "--json"]
+    folderMutateProc.running = true
   }
 
   function isAttachmentPreviewable(filename) {
@@ -1113,6 +1185,12 @@ Item {
     var items = root.rawVaultItems || []
     var noFolderCount = 0
     var folderMap = {}
+    var knownFolders = root.vaultFolders || []
+    for (var k = 0; k < knownFolders.length; k++) {
+      var kf = knownFolders[k]
+      if (!kf || !kf.id) continue
+      folderMap[kf.id] = { id: kf.id, name: kf.name || "Folder", icon: "\uf07b", count: 0 }
+    }
     for (var i = 0; i < items.length; i++) {
       var it = items[i]
       if (!it.folder_id && !it.folder_name) {
@@ -1226,6 +1304,11 @@ Item {
 
   onShowDeleteCipherModalChanged: {
     if (!root.showDeleteCipherModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+  onShowFolderManagerModalChanged: {
+    if (!root.showFolderManagerModal && !root.hasActiveModal) {
       root.restoreSearchFocus()
     }
   }
@@ -1436,8 +1519,15 @@ Item {
 
   function getAvailableFolders() {
     var items = root.rawVaultItems || []
+    var known = root.vaultFolders || []
     var seen = {}
     var list = []
+    for (var k = 0; k < known.length; k++) {
+      var kf = known[k]
+      if (!kf || !kf.id || seen[kf.id]) continue
+      seen[kf.id] = true
+      list.push({ id: kf.id, name: kf.name || "Folder" })
+    }
     for (var i = 0; i < items.length; i++) {
       var id = items[i].folder_id
       if (!id || seen[id]) continue
@@ -2157,6 +2247,7 @@ Item {
 
     actions.push({ label: "Create Login", icon: "\uf067", shortcut: "Ctrl+N", action: function() { root.openCipherCreateModal("login") } })
     actions.push({ label: "Create Secure Note", icon: "\uf0f6", shortcut: "", action: function() { root.openCipherCreateModal("note") } })
+    actions.push({ label: "Manage Folders", icon: "\uf07b", shortcut: "", action: function() { root.openFolderManagerModal() } })
     actions.push({ label: "Generate Password", icon: "\uf084", shortcut: "Ctrl+G", action: function() { root.openPasswordGeneratorModal("password") } })
     actions.push({ label: "Generate Passphrase", icon: "\uf02d", shortcut: "", action: function() { root.openPasswordGeneratorModal("passphrase") } })
     actions.push({ label: "Generate SSH Key", icon: "\uf067", shortcut: "", action: function() { root.openSshKeyModal("create", null) } })
@@ -2702,6 +2793,9 @@ Item {
         onActivated: {
           if (root.showTypePicker) {
             typePickerModalComponent.dismiss()
+          } else if (root.showFolderManagerModal) {
+            if (folderManagerModalComponent) folderManagerModalComponent.requestClose()
+            else root.showFolderManagerModal = false
           } else if (root.showDeleteCipherModal) {
             if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
               root.showDeleteCipherModal = false
@@ -2767,6 +2861,14 @@ Item {
           return
         }
 
+        if (root.showFolderManagerModal) {
+          if (event.key === Qt.Key_Escape) {
+            if (folderManagerModalComponent) folderManagerModalComponent.requestClose()
+            else root.showFolderManagerModal = false
+            event.accepted = true
+          }
+          return
+        }
         if (root.showDeleteCipherModal) {
           if (event.key === Qt.Key_Escape && (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy)) {
             root.showDeleteCipherModal = false
@@ -2926,6 +3028,7 @@ Item {
           activeVaultScope: root.activeVaultScope
           activeFolderScope: root.activeFolderScope
           rawVaultItems: root.rawVaultItems
+          vaultFolders: root.vaultFolders
           fontFamily: root.fontFamily
           background: root.background
           foreground: root.foreground
@@ -2959,6 +3062,7 @@ Item {
               root.openCipherEditModal(root.selectedItem)
             }
           }
+          onManageFoldersRequested: root.openFolderManagerModal()
         }
 
         // 2. Main Content Center View
@@ -3395,6 +3499,27 @@ Item {
           if (!deleteCipherModalComponent.isBusy) {
             root.showDeleteCipherModal = false
             root.deleteCipherItem = null
+          }
+        }
+      }
+
+      // 11. Folder Manager Modal (Create / Rename / Delete Folders)
+      FolderManagerModal {
+        id: folderManagerModalComponent
+        active: root.showFolderManagerModal
+        folders: root.vaultFolders
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onCreateRequested: function(name) { root.submitFolderCreate(name) }
+        onRenameRequested: function(folderId, newName) { root.submitFolderRename(folderId, newName) }
+        onDeleteRequested: function(folderId) { root.submitFolderDelete(folderId) }
+        onCloseRequested: {
+          if (!folderManagerModalComponent.isBusy) {
+            root.showFolderManagerModal = false
           }
         }
       }
@@ -4580,6 +4705,120 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
+    }
+  }
+
+  Process {
+    id: folderListProc
+    property int revision: 0
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (folderListProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") return
+        try {
+          var data = JSON.parse((text || "").trim())
+          if (data && data.ok && Array.isArray(data.folders)) {
+            root.vaultFolders = data.folders
+            if (root.activeFolderScope !== "all" && root.activeFolderScope !== "none") {
+              var found = false
+              for (var i = 0; i < data.folders.length; i++) {
+                if (data.folders[i].id === root.activeFolderScope) { found = true; break }
+              }
+              if (!found) root.activeFolderScope = "all"
+            }
+          } else if (data && data.ok === false) {
+            folderListProc.errorReported = true
+            var msg = data.error ? String(data.error) : "Failed to load folders."
+            if (folderManagerModalComponent && root.showFolderManagerModal) {
+              folderManagerModalComponent.errorMessage = msg
+            }
+          }
+        } catch (e) {
+          root.logError("omarchy:folder", "Failed to parse folder list: " + e)
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var cleaned = (text || "").trim().replace(/^Error:\s*/i, "")
+        if (cleaned.length > 0) {
+          folderListProc.lastStderr = cleaned
+          if (!folderListProc.errorReported && folderManagerModalComponent && root.showFolderManagerModal) {
+            folderManagerModalComponent.errorMessage = cleaned
+          }
+        }
+        root.handleProcessStderr(text, "omawarden:folder")
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0 && !folderListProc.errorReported && folderManagerModalComponent && root.showFolderManagerModal) {
+        folderManagerModalComponent.errorMessage = folderListProc.lastStderr || ("Failed to load folders (exit code " + code + ").")
+      }
+    }
+  }
+
+  Process {
+    id: folderMutateProc
+    property string operation: ""
+    property string targetFolderId: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (folderManagerModalComponent) folderManagerModalComponent.isBusy = false
+        try {
+          var data = JSON.parse((text || "").trim())
+          if (data && data.ok) {
+            if (folderManagerModalComponent) {
+              folderManagerModalComponent.resetTransientState()
+            }
+            if (folderMutateProc.operation === "delete"
+                && folderMutateProc.targetFolderId
+                && root.activeFolderScope === folderMutateProc.targetFolderId) {
+              root.activeFolderScope = "all"
+            }
+            root.lastVaultItemsRawText = ""
+            root.loadVaultItems()
+            root.loadFolders()
+          } else {
+            folderMutateProc.errorReported = true
+            var msg = (data && data.error) ? String(data.error) : "Folder operation failed."
+            if (folderManagerModalComponent) folderManagerModalComponent.errorMessage = msg
+          }
+        } catch (e) {
+          if (!folderMutateProc.errorReported && (text || "").trim().length > 0) {
+            folderMutateProc.errorReported = true
+            if (folderManagerModalComponent) {
+              folderManagerModalComponent.errorMessage = "Unexpected response from folder operation."
+            }
+          }
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var cleaned = (text || "").trim().replace(/^Error:\s*/i, "")
+        if (cleaned.length > 0) {
+          folderMutateProc.lastStderr = cleaned
+          if (!folderMutateProc.errorReported && folderManagerModalComponent) {
+            folderManagerModalComponent.errorMessage = cleaned
+          }
+        }
+      }
+    }
+    onExited: function(code) {
+      if (folderManagerModalComponent) folderManagerModalComponent.isBusy = false
+      if (code !== 0 && !folderMutateProc.errorReported && folderManagerModalComponent) {
+        folderManagerModalComponent.errorMessage = folderMutateProc.lastStderr || ("Folder operation failed with exit code " + code)
+      }
     }
   }
 

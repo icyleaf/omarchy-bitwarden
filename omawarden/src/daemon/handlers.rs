@@ -63,7 +63,7 @@ pub fn handle_client_with_peer(
 
     let reads_plaintext = matches!(
         action,
-        "list" | "search" | "get_item" | "get_ssh_key" | "get_attachment_key"
+        "list" | "search" | "get_item" | "get_ssh_key" | "get_attachment_key" | "folder_list"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()));
     let is_privileged = reads_plaintext
@@ -77,6 +77,10 @@ pub fn handle_client_with_peer(
                 | "cipher_delete_trash"
                 | "cipher_restore"
                 | "cipher_resolve"
+                | "folder_create"
+                | "folder_update"
+                | "folder_delete"
+                | "folder_resolve"
                 | "sync"
         )
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
@@ -426,6 +430,37 @@ pub fn handle_client_with_peer(
             Err(error) => error.response(),
         },
         "cipher_restore" => match state.vault_mgr.restore_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "folder_list" => match state.vault_mgr.list_folders() {
+            Ok(folders) => json!({ "ok": true, "folders": folders }),
+            Err(err) => json!({ "ok": false, "error": err }),
+        },
+        "folder_resolve" => {
+            let inner = req.get("mutation").unwrap_or(&req);
+            let target = inner.get("target").and_then(Value::as_str).unwrap_or("");
+            match state.vault_mgr.resolve_folder_target(target) {
+                Ok(folder) => json!({
+                    "ok": true,
+                    "folder": {
+                        "id": folder.id,
+                        "name": folder.name,
+                        "count": folder.count,
+                    }
+                }),
+                Err(err) => json!({ "ok": false, "error": err }),
+            }
+        }
+        "folder_create" => match state.vault_mgr.create_folder(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "folder_update" => match state.vault_mgr.update_folder(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "folder_delete" => match state.vault_mgr.delete_folder(req, client_context.as_ref()) {
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },

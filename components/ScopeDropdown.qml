@@ -17,12 +17,20 @@ Item {
   property string fontFamily: ""
   property bool alignRight: false
   property int maxLabelWidth: 110
+  property string footerActionLabel: ""
 
   property alias isOpen: popup.opened
 
   signal selected(string id)
   signal resetRequested()
+  signal footerActionRequested()
   signal closed()
+
+  function triggerFooterAction() {
+    if (!footerActionLabel) return
+    popup.close()
+    footerActionRequested()
+  }
 
   function open() {
     popup.open()
@@ -157,7 +165,7 @@ Item {
     y: capsuleRect.height + 6
     x: dropdownRoot.alignRight ? (capsuleRect.width - width) : 0
     width: Math.max(190, capsuleRect.width)
-    implicitHeight: Math.min(260, (dropdownRoot.items ? dropdownRoot.items.length * 30 + 12 : 60))
+    implicitHeight: Math.min(296, (dropdownRoot.items ? dropdownRoot.items.length * 30 + 12 : 60) + (dropdownRoot.footerActionLabel ? 36 : 0))
     padding: 6
     modal: true
     focus: true
@@ -191,56 +199,131 @@ Item {
       radius: 6
     }
 
-    contentItem: ListView {
-      id: menuListView
-      focus: true
-      model: dropdownRoot.items
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      currentIndex: popup.highlightedIndex
-      spacing: 2
+    contentItem: ColumnLayout {
+      spacing: 4
 
-      onCurrentIndexChanged: {
-        positionViewAtIndex(currentIndex, ListView.Contain)
-      }
+      ListView {
+        id: menuListView
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        focus: true
+        model: dropdownRoot.items
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        currentIndex: popup.highlightedIndex
+        spacing: 2
 
-      ScrollBar.vertical: ScrollBar {
-        policy: ScrollBar.AsNeeded
-      }
+        onCurrentIndexChanged: {
+          positionViewAtIndex(currentIndex, ListView.Contain)
+        }
 
-      Keys.priority: Keys.BeforeItem
-      Keys.onPressed: function(event) {
-        if (!dropdownRoot.items || dropdownRoot.items.length === 0) return
+        ScrollBar.vertical: ScrollBar {
+          policy: ScrollBar.AsNeeded
+        }
 
-        if (event.key === Qt.Key_Down) {
-          popup.highlightedIndex = (popup.highlightedIndex + 1) % dropdownRoot.items.length
-          menuListView.currentIndex = popup.highlightedIndex
-          event.accepted = true
-        } else if (event.key === Qt.Key_Up) {
-          popup.highlightedIndex = (popup.highlightedIndex - 1 + dropdownRoot.items.length) % dropdownRoot.items.length
-          menuListView.currentIndex = popup.highlightedIndex
-          event.accepted = true
-        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
-          if (popup.highlightedIndex >= 0 && popup.highlightedIndex < dropdownRoot.items.length) {
-            dropdownRoot.selected(dropdownRoot.items[popup.highlightedIndex].id)
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+          if (!dropdownRoot.items || dropdownRoot.items.length === 0) return
+
+          if (event.key === Qt.Key_Down) {
+            popup.highlightedIndex = (popup.highlightedIndex + 1) % dropdownRoot.items.length
+            menuListView.currentIndex = popup.highlightedIndex
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up) {
+            popup.highlightedIndex = (popup.highlightedIndex - 1 + dropdownRoot.items.length) % dropdownRoot.items.length
+            menuListView.currentIndex = popup.highlightedIndex
+            event.accepted = true
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+            if (popup.highlightedIndex >= 0 && popup.highlightedIndex < dropdownRoot.items.length) {
+              dropdownRoot.selected(dropdownRoot.items[popup.highlightedIndex].id)
+              popup.close()
+              event.accepted = true
+            }
+          } else if (event.key === Qt.Key_Escape) {
             popup.close()
             event.accepted = true
           }
-        } else if (event.key === Qt.Key_Escape) {
-          popup.close()
-          event.accepted = true
+        }
+
+        delegate: Rectangle {
+          required property int index
+          required property var modelData
+          width: menuListView.width
+          implicitHeight: 28
+          radius: 4
+          property bool isSelected: modelData.id === dropdownRoot.currentValue
+          property bool isHighlighted: index === popup.highlightedIndex
+          color: isSelected ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.2) : ((itemMouse.containsMouse || isHighlighted) ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.08) : "transparent")
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            spacing: 6
+
+            Text {
+              text: modelData.icon || "\uf009"
+              font.family: dropdownRoot.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
+            }
+
+            Text {
+              text: modelData.name || ""
+              color: isSelected ? dropdownRoot.accent : dropdownRoot.foreground
+              font.pixelSize: Style.font.bodySmall
+              font.weight: isSelected ? Font.DemiBold : Font.Normal
+              elide: Text.ElideRight
+              Layout.fillWidth: true
+              Layout.preferredWidth: 0
+            }
+
+            Text {
+              visible: modelData.count !== undefined && modelData.count !== null
+              text: String(modelData.count)
+              color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: isSelected
+              text: "\uf00c"
+              font.family: dropdownRoot.fontFamily
+              font.pixelSize: Style.font.caption
+              color: dropdownRoot.accent
+            }
+          }
+
+          MouseArea {
+            id: itemMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onPositionChanged: {
+              popup.highlightedIndex = index
+              menuListView.currentIndex = index
+            }
+            onClicked: {
+              dropdownRoot.selected(modelData.id)
+              popup.close()
+            }
+          }
         }
       }
 
-      delegate: Rectangle {
-        required property int index
-        required property var modelData
-        width: menuListView.width
+      Rectangle {
+        visible: Boolean(dropdownRoot.footerActionLabel)
+        Layout.fillWidth: true
+        height: 1
+        color: dropdownRoot.borderColor
+      }
+
+      Rectangle {
+        visible: Boolean(dropdownRoot.footerActionLabel)
+        Layout.fillWidth: true
         implicitHeight: 28
         radius: 4
-        property bool isSelected: modelData.id === dropdownRoot.currentValue
-        property bool isHighlighted: index === popup.highlightedIndex
-        color: isSelected ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.2) : ((itemMouse.containsMouse || isHighlighted) ? Qt.rgba(dropdownRoot.foreground.r, dropdownRoot.foreground.g, dropdownRoot.foreground.b, 0.08) : "transparent")
+        color: footerMouse.containsMouse ? Qt.rgba(dropdownRoot.accent.r, dropdownRoot.accent.g, dropdownRoot.accent.b, 0.16) : "transparent"
 
         RowLayout {
           anchors.fill: parent
@@ -249,51 +332,28 @@ Item {
           spacing: 6
 
           Text {
-            text: modelData.icon || "\uf009"
-            font.family: dropdownRoot.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
-          }
-
-          Text {
-            text: modelData.name || ""
-            color: isSelected ? dropdownRoot.accent : dropdownRoot.foreground
-            font.pixelSize: Style.font.bodySmall
-            font.weight: isSelected ? Font.DemiBold : Font.Normal
-            elide: Text.ElideRight
-            Layout.fillWidth: true
-            Layout.preferredWidth: 0
-          }
-
-          Text {
-            visible: modelData.count !== undefined && modelData.count !== null
-            text: String(modelData.count)
-            color: isSelected ? dropdownRoot.accent : dropdownRoot.muted
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            visible: isSelected
-            text: "\uf00c"
+            text: "\uf013"
             font.family: dropdownRoot.fontFamily
             font.pixelSize: Style.font.caption
             color: dropdownRoot.accent
           }
+
+          Text {
+            text: dropdownRoot.footerActionLabel
+            color: dropdownRoot.accent
+            font.pixelSize: Style.font.bodySmall
+            font.weight: Font.Medium
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
         }
 
         MouseArea {
-          id: itemMouse
+          id: footerMouse
           anchors.fill: parent
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
-          onPositionChanged: {
-            popup.highlightedIndex = index
-            menuListView.currentIndex = index
-          }
-          onClicked: {
-            dropdownRoot.selected(modelData.id)
-            popup.close()
-          }
+          onClicked: dropdownRoot.triggerFooterAction()
         }
       }
     }
