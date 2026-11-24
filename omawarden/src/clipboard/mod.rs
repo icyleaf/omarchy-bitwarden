@@ -34,7 +34,7 @@ pub enum ClipboardScope {
 #[doc(hidden)]
 pub struct ClipboardOutput {
     _output: File,
-    _account: Option<File>,
+    _account: Option<crate::storage::FileLockGuard>,
 }
 
 impl ClipboardScope {

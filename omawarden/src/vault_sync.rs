@@ -269,7 +269,8 @@ mod tests {
                 Err(e) => panic!("{e}"),
             }
         }
-        assert!(task.join().unwrap().is_ok());
+        let result = task.join().unwrap();
+        assert!(result.is_ok(), "sync failed: {result:?}");
         assert_eq!(
             mgr.storage_mgr.load().ciphers.len(),
             1,
