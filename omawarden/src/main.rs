@@ -916,17 +916,10 @@ enum CreateItemAction {
         cardholder_name: Option<String>,
         #[arg(long, help = "Card brand (e.g. Visa, Mastercard, Amex)")]
         brand: Option<String>,
-        #[arg(
-            long,
-            help = "Card number (prefer --stdin JSON for sensitive automation)"
-        )]
-        number: Option<String>,
         #[arg(long, help = "Expiration month (01-12)")]
         exp_month: Option<String>,
         #[arg(long, help = "Expiration year (4-digit, e.g. 2029)")]
         exp_year: Option<String>,
-        #[arg(long, help = "Security code / CVV")]
-        code: Option<String>,
         #[arg(long, help = "Optional notes")]
         notes: Option<String>,
         #[arg(
@@ -2518,10 +2511,8 @@ fn main() -> ExitCode {
                             name,
                             cardholder_name,
                             brand,
-                            number,
                             exp_month,
                             exp_year,
-                            code,
                             notes,
                             fields,
                             hidden_fields,
@@ -2549,6 +2540,53 @@ fn main() -> ExitCode {
                                     }
                                 };
 
+                            let is_interactive = (io::stdin().is_terminal()
+                                || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                                && !json;
+
+                            let read_card_secret =
+                                |prompt_msg: &str| -> zeroize::Zeroizing<String> {
+                                    if io::stdin().is_terminal() {
+                                        zeroize::Zeroizing::new(
+                                            rpassword::prompt_password(prompt_msg)
+                                                .unwrap_or_default(),
+                                        )
+                                    } else {
+                                        eprint!("{prompt_msg}");
+                                        let _ = io::stderr().flush();
+                                        let mut buf = zeroize::Zeroizing::new(String::new());
+                                        let _ = io::stdin().read_line(&mut buf);
+                                        zeroize::Zeroizing::new(
+                                            buf.trim_end_matches(['\r', '\n']).to_string(),
+                                        )
+                                    }
+                                };
+
+                            let number_val = if is_interactive {
+                                let v = read_card_secret(
+                                    "Enter card number (optional, Enter to skip): ",
+                                );
+                                if v.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(v)
+                                }
+                            } else {
+                                None
+                            };
+                            let code_val = if is_interactive {
+                                let v = read_card_secret(
+                                    "Enter security code / CVV (optional, Enter to skip): ",
+                                );
+                                if v.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(v)
+                                }
+                            } else {
+                                None
+                            };
+
                             let mut card_obj = serde_json::Map::new();
                             if let Some(v) = cardholder_name {
                                 card_obj.insert("cardholderName".into(), json!(v));
@@ -2556,8 +2594,8 @@ fn main() -> ExitCode {
                             if let Some(v) = brand {
                                 card_obj.insert("brand".into(), json!(v));
                             }
-                            if let Some(v) = number {
-                                card_obj.insert("number".into(), json!(v));
+                            if let Some(ref v) = number_val {
+                                card_obj.insert("number".into(), json!(v.as_str()));
                             }
                             if let Some(v) = exp_month {
                                 card_obj.insert("expMonth".into(), json!(v));
@@ -2565,8 +2603,8 @@ fn main() -> ExitCode {
                             if let Some(v) = exp_year {
                                 card_obj.insert("expYear".into(), json!(v));
                             }
-                            if let Some(v) = code {
-                                card_obj.insert("code".into(), json!(v));
+                            if let Some(ref v) = code_val {
+                                card_obj.insert("code".into(), json!(v.as_str()));
                             }
 
                             let mut req = json!({
@@ -6622,14 +6660,10 @@ Bool Field: Active = maybe
             "Jane Doe",
             "--brand",
             "Visa",
-            "--number",
-            "4111111111111111",
             "--exp-month",
             "08",
             "--exp-year",
             "2029",
-            "--code",
-            "123",
         ])
         .unwrap();
         match card_cli.command {
@@ -6641,10 +6675,8 @@ Bool Field: Active = maybe
                                 name,
                                 cardholder_name,
                                 brand,
-                                number,
                                 exp_month,
                                 exp_year,
-                                code,
                                 ..
                             }),
                         ..
@@ -6653,13 +6685,41 @@ Bool Field: Active = maybe
                 assert_eq!(name, "Corp Visa");
                 assert_eq!(cardholder_name.as_deref(), Some("Jane Doe"));
                 assert_eq!(brand.as_deref(), Some("Visa"));
-                assert_eq!(number.as_deref(), Some("4111111111111111"));
                 assert_eq!(exp_month.as_deref(), Some("08"));
                 assert_eq!(exp_year.as_deref(), Some("2029"));
-                assert_eq!(code.as_deref(), Some("123"));
             }
             _ => panic!("Expected VaultAction::Create(Card)"),
         }
+
+        // Security Rule 11 (Zero-Argv): sensitive card number and CVV must be rejected in argv
+        assert!(
+            Cli::try_parse_from([
+                "omawarden",
+                "vault",
+                "create",
+                "card",
+                "--name",
+                "Corp Visa",
+                "--number",
+                "4111111111111111",
+            ])
+            .is_err(),
+            "--number must be rejected in argv (Zero-Argv Rule 11)"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "omawarden",
+                "vault",
+                "create",
+                "card",
+                "--name",
+                "Corp Visa",
+                "--code",
+                "123",
+            ])
+            .is_err(),
+            "--code must be rejected in argv (Zero-Argv Rule 11)"
+        );
     }
 
     #[test]
