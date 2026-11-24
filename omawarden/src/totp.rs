@@ -9,11 +9,13 @@ pub struct TotpResult {
     pub period: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct TotpParams {
     pub secret: String,
     pub algorithm: String, // "SHA1", "SHA256", "SHA512"
+    #[zeroize(skip)]
     pub digits: u32,
+    #[zeroize(skip)]
     pub period: u64,
 }
 
@@ -93,7 +95,87 @@ pub fn parse_totp_params(secret_or_uri: &str) -> Option<TotpParams> {
 }
 
 pub fn parse_totp_secret(secret_or_uri: &str) -> Option<String> {
-    parse_totp_params(secret_or_uri).map(|p| p.secret)
+    parse_totp_params(secret_or_uri).map(|p| p.secret.clone())
+}
+
+fn decode_base32_secret(secret: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    let mut padded = zeroize::Zeroizing::new(secret.to_string());
+    let missing_padding = padded.len() % 8;
+    if missing_padding != 0 {
+        padded.push_str(&"=".repeat(8 - missing_padding));
+    }
+
+    base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &padded)
+        .or_else(|| base32::decode(base32::Alphabet::Rfc4648 { padding: false }, secret))
+        .or_else(|| base32::decode(base32::Alphabet::Rfc4648Lower { padding: false }, secret))
+        .filter(|bytes| !bytes.is_empty())
+        .map(zeroize::Zeroizing::new)
+}
+
+/// Fail-closed validation for a Login TOTP seed (either a full `otpauth://` URI
+/// or a raw Base32 / `SECRET?digits=...&period=...` string).
+pub fn validate_totp_seed(secret_or_uri: &str) -> Result<TotpParams, String> {
+    let raw = secret_or_uri.trim();
+    if raw.is_empty() {
+        return Err("TOTP seed cannot be empty.".to_string());
+    }
+    if raw.starts_with("otpauth://") || raw.starts_with("otpauth-migration://") {
+        let parsed = Url::parse(raw)
+            .map_err(|_| "Invalid TOTP URI: could not parse otpauth:// URL.".to_string())?;
+        for (k, v) in parsed.query_pairs() {
+            match k.as_ref() {
+                "digits" if v.parse::<u32>().is_err() => {
+                    return Err(format!("Invalid TOTP digits parameter '{v}'."));
+                }
+                "period" if v.parse::<u64>().is_err() => {
+                    return Err(format!("Invalid TOTP period parameter '{v}'."));
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(q_idx) = raw.find('?') {
+        let query_part = &raw[q_idx + 1..];
+        for pair in query_part.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
+                match k {
+                    "digits" if v.parse::<u32>().is_err() => {
+                        return Err(format!("Invalid TOTP digits parameter '{v}'."));
+                    }
+                    "period" if v.parse::<u64>().is_err() => {
+                        return Err(format!("Invalid TOTP period parameter '{v}'."));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let params = parse_totp_params(raw)
+        .ok_or_else(|| "Invalid TOTP seed: missing secret parameter.".to_string())?;
+
+    if !matches!(params.algorithm.as_str(), "SHA1" | "SHA256" | "SHA512") {
+        return Err(format!(
+            "Unsupported TOTP algorithm '{}'. Supported algorithms are SHA1, SHA256, and SHA512.",
+            params.algorithm
+        ));
+    }
+    if !(1..=9).contains(&params.digits) {
+        return Err(format!(
+            "Invalid TOTP digits '{}'. Expected a value between 1 and 9 (typically 6 or 8).",
+            params.digits
+        ));
+    }
+    if params.period == 0 {
+        return Err("Invalid TOTP period '0'. Period must be at least 1 second.".to_string());
+    }
+    if decode_base32_secret(&params.secret).is_none() {
+        return Err(
+            "Invalid TOTP secret: expected valid Base32 characters (A-Z, 2-7).".to_string(),
+        );
+    }
+
+    Ok(params)
 }
 
 pub fn generate_totp(
@@ -113,6 +195,9 @@ pub fn generate_totp(
     } else {
         default_period
     };
+    if period == 0 || digits == 0 || digits > 9 {
+        return None;
+    }
 
     let now = timestamp.unwrap_or_else(|| {
         SystemTime::now()
@@ -124,21 +209,7 @@ pub fn generate_totp(
     let counter = now / period;
     let ttl = period - (now % period);
 
-    // Normalize base32 padding
-    let mut padded = params.secret.clone();
-    let missing_padding = padded.len() % 8;
-    if missing_padding != 0 {
-        padded.push_str(&"=".repeat(8 - missing_padding));
-    }
-
-    let key = base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &padded)
-        .or_else(|| base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &params.secret))
-        .or_else(|| {
-            base32::decode(
-                base32::Alphabet::Rfc4648Lower { padding: false },
-                &params.secret,
-            )
-        })?;
+    let key = decode_base32_secret(&params.secret)?;
 
     let msg = counter.to_be_bytes();
 

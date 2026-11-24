@@ -96,9 +96,10 @@ const CIPHER_UPDATE_RESERVED_KEYS: [&str; 4] = ["action", "id", "target", "clien
 /// Keys that only make sense on Login ciphers. The daemon enforces this too,
 /// but rejecting before dispatch keeps Secure Note edits from surfacing a
 /// confusing IPC error.
-const CIPHER_UPDATE_LOGIN_KEYS: [&str; 6] = [
+const CIPHER_UPDATE_LOGIN_KEYS: [&str; 7] = [
     "username",
     "password",
+    "totp",
     "uri",
     "uris",
     "add_uris",
@@ -154,9 +155,24 @@ fn cipher_mutation_required_schema_version(request: &Value) -> u32 {
             .and_then(Value::as_str)
             .is_some_and(|t| t.eq_ignore_ascii_case("card") || t.eq_ignore_ascii_case("identity")),
     };
+    let has_uri_match_rule = [
+        request.get("uris"),
+        request.get("add_uris"),
+        request.get("login").and_then(|l| l.get("uris")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_array)
+    .flatten()
+    .any(|u| u.as_object().is_some_and(|o| o.contains_key("match")));
+    let has_login_totp = request.get("totp").is_some()
+        || (action == Some("cipher_create")
+            && request.get("login").and_then(|l| l.get("totp")).is_some());
     if request.get("card").is_some()
         || request.get("identity").is_some()
         || (action == Some("cipher_create") && is_card_or_identity_type)
+        || has_login_totp
+        || has_uri_match_rule
     {
         return 3;
     }
@@ -685,6 +701,18 @@ enum VaultAction {
         generate_passphrase: bool,
         #[arg(
             long,
+            conflicts_with_all = ["password_stdin", "notes_stdin", "clear_totp"],
+            help = "Read TOTP seed or otpauth:// URI from standard input (Zero-Argv compliant)"
+        )]
+        totp_stdin: bool,
+        #[arg(
+            long,
+            conflicts_with = "totp_stdin",
+            help = "Clear the TOTP seed from login cipher"
+        )]
+        clear_totp: bool,
+        #[arg(
+            long,
             conflicts_with = "notes_stdin",
             help = "New notes for the cipher"
         )]
@@ -760,6 +788,8 @@ enum VaultAction {
                 "password_stdin",
                 "generate_password",
                 "generate_passphrase",
+                "totp_stdin",
+                "clear_totp",
                 "notes",
                 "notes_stdin",
                 "uris",
@@ -785,6 +815,8 @@ enum VaultAction {
                 "password_stdin",
                 "generate_password",
                 "generate_passphrase",
+                "totp_stdin",
+                "clear_totp",
                 "notes",
                 "notes_stdin",
                 "uris",
@@ -838,6 +870,12 @@ enum CreateItemAction {
             help = "Automatically generate a 4-word Diceware passphrase"
         )]
         generate_passphrase: bool,
+        #[arg(
+            long,
+            conflicts_with = "password_stdin",
+            help = "Read TOTP seed or otpauth:// URI from standard input (Zero-Argv compliant)"
+        )]
+        totp_stdin: bool,
         #[arg(long, help = "Optional notes")]
         notes: Option<String>,
         #[arg(
@@ -2355,6 +2393,7 @@ fn main() -> ExitCode {
                             password_stdin,
                             generate_password,
                             generate_passphrase,
+                            totp_stdin,
                             notes,
                             uris,
                             fields,
@@ -2487,6 +2526,15 @@ fn main() -> ExitCode {
                                     }
                                 };
 
+                            let totp_val = if totp_stdin {
+                                let mut buf = zeroize::Zeroizing::new(String::new());
+                                io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                                let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+                                Some(zeroize::Zeroizing::new(trimmed))
+                            } else {
+                                None
+                            };
+
                             let mut req = json!({
                                 "action": "cipher_create",
                                 "cipher_type": "login",
@@ -2496,6 +2544,9 @@ fn main() -> ExitCode {
                                 "notes": notes,
                                 "folder_id": folder_id,
                             });
+                            if let Some(ref totp) = totp_val {
+                                req["totp"] = json!(totp.as_str());
+                            }
                             if !uris.is_empty() {
                                 req["uris"] = json!(uris);
                                 req["login"] = json!({ "uris": uris });
@@ -3226,6 +3277,8 @@ fn main() -> ExitCode {
                     password_stdin,
                     generate_password,
                     generate_passphrase,
+                    totp_stdin,
+                    clear_totp,
                     notes,
                     notes_stdin,
                     uris,
@@ -3247,6 +3300,8 @@ fn main() -> ExitCode {
                         || password_stdin
                         || generate_password
                         || generate_passphrase
+                        || totp_stdin
+                        || clear_totp
                         || notes.is_some()
                         || notes_stdin
                         || !uris.is_empty()
@@ -3384,6 +3439,8 @@ fn main() -> ExitCode {
                             || password_stdin
                             || generate_password
                             || generate_passphrase
+                            || totp_stdin
+                            || clear_totp
                             || !uris.is_empty()
                             || !add_uris.is_empty()
                             || clear_uris)
@@ -3446,6 +3503,17 @@ fn main() -> ExitCode {
                             notes.map(zeroize::Zeroizing::new)
                         };
 
+                        let totp_val = if clear_totp {
+                            Some(zeroize::Zeroizing::new(String::new()))
+                        } else if totp_stdin {
+                            let mut buf = zeroize::Zeroizing::new(String::new());
+                            io::stdin().read_to_string(&mut buf).unwrap_or_default();
+                            let trimmed = buf.trim_end_matches(['\r', '\n']);
+                            Some(zeroize::Zeroizing::new(trimmed.to_string()))
+                        } else {
+                            None
+                        };
+
                         let mut req = json!({
                             "action": "cipher_update",
                             "id": item_id.as_str(),
@@ -3456,6 +3524,9 @@ fn main() -> ExitCode {
                             "folder_id": folder_id,
                             "favorite": favorite,
                         });
+                        if let Some(ref totp) = totp_val {
+                            req["totp"] = json!(totp.as_str());
+                        }
                         if !uris.is_empty() {
                             req["uris"] = json!(uris);
                         }
@@ -4872,12 +4943,65 @@ const IDENTITY_EDITOR_FIELDS: &[(&str, &str)] = &[
     ("country", "Country"),
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct ParsedEditorUri {
+    uri: String,
+    #[zeroize(skip)]
+    match_type: Option<u32>,
+}
+
+fn uri_match_rule_label(match_type: Option<u32>) -> Option<&'static str> {
+    match match_type {
+        None => None,
+        Some(0) => Some("domain"),
+        Some(1) => Some("host"),
+        Some(2) => Some("starts_with"),
+        Some(3) => Some("exact"),
+        Some(4) => Some("regex"),
+        Some(5) => Some("never"),
+        _ => None,
+    }
+}
+
+fn parse_editor_uri_line(val: &str, line_number: usize) -> Result<ParsedEditorUri, String> {
+    let trimmed = val.trim();
+    if let Some(without_close) = trimmed.strip_suffix(']') {
+        if let Some(open_idx) = without_close.rfind(" [") {
+            let uri_part = without_close[..open_idx].trim();
+            let rule_part = without_close[open_idx + 2..].trim().to_ascii_lowercase();
+            let match_type = match rule_part.as_str() {
+                "default" => None,
+                "domain" => Some(0),
+                "host" => Some(1),
+                "starts_with" => Some(2),
+                "exact" => Some(3),
+                "regex" => Some(4),
+                "never" => Some(5),
+                other => {
+                    return Err(format!(
+                        "Invalid URI match rule '[{other}]' on line {line_number}: expected default, domain, host, starts_with, exact, regex, or never."
+                    ));
+                }
+            };
+            return Ok(ParsedEditorUri {
+                uri: uri_part.to_string(),
+                match_type,
+            });
+        }
+    }
+    Ok(ParsedEditorUri {
+        uri: trimmed.to_string(),
+        match_type: None,
+    })
+}
+
 #[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct ParsedEditorCipher {
     name: String,
     username: Option<String>,
     password: Option<String>,
-    uris: Vec<String>,
+    totp: Option<String>,
+    uris: Vec<ParsedEditorUri>,
     card: Vec<(String, String)>,
     identity: Vec<(String, String)>,
     fields: Vec<ParsedEditorField>,
@@ -4918,8 +5042,14 @@ fn format_editor_template(
             .and_then(|l| l.get("password"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let totp = item_details
+            .and_then(|i| i.login.as_ref())
+            .and_then(|l| l.get("totp"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let _ = writeln!(out, "Username: {username}");
         let _ = writeln!(out, "Password: {password}");
+        let _ = writeln!(out, "TOTP: {totp}");
         let uris = item_details
             .and_then(|i| i.login.as_ref())
             .and_then(|l| l.get("uris"))
@@ -4928,7 +5058,15 @@ fn format_editor_template(
             .unwrap_or_default();
         for uri in &uris {
             let value = uri.get("uri").and_then(Value::as_str).unwrap_or("");
-            let _ = writeln!(out, "URI: {value}");
+            let match_type = uri
+                .get("match")
+                .and_then(Value::as_u64)
+                .and_then(|m| u32::try_from(m).ok());
+            if let Some(rule) = uri_match_rule_label(match_type) {
+                let _ = writeln!(out, "URI: {value} [{rule}]");
+            } else {
+                let _ = writeln!(out, "URI: {value}");
+            }
         }
     } else if item_type == "card" {
         let card = item_details.and_then(|i| i.card.as_ref());
@@ -5026,7 +5164,8 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
     let mut name = String::new();
     let mut username = String::new();
     let mut password = String::new();
-    let mut uris: Vec<String> = Vec::new();
+    let mut totp = String::new();
+    let mut uris: Vec<ParsedEditorUri> = Vec::new();
     let mut card_values: Vec<(String, String)> = if item_type == "card" {
         CARD_EDITOR_FIELDS
             .iter()
@@ -5071,9 +5210,19 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
                 "name" => name = val.to_string(),
                 "username" if item_type == "login" => username = val.to_string(),
                 "password" => password = val.to_string(),
+                "totp" if item_type == "login" => {
+                    if !val.is_empty() {
+                        omawarden::totp::validate_totp_seed(val)
+                            .map_err(|e| format!("Invalid TOTP on line {line_number}: {e}"))?;
+                    }
+                    totp = val.to_string();
+                }
                 "uri" => {
                     if !val.is_empty() {
-                        uris.push(val.to_string());
+                        let parsed_uri = parse_editor_uri_line(val, line_number)?;
+                        if !parsed_uri.uri.is_empty() {
+                            uris.push(parsed_uri);
+                        }
                     }
                 }
                 "field" => fields.push(parse_editor_field(val, 0, line_number, "Field")?),
@@ -5127,6 +5276,7 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
         name,
         username: if has_login { Some(username) } else { None },
         password: if has_login { Some(password) } else { None },
+        totp: if has_login { Some(totp) } else { None },
         uris: if has_login { uris } else { Vec::new() },
         card: card_values,
         identity: identity_values,
@@ -5304,7 +5454,7 @@ fn handle_editor_edit(
     let orig_favorite = full_item.as_ref().map(|i| i.favorite).unwrap_or(false);
     let orig_folder_id = full_item.as_ref().and_then(|i| i.folder_id.as_deref());
 
-    let (orig_user, orig_pass) = if item_type == "login" {
+    let (orig_user, orig_pass, orig_totp) = if item_type == "login" {
         let u = full_item
             .as_ref()
             .and_then(|i| i.login.as_ref())
@@ -5319,12 +5469,25 @@ fn handle_editor_edit(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        (u, p)
+        let t = zeroize::Zeroizing::new(
+            full_item
+                .as_ref()
+                .and_then(|i| i.login.as_ref())
+                .and_then(|l| l.get("totp"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        );
+        (u, p, t)
     } else {
-        (String::new(), String::new())
+        (
+            String::new(),
+            String::new(),
+            zeroize::Zeroizing::new(String::new()),
+        )
     };
 
-    let orig_uris: Vec<String> = if item_type == "login" {
+    let orig_uris: Vec<ParsedEditorUri> = if item_type == "login" {
         full_item
             .as_ref()
             .and_then(|i| i.login.as_ref())
@@ -5332,7 +5495,14 @@ fn handle_editor_edit(
             .and_then(Value::as_array)
             .map(|uris| {
                 uris.iter()
-                    .filter_map(|u| u.get("uri").and_then(Value::as_str).map(str::to_string))
+                    .filter_map(|u| {
+                        let uri = u.get("uri").and_then(Value::as_str)?.to_string();
+                        let match_type = u
+                            .get("match")
+                            .and_then(Value::as_u64)
+                            .and_then(|m| u32::try_from(m).ok());
+                        Some(ParsedEditorUri { uri, match_type })
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -5371,6 +5541,7 @@ fn handle_editor_edit(
         item_type == "login" && parsed.username.as_deref() != Some(orig_user.as_str());
     let password_changed =
         item_type == "login" && parsed.password.as_deref() != Some(orig_pass.as_str());
+    let totp_changed = item_type == "login" && parsed.totp.as_deref() != Some(orig_totp.as_str());
     let uris_changed = item_type == "login" && parsed.uris != orig_uris;
     let folder_changed = parsed.folder_id.as_deref() != orig_folder_id;
     let favorite_changed = parsed.favorite != orig_favorite;
@@ -5433,6 +5604,7 @@ fn handle_editor_edit(
     if !name_changed
         && !username_changed
         && !password_changed
+        && !totp_changed
         && !uris_changed
         && !card_changed
         && !identity_changed
@@ -5459,8 +5631,20 @@ fn handle_editor_edit(
     if password_changed {
         daemon_req["password"] = json!(parsed.password);
     }
+    if totp_changed {
+        daemon_req["totp"] = json!(parsed.totp.as_deref().unwrap_or(""));
+    }
     if uris_changed {
-        daemon_req["uris"] = json!(parsed.uris);
+        if parsed.uris.is_empty() && !orig_uris.is_empty() {
+            daemon_req["clear_uris"] = json!(true);
+        } else {
+            let uri_objs: Vec<Value> = parsed
+                .uris
+                .iter()
+                .map(|u| json!({ "uri": u.uri, "match": u.match_type }))
+                .collect();
+            daemon_req["uris"] = json!(uri_objs);
+        }
     }
     if card_changed {
         daemon_req["card"] = Value::Object(card_diff);
@@ -6022,6 +6206,62 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_rejects_totp_argv_zero_argv_rule_11() {
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "GitHub",
+            "--username",
+            "octocat",
+            "--password-stdin",
+            "--totp",
+            "JBSWY3DPEHPK3PXP",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "GitHub",
+            "--totp",
+            "JBSWY3DPEHPK3PXP",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "GitHub",
+            "--username",
+            "octocat",
+            "--password",
+            "pass",
+            "--totp-stdin",
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["omawarden", "vault", "edit", "GitHub", "--totp-stdin",]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["omawarden", "vault", "edit", "GitHub", "--clear-totp",]).is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "edit",
+            "GitHub",
+            "--totp-stdin",
+            "--clear-totp",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn test_cli_generate_password_default_and_flags() {
         let cli_default = Cli::try_parse_from(["omawarden", "generate"]).unwrap();
         match cli_default.command {
@@ -6254,6 +6494,8 @@ mod tests {
                         password_stdin,
                         generate_password,
                         generate_passphrase,
+                        totp_stdin: _,
+                        clear_totp: _,
                         notes,
                         notes_stdin,
                         uris,
@@ -6569,7 +6811,13 @@ Note line 2 with: colons and # symbols
         assert_eq!(parsed.name, "Updated Name");
         assert_eq!(parsed.username.as_deref(), Some("updated_user"));
         assert_eq!(parsed.password.as_deref(), Some("new_password"));
-        assert_eq!(parsed.uris, vec!["https://example.com/updated"]);
+        assert_eq!(
+            parsed.uris,
+            vec![ParsedEditorUri {
+                uri: "https://example.com/updated".to_string(),
+                match_type: None,
+            }]
+        );
         assert_eq!(parsed.folder_id.as_deref(), Some("folder-2"));
         assert!(parsed.favorite);
         assert_eq!(
@@ -6634,7 +6882,16 @@ body
         let parsed = parse_editor_template(content, "login").unwrap();
         assert_eq!(
             parsed.uris,
-            vec!["https://one.example", "https://two.example"]
+            vec![
+                ParsedEditorUri {
+                    uri: "https://one.example".to_string(),
+                    match_type: None,
+                },
+                ParsedEditorUri {
+                    uri: "https://two.example".to_string(),
+                    match_type: None,
+                },
+            ]
         );
         assert_eq!(parsed.fields.len(), 4);
         assert_eq!(parsed.fields[0].name, "PIN");

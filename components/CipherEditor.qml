@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "./CardFormatter.js" as CardFormatter
+import "./CipherMutation.js" as CipherMutation
 import qs.Commons
 import qs.Commons as Commons
 
@@ -65,6 +66,8 @@ ScrollView {
   property string username: ""
   property string password: ""
   property bool passwordRevealed: false
+  property string totp: ""
+  property bool totpRevealed: false
   property string cardholderName: ""
   property string cardBrand: ""
   property bool cardBrandManual: false
@@ -147,7 +150,22 @@ ScrollView {
     return out
   }
 
-  function originalUriValues() {
+  function currentUriEntries() {
+    var out = []
+    for (var u = 0; u < uriModel.count; u++) {
+      var row = uriModel.get(u)
+      var uri = String(row.uri || "").trim()
+      if (uri.length > 0) {
+        out.push({
+          uri: uri,
+          match: CipherMutation.uriMatchRuleToWire(row.matchRule)
+        })
+      }
+    }
+    return out
+  }
+
+  function originalUriEntries() {
     var out = []
     if (!originalItem || !originalItem.login || !originalItem.login.uris) return out
     var src = originalItem.login.uris
@@ -155,7 +173,10 @@ ScrollView {
       var raw = src[i]
       var value = (typeof raw === "string") ? raw : ((raw && raw.uri) ? raw.uri : "")
       value = String(value || "").trim()
-      if (value.length > 0) out.push(value)
+      var matchVal = (raw && typeof raw === "object")
+        ? CipherMutation.uriMatchRuleToWire(raw.match)
+        : null
+      if (value.length > 0) out.push({ uri: value, match: matchVal })
     }
     return out
   }
@@ -173,6 +194,8 @@ ScrollView {
     username = ""
     password = ""
     passwordRevealed = false
+    totp = ""
+    totpRevealed = false
     cardholderName = ""
     cardBrand = ""
     cardBrandManual = false
@@ -223,11 +246,15 @@ ScrollView {
       if (isLogin && originalItem.login) {
         username = String(originalItem.login.username || "")
         password = String(originalItem.login.password || "")
+        totp = String(originalItem.login.totp || "")
         var uris = originalItem.login.uris || []
         for (var u = 0; u < uris.length; u++) {
           var rawUri = uris[u]
           var uriValue = (typeof rawUri === "string") ? rawUri : ((rawUri && rawUri.uri) ? rawUri.uri : "")
-          uriModel.append({ uri: String(uriValue || "") })
+          var matchRule = (rawUri && typeof rawUri === "object")
+            ? CipherMutation.normalizeUriMatchRule(rawUri.match)
+            : -1
+          uriModel.append({ uri: String(uriValue || ""), matchRule: matchRule })
         }
       } else if (isCard && originalItem.card) {
         cardholderName = String(originalItem.card.cardholderName || "")
@@ -276,7 +303,7 @@ ScrollView {
       folderId = normalizeFolderId(defaultFolderId)
     }
 
-    if (uriModel.count === 0) uriModel.append({ uri: "" })
+    if (uriModel.count === 0) uriModel.append({ uri: "", matchRule: -1 })
     linkedFields = linked
     isResettingForm = false
     recomputeDirty()
@@ -309,6 +336,7 @@ ScrollView {
     if (isLogin) {
       if (String(username || "") !== "") return true
       if (String(password || "") !== "") return true
+      if (String(totp || "") !== "") return true
       for (var u = 0; u < uriModel.count; u++) {
         if (String(uriModel.get(u).uri || "").trim() !== "") return true
       }
@@ -358,6 +386,7 @@ ScrollView {
   onCipherNameChanged: recomputeDirty()
   onUsernameChanged: recomputeDirty()
   onPasswordChanged: recomputeDirty()
+  onTotpChanged: recomputeDirty()
   onCardholderNameChanged: recomputeDirty()
   onCardBrandChanged: recomputeDirty()
   onCardNumberChanged: {
@@ -396,7 +425,7 @@ ScrollView {
   // ----------------------------------------------------------------
 
   function addUri() {
-    uriModel.append({ uri: "" })
+    uriModel.append({ uri: "", matchRule: -1 })
   }
 
   function uriAt(index) {
@@ -410,10 +439,16 @@ ScrollView {
     recomputeDirty()
   }
 
+  function setUriMatch(index, matchValue) {
+    if (index < 0 || index >= uriModel.count) return
+    uriModel.setProperty(index, "matchRule", CipherMutation.normalizeUriMatchRule(matchValue))
+    recomputeDirty()
+  }
+
   function removeUri(index) {
     if (index < 0 || index >= uriModel.count) return
     uriModel.remove(index)
-    if (uriModel.count === 0) uriModel.append({ uri: "" })
+    if (uriModel.count === 0) uriModel.append({ uri: "", matchRule: -1 })
     recomputeDirty()
   }
 
@@ -533,6 +568,14 @@ ScrollView {
       }
     }
 
+    if (isLogin) {
+      var totpError = CipherMutation.validateTotpSeed(totp)
+      if (totpError.length > 0) {
+        errorMessage = totpError
+        return null
+      }
+    }
+
     if (isCard) {
       var trimmedYear = String(cardExpYear || "").trim()
       if (trimmedYear.length > 0 && !/^\d{4}$/.test(trimmedYear)) {
@@ -554,12 +597,10 @@ ScrollView {
     if (isLogin) {
       if (username && username.length > 0) payload.username = username
       if (password && password.length > 0) payload.password = password
+      var trimmedTotp = String(totp || "").trim()
+      if (trimmedTotp.length > 0) payload.totp = trimmedTotp
 
-      var cleanedUris = []
-      for (var u = 0; u < uriModel.count; u++) {
-        var uri = String(uriModel.get(u).uri || "").trim()
-        if (uri.length > 0) cleanedUris.push(uri)
-      }
+      var cleanedUris = currentUriEntries()
       if (cleanedUris.length > 0) payload.uris = cleanedUris
     } else if (isCard) {
       var cardObj = {}
@@ -618,17 +659,18 @@ ScrollView {
       if (String(password || "") !== String(login.password || "")) {
         payload.password = String(password || "")
       }
-
-      var originalUris = originalUriValues()
-      var currentUris = []
-      for (var u = 0; u < uriModel.count; u++) {
-        var uri = String(uriModel.get(u).uri || "").trim()
-        if (uri.length > 0) currentUris.push(uri)
+      var trimmedTotp = String(totp || "").trim()
+      if (trimmedTotp !== String(login.totp || "").trim()) {
+        payload.totp = trimmedTotp
       }
+
+      var originalUris = originalUriEntries()
+      var currentUris = currentUriEntries()
       var urisMatch = originalUris.length === currentUris.length
       if (urisMatch) {
         for (var c = 0; c < currentUris.length; c++) {
-          if (currentUris[c] !== originalUris[c]) {
+          if (currentUris[c].uri !== originalUris[c].uri
+              || currentUris[c].match !== originalUris[c].match) {
             urisMatch = false
             break
           }
@@ -1316,6 +1358,74 @@ ScrollView {
         }
       }
 
+      // Authenticator Key (TOTP)
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Authenticator Key (TOTP)"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: 6
+
+          Rectangle {
+            Layout.fillWidth: true
+            height: 32
+            radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: totpInput.activeFocus ? editorRoot.accent : editorRoot.borderColor
+            border.width: 1
+
+            TextInput {
+              id: totpInput
+              anchors.fill: parent
+              anchors.leftMargin: 8
+              anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter
+              color: editorRoot.foreground
+              font.pixelSize: Style.font.body
+              selectByMouse: true
+              clip: true
+              activeFocusOnTab: true
+              echoMode: editorRoot.totpRevealed ? TextInput.Normal : TextInput.Password
+              text: editorRoot.totp
+              onTextChanged: editorRoot.totp = text
+            }
+          }
+
+          Rectangle {
+            Layout.preferredWidth: 32
+            Layout.preferredHeight: 32
+            radius: 4
+            color: totpRevealMouse.containsMouse ? Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.15) : Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.05)
+            border.color: editorRoot.borderColor
+            border.width: 1
+
+            Text {
+              anchors.centerIn: parent
+              text: editorRoot.totpRevealed ? "\uf070" : "\uf06e"
+              font.family: editorRoot.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              color: editorRoot.accent
+            }
+
+            MouseArea {
+              id: totpRevealMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: editorRoot.totpRevealed = !editorRoot.totpRevealed
+            }
+          }
+        }
+      }
+
       // Login URIs
       ColumnLayout {
         Layout.fillWidth: true
@@ -1375,8 +1485,10 @@ ScrollView {
           model: uriModel
 
           delegate: RowLayout {
+            id: uriRow
             required property int index
             required property string uri
+            required property int matchRule
             Layout.fillWidth: true
             spacing: 6
 
@@ -1399,12 +1511,74 @@ ScrollView {
                 selectByMouse: true
                 clip: true
                 activeFocusOnTab: true
-                text: uri
+                text: uriRow.uri
                 onTextChanged: {
-                  if (uri !== text) {
-                    uriModel.setProperty(index, "uri", text)
+                  if (uriRow.uri !== text) {
+                    uriModel.setProperty(uriRow.index, "uri", text)
                     editorRoot.recomputeDirty()
                   }
+                }
+              }
+            }
+
+            ComboBox {
+              id: uriMatchCombo
+              Layout.preferredWidth: 112
+              Layout.preferredHeight: 30
+              model: CipherMutation.URI_MATCH_OPTIONS
+              textRole: "label"
+              currentIndex: CipherMutation.uriMatchRuleIndex(uriRow.matchRule)
+              onActivated: function(idx) {
+                var opt = CipherMutation.URI_MATCH_OPTIONS[idx]
+                editorRoot.setUriMatch(uriRow.index, opt ? opt.wire : null)
+              }
+              background: Rectangle {
+                radius: 4
+                color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+                border.color: uriMatchCombo.activeFocus ? editorRoot.accent : editorRoot.borderColor
+                border.width: 1
+              }
+              contentItem: Text {
+                leftPadding: 8
+                rightPadding: 20
+                text: uriMatchCombo.displayText
+                color: uriRow.matchRule >= 0 ? editorRoot.foreground : editorRoot.muted
+                font.pixelSize: Style.font.caption
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+              }
+              delegate: ItemDelegate {
+                required property int index
+                required property var modelData
+                width: uriMatchCombo.width
+                height: 26
+                highlighted: uriMatchCombo.highlightedIndex === index
+                background: Rectangle {
+                  color: highlighted ? Commons.Color.menu.selectedBackground : "transparent"
+                }
+                contentItem: Text {
+                  text: modelData ? modelData.label : ""
+                  color: highlighted ? Commons.Color.menu.selectedText : editorRoot.foreground
+                  font.pixelSize: Style.font.caption
+                  verticalAlignment: Text.AlignVCenter
+                  elide: Text.ElideRight
+                }
+              }
+              popup: Popup {
+                y: uriMatchCombo.height + 2
+                width: uriMatchCombo.width
+                padding: 2
+                background: Rectangle {
+                  radius: 4
+                  color: Commons.Color.popups.background
+                  border.color: Commons.Color.popups.border
+                  border.width: 1
+                }
+                contentItem: ListView {
+                  clip: true
+                  implicitHeight: Math.min(contentHeight, 200)
+                  model: uriMatchCombo.popup.visible ? uriMatchCombo.delegateModel : null
+                  currentIndex: uriMatchCombo.highlightedIndex
                 }
               }
             }
@@ -1430,7 +1604,7 @@ ScrollView {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: editorRoot.removeUri(index)
+                onClicked: editorRoot.removeUri(uriRow.index)
               }
             }
           }

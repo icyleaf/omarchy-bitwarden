@@ -1785,7 +1785,8 @@ pub fn decrypt_sync_ciphers_with_context(
                                 u.get("uri").and_then(|v| v.as_str()),
                                 &cipher_key,
                             );
-                            uris_decrypted.push(json!({ "uri": uri_str }));
+                            let match_val = u.get("match").and_then(Value::as_u64);
+                            uris_decrypted.push(json!({ "uri": uri_str, "match": match_val }));
                         }
                     }
 

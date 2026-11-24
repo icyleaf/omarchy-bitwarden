@@ -121,7 +121,10 @@ Item {
     check(editorLoginPayload.password === "  p@ss word  ", "editor password whitespace is preserved verbatim")
     check(editorLoginPayload.notes === "line1\nline2", "editor login notes are serialized")
     check(editorLoginPayload.uris.length === 2, "editor blank URI rows are filtered out")
-    check(editorLoginPayload.uris[0] === "https://example.com" && editorLoginPayload.uris[1] === "https://second.example",
+    check(editorLoginPayload.uris[0].uri === "https://example.com"
+          && editorLoginPayload.uris[0].match === null
+          && editorLoginPayload.uris[1].uri === "https://second.example"
+          && editorLoginPayload.uris[1].match === null,
           "editor non-blank URIs keep their order")
     check(editorLoginPayload.fields.length === 3, "editor serializes all custom fields")
     check(editorLoginPayload.fields[0].type === 0 && editorLoginPayload.fields[0].name === "recovery" &&
@@ -491,8 +494,11 @@ Item {
     editor.resetForm()
     editor.setUri(0, "https://gitlab.com")
     var uriDiff = editor.buildEditPayload("GitHub")
-    check(uriDiff.uris.length === 2 && uriDiff.uris[0] === "https://gitlab.com" &&
-          uriDiff.uris[1] === "https://gist.github.com", "edited URIs are sent in order")
+    check(uriDiff.uris.length === 2
+          && uriDiff.uris[0].uri === "https://gitlab.com"
+          && uriDiff.uris[0].match === null
+          && uriDiff.uris[1].uri === "https://gist.github.com"
+          && uriDiff.uris[1].match === null, "edited URIs are sent in order")
 
     editor.resetForm()
     editor.addUri()
@@ -1088,6 +1094,110 @@ Item {
     var focusGuardWindow = focusGuardIdx >= 0 ? src.substring(focusGuardIdx, focusGuardIdx + 200) : ""
     check(focusGuardWindow.indexOf("root.showCipherFormModal") === -1,
           "hasActiveModal no longer includes the retired CipherFormModal")
+
+    // ------------------------------------------------------------------
+    // 18. Login TOTP seed & per-URI match rule editing (#423)
+    // ------------------------------------------------------------------
+    // 18a. Create mode: TOTP validation + verbatim payload + URI match rules
+    editor.active = false
+    editor.mode = "create"
+    editor.cipherType = "login"
+    editor.originalItem = null
+    editor.active = true
+    editor.cipherName = "TOTP & Match Login"
+    editor.username = "alice"
+    editor.password = "s3cr3t"
+    editor.totp = "not-valid-base32!!!"
+    var totpInvalidBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === totpInvalidBefore, "invalid Base32 TOTP seed blocks create submit")
+    check(editor.errorMessage.length > 0, "invalid TOTP seed surfaces errorMessage")
+
+    editor.totp = "otpauth://totp/Acme:alice?issuer=Acme"
+    editor.submit()
+    check(testRunner.editorSubmitCount === totpInvalidBefore, "otpauth URI missing secret blocks create submit")
+
+    editor.totp = "otpauth://totp/Acme:alice?secret=JBSWY3DPEHPK3PXP&issuer=%ZZ"
+    editor.submit()
+    check(testRunner.editorSubmitCount === totpInvalidBefore, "malformed percent-encoding in otpauth URI blocks submit without throwing")
+
+    editor.totp = "JBSWY3DP="
+    editor.submit()
+    check(testRunner.editorSubmitCount === totpInvalidBefore, "invalid Base32 padding blocks create submit")
+
+    var validOtpauth = "otpauth://totp/Acme:alice?secret=JBSWY3DPEHPK3PXP&issuer=Acme&digits=8&period=60&algorithm=SHA256"
+    editor.totp = validOtpauth
+    editor.setUri(0, "https://app.example.com/login")
+    editor.setUriMatch(0, 3) // Exact
+    editor.addUri()
+    editor.setUri(1, "https://example.com")
+    editor.setUriMatch(1, null) // Default
+    editor.submit()
+    check(testRunner.editorSubmitCount === totpInvalidBefore + 1, "valid TOTP + URI match create submits")
+    var totpCreatePayload = testRunner.editorSubmitted
+    check(totpCreatePayload && totpCreatePayload.totp === validOtpauth, "create payload preserves TOTP URI verbatim")
+    check(totpCreatePayload && totpCreatePayload.uris && totpCreatePayload.uris.length === 2, "create payload includes both URIs")
+    check(totpCreatePayload && totpCreatePayload.uris[0].uri === "https://app.example.com/login"
+          && totpCreatePayload.uris[0].match === 3, "first URI carries Exact (3) match rule")
+    check(totpCreatePayload && totpCreatePayload.uris[1].uri === "https://example.com"
+          && totpCreatePayload.uris[1].match === null, "second URI carries Default (null) match rule")
+
+    // Closing scrubs TOTP draft and reveal state
+    editor.totpRevealed = true
+    editor.active = false
+    check(editor.totp === "" && editor.totpRevealed === false, "closing CipherEditor scrubs TOTP seed and reveal state")
+
+    // 18b. Edit mode: minimal dirty-diff for TOTP and per-URI match rules
+    editor.mode = "edit"
+    editor.cipherType = "login"
+    editor.originalItem = {
+      id: "login-totp-match-1",
+      type_name: "login",
+      name: "TOTP & Match Login",
+      folder_id: "",
+      notes: "",
+      login: {
+        username: "alice",
+        password: "s3cr3t",
+        totp: "JBSWY3DPEHPK3PXP",
+        uris: [
+          { uri: "https://app.example.com/login", match: 3 },
+          { uri: "https://example.com", match: null }
+        ]
+      },
+      fields: []
+    }
+    editor.active = true
+    check(editor.totp === "JBSWY3DPEHPK3PXP", "edit mode pre-populates TOTP seed")
+    check(editor.isDirty === false, "pristine login with TOTP and match rules is not dirty")
+
+    // Changing only a URI match rule marks dirty and emits uris diff without touching totp
+    editor.setUriMatch(0, 1) // Host
+    check(editor.isDirty === true, "changing only URI match rule marks editor dirty")
+    var matchOnlyBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === matchOnlyBefore + 1, "match-only edit submits")
+    var matchOnlyDiff = testRunner.editorSubmitted
+    check(matchOnlyDiff && matchOnlyDiff.totp === undefined, "unchanged TOTP is omitted from match-only diff")
+    check(matchOnlyDiff && matchOnlyDiff.uris && matchOnlyDiff.uris.length === 2
+          && matchOnlyDiff.uris[0].match === 1 && matchOnlyDiff.uris[1].match === null,
+          "match-only diff emits updated URI match rules")
+
+    // Reverting match rule back to original 3 clears dirty state
+    editor.setUriMatch(0, 3)
+    check(editor.isDirty === false, "reverting match rule back to original clears dirty state")
+
+    // Clearing TOTP (including whitespace-only) emits empty string in diff and omits unchanged uris
+    editor.totp = "   "
+    check(editor.isDirty === true, "clearing TOTP marks editor dirty")
+    var clearTotpBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === clearTotpBefore + 1, "clearing TOTP submits")
+    var clearTotpDiff = testRunner.editorSubmitted
+    check(clearTotpDiff && clearTotpDiff.totp === "", "clearing TOTP emits empty string to clear on daemon")
+    check(clearTotpDiff && clearTotpDiff.uris === undefined, "unchanged URIs are omitted when only TOTP changes")
+
+    editor.active = false
 
     console.log("CipherEditor Tests Completed: " + (failures === 0 ? "ALL PASSED" : failures + " FAILURES"))
     Qt.exit(failures === 0 ? 0 : 1)
