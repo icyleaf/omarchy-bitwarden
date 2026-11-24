@@ -889,8 +889,9 @@ fn test_matching_version_create_and_edit_all_fields_saved() {
     let ping_res: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(ping_res["ok"], true);
     assert_eq!(
-        ping_res["schema_version"], 2,
-        "New daemon must advertise schema_version: 2"
+        ping_res["schema_version"],
+        omawarden::daemon::CURRENT_SCHEMA_VERSION,
+        "New daemon must advertise current schema_version"
     );
 
     // Unlock daemon on a new socket connection

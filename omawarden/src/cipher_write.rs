@@ -46,6 +46,20 @@ pub(crate) struct LoginDraft {
     pub(crate) totp: Option<String>,
 }
 
+#[derive(Deserialize, ZeroizeOnDrop, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CardDraft {
+    #[serde(rename = "cardholderName", alias = "cardholder_name")]
+    pub(crate) cardholder_name: Option<String>,
+    pub(crate) brand: Option<String>,
+    pub(crate) number: Option<String>,
+    #[serde(rename = "expMonth", alias = "exp_month")]
+    pub(crate) exp_month: Option<String>,
+    #[serde(rename = "expYear", alias = "exp_year")]
+    pub(crate) exp_year: Option<String>,
+    pub(crate) code: Option<String>,
+}
+
 #[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
 #[serde(untagged)]
 pub(crate) enum CipherTypeField {
@@ -82,6 +96,7 @@ pub(crate) struct CipherCreateDraft {
     pub(crate) collection_ids_camel: Option<Vec<String>>,
     pub(crate) favorite: Option<bool>,
     pub(crate) login: Option<LoginDraft>,
+    pub(crate) card: Option<CardDraft>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) uri: Option<String>,
@@ -108,6 +123,7 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) uris: Option<Vec<LoginUriDraft>>,
     pub(crate) add_uris: Option<Vec<LoginUriDraft>>,
     pub(crate) clear_uris: Option<bool>,
+    pub(crate) card: Option<CardDraft>,
     pub(crate) fields: Option<Vec<CipherFieldDraft>>,
     pub(crate) remove_fields: Option<Vec<String>>,
     pub(crate) folder_id: Option<String>,
@@ -391,6 +407,11 @@ impl VaultManager {
                     "Username, password, and URI can only be updated on login ciphers.".into(),
                 ));
             }
+            if draft.card.is_some() && cipher_type != 3 {
+                return Err(WriteError::Rejected(
+                    "Card fields can only be updated on card ciphers.".into(),
+                ));
+            }
 
             (resolved_item.id, resolved_item.name, cipher_in_storage)
         };
@@ -554,6 +575,15 @@ impl VaultManager {
                         payload["login"]["uris"] = json!([{"uri": enc_uri, "match": match_val}]);
                     }
                 }
+                field_changed = true;
+            }
+        }
+
+        if let Some(ref card_draft) = draft.card {
+            if !payload["card"].is_object() {
+                payload["card"] = json!({});
+            }
+            if apply_card_updates(&mut payload["card"], card_draft, &cipher_key)? {
                 field_changed = true;
             }
         }
@@ -1332,29 +1362,35 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
     enum ResolvedType {
         Login,
         Note,
+        Card,
     }
 
     let resolved_type = match (&draft.raw_type, &draft.cipher_type) {
         (Some(CipherTypeField::Numeric(1)), _) => ResolvedType::Login,
         (Some(CipherTypeField::Numeric(2)), _) => ResolvedType::Note,
+        (Some(CipherTypeField::Numeric(3)), _) => ResolvedType::Card,
         (Some(CipherTypeField::Numeric(other)), _) => {
             return Err(format!(
-                "Unsupported cipher type {other}. Only login (type 1) and secure note (type 2) ciphers are supported."
+                "Unsupported cipher type {other}. Supported types are login (1), secure note (2), and card (3)."
             ));
         }
         (Some(CipherTypeField::Named(name)), _) | (None, Some(name)) => {
             match name.to_lowercase().as_str() {
                 "login" => ResolvedType::Login,
                 "note" | "secure_note" | "securenote" => ResolvedType::Note,
+                "card" => ResolvedType::Card,
                 other => {
                     return Err(format!(
-                        "Unsupported cipher type '{other}'. Only login (type 1) and secure note (type 2) ciphers are supported."
+                        "Unsupported cipher type '{other}'. Supported types are login (1), secure note (2), and card (3)."
                     ));
                 }
             }
         }
         (None, None) => {
-            if draft.login.is_some() || draft.username.is_some() || draft.password.is_some() {
+            if draft.card.is_some() {
+                ResolvedType::Card
+            } else if draft.login.is_some() || draft.username.is_some() || draft.password.is_some()
+            {
                 ResolvedType::Login
             } else if draft.notes.is_some() {
                 ResolvedType::Note
@@ -1363,6 +1399,18 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
             }
         }
     };
+
+    let has_login_payload = draft.login.is_some()
+        || draft.username.is_some()
+        || draft.password.is_some()
+        || draft.uri.is_some()
+        || draft.uris.is_some();
+    if !matches!(resolved_type, ResolvedType::Login) && has_login_payload {
+        return Err("Login fields can only be set on login ciphers.".to_string());
+    }
+    if !matches!(resolved_type, ResolvedType::Card) && draft.card.is_some() {
+        return Err("Card fields can only be set on card ciphers.".to_string());
+    }
 
     if matches!(resolved_type, ResolvedType::Note) {
         let mut payload = json!({
@@ -1374,6 +1422,24 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
             "name": name,
             "notes": notes,
             "secureNote": { "type": 0 }
+        });
+        if let Some(ref fields) = encrypted_fields {
+            payload["fields"] = json!(fields);
+        }
+        return Ok(payload);
+    }
+
+    if matches!(resolved_type, ResolvedType::Card) {
+        let card_obj = encrypt_card_object(key, draft.card.as_ref())?;
+        let mut payload = json!({
+            "type": 3,
+            "folderId": folder_id,
+            "organizationId": null,
+            "favorite": favorite,
+            "reprompt": 0,
+            "name": name,
+            "notes": notes,
+            "card": card_obj
         });
         if let Some(ref fields) = encrypted_fields {
             payload["fields"] = json!(fields);
@@ -1496,4 +1562,232 @@ fn decrypt_field_name(field: &Value, key: &SymmetricCryptoKey) -> Option<String>
         .and_then(Value::as_str)
         .and_then(|enc| EncString::parse(enc).ok())
         .and_then(|enc| enc.decrypt_string(key).ok())
+}
+
+fn encrypt_optional_field(
+    key: &SymmetricCryptoKey,
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    value
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            key.encrypt_string(s)
+                .map_err(|_| "Could not encrypt cipher field.".to_string())
+        })
+        .transpose()
+}
+
+fn apply_optional_encrypted_field(
+    target: &mut Value,
+    wire_key: &str,
+    value: Option<&str>,
+    key: &SymmetricCryptoKey,
+) -> Result<bool, String> {
+    let Some(val) = value else {
+        return Ok(false);
+    };
+    if val.is_empty() {
+        target[wire_key] = Value::Null;
+    } else {
+        let enc = key
+            .encrypt_string(val)
+            .map_err(|_| format!("Could not encrypt {wire_key}."))?;
+        target[wire_key] = json!(enc);
+    }
+    Ok(true)
+}
+
+fn validate_card_expiration(exp_month: Option<&str>, exp_year: Option<&str>) -> Result<(), String> {
+    if let Some(month) = exp_month.map(str::trim).filter(|s| !s.is_empty()) {
+        let valid_month = month.chars().all(|c| c.is_ascii_digit())
+            && month.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m));
+        if !valid_month {
+            return Err("Expiration month must be between 01 and 12 (e.g. 08 or 12).".to_string());
+        }
+    }
+    if let Some(year) = exp_year.map(str::trim).filter(|s| !s.is_empty()) {
+        let valid_year = year.len() == 4 && year.chars().all(|c| c.is_ascii_digit());
+        if !valid_year {
+            return Err("Expiration year must be a 4-digit number (e.g. 2029).".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn encrypt_card_object(
+    key: &SymmetricCryptoKey,
+    card: Option<&CardDraft>,
+) -> Result<Value, String> {
+    if let Some(c) = card {
+        validate_card_expiration(c.exp_month.as_deref(), c.exp_year.as_deref())?;
+    }
+    Ok(json!({
+        "cardholderName": encrypt_optional_field(key, card.and_then(|c| c.cardholder_name.as_deref()))?,
+        "brand": encrypt_optional_field(key, card.and_then(|c| c.brand.as_deref()))?,
+        "number": encrypt_optional_field(key, card.and_then(|c| c.number.as_deref()))?,
+        "expMonth": encrypt_optional_field(key, card.and_then(|c| c.exp_month.as_deref()))?,
+        "expYear": encrypt_optional_field(key, card.and_then(|c| c.exp_year.as_deref()))?,
+        "code": encrypt_optional_field(key, card.and_then(|c| c.code.as_deref()))?,
+    }))
+}
+
+fn apply_card_updates(
+    target: &mut Value,
+    card: &CardDraft,
+    key: &SymmetricCryptoKey,
+) -> Result<bool, String> {
+    validate_card_expiration(card.exp_month.as_deref(), card.exp_year.as_deref())?;
+    let mut changed = false;
+    changed |= apply_optional_encrypted_field(
+        target,
+        "cardholderName",
+        card.cardholder_name.as_deref(),
+        key,
+    )?;
+    changed |= apply_optional_encrypted_field(target, "brand", card.brand.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "number", card.number.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "expMonth", card.exp_month.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "expYear", card.exp_year.as_deref(), key)?;
+    changed |= apply_optional_encrypted_field(target, "code", card.code.as_deref(), key)?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_key() -> SymmetricCryptoKey {
+        let mut raw = [0x11u8; 64];
+        raw[32..].fill(0x22);
+        parse_symmetric_key_from_decrypted_bytes(&raw).expect("valid 64-byte symmetric key")
+    }
+
+    fn decrypt_str(val: &Value, key: &SymmetricCryptoKey) -> String {
+        EncString::parse(val.as_str().expect("encrypted string"))
+            .expect("valid enc string")
+            .decrypt_string(key)
+            .expect("decrypt")
+    }
+
+    #[test]
+    fn schema_version_is_v3_for_card_mutations() {
+        assert_eq!(crate::daemon::CURRENT_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn encrypt_card_cipher_round_trip() {
+        let key = test_key();
+        let draft: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "card",
+            "name": "Corporate Visa",
+            "notes": "Travel card",
+            "card": {
+                "cardholderName": "Jane Doe",
+                "brand": "Visa",
+                "number": "4111111111111111",
+                "expMonth": "08",
+                "expYear": "2029",
+                "code": "123"
+            }
+        }))
+        .unwrap();
+
+        let payload = encrypt_cipher(&key, &draft).unwrap();
+        assert_eq!(payload["type"], 3);
+        assert_eq!(decrypt_str(&payload["name"], &key), "Corporate Visa");
+        assert_eq!(decrypt_str(&payload["notes"], &key), "Travel card");
+        assert_eq!(
+            decrypt_str(&payload["card"]["cardholderName"], &key),
+            "Jane Doe"
+        );
+        assert_eq!(decrypt_str(&payload["card"]["brand"], &key), "Visa");
+        assert_eq!(
+            decrypt_str(&payload["card"]["number"], &key),
+            "4111111111111111"
+        );
+        assert_eq!(decrypt_str(&payload["card"]["expMonth"], &key), "08");
+        assert_eq!(decrypt_str(&payload["card"]["expYear"], &key), "2029");
+        assert_eq!(decrypt_str(&payload["card"]["code"], &key), "123");
+    }
+
+    #[test]
+    fn encrypt_cipher_rejects_card_fields_on_non_card_and_login_fields_on_card() {
+        let key = test_key();
+        let card_on_login: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "login",
+            "name": "Bad",
+            "card": { "brand": "Visa" }
+        }))
+        .unwrap();
+        assert!(encrypt_cipher(&key, &card_on_login)
+            .unwrap_err()
+            .contains("Card fields"));
+
+        let login_on_card: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "card",
+            "name": "Bad",
+            "username": "octocat"
+        }))
+        .unwrap();
+        assert!(encrypt_cipher(&key, &login_on_card)
+            .unwrap_err()
+            .contains("Login fields"));
+    }
+
+    #[test]
+    fn partial_merge_card_preserves_untouched_and_clears_empty() {
+        let key = test_key();
+        let mut card = json!({
+            "brand": key.encrypt_string("Visa").unwrap(),
+            "number": key.encrypt_string("4111111111111111").unwrap(),
+            "code": key.encrypt_string("123").unwrap(),
+        });
+        let patch: CardDraft = serde_json::from_value(json!({
+            "expMonth": "12",
+            "code": ""
+        }))
+        .unwrap();
+        assert!(apply_card_updates(&mut card, &patch, &key).unwrap());
+        assert_eq!(decrypt_str(&card["brand"], &key), "Visa");
+        assert_eq!(decrypt_str(&card["number"], &key), "4111111111111111");
+        assert_eq!(decrypt_str(&card["expMonth"], &key), "12");
+        assert!(card["code"].is_null());
+    }
+
+    #[test]
+    fn card_expiration_validation_rejects_out_of_range_and_allows_clear() {
+        let key = test_key();
+        let bad_month: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "card",
+            "name": "Bad Month",
+            "card": { "expMonth": "13" }
+        }))
+        .unwrap();
+        assert!(encrypt_cipher(&key, &bad_month)
+            .unwrap_err()
+            .contains("01 and 12"));
+
+        let bad_year: CipherCreateDraft = serde_json::from_value(json!({
+            "cipher_type": "card",
+            "name": "Bad Year",
+            "card": { "expYear": "29" }
+        }))
+        .unwrap();
+        assert!(encrypt_cipher(&key, &bad_year)
+            .unwrap_err()
+            .contains("4-digit"));
+
+        let mut card = json!({
+            "expMonth": key.encrypt_string("08").unwrap(),
+            "expYear": key.encrypt_string("2029").unwrap(),
+        });
+        let clear_patch: CardDraft = serde_json::from_value(json!({
+            "expMonth": "",
+            "expYear": ""
+        }))
+        .unwrap();
+        assert!(apply_card_updates(&mut card, &clear_patch, &key).unwrap());
+        assert!(card["expMonth"].is_null());
+        assert!(card["expYear"].is_null());
+    }
 }

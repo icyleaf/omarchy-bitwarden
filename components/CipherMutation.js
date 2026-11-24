@@ -19,6 +19,7 @@ function isEditableType(item) {
   if (!item) return false
   return item.type_name === "login"
     || item.type_name === "note"
+    || item.type_name === "card"
     || item.type_name === "ssh_key"
 }
 

@@ -1266,7 +1266,7 @@ Item {
       root.openSshKeyModal("create", null)
       return
     }
-    root.cipherEditorType = cipherType === "note" ? "note" : "login"
+    root.cipherEditorType = (cipherType === "note" || cipherType === "card") ? cipherType : "login"
     var scope = root.activeFolderScope || "all"
     root.cipherEditorDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
     root.cipherEditorEditItem = null
@@ -1462,7 +1462,7 @@ Item {
     cipherCreateProc.revision = root.vaultRevision
     cipherCreateProc.errorReported = false
     cipherCreateProc.lastStderr = ""
-    cipherCreateProc.createdType = payload.cipher_type === "note" ? "note" : "login"
+    cipherCreateProc.createdType = payload.cipher_type || "login"
     cipherCreateProc.createdFolderId = payload.folder_id || ""
     cipherCreateProc.createdName = payload.name || ""
     cipherCreateProc.payload = JSON.stringify(payload)
@@ -1477,7 +1477,7 @@ Item {
     if (root.activeVaultScope !== "all" && root.activeVaultScope !== "personal") {
       root.activeVaultScope = "all"
     }
-    var category = cipherType === "note" ? "note" : "login"
+    var category = cipherType || "login"
     if (root.activeCategory !== "all" && root.activeCategory !== category) {
       root.activeCategory = "all"
     }
