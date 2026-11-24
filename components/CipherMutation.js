@@ -4,10 +4,22 @@
 // Keeping the optimistic list update here lets the headless QML suite exercise
 // it directly instead of mirroring the logic.
 
-// Only personal Login and Secure Note ciphers are mutable from the Overlay.
+// All five personal cipher types support favorite and delete mutations from the Overlay.
 function isMutableType(item) {
   if (!item) return false
-  return item.type_name === "login" || item.type_name === "note"
+  return item.type_name === "login"
+    || item.type_name === "note"
+    || item.type_name === "card"
+    || item.type_name === "identity"
+    || item.type_name === "ssh_key"
+}
+
+// Cipher types currently supported by Inspector Form (CipherEditor) editing.
+function isEditableType(item) {
+  if (!item) return false
+  return item.type_name === "login"
+    || item.type_name === "note"
+    || item.type_name === "ssh_key"
 }
 
 function isOrganizationOwned(item) {

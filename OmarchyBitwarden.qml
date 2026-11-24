@@ -1261,6 +1261,11 @@ Item {
 
   function openCipherCreateModal(cipherType) {
     if (!root.authState || root.authState.status !== "unlocked") return
+    if (cipherType === "ssh_key") {
+      root.showTypePicker = false
+      root.openSshKeyModal("create", null)
+      return
+    }
     root.cipherEditorType = cipherType === "note" ? "note" : "login"
     var scope = root.activeFolderScope || "all"
     root.cipherEditorDefaultFolderId = (scope !== "all" && scope !== "none") ? scope : ""
@@ -1276,15 +1281,14 @@ Item {
   function openCipherEditModal(item) {
     if (!root.authState || root.authState.status !== "unlocked") return
     if (!item) return
-    var typeName = item.type_name || ""
-    if (typeName !== "login" && typeName !== "note") return
+    if (!CipherMutation.isEditableType(item)) return
     if (item.organization_id) {
       root.errorMessage = "Organization ciphers are read-only."
       return
     }
     // Edit drafts render in place inside the Inspector (#387). The original
     // item is installed before `showCipherEditor` so the form prefills from it.
-    root.cipherEditorType = typeName === "note" ? "note" : "login"
+    root.cipherEditorType = item.type_name || "login"
     root.cipherEditorDefaultFolderId = ""
     root.cipherEditorEditItem = item
     root.showActionPalette = false
@@ -1971,7 +1975,7 @@ Item {
       actions.push({
         label: "Export to ~/.ssh",
         icon: "\uf093",
-        shortcut: "Ctrl+E",
+        shortcut: "",
         action: function() {
           root.openSshKeyModal("export", item)
         }
@@ -1990,13 +1994,16 @@ Item {
       if (item.identity.licenseNumber) actions.push({ label: "Copy Driver License", icon: "\uf2c2", shortcut: "", action: function() { root.copyToClipboard(item.identity.licenseNumber, true, "driver license") } })
     }
 
-    if (item.type_name === "login" || item.type_name === "note") {
+    if (CipherMutation.isEditableType(item)) {
       actions.push({
         label: "Edit Item",
         icon: "\uf044",
         shortcut: "Ctrl+E",
         action: function() { root.openCipherEditModal(item) }
       })
+    }
+
+    if (CipherMutation.isMutableType(item)) {
       actions.push({
         label: item.favorite ? "Unfavorite Item" : "Favorite Item",
         icon: item.favorite ? "\uf005" : "\uf006",
@@ -2628,18 +2635,15 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+E"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isEditableType(root.selectedItem)
         onActivated: {
-          var item = root.selectedItem
-          if (!item) return
-          if (item.type_name === "ssh_key") root.openSshKeyModal("export", item)
-          else root.openCipherEditModal(item)
+          if (root.selectedItem) root.openCipherEditModal(root.selectedItem)
         }
       }
 
       Shortcut {
         sequence: "Ctrl+B"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isMutableType(root.selectedItem)
         onActivated: {
           if (root.selectedItem) root.toggleCipherFavorite(root.selectedItem)
         }
@@ -2647,7 +2651,7 @@ Item {
 
       Shortcut {
         sequence: "Ctrl+D"
-        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")
+        enabled: root.opened && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isMutableType(root.selectedItem)
         onActivated: {
           if (root.selectedItem) root.openDeleteCipherModal(root.selectedItem)
         }
@@ -2872,14 +2876,13 @@ Item {
           } else if (event.key === Qt.Key_O && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
             root.openFirstWebsite(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "ssh_key" || root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
-            if (root.selectedItem.type_name === "ssh_key") root.openSshKeyModal("export", root.selectedItem)
-            else root.openCipherEditModal(root.selectedItem)
+          } else if (event.key === Qt.Key_E && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isEditableType(root.selectedItem)) {
+            root.openCipherEditModal(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_B && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+          } else if (event.key === Qt.Key_B && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isMutableType(root.selectedItem)) {
             root.toggleCipherFavorite(root.selectedItem)
             event.accepted = true
-          } else if (event.key === Qt.Key_D && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && (root.selectedItem.type_name === "login" || root.selectedItem.type_name === "note")) {
+          } else if (event.key === Qt.Key_D && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal && CipherMutation.isMutableType(root.selectedItem)) {
             root.openDeleteCipherModal(root.selectedItem)
             event.accepted = true
           } else if (event.key === Qt.Key_H && root.effectiveView === "search" && root.selectedItem !== null && !root.hasActiveModal) {
@@ -2951,9 +2954,9 @@ Item {
             root.actionPaletteIndex = 0
             root.showActionPalette = true
           }
-          onExportSshKeyRequested: {
-            if (root.selectedItem && root.selectedItem.type_name === "ssh_key") {
-              root.openSshKeyModal("export", root.selectedItem)
+          onEditItemRequested: {
+            if (root.selectedItem && CipherMutation.isEditableType(root.selectedItem)) {
+              root.openCipherEditModal(root.selectedItem)
             }
           }
         }

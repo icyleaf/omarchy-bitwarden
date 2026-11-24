@@ -131,11 +131,11 @@ The side panel within the overlay that reveals details, masked secrets, and meta
 _Avoid_: Details pane, info view, sidebar
 
 **Inspector Form**:
-The inline editable state within the Inspector panel for drafting or modifying personal Login and Secure Note ciphers without opening a blocking modal dialog.
+The inline editable state within the Inspector panel for drafting or modifying personal ciphers (Login, Secure Note, Card, Identity, and SSH Key metadata) without opening a blocking modal dialog.
 _Avoid_: Create window, edit popup, modal form
 
 **Type Picker**:
-The lightweight keyboard-driven selector (`Ctrl+N`) for quickly choosing between creating a Login or Secure Note cipher.
+The lightweight keyboard-driven selector (`Ctrl+N`) for choosing a cipher type to create (Login, Secure Note, Card, Identity, or SSH Key).
 _Avoid_: Creation modal, type dialog, prompt window
 
 **Theme Tokens**:

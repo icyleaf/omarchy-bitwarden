@@ -66,27 +66,42 @@ Item {
     // ------------------------------------------------------------------
     var login = { id: "c1", type_name: "login", name: "GitHub", favorite: false }
     var note = { id: "n1", type_name: "note", name: "Wifi" }
-    var card = { id: "d1", type_name: "card" }
-    var identity = { id: "i1", type_name: "identity" }
-    var ssh = { id: "s1", type_name: "ssh_key" }
+    var card = { id: "d1", type_name: "card", name: "Visa" }
+    var identity = { id: "i1", type_name: "identity", name: "Passport" }
+    var ssh = { id: "s1", type_name: "ssh_key", name: "Deploy Key" }
     var orgLogin = { id: "c2", type_name: "login", organization_id: "org-1" }
     var orgNote = { id: "n2", type_name: "note", organization_id: "org-1" }
+    var orgCard = { id: "d2", type_name: "card", organization_id: "org-1" }
+    var orgIdentity = { id: "i2", type_name: "identity", organization_id: "org-1" }
+    var orgSsh = { id: "s2", type_name: "ssh_key", organization_id: "org-1" }
 
     check(CipherMutation.isMutableType(login) === true, "Login ciphers are mutable")
     check(CipherMutation.isMutableType(note) === true, "Secure Notes are mutable")
-    check(CipherMutation.isMutableType(card) === false, "Cards are not mutable")
-    check(CipherMutation.isMutableType(identity) === false, "Identities are not mutable")
-    check(CipherMutation.isMutableType(ssh) === false, "SSH keys are not mutable")
+    check(CipherMutation.isMutableType(card) === true, "Cards are mutable for favorite/delete")
+    check(CipherMutation.isMutableType(identity) === true, "Identities are mutable for favorite/delete")
+    check(CipherMutation.isMutableType(ssh) === true, "SSH keys are mutable for favorite/delete")
     check(CipherMutation.isMutableType(null) === false, "null is not mutable")
+
+    check(CipherMutation.isEditableType(login) === true, "Login ciphers are editable")
+    check(CipherMutation.isEditableType(note) === true, "Secure Notes are editable")
+    check(CipherMutation.isEditableType(ssh) === true, "SSH keys are metadata-editable")
+    check(CipherMutation.isEditableType(card) === false, "Cards are not yet editable in Inspector Form")
+    check(CipherMutation.isEditableType(identity) === false, "Identities are not yet editable in Inspector Form")
+    check(CipherMutation.isEditableType(null) === false, "null is not editable")
 
     check(CipherMutation.isOrganizationOwned(orgLogin) === true, "organization login is detected")
     check(CipherMutation.isOrganizationOwned(login) === false, "personal login is not organization-owned")
 
     check(CipherMutation.canMutate(login) === true, "personal login can mutate")
     check(CipherMutation.canMutate(note) === true, "personal note can mutate")
+    check(CipherMutation.canMutate(card) === true, "personal card can mutate")
+    check(CipherMutation.canMutate(identity) === true, "personal identity can mutate")
+    check(CipherMutation.canMutate(ssh) === true, "personal SSH key can mutate")
     check(CipherMutation.canMutate(orgLogin) === false, "organization login cannot mutate")
     check(CipherMutation.canMutate(orgNote) === false, "organization note cannot mutate")
-    check(CipherMutation.canMutate(card) === false, "card cannot mutate")
+    check(CipherMutation.canMutate(orgCard) === false, "organization card cannot mutate")
+    check(CipherMutation.canMutate(orgIdentity) === false, "organization identity cannot mutate")
+    check(CipherMutation.canMutate(orgSsh) === false, "organization SSH key cannot mutate")
 
     check(CipherMutation.nextFavorite(login) === true, "favorite toggles false to true")
     check(CipherMutation.nextFavorite({ favorite: true }) === false, "favorite toggles true to false")
@@ -293,16 +308,14 @@ Item {
           "Escape is blocked while the delete modal is busy")
 
     // ------------------------------------------------------------------
-    // 7. Mutable types only: Card and Identity stay read-only
+    // 7. All five personal cipher types support Favorite and Delete
     // ------------------------------------------------------------------
-    var paletteGate = src.indexOf('if (item.type_name === "login" || item.type_name === "note") {')
+    var paletteGate = src.indexOf('if (CipherMutation.isMutableType(item)) {')
     var favoriteLabel = src.indexOf('label: item.favorite ? "Unfavorite Item" : "Favorite Item"')
     var deleteLabel = src.indexOf('label: "Delete Item"')
-    check(paletteGate >= 0, "palette gates mutations behind Login/Secure Note")
+    check(paletteGate >= 0, "palette gates favorite/delete behind CipherMutation.isMutableType")
     check(favoriteLabel > paletteGate && deleteLabel > paletteGate,
-          "favorite and delete actions only exist inside the mutable-type gate")
-    check(src.indexOf('item.type_name === "card" && item.card') !== -1,
-          "Card actions remain copy-only")
+          "favorite and delete actions exist inside the mutable-type gate")
 
     var inspectorSrc = readSource(Qt.resolvedUrl("../components/ItemInspector.qml"))
     check(inspectorSrc.indexOf("property bool isFavoriteMutating: false") !== -1,
@@ -319,8 +332,8 @@ Item {
           "Inspector star emits favoriteToggled")
     check(inspectorSrc.indexOf("onClicked: inspectorRoot.deleteRequested(inspectorRoot.item)") !== -1,
           "Inspector trash emits deleteRequested")
-    check(inspectorSrc.indexOf('visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))') !== -1,
-          "Inspector only offers mutations for Login and Secure Note")
+    check(inspectorSrc.indexOf('visible: Boolean(inspectorRoot.item && CipherMutation.isMutableType(inspectorRoot.item))') !== -1,
+          "Inspector offers favorite/delete for all mutable cipher types")
 
     var paletteSrc = readSource(Qt.resolvedUrl("../components/ActionPaletteModal.qml"))
     check(paletteSrc.indexOf('pressedKey = "Ctrl+B"') !== -1,

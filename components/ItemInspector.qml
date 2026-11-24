@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "./IconPolicy.js" as IconPolicy
 import "./CardFormatter.js" as CardFormatter
+import "./CipherMutation.js" as CipherMutation
 import qs.Commons
 import qs.Commons as Commons
 
@@ -540,7 +541,7 @@ ScrollView {
 
             GhostIconButton {
               objectName: "favoriteButton"
-              visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+              visible: Boolean(inspectorRoot.item && CipherMutation.isMutableType(inspectorRoot.item))
               isBusy: inspectorRoot.isFavoriteMutating
               enabled: !inspectorRoot.isFavoriteMutating
               Layout.alignment: Qt.AlignVCenter
@@ -628,7 +629,7 @@ ScrollView {
         // Edit and delete controls for mutable ciphers
         GhostIconButton {
           objectName: "editButton"
-          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          visible: Boolean(inspectorRoot.item && CipherMutation.isEditableType(inspectorRoot.item))
           Layout.alignment: Qt.AlignTop
           iconText: "\uf044"
           iconColor: inspectorRoot.accent
@@ -639,7 +640,7 @@ ScrollView {
 
         GhostIconButton {
           objectName: "deleteButton"
-          visible: Boolean(inspectorRoot.item && (inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"))
+          visible: Boolean(inspectorRoot.item && CipherMutation.isMutableType(inspectorRoot.item))
           Layout.alignment: Qt.AlignTop
           iconText: "\uf1f8"
           tooltip: "Delete item (Ctrl+D)"
