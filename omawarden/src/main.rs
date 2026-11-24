@@ -4467,8 +4467,14 @@ fn format_editor_template(
     let _ = writeln!(out, "# Editing {item_type} cipher: {item_name} ({item_id})");
     out.push_str("# Lines starting with '#' before the notes section are ignored.\n");
     out.push_str(
-        "# Save and exit the editor to apply changes, or exit without changes to abort.\n\n",
+        "# Save and exit the editor to apply changes, or exit without changes to abort.\n",
     );
+    if item_type == "ssh_key" {
+        out.push_str(
+            "# SSH key material is immutable here; only metadata, custom fields, and notes are editable.\n",
+        );
+    }
+    out.push('\n');
 
     let _ = writeln!(out, "Name: {item_name}");
     if item_type == "login" {
@@ -6314,5 +6320,51 @@ Bool Field: Active = maybe
 
         assert!(result.ok);
         assert!(!sent_email);
+    }
+
+    #[test]
+    fn test_editor_template_ssh_key_metadata_only() {
+        let ssh_item = VaultItem {
+            id: "ssh-1".into(),
+            name: "Prod Deploy".into(),
+            item_type: 5,
+            type_name: "ssh_key".into(),
+            sub_title: "ed25519".into(),
+            notes: Some("Used for CI deploy".into()),
+            favorite: true,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            folder_id: Some("folder-1".into()),
+            folder_name: Some("Infra".into()),
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: None,
+            card: None,
+            identity: None,
+            ssh_key: None,
+            fields: vec![json!({"name": "Env", "value": "prod", "type": 0})],
+            attachments: vec![],
+            search_text: String::new(),
+        };
+
+        let tpl = format_editor_template("ssh-1", "Prod Deploy", "ssh_key", Some(&ssh_item));
+        assert!(tpl.contains("SSH key material is immutable"));
+        assert!(tpl.contains("Name: Prod Deploy"));
+        assert!(tpl.contains("Field: Env = prod"));
+        assert!(tpl.contains("Used for CI deploy"));
+
+        let parsed = parse_editor_template(&tpl, "ssh_key").unwrap();
+        assert_eq!(parsed.name, "Prod Deploy");
+        assert!(parsed.username.is_none());
+        assert!(parsed.password.is_none());
+        assert!(parsed.uris.is_empty());
+        assert_eq!(parsed.folder_id.as_deref(), Some("folder-1"));
+        assert!(parsed.favorite);
+        assert_eq!(parsed.fields.len(), 1);
+        assert_eq!(parsed.fields[0].name, "Env");
+        assert_eq!(parsed.fields[0].value, "prod");
+        assert_eq!(parsed.notes, "Used for CI deploy");
     }
 }

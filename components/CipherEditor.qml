@@ -23,7 +23,7 @@ ScrollView {
 
   property bool active: false
   property string mode: "create" // "create" | "edit"
-  property string cipherType: "login" // "login" | "note"
+  property string cipherType: "login" // "login" | "note" | "ssh_key"
   property var folders: [] // [{ id, name }]
   property string defaultFolderId: ""
   // In edit mode this is the selected vault item. Saving diffs against it.
@@ -49,6 +49,7 @@ ScrollView {
 
   readonly property color textOnAccent: StatusPalette.textOn(accent)
   readonly property bool isLogin: cipherType === "login"
+  readonly property bool isSshKey: cipherType === "ssh_key"
   readonly property bool isEdit: mode === "edit"
   readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : "New Secure Note")
   // Recomputed on every form mutation so the discard guard stays accurate even
@@ -587,7 +588,7 @@ ScrollView {
       spacing: 8
 
       Text {
-        text: editorRoot.isLogin ? "\uf023" : "\uf0f6"
+        text: editorRoot.isSshKey ? "\uf084" : (editorRoot.isLogin ? "\uf023" : "\uf0f6")
         font.family: editorRoot.fontFamily
         font.pixelSize: Style.font.subtitle
         color: editorRoot.accent
@@ -613,6 +614,41 @@ ScrollView {
       Layout.fillWidth: true
       height: 1
       color: editorRoot.borderColor
+    }
+
+    // SSH Key immutability notice
+    Rectangle {
+      objectName: "sshKeyImmutableNotice"
+      visible: editorRoot.isSshKey
+      Layout.fillWidth: true
+      implicitHeight: sshNoticeText.implicitHeight + 12
+      radius: 4
+      color: StatusPalette.tint(editorRoot.accent, 0.12)
+      border.color: StatusPalette.tint(editorRoot.accent, 0.35)
+      border.width: 1
+
+      RowLayout {
+        anchors.fill: parent
+        anchors.margins: 6
+        spacing: 6
+
+        Text {
+          text: "\uf05a"
+          font.family: editorRoot.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          color: editorRoot.accent
+          Layout.alignment: Qt.AlignTop
+        }
+
+        Text {
+          id: sshNoticeText
+          text: "SSH key material is immutable here; only metadata, custom fields, and notes are editable."
+          color: editorRoot.foreground
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          Layout.fillWidth: true
+        }
+      }
     }
 
     // Error Alert Banner
@@ -1196,7 +1232,7 @@ ScrollView {
       spacing: 4
 
       Text {
-        text: editorRoot.isLogin ? "Notes (optional)" : "Note"
+        text: (editorRoot.isLogin || editorRoot.isSshKey) ? "Notes (optional)" : "Note"
         color: editorRoot.muted
         font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium

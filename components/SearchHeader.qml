@@ -35,7 +35,7 @@ ColumnLayout {
   signal copyTotpRequested()
   signal openUrlRequested()
   signal actionPaletteRequested()
-  signal exportSshKeyRequested()
+  signal editItemRequested()
 
   property alias isScopeDropdownOpen: vaultScopeDropdown.isOpen
   property alias isVaultScopeOpen: vaultScopeDropdown.isOpen
@@ -242,7 +242,7 @@ ColumnLayout {
                 searchHeaderRoot.actionPaletteRequested()
                 event.accepted = true
               } else if (event.key === Qt.Key_E) {
-                searchHeaderRoot.exportSshKeyRequested()
+                searchHeaderRoot.editItemRequested()
                 event.accepted = true
               }
             }

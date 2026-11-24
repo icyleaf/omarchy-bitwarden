@@ -755,12 +755,44 @@ Item {
 
     var ctrlECount = src.split('sequence: "Ctrl+E"').length - 1
     check(ctrlECount === 1, "Ctrl+E is declared exactly once")
-    check(src.indexOf('if (item.type_name === "ssh_key") root.openSshKeyModal("export", item)') !== -1,
-          "Ctrl+E keeps SSH export for SSH keys")
-    check(src.indexOf("else root.openCipherEditModal(item)") !== -1,
-          "Ctrl+E opens the edit modal for Login and Secure Note")
-    check(src.indexOf("else root.openCipherEditModal(root.selectedItem)") !== -1,
-          "the key handler also routes Ctrl+E to the edit modal")
+    check(src.indexOf('if (item.type_name === "ssh_key") root.openSshKeyModal("export", item)') === -1,
+          "Ctrl+E no longer branches to SSH export")
+    check(src.indexOf("if (root.selectedItem) root.openCipherEditModal(root.selectedItem)") !== -1,
+          "Ctrl+E uniformly opens the edit modal for editable ciphers")
+    check(src.indexOf("onEditItemRequested:") !== -1,
+          "SearchHeader Ctrl+E routes to editItemRequested")
+    check(src.indexOf('if (cipherType === "ssh_key") {\n      root.showTypePicker = false\n      root.openSshKeyModal("create", null)') !== -1,
+          "TypePicker SSH Key selection routes to SshKeyModal")
+
+    // SSH Key metadata-only edit in CipherEditor
+    editor.active = false
+    editor.mode = "edit"
+    editor.cipherType = "ssh_key"
+    editor.originalItem = {
+      id: "ssh-1",
+      type_name: "ssh_key",
+      name: "Prod Key",
+      folder_id: "f1",
+      notes: "CI deploy key",
+      fields: [{ name: "Env", value: "prod", type: 0 }]
+    }
+    editor.active = true
+    check(editor.isSshKey === true, "CipherEditor recognizes ssh_key edit mode")
+    check(editor.isLogin === false, "ssh_key edit mode hides login-only fields")
+    editor.cipherName = "Prod Key Renamed"
+    editor.notes = "Updated deploy notes"
+    var sshPayloadBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === sshPayloadBefore + 1, "ssh_key edit submits minimal metadata diff")
+    var sshDiff = testRunner.editorSubmitted
+    check(sshDiff && sshDiff.name === "Prod Key Renamed", "ssh_key diff includes updated name")
+    check(sshDiff && sshDiff.notes === "Updated deploy notes", "ssh_key diff includes updated notes")
+    check(sshDiff && sshDiff.username === undefined && sshDiff.password === undefined && sshDiff.uris === undefined,
+          "ssh_key diff never emits login-only keys")
+    editor.active = false
+    editor.mode = "create"
+    editor.cipherType = "login"
+    editor.originalItem = null
 
     var editSuccessIdx = src.indexOf("function handleCipherEditSuccess(data)")
     var editSuccessWindow = editSuccessIdx >= 0 ? src.substring(editSuccessIdx, editSuccessIdx + 900) : ""
@@ -783,8 +815,8 @@ Item {
           "ItemInspector declares editRequested")
     check(inspectorSrc.indexOf("inspectorRoot.editRequested(inspectorRoot.item)") !== -1,
           "Inspector Edit button emits editRequested")
-    check(inspectorSrc.indexOf('inspectorRoot.item.type_name === "login" || inspectorRoot.item.type_name === "note"') !== -1,
-          "Inspector only offers Edit for Login and Secure Note")
+    check(inspectorSrc.indexOf('CipherMutation.isEditableType(inspectorRoot.item)') !== -1,
+          "Inspector offers Edit for editable cipher types via CipherMutation.isEditableType")
 
     // CipherEditor component instantiation
     check(src.indexOf("id: cipherEditorComponent") !== -1, "Overlay instantiates the CipherEditor")
