@@ -467,7 +467,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 
 ### Phase 4: Completed (Vault Item Creation & In-Place Editing)
 
-- [x] In-place Inspector cipher editor (`CipherEditor.qml`) & Type Picker modal (<kbd>Ctrl</kbd>+<kbd>N</kbd>) for Login and Secure Note
+- [x] In-place Inspector cipher editor (`CipherEditor.qml`) & Type Picker modal (<kbd>Ctrl</kbd>+<kbd>N</kbd>) for all five personal cipher types (Login, Secure Note, Card, Identity, and SSH Key)
 - [x] Client-side cipher payload encryption (AES-256-CBC / HMAC) using user master key
 - [x] Bitwarden REST API POST `/ciphers` and PUT `/ciphers/{id}` integration with auto-session renewal
 - [x] Local zero-knowledge ciphertext cache and memory index synchronization upon creation and mutation
@@ -475,19 +475,28 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] Zero-argv stdin edit contract (`omawarden vault edit <target> --stdin --json`) preventing secret leakage in process arguments
 - [x] In-place item editing (credentials, notes, dynamic URI list, custom text/hidden/boolean fields, folder assignment)
 - [x] Dynamic custom fields support (Text, Hidden, and Boolean types with strict fail-closed deserialization)
-- [ ] Card and Identity creation & editing (planned for subsequent iteration)
+- [x] Full Card (6 fields) and Identity (18 fields including `address3`) creation & editing, plus SSH Key metadata editing (ADR 0036, Daemon Schema v3, Zero-Argv Rule 11)
 
-### Phase 5: In Progress (Vault Item Lifecycle, Trash & Deletion)
+### Phase 5: Completed (Vault Item Lifecycle, Trash & Deletion)
 
 - [x] CLI Trash inspection and search (`omawarden vault list --trash`, `vault search --trash`)
 - [x] Cipher restoration from Trash (`omawarden vault restore <target>`) with automatic cache/index reconciliation
 - [x] Scoped permanent deletion (`omawarden vault delete <target> --trash`)
-- [x] Overlay soft-delete and permanent delete confirmation modal (<kbd>Ctrl</kbd>+<kbd>D</kbd>)
-- [x] Quick favorite toggle (<kbd>Ctrl</kbd>+<kbd>B</kbd>, Inspector star icon, and Action Palette)
-- [x] Mixed-version daemon capability negotiation and fail-closed deserialization guard against data loss
-- [ ] Organization collection reassignment & shared cipher mutation
+- [x] Overlay soft-delete and permanent delete confirmation modal (<kbd>Ctrl</kbd>+<kbd>D</kbd>) across all five personal cipher types
+- [x] Quick favorite toggle (<kbd>Ctrl</kbd>+<kbd>B</kbd>, Inspector star icon, and Action Palette) across all five personal cipher types
+- [x] Mixed-version daemon capability negotiation (Schema v2 / v3) and fail-closed deserialization guard against data loss
 
-### Phase 6: Future (Desktop Automation & Biometrics)
+### Phase 6: Planned (Bitwarden CLI Parity & Vault Management)
+
+- [ ] Folder management (`list`, `create`, `edit`, `delete`) in CLI and Overlay
+- [ ] Attachment upload & deletion (`omawarden attachment upload|delete`)
+- [ ] Script-friendly single-item getter (`omawarden vault get <target> [--field ...]`) outputting clean stdout/JSON
+- [ ] Login TOTP seed & URI match-rule editing in CLI (`vault edit`) and Overlay Inspector Form
+- [ ] Vault export & import (encrypted JSON, plaintext JSON, CSV)
+- [ ] Organization collection reassignment & shared cipher mutation
+- [ ] Bitwarden Send (`omawarden send`) for ephemeral encrypted text & file sharing
+
+### Phase 7: Future (Desktop Automation & Biometrics)
 
 - [ ] Wayland auto-type / auto-fill integration (e.g. via `ydotool` / `wtype`)
 - [x] Quick biometric / PAM / Fingerprint system unlock (ADR 0025) — shipped in Phase 3.5 via polkit
