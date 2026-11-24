@@ -139,7 +139,20 @@ fn cipher_update_payload_has_login_fields(payload: &Value) -> bool {
         .any(|key| payload.get(*key).is_some())
 }
 
-fn cipher_mutation_requires_schema_v2(request: &Value) -> bool {
+fn cipher_mutation_required_schema_version(request: &Value) -> u32 {
+    let action = request.get("action").and_then(Value::as_str);
+    let is_card_type = match request.get("type") {
+        Some(Value::Number(n)) => n.as_u64() == Some(3),
+        Some(Value::String(s)) => s == "3" || s.eq_ignore_ascii_case("card"),
+        _ => request
+            .get("cipher_type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.eq_ignore_ascii_case("card")),
+    };
+    if request.get("card").is_some() || (action == Some("cipher_create") && is_card_type) {
+        return 3;
+    }
+
     let has_fields = request
         .get("fields")
         .and_then(Value::as_array)
@@ -155,17 +168,19 @@ fn cipher_mutation_requires_schema_v2(request: &Value) -> bool {
         || request
             .get("clear_uris")
             .is_some_and(|v| v.as_bool().unwrap_or(false))
-        || (request.get("action").and_then(Value::as_str) == Some("cipher_update")
-            && request.get("uris").is_some());
-    let has_unconverted_create_uris = request.get("action").and_then(Value::as_str)
-        == Some("cipher_create")
+        || (action == Some("cipher_update") && request.get("uris").is_some());
+    let has_unconverted_create_uris = action == Some("cipher_create")
         && request
             .get("uris")
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty())
         && request.get("login").and_then(|l| l.get("uris")).is_none();
 
-    has_fields || has_edit_uris || has_unconverted_create_uris
+    if has_fields || has_edit_uris || has_unconverted_create_uris {
+        2
+    } else {
+        1
+    }
 }
 
 /// Emit a vault command failure in whichever envelope the caller asked for.
@@ -865,6 +880,48 @@ enum CreateItemAction {
             help = "Read note content from standard input"
         )]
         notes_stdin: bool,
+        #[arg(
+            long = "field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Text custom field (repeatable)"
+        )]
+        fields: Vec<String>,
+        #[arg(
+            long = "hidden-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Hidden custom field (repeatable)"
+        )]
+        hidden_fields: Vec<String>,
+        #[arg(
+            long = "bool-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=true|false",
+            help = "Boolean custom field (repeatable)"
+        )]
+        bool_fields: Vec<String>,
+        #[arg(long, help = "Optional folder ID")]
+        folder_id: Option<String>,
+        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        organization_id: Option<String>,
+        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
+        collection_id: Option<String>,
+    },
+    #[command(about = "Create a new Card cipher")]
+    Card {
+        #[arg(long, help = "Name of the card cipher")]
+        name: String,
+        #[arg(long, help = "Cardholder name")]
+        cardholder_name: Option<String>,
+        #[arg(long, help = "Card brand (e.g. Visa, Mastercard, Amex)")]
+        brand: Option<String>,
+        #[arg(long, help = "Expiration month (01-12)")]
+        exp_month: Option<String>,
+        #[arg(long, help = "Expiration year (4-digit, e.g. 2029)")]
+        exp_year: Option<String>,
+        #[arg(long, help = "Optional notes")]
+        notes: Option<String>,
         #[arg(
             long = "field",
             action = clap::ArgAction::Append,
@@ -2450,6 +2507,120 @@ fn main() -> ExitCode {
                             }
                             (req, "note cipher", name)
                         }
+                        Some(CreateItemAction::Card {
+                            name,
+                            cardholder_name,
+                            brand,
+                            exp_month,
+                            exp_year,
+                            notes,
+                            fields,
+                            hidden_fields,
+                            bool_fields,
+                            folder_id,
+                            organization_id,
+                            collection_id,
+                        }) => {
+                            if organization_id
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
+                            {
+                                emit_vault_error(json, "Organization ciphers are read-only.");
+                                return ExitCode::FAILURE;
+                            }
+
+                            let custom_fields =
+                                match build_custom_fields(&fields, &hidden_fields, &bool_fields) {
+                                    Ok(list) => list,
+                                    Err(err_msg) => {
+                                        emit_vault_error(json, &err_msg);
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+
+                            let is_interactive = (io::stdin().is_terminal()
+                                || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                                && !json;
+
+                            let read_card_secret =
+                                |prompt_msg: &str| -> zeroize::Zeroizing<String> {
+                                    if io::stdin().is_terminal() {
+                                        zeroize::Zeroizing::new(
+                                            rpassword::prompt_password(prompt_msg)
+                                                .unwrap_or_default(),
+                                        )
+                                    } else {
+                                        eprint!("{prompt_msg}");
+                                        let _ = io::stderr().flush();
+                                        let mut buf = zeroize::Zeroizing::new(String::new());
+                                        let _ = io::stdin().read_line(&mut buf);
+                                        zeroize::Zeroizing::new(
+                                            buf.trim_end_matches(['\r', '\n']).to_string(),
+                                        )
+                                    }
+                                };
+
+                            let number_val = if is_interactive {
+                                let v = read_card_secret(
+                                    "Enter card number (optional, Enter to skip): ",
+                                );
+                                if v.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(v)
+                                }
+                            } else {
+                                None
+                            };
+                            let code_val = if is_interactive {
+                                let v = read_card_secret(
+                                    "Enter security code / CVV (optional, Enter to skip): ",
+                                );
+                                if v.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(v)
+                                }
+                            } else {
+                                None
+                            };
+
+                            let mut card_obj = serde_json::Map::new();
+                            if let Some(v) = cardholder_name {
+                                card_obj.insert("cardholderName".into(), json!(v));
+                            }
+                            if let Some(v) = brand {
+                                card_obj.insert("brand".into(), json!(v));
+                            }
+                            if let Some(ref v) = number_val {
+                                card_obj.insert("number".into(), json!(v.as_str()));
+                            }
+                            if let Some(v) = exp_month {
+                                card_obj.insert("expMonth".into(), json!(v));
+                            }
+                            if let Some(v) = exp_year {
+                                card_obj.insert("expYear".into(), json!(v));
+                            }
+                            if let Some(ref v) = code_val {
+                                card_obj.insert("code".into(), json!(v.as_str()));
+                            }
+
+                            let mut req = json!({
+                                "action": "cipher_create",
+                                "type": 3,
+                                "cipher_type": "card",
+                                "name": name,
+                                "notes": notes,
+                                "folder_id": folder_id,
+                                "card": Value::Object(card_obj),
+                            });
+                            if !custom_fields.is_empty() {
+                                req["fields"] = json!(custom_fields);
+                            }
+                            (req, "card cipher", name)
+                        }
                         None => {
                             let raw_json = if stdin {
                                 read_json_payload_stdin()
@@ -2475,7 +2646,7 @@ fn main() -> ExitCode {
                                     }
                                 }
                             } else {
-                                let err_msg = "Specify a cipher type subcommand (e.g. 'login', 'note') or pass --stdin / --from-json.";
+                                let err_msg = "Specify a cipher type subcommand (e.g. 'login', 'note', 'card') or pass --stdin / --from-json.";
                                 if json {
                                     println!(
                                         "{}",
@@ -2977,6 +3148,13 @@ fn main() -> ExitCode {
                             emit_vault_error(
                                 json,
                                 "Username, password, and URI can only be updated on login ciphers.",
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        if item_type != "card" && payload.get("card").is_some() {
+                            emit_vault_error(
+                                json,
+                                "Card fields can only be updated on card ciphers.",
                             );
                             return ExitCode::FAILURE;
                         }
@@ -4144,8 +4322,14 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         .get("schema_version")
         .and_then(Value::as_u64)
         .unwrap_or(1) as u32;
+    let required_schema = cipher_mutation_required_schema_version(request);
+    let schema_feature_label = if required_schema >= 3 {
+        "card or identity cipher mutations"
+    } else {
+        "custom fields or advanced URI mutations"
+    };
 
-    if cipher_mutation_requires_schema_v2(request) && running_schema < CURRENT_SCHEMA_VERSION {
+    if required_schema > 1 && running_schema < required_schema {
         // Attempt on-demand auto-restart of stale standalone daemon
         let stop_req = json!({ "action": "stop", "admin": true });
         match dispatch_daemon_request(&stop_req) {
@@ -4162,16 +4346,16 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
                     .get("schema_version")
                     .and_then(Value::as_u64)
                     .unwrap_or(1) as u32;
-                if restarted_schema < CURRENT_SCHEMA_VERSION {
-                    return Err(reject(
-                        "The running daemon was restarted, but the active executable does not support custom fields or advanced URI mutations. Check OMA_DAEMON_BIN or update your installation.",
-                    ));
+                if restarted_schema < required_schema {
+                    return Err(reject(&format!(
+                        "The running daemon was restarted, but the active executable does not support {schema_feature_label}. Check OMA_DAEMON_BIN or update your installation."
+                    )));
                 }
             }
             _ => {
-                return Err(reject(
-                    "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
-                ));
+                return Err(reject(&format!(
+                    "The running daemon does not support {schema_feature_label}. Restart the daemon or its host application to apply the update."
+                )));
             }
         }
     }
@@ -4199,7 +4383,7 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
         }
     }
     let unknown = || json!({"ok":false, "outcome":"unknown", "error":"Could not confirm the mutation. Sync the vault before trying again."});
-    let (mutation_req, uses_envelope) = if cipher_mutation_requires_schema_v2(request) {
+    let (mutation_req, uses_envelope) = if required_schema > 1 {
         let mut env = json!({
             "action": request.get("action").cloned().unwrap_or_else(|| json!("cipher_update")),
             "mutation": request,
@@ -4232,9 +4416,9 @@ fn submit_cipher_mutation(request: &Value) -> Result<Value, Value> {
                     || err_str.contains("Invalid cipher fields")
                     || err_str.contains("Invalid cipher update fields")))
         {
-            return Err(reject(
-                "The running daemon does not support custom fields or advanced URI mutations. Restart the daemon or its host application to apply the update.",
-            ));
+            return Err(reject(&format!(
+                "The running daemon does not support {schema_feature_label}. Restart the daemon or its host application to apply the update."
+            )));
         }
         return Err(reply);
     }
@@ -4444,12 +4628,22 @@ struct ParsedEditorField {
     field_type: i64,
 }
 
+const CARD_EDITOR_FIELDS: &[(&str, &str)] = &[
+    ("cardholderName", "Cardholder Name"),
+    ("brand", "Brand"),
+    ("number", "Number"),
+    ("expMonth", "Expiration Month"),
+    ("expYear", "Expiration Year"),
+    ("code", "Security Code"),
+];
+
 #[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct ParsedEditorCipher {
     name: String,
     username: Option<String>,
     password: Option<String>,
     uris: Vec<String>,
+    card: Vec<(String, String)>,
     fields: Vec<ParsedEditorField>,
     folder_id: Option<String>,
     favorite: bool,
@@ -4499,6 +4693,15 @@ fn format_editor_template(
         for uri in &uris {
             let value = uri.get("uri").and_then(Value::as_str).unwrap_or("");
             let _ = writeln!(out, "URI: {value}");
+        }
+    } else if item_type == "card" {
+        let card = item_details.and_then(|i| i.card.as_ref());
+        for (wire_key, label) in CARD_EDITOR_FIELDS {
+            let val = card
+                .and_then(|c| c.get(*wire_key))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let _ = writeln!(out, "{label}: {val}");
         }
     }
     let folder_id = item_details
@@ -4579,6 +4782,14 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
     let mut username = String::new();
     let mut password = String::new();
     let mut uris: Vec<String> = Vec::new();
+    let mut card_values: Vec<(String, String)> = if item_type == "card" {
+        CARD_EDITOR_FIELDS
+            .iter()
+            .map(|(wire_key, _)| ((*wire_key).to_string(), String::new()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut fields: Vec<ParsedEditorField> = Vec::new();
     let mut folder_id = String::new();
     let mut favorite = false;
@@ -4622,7 +4833,19 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
                     favorite =
                         parse_cli_bool(val).map_err(|e| format!("Invalid favorite value: {e}"))?;
                 }
-                _ => {}
+                other => {
+                    if item_type == "card" {
+                        if let Some((wire_key, _)) = CARD_EDITOR_FIELDS.iter().find(|(wk, lbl)| {
+                            lbl.eq_ignore_ascii_case(other) || wk.eq_ignore_ascii_case(other)
+                        }) {
+                            if let Some((_, slot)) =
+                                card_values.iter_mut().find(|(k, _)| k == wire_key)
+                            {
+                                *slot = val.to_string();
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -4640,6 +4863,7 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
         username: if has_login { Some(username) } else { None },
         password: if has_login { Some(password) } else { None },
         uris: if has_login { uris } else { Vec::new() },
+        card: card_values,
         fields,
         folder_id: folder_opt,
         favorite,
@@ -4910,10 +5134,26 @@ fn handle_editor_edit(
         .collect();
     let fields_changed = !upsert_fields.is_empty() || !remove_field_names.is_empty();
 
+    let mut card_diff = serde_json::Map::new();
+    if item_type == "card" {
+        let orig_card = full_item.as_ref().and_then(|i| i.card.as_ref());
+        for (wire_key, new_val) in &parsed.card {
+            let orig_val = orig_card
+                .and_then(|c| c.get(wire_key.as_str()))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if new_val != orig_val {
+                card_diff.insert(wire_key.clone(), json!(new_val));
+            }
+        }
+    }
+    let card_changed = !card_diff.is_empty();
+
     if !name_changed
         && !username_changed
         && !password_changed
         && !uris_changed
+        && !card_changed
         && !folder_changed
         && !favorite_changed
         && !notes_changed
@@ -4939,6 +5179,9 @@ fn handle_editor_edit(
     }
     if uris_changed {
         daemon_req["uris"] = json!(parsed.uris);
+    }
+    if card_changed {
+        daemon_req["card"] = Value::Object(card_diff);
     }
     if !upsert_fields.is_empty() {
         daemon_req["fields"] = json!(upsert_fields);
@@ -6366,5 +6609,164 @@ Bool Field: Active = maybe
         assert_eq!(parsed.fields[0].name, "Env");
         assert_eq!(parsed.fields[0].value, "prod");
         assert_eq!(parsed.notes, "Used for CI deploy");
+    }
+
+    #[test]
+    fn test_schema_version_requirements_for_card_mutations() {
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_create",
+                "cipher_type": "login",
+                "name": "Example"
+            })),
+            1
+        );
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_update",
+                "id": "uuid-1",
+                "fields": [{"name": "PIN", "value": "1234", "type": 1}]
+            })),
+            2
+        );
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_create",
+                "cipher_type": "card",
+                "name": "Visa"
+            })),
+            3
+        );
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_update",
+                "id": "uuid-2",
+                "card": {"expMonth": "12"}
+            })),
+            3
+        );
+    }
+
+    #[test]
+    fn test_clap_vault_create_card() {
+        let card_cli = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "create",
+            "card",
+            "--name",
+            "Corp Visa",
+            "--cardholder-name",
+            "Jane Doe",
+            "--brand",
+            "Visa",
+            "--exp-month",
+            "08",
+            "--exp-year",
+            "2029",
+        ])
+        .unwrap();
+        match card_cli.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Create {
+                        item:
+                            Some(CreateItemAction::Card {
+                                name,
+                                cardholder_name,
+                                brand,
+                                exp_month,
+                                exp_year,
+                                ..
+                            }),
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "Corp Visa");
+                assert_eq!(cardholder_name.as_deref(), Some("Jane Doe"));
+                assert_eq!(brand.as_deref(), Some("Visa"));
+                assert_eq!(exp_month.as_deref(), Some("08"));
+                assert_eq!(exp_year.as_deref(), Some("2029"));
+            }
+            _ => panic!("Expected VaultAction::Create(Card)"),
+        }
+
+        // Security Rule 11 (Zero-Argv): sensitive card number and CVV must be rejected in argv
+        assert!(
+            Cli::try_parse_from([
+                "omawarden",
+                "vault",
+                "create",
+                "card",
+                "--name",
+                "Corp Visa",
+                "--number",
+                "4111111111111111",
+            ])
+            .is_err(),
+            "--number must be rejected in argv (Zero-Argv Rule 11)"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "omawarden",
+                "vault",
+                "create",
+                "card",
+                "--name",
+                "Corp Visa",
+                "--code",
+                "123",
+            ])
+            .is_err(),
+            "--code must be rejected in argv (Zero-Argv Rule 11)"
+        );
+    }
+
+    #[test]
+    fn test_editor_template_roundtrip_card() {
+        let card_item = VaultItem {
+            id: "card-1".into(),
+            name: "Corp Visa".into(),
+            item_type: 3,
+            type_name: "card".into(),
+            sub_title: "Visa".into(),
+            notes: Some("Card notes".into()),
+            favorite: true,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: None,
+            card: Some(json!({
+                "cardholderName": "Jane Doe",
+                "brand": "Visa",
+                "number": "4111111111111111",
+                "expMonth": "08",
+                "expYear": "2029",
+                "code": "123"
+            })),
+            identity: None,
+            ssh_key: None,
+            fields: vec![],
+            attachments: vec![],
+            search_text: String::new(),
+        };
+        let tpl = format_editor_template("card-1", "Corp Visa", "card", Some(&card_item));
+        assert!(tpl.contains("Cardholder Name: Jane Doe"));
+        assert!(tpl.contains("Brand: Visa"));
+        assert!(tpl.contains("Number: 4111111111111111"));
+        assert!(tpl.contains("Expiration Month: 08"));
+        assert!(tpl.contains("Expiration Year: 2029"));
+        assert!(tpl.contains("Security Code: 123"));
+
+        let parsed = parse_editor_template(&tpl, "card").unwrap();
+        assert_eq!(parsed.name, "Corp Visa");
+        assert!(parsed.card.iter().any(|(k, v)| k == "brand" && v == "Visa"));
+        assert!(parsed.card.iter().any(|(k, v)| k == "code" && v == "123"));
+        assert_eq!(parsed.notes, "Card notes");
     }
 }

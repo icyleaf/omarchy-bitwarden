@@ -794,6 +794,109 @@ Item {
     editor.cipherType = "login"
     editor.originalItem = null
 
+    // Card create mode: BIN auto-suggest, 4-digit year validation, no hard Luhn block
+    editor.active = false
+    editor.mode = "create"
+    editor.cipherType = "card"
+    editor.originalItem = null
+    editor.active = true
+    check(editor.isCard === true, "CipherEditor recognizes card create mode")
+    check(editor.title === "New Card", "card create mode sets title to New Card")
+    editor.cipherName = "Travel Visa"
+    editor.cardholderName = "Jane Doe"
+    editor.cardNumber = "4111111111111112" // intentionally non-Luhn to verify no hard Luhn block
+    check(editor.cardBrand === "Visa", "BIN auto-suggest populates Visa when brand is unset")
+    editor.cardBrand = "Mastercard"
+    editor.cardNumber = "4111111111111119"
+    check(editor.cardBrand === "Mastercard", "BIN auto-suggest never overrides a manually chosen brand")
+    editor.cardBrand = "Visa"
+    editor.cardExpMonth = "08"
+    editor.cardExpYear = "29"
+    var cardCreateBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === cardCreateBefore, "2-digit expiration year is rejected")
+    check(editor.errorMessage.indexOf("4-digit") !== -1, "year validation explains 4-digit requirement")
+    editor.cardExpYear = "2029"
+    editor.cardCode = "123"
+    editor.submit()
+    check(testRunner.editorSubmitCount === cardCreateBefore + 1, "valid card create submits payload")
+    var cardCreatePayload = testRunner.editorSubmitted
+    check(cardCreatePayload && cardCreatePayload.cipher_type === "card", "card create emits cipher_type card")
+    check(cardCreatePayload && cardCreatePayload.card && cardCreatePayload.card.brand === "Visa", "card create includes brand")
+    check(cardCreatePayload && cardCreatePayload.card.number === "4111111111111119", "card create accepts non-Luhn number")
+    check(cardCreatePayload && cardCreatePayload.card.expMonth === "08" && cardCreatePayload.card.expYear === "2029",
+          "card create includes expiration month and year")
+    check(cardCreatePayload && cardCreatePayload.card.code === "123", "card create includes security code")
+
+    // Card edit mode: minimal dirty diff emits only modified card sub-fields
+    editor.active = false
+    editor.mode = "edit"
+    editor.cipherType = "card"
+    editor.originalItem = {
+      id: "card-1",
+      type_name: "card",
+      name: "Travel Visa",
+      folder_id: "f1",
+      notes: "Primary card",
+      card: {
+        cardholderName: "Jane Doe",
+        brand: "Visa",
+        number: "4111111111111111",
+        expMonth: "08",
+        expYear: "2029",
+        code: "123"
+      },
+      fields: []
+    }
+    editor.active = true
+    check(editor.isDirty === false, "pristine card edit is not dirty")
+    editor.cardExpMonth = "12"
+    editor.cardCode = ""
+    check(editor.isDirty === true, "modifying card sub-fields marks editor dirty")
+    var cardEditBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === cardEditBefore + 1, "card edit submits minimal diff")
+    var cardEditDiff = testRunner.editorSubmitted
+    check(cardEditDiff && cardEditDiff.name === undefined, "unchanged name is omitted from card diff")
+    check(cardEditDiff && cardEditDiff.card && cardEditDiff.card.expMonth === "12", "modified expMonth is emitted")
+    check(cardEditDiff && cardEditDiff.card.code === "", "cleared code emits empty string")
+    check(cardEditDiff && cardEditDiff.card.number === undefined && cardEditDiff.card.brand === undefined,
+          "untouched card sub-fields are omitted from minimal diff")
+
+    // Regression: opening an existing Card with empty brand and Visa BIN must NOT mutate brand or mark dirty
+    editor.active = false
+    editor.mode = "edit"
+    editor.cipherType = "card"
+    editor.originalItem = {
+      id: "card-2",
+      type_name: "card",
+      name: "Unbranded Visa",
+      folder_id: "",
+      notes: "",
+      card: {
+        cardholderName: "Jane Doe",
+        brand: "",
+        number: "4111111111111111",
+        expMonth: "08",
+        expYear: "2029",
+        code: ""
+      },
+      fields: []
+    }
+    editor.active = true
+    check(editor.cardBrand === "", "prefilling an unbranded Card does not auto-mutate cardBrand")
+    check(editor.isDirty === false, "prefilling an unbranded Card keeps the form pristine")
+    // Regression: manually clearing brand prevents subsequent BIN auto-suggest overwrite
+    editor.cardBrandManual = true
+    editor.cardBrand = ""
+    editor.cardNumber = "4111111111111112"
+    check(editor.cardBrand === "", "manually cleared brand is not overwritten by BIN auto-suggest")
+
+    editor.active = false
+    editor.mode = "create"
+    editor.cipherType = "login"
+    editor.originalItem = null
+
     var editSuccessIdx = src.indexOf("function handleCipherEditSuccess(data)")
     var editSuccessWindow = editSuccessIdx >= 0 ? src.substring(editSuccessIdx, editSuccessIdx + 900) : ""
     check(editSuccessWindow.indexOf('data.outcome === "saved_needs_sync"') !== -1,

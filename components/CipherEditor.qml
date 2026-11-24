@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "./CardFormatter.js" as CardFormatter
 import qs.Commons
 import qs.Commons as Commons
 
@@ -23,7 +24,7 @@ ScrollView {
 
   property bool active: false
   property string mode: "create" // "create" | "edit"
-  property string cipherType: "login" // "login" | "note" | "ssh_key"
+  property string cipherType: "login" // "login" | "note" | "card" | "ssh_key"
   property var folders: [] // [{ id, name }]
   property string defaultFolderId: ""
   // In edit mode this is the selected vault item. Saving diffs against it.
@@ -49,9 +50,10 @@ ScrollView {
 
   readonly property color textOnAccent: StatusPalette.textOn(accent)
   readonly property bool isLogin: cipherType === "login"
+  readonly property bool isCard: cipherType === "card"
   readonly property bool isSshKey: cipherType === "ssh_key"
   readonly property bool isEdit: mode === "edit"
-  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : "New Secure Note")
+  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : (isCard ? "New Card" : "New Secure Note"))
   // Recomputed on every form mutation so the discard guard stays accurate even
   // when the user reverts their edits back to the original cipher.
   property bool isDirty: false
@@ -62,6 +64,16 @@ ScrollView {
   property string username: ""
   property string password: ""
   property bool passwordRevealed: false
+  property string cardholderName: ""
+  property string cardBrand: ""
+  property bool cardBrandManual: false
+  property bool isResettingForm: false
+  property string cardNumber: ""
+  property bool cardNumberRevealed: false
+  property string cardExpMonth: ""
+  property string cardExpYear: ""
+  property string cardCode: ""
+  property bool cardCodeRevealed: false
   property string notes: ""
 
   signal submitRequested(var payload)
@@ -141,6 +153,15 @@ ScrollView {
     username = ""
     password = ""
     passwordRevealed = false
+    cardholderName = ""
+    cardBrand = ""
+    cardBrandManual = false
+    cardNumber = ""
+    cardNumberRevealed = false
+    cardExpMonth = ""
+    cardExpYear = ""
+    cardCode = ""
+    cardCodeRevealed = false
     notes = ""
     uriModel.clear()
     fieldModel.clear()
@@ -149,6 +170,7 @@ ScrollView {
   }
 
   function resetForm() {
+    isResettingForm = true
     clearDraft()
 
     var linked = []
@@ -168,6 +190,13 @@ ScrollView {
           var uriValue = (typeof rawUri === "string") ? rawUri : ((rawUri && rawUri.uri) ? rawUri.uri : "")
           uriModel.append({ uri: String(uriValue || "") })
         }
+      } else if (isCard && originalItem.card) {
+        cardholderName = String(originalItem.card.cardholderName || "")
+        cardBrand = String(originalItem.card.brand || "")
+        cardNumber = String(originalItem.card.number || "")
+        cardExpMonth = String(originalItem.card.expMonth || "")
+        cardExpYear = String(originalItem.card.expYear || "")
+        cardCode = String(originalItem.card.code || "")
       }
 
       var fields = originalFields()
@@ -191,6 +220,7 @@ ScrollView {
 
     if (uriModel.count === 0) uriModel.append({ uri: "" })
     linkedFields = linked
+    isResettingForm = false
     recomputeDirty()
   }
 
@@ -224,6 +254,13 @@ ScrollView {
       for (var u = 0; u < uriModel.count; u++) {
         if (String(uriModel.get(u).uri || "").trim() !== "") return true
       }
+    } else if (isCard) {
+      if (String(cardholderName || "") !== "") return true
+      if (String(cardBrand || "") !== "") return true
+      if (String(cardNumber || "") !== "") return true
+      if (String(cardExpMonth || "") !== "") return true
+      if (String(cardExpYear || "") !== "") return true
+      if (String(cardCode || "") !== "") return true
     }
     return false
   }
@@ -235,6 +272,18 @@ ScrollView {
   onCipherNameChanged: recomputeDirty()
   onUsernameChanged: recomputeDirty()
   onPasswordChanged: recomputeDirty()
+  onCardholderNameChanged: recomputeDirty()
+  onCardBrandChanged: recomputeDirty()
+  onCardNumberChanged: {
+    if (!isResettingForm && isCard && !cardBrandManual && !String(cardBrand || "").trim()) {
+      var suggested = CardFormatter.detectCardBrand(cardNumber)
+      if (suggested) cardBrand = suggested
+    }
+    recomputeDirty()
+  }
+  onCardExpMonthChanged: recomputeDirty()
+  onCardExpYearChanged: recomputeDirty()
+  onCardCodeChanged: recomputeDirty()
   onNotesChanged: recomputeDirty()
   onFolderIdChanged: recomputeDirty()
 
@@ -380,6 +429,14 @@ ScrollView {
       }
     }
 
+    if (isCard) {
+      var trimmedYear = String(cardExpYear || "").trim()
+      if (trimmedYear.length > 0 && !/^\d{4}$/.test(trimmedYear)) {
+        errorMessage = "Expiration year must be a 4-digit number (e.g. 2029)."
+        return null
+      }
+    }
+
     if (isEdit && originalItem) return buildEditPayload(trimmedName)
 
     var payload = {
@@ -400,6 +457,15 @@ ScrollView {
         if (uri.length > 0) cleanedUris.push(uri)
       }
       if (cleanedUris.length > 0) payload.uris = cleanedUris
+    } else if (isCard) {
+      var cardObj = {}
+      if (cardholderName && cardholderName.length > 0) cardObj.cardholderName = cardholderName
+      if (cardBrand && cardBrand.length > 0) cardObj.brand = cardBrand
+      if (cardNumber && cardNumber.length > 0) cardObj.number = cardNumber
+      if (cardExpMonth && cardExpMonth.length > 0) cardObj.expMonth = cardExpMonth
+      if (cardExpYear && String(cardExpYear).trim().length > 0) cardObj.expYear = String(cardExpYear).trim()
+      if (cardCode && cardCode.length > 0) cardObj.code = cardCode
+      payload.card = cardObj
     }
 
     var fields = []
@@ -460,6 +526,27 @@ ScrollView {
       if (!urisMatch) {
         if (currentUris.length === 0 && originalUris.length > 0) payload.clear_uris = true
         else payload.uris = currentUris
+      }
+    } else if (isCard) {
+      var origCard = original.card || {}
+      var cardDiff = {}
+      var cardPairs = [
+        ["cardholderName", String(cardholderName || "")],
+        ["brand", String(cardBrand || "")],
+        ["number", String(cardNumber || "")],
+        ["expMonth", String(cardExpMonth || "")],
+        ["expYear", String(cardExpYear || "").trim()],
+        ["code", String(cardCode || "")]
+      ]
+      for (var ci = 0; ci < cardPairs.length; ci++) {
+        var ck = cardPairs[ci][0]
+        var cv = cardPairs[ci][1]
+        if (cv !== String(origCard[ck] || "")) {
+          cardDiff[ck] = cv
+        }
+      }
+      if (Object.keys(cardDiff).length > 0) {
+        payload.card = cardDiff
       }
     }
 
@@ -588,7 +675,7 @@ ScrollView {
       spacing: 8
 
       Text {
-        text: editorRoot.isSshKey ? "\uf084" : (editorRoot.isLogin ? "\uf023" : "\uf0f6")
+        text: editorRoot.isSshKey ? "\uf084" : (editorRoot.isCard ? "\uf09d" : (editorRoot.isLogin ? "\uf023" : "\uf0f6"))
         font.family: editorRoot.fontFamily
         font.pixelSize: Style.font.subtitle
         color: editorRoot.accent
@@ -1226,13 +1313,342 @@ ScrollView {
       }
     }
 
+    // Card-only fields
+    ColumnLayout {
+      visible: editorRoot.isCard
+      Layout.fillWidth: true
+      spacing: 12
+
+      // Cardholder Name
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Cardholder Name"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          height: 32
+          radius: 4
+          color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: cardholderInput.activeFocus ? editorRoot.accent : editorRoot.borderColor
+          border.width: 1
+
+          TextInput {
+            id: cardholderInput
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            verticalAlignment: Text.AlignVCenter
+            color: editorRoot.foreground
+            font.pixelSize: Style.font.body
+            selectByMouse: true
+            clip: true
+            activeFocusOnTab: true
+            text: editorRoot.cardholderName
+            onTextChanged: editorRoot.cardholderName = text
+          }
+        }
+      }
+
+      // Brand selector
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Brand"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        ComboBox {
+          id: cardBrandCombo
+          Layout.fillWidth: true
+          height: 32
+          model: [""].concat(CardFormatter.STANDARD_BRANDS)
+          currentIndex: Math.max(0, model.indexOf(editorRoot.cardBrand))
+          onActivated: {
+            editorRoot.cardBrandManual = true
+            editorRoot.cardBrand = currentText
+          }
+          displayText: editorRoot.cardBrand ? editorRoot.cardBrand : "Select brand"
+          background: Rectangle {
+            radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: cardBrandCombo.activeFocus ? editorRoot.accent : editorRoot.borderColor
+            border.width: 1
+          }
+          contentItem: Text {
+            leftPadding: 8
+            rightPadding: 24
+            text: cardBrandCombo.displayText
+            color: editorRoot.cardBrand ? editorRoot.foreground : editorRoot.muted
+            font.pixelSize: Style.font.body
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+          }
+          delegate: ItemDelegate {
+            width: cardBrandCombo.width
+            height: 28
+            highlighted: cardBrandCombo.highlightedIndex === index
+            background: Rectangle {
+              color: highlighted ? Commons.Color.menu.selectedBackground : "transparent"
+            }
+            contentItem: Text {
+              text: modelData ? modelData : "Select brand"
+              color: highlighted ? Commons.Color.menu.selectedText : (modelData ? editorRoot.foreground : editorRoot.muted)
+              font.pixelSize: Style.font.bodySmall
+              verticalAlignment: Text.AlignVCenter
+              elide: Text.ElideRight
+            }
+          }
+          popup: Popup {
+            y: cardBrandCombo.height + 2
+            width: cardBrandCombo.width
+            padding: 2
+            background: Rectangle {
+              radius: 4
+              color: Commons.Color.popups.background
+              border.color: Commons.Color.popups.border
+              border.width: 1
+            }
+            contentItem: ListView {
+              clip: true
+              implicitHeight: Math.min(contentHeight, 200)
+              model: cardBrandCombo.popup.visible ? cardBrandCombo.delegateModel : null
+              currentIndex: cardBrandCombo.highlightedIndex
+            }
+          }
+        }
+      }
+
+      // Card Number (masked with reveal toggle)
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Number"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          height: 32
+          radius: 4
+          color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: cardNumberInput.activeFocus ? editorRoot.accent : editorRoot.borderColor
+          border.width: 1
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 4
+            spacing: 4
+
+            TextInput {
+              id: cardNumberInput
+              Layout.fillWidth: true
+              verticalAlignment: Text.AlignVCenter
+              color: editorRoot.foreground
+              font.pixelSize: Style.font.body
+              echoMode: editorRoot.cardNumberRevealed ? TextInput.Normal : TextInput.Password
+              selectByMouse: true
+              clip: true
+              activeFocusOnTab: true
+              text: editorRoot.cardNumber
+              onTextChanged: editorRoot.cardNumber = text
+            }
+
+            GhostIconButton {
+              iconText: editorRoot.cardNumberRevealed ? "\uf070" : "\uf06e"
+              tooltip: editorRoot.cardNumberRevealed ? "Hide card number" : "Show card number"
+              fontFamily: editorRoot.fontFamily
+              onClicked: editorRoot.cardNumberRevealed = !editorRoot.cardNumberRevealed
+            }
+          }
+        }
+      }
+
+      // Expiration Month & Year (2-column compact row)
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+
+          Text {
+            text: "Expiration Month"
+            color: editorRoot.muted
+            font.pixelSize: Style.font.bodySmall
+            font.weight: Font.Medium
+          }
+
+          ComboBox {
+            id: cardMonthCombo
+            Layout.fillWidth: true
+            height: 32
+            model: ["", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
+            currentIndex: Math.max(0, model.indexOf(editorRoot.cardExpMonth))
+            onActivated: editorRoot.cardExpMonth = currentText
+            displayText: editorRoot.cardExpMonth ? editorRoot.cardExpMonth : "Month"
+            background: Rectangle {
+              radius: 4
+              color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+              border.color: cardMonthCombo.activeFocus ? editorRoot.accent : editorRoot.borderColor
+              border.width: 1
+            }
+            contentItem: Text {
+              leftPadding: 8
+              rightPadding: 24
+              text: cardMonthCombo.displayText
+              color: editorRoot.cardExpMonth ? editorRoot.foreground : editorRoot.muted
+              font.pixelSize: Style.font.body
+              verticalAlignment: Text.AlignVCenter
+              elide: Text.ElideRight
+            }
+            delegate: ItemDelegate {
+              width: cardMonthCombo.width
+              height: 28
+              highlighted: cardMonthCombo.highlightedIndex === index
+              background: Rectangle {
+                color: highlighted ? Commons.Color.menu.selectedBackground : "transparent"
+              }
+              contentItem: Text {
+                text: modelData ? modelData : "Month"
+                color: highlighted ? Commons.Color.menu.selectedText : (modelData ? editorRoot.foreground : editorRoot.muted)
+                font.pixelSize: Style.font.bodySmall
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+              }
+            }
+            popup: Popup {
+              y: cardMonthCombo.height + 2
+              width: cardMonthCombo.width
+              padding: 2
+              background: Rectangle {
+                radius: 4
+                color: Commons.Color.popups.background
+                border.color: Commons.Color.popups.border
+                border.width: 1
+              }
+              contentItem: ListView {
+                clip: true
+                implicitHeight: Math.min(contentHeight, 200)
+                model: cardMonthCombo.popup.visible ? cardMonthCombo.delegateModel : null
+                currentIndex: cardMonthCombo.highlightedIndex
+              }
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+
+          Text {
+            text: "Expiration Year"
+            color: editorRoot.muted
+            font.pixelSize: Style.font.bodySmall
+            font.weight: Font.Medium
+          }
+
+          Rectangle {
+            Layout.fillWidth: true
+            height: 32
+            radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: cardYearInput.activeFocus ? editorRoot.accent : editorRoot.borderColor
+            border.width: 1
+
+            TextInput {
+              id: cardYearInput
+              anchors.fill: parent
+              anchors.leftMargin: 8
+              anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter
+              color: editorRoot.foreground
+              font.pixelSize: Style.font.body
+              selectByMouse: true
+              clip: true
+              maximumLength: 4
+              activeFocusOnTab: true
+              text: editorRoot.cardExpYear
+              onTextChanged: editorRoot.cardExpYear = text
+            }
+          }
+        }
+      }
+
+      // Security Code / CVV (masked with reveal toggle)
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Security Code (CVV)"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          height: 32
+          radius: 4
+          color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: cardCodeInput.activeFocus ? editorRoot.accent : editorRoot.borderColor
+          border.width: 1
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 4
+            spacing: 4
+
+            TextInput {
+              id: cardCodeInput
+              Layout.fillWidth: true
+              verticalAlignment: Text.AlignVCenter
+              color: editorRoot.foreground
+              font.pixelSize: Style.font.body
+              echoMode: editorRoot.cardCodeRevealed ? TextInput.Normal : TextInput.Password
+              selectByMouse: true
+              clip: true
+              activeFocusOnTab: true
+              text: editorRoot.cardCode
+              onTextChanged: editorRoot.cardCode = text
+            }
+
+            GhostIconButton {
+              iconText: editorRoot.cardCodeRevealed ? "\uf070" : "\uf06e"
+              tooltip: editorRoot.cardCodeRevealed ? "Hide security code" : "Show security code"
+              fontFamily: editorRoot.fontFamily
+              onClicked: editorRoot.cardCodeRevealed = !editorRoot.cardCodeRevealed
+            }
+          }
+        }
+      }
+    }
+
     // Notes / note body
     ColumnLayout {
       Layout.fillWidth: true
       spacing: 4
 
       Text {
-        text: (editorRoot.isLogin || editorRoot.isSshKey) ? "Notes (optional)" : "Note"
+        text: (editorRoot.isLogin || editorRoot.isCard || editorRoot.isSshKey) ? "Notes (optional)" : "Note"
         color: editorRoot.muted
         font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium

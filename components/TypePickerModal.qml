@@ -22,6 +22,7 @@ Rectangle {
   readonly property var options: [
     { type: "login", label: "Login", hint: "L" },
     { type: "note", label: "Secure Note", hint: "N" },
+    { type: "card", label: "Card", hint: "C" },
     { type: "ssh_key", label: "SSH Key", hint: "S" }
   ]
 

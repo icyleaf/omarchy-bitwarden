@@ -151,7 +151,8 @@ pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 /// The monotonically increasing integer version of cipher mutation schema capabilities.
 /// Version 1 represents legacy ciphers (pure login/note fields without custom fields or multi-URI modifications).
 /// Version 2 adds support for custom fields and multiple URIs.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// Version 3 adds support for Card (and upcoming Identity) cipher mutations.
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// The minimum protocol version this client/server understands.
 /// Version 0 represents legacy unversioned daemons.

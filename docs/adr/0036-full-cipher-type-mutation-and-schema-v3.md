@@ -36,8 +36,9 @@ Extending mutation parity to all five Bitwarden cipher types required settling f
 - Soft-delete (**Trash**), permanent delete, and Favorite (`Ctrl+B` / Inspector header toggle) are enabled for all five personal cipher types (**Login**, **Secure Note**, **Card**, **Identity**, **SSH Key**).
 - **Organization** ciphers remain strictly read-only across all mutation paths (ADR-0033).
 
-### 5. CLI Interface Division
-- `omawarden vault create` exposes `card` and `identity` subcommands with full type-specific flags alongside `--stdin` and `--from-json`.
+### 5. CLI Interface Division & Zero-Argv Enforcement
+- `omawarden vault create` exposes `card` and `identity` subcommands with non-sensitive metadata flags alongside `--stdin` and `--from-json`.
+- Per Security Rule 11 (Zero-Argv), sensitive item secrets (Card `number` and `code`, Identity `ssn`, `passportNumber`, and `licenseNumber`) are **never** accepted as CLI `argv` flags; they are supplied via interactive non-echoing terminal prompts or via `--stdin` / `--from-json` JSON payloads.
 - `omawarden vault edit <target>` supports interactive `$EDITOR` templates and zero-argv `--stdin` / `--from-json` payloads for all five cipher types, while keeping top-level CLI flags focused on common metadata (`--name`, `--notes`, `--folder`, `--favorite`, `--field*`) to avoid flag bloat.
 
 ## Consequences

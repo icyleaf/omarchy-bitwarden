@@ -968,8 +968,8 @@ fn test_create_cipher_unsupported_type_rejected() {
         true
     );
 
-    // Passing type 3 (Card) must be explicitly rejected, not coerced into login
-    let mut cli_card = make_command(dir)
+    // Passing an unknown numeric cipher type (e.g. 99) must be explicitly rejected, not coerced into login
+    let mut cli_unsupported = make_command(dir)
         .args(["vault", "create", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -978,13 +978,13 @@ fn test_create_cipher_unsupported_type_rejected() {
         .unwrap();
 
     {
-        let mut stdin = cli_card.stdin.take().unwrap();
+        let mut stdin = cli_unsupported.stdin.take().unwrap();
         stdin
             .write_all(
                 json!({
-                    "type": 3,
-                    "name": "Card Item",
-                    "notes": "Card Secret"
+                    "type": 99,
+                    "name": "Unknown Item",
+                    "notes": "Unknown Secret"
                 })
                 .to_string()
                 .as_bytes(),
@@ -992,12 +992,12 @@ fn test_create_cipher_unsupported_type_rejected() {
             .unwrap();
     }
 
-    let out_card = cli_card.wait_with_output().unwrap();
-    assert!(!out_card.status.success());
-    let stderr_card = String::from_utf8_lossy(&out_card.stderr);
+    let out_unsupported = cli_unsupported.wait_with_output().unwrap();
+    assert!(!out_unsupported.status.success());
+    let stderr_unsupported = String::from_utf8_lossy(&out_unsupported.stderr);
     assert!(
-        stderr_card.contains("Unsupported cipher type"),
-        "Unexpected error: {stderr_card}"
+        stderr_unsupported.contains("Unsupported cipher type"),
+        "Unexpected error: {stderr_unsupported}"
     );
 }
 

@@ -122,3 +122,34 @@ function formatMaskedCardNumber(num, brand) {
   }
   return parts.join(" ")
 }
+
+var STANDARD_BRANDS = [
+  "Visa",
+  "Mastercard",
+  "Amex",
+  "Discover",
+  "Diners Club",
+  "JCB",
+  "Maestro",
+  "UnionPay",
+  "RuPay",
+  "Other"
+]
+
+/**
+ * Gently detect a standard Bitwarden card brand from leading BIN digits.
+ * Returns "" when no known prefix matches.
+ */
+function detectCardBrand(num) {
+  var digits = cleanCardNumber(num)
+  if (!digits) return ""
+  if (/^4/.test(digits)) return "Visa"
+  if (/^(34|37)/.test(digits)) return "Amex"
+  if (/^(5[1-5]|222[1-9]|22[3-9]\d|2[3-6]\d{2}|27[01]\d|2720)/.test(digits)) return "Mastercard"
+  if (/^(6011|65|64[4-9])/.test(digits)) return "Discover"
+  if (/^(36|38|30[0-5])/.test(digits)) return "Diners Club"
+  if (/^35(2[89]|[3-8]\d)/.test(digits)) return "JCB"
+  if (/^62/.test(digits)) return "UnionPay"
+  if (/^(50|5[6-9]|6[0-9])/.test(digits)) return "Maestro"
+  return ""
+}

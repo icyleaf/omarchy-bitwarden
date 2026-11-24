@@ -105,6 +105,19 @@ Item {
     parentScope.rootShowCardNumberRevealed = true
     check(childInspector.showCardNumberRevealed === true, "Inspector reflects reveal toggle on subsequent item")
 
+    // 6. BIN prefix brand detection (gentle auto-suggest)
+    check(CardFormatter.detectCardBrand("4111111111111111") === "Visa", "BIN 4 detects Visa")
+    check(CardFormatter.detectCardBrand("5555444433332222") === "Mastercard", "BIN 55 detects Mastercard")
+    check(CardFormatter.detectCardBrand("2221000000000000") === "Mastercard", "BIN 2221 detects Mastercard")
+    check(CardFormatter.detectCardBrand("378282246310005") === "Amex", "BIN 37 detects Amex")
+    check(CardFormatter.detectCardBrand("340000000000009") === "Amex", "BIN 34 detects Amex")
+    check(CardFormatter.detectCardBrand("6011000000000000") === "Discover", "BIN 6011 detects Discover")
+    check(CardFormatter.detectCardBrand("36123456789012") === "Diners Club", "BIN 36 detects Diners Club")
+    check(CardFormatter.detectCardBrand("3528000000000000") === "JCB", "BIN 3528 detects JCB")
+    check(CardFormatter.detectCardBrand("6221260000000000") === "UnionPay", "BIN 62 detects UnionPay")
+    check(CardFormatter.detectCardBrand("9999") === "", "Unknown BIN returns empty string")
+    check(CardFormatter.detectCardBrand("") === "", "Empty number returns empty string")
+
     console.log("Card Formatting Tests Completed: " + (failures === 0 ? "ALL PASSED" : failures + " FAILURES"))
     Qt.exit(failures === 0 ? 0 : 1)
   }
