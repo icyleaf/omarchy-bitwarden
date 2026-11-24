@@ -3719,8 +3719,11 @@ fn test_create_login_cipher_generate_passphrase_flag() {
             .unwrap()
             .decrypt_string(&user_key)
             .unwrap();
-        let words: Vec<&str> = decrypted_pwd.split('-').collect();
-        assert_eq!(words.len(), 4, "Expected 4 words, got {decrypted_pwd}");
+        // EFF words like "t-shirt" or "yo-yo" can contribute additional hyphens.
+        assert!(
+            decrypted_pwd.matches('-').count() >= 3,
+            "Expected at least 4 hyphen-separated segments, got {decrypted_pwd}"
+        );
 
         let resp_body = json!({
             "id": "gen-phrase-uuid",

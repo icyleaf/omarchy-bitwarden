@@ -104,6 +104,21 @@ pub struct StorageManager {
     pub(crate) fail_credential_cleanup_sync: bool,
 }
 
+/// Releases an `flock` lock explicitly on drop rather than relying on `close()`.
+///
+/// On Unix, `flock` locks belong to the open file description: if another thread
+/// in this process is between `fork()` and `execve()` when the guard drops, the
+/// child briefly holds a duplicate descriptor and keeps the lock alive until
+/// `execve()` closes `O_CLOEXEC` descriptors. Calling `unlock()` (`LOCK_UN`)
+/// releases the lock immediately regardless of transient child descriptors.
+pub(crate) struct FileLockGuard(fs::File);
+
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// Pins the original inode until commit, preventing inode reuse from passing
 /// a stale comparison. All production cache writers replace the file atomically.
 pub(crate) struct CacheSnapshot {
@@ -121,7 +136,7 @@ impl CacheSnapshot {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                 Err(error) => return Err(error),
             };
-            if StorageManager::current_write_revision(&barrier)? != expected {
+            if StorageManager::current_write_revision(&barrier.0)? != expected {
                 return Ok(false);
             }
         }
@@ -234,7 +249,7 @@ impl StorageManager {
     /// unreadable or malformed storage must never become an empty snapshot.
     pub(crate) fn snapshot(&self) -> std::io::Result<CacheSnapshot> {
         let barrier = self.cipher_barrier()?;
-        let revision = Self::current_write_revision(&barrier)?;
+        let revision = Self::current_write_revision(&barrier.0)?;
         let mut snapshot = self.cache_snapshot()?;
         snapshot.write_revision = Some(revision);
         Ok(snapshot)
@@ -294,7 +309,7 @@ impl StorageManager {
         Ok(revision)
     }
 
-    fn cipher_barrier(&self) -> std::io::Result<fs::File> {
+    fn cipher_barrier(&self) -> std::io::Result<FileLockGuard> {
         let barrier = self.open_cipher_barrier()?;
         barrier.try_lock().map_err(|e| match e {
             std::fs::TryLockError::WouldBlock => std::io::Error::new(
@@ -303,13 +318,13 @@ impl StorageManager {
             ),
             std::fs::TryLockError::Error(error) => error,
         })?;
-        Ok(barrier)
+        Ok(FileLockGuard(barrier))
     }
 
     /// Shared operation marker, held through the HTTP request and receipt.
     /// It contains no secrets and never blocks lock(), which does not use it.
     /// Sync/login readers fail promptly while any request is outstanding.
-    pub(crate) fn begin_cipher_write(&self) -> std::io::Result<fs::File> {
+    pub(crate) fn begin_cipher_write(&self) -> std::io::Result<FileLockGuard> {
         use std::os::unix::fs::FileExt;
         let _account = self.account_guard()?;
         let barrier = self.open_cipher_barrier()?;
@@ -320,8 +335,9 @@ impl StorageManager {
             ),
             std::fs::TryLockError::Error(error) => error,
         })?;
-        Self::current_write_revision(&barrier)?;
-        barrier.write_all_at(&rand::random::<[u8; 16]>(), 0)?;
+        let barrier = FileLockGuard(barrier);
+        Self::current_write_revision(&barrier.0)?;
+        barrier.0.write_all_at(&rand::random::<[u8; 16]>(), 0)?;
         Ok(barrier)
     }
 
@@ -363,7 +379,7 @@ impl StorageManager {
 
     /// Serialize credential replacement and revocation across CLI and daemon processes.
     /// Keep the lock file separate from data.json, whose inode changes on each save.
-    pub(crate) fn account_guard(&self) -> std::io::Result<fs::File> {
+    pub(crate) fn account_guard(&self) -> std::io::Result<FileLockGuard> {
         use std::os::unix::fs::OpenOptionsExt;
         let parent = self
             .file_path
@@ -381,7 +397,7 @@ impl StorageManager {
             .custom_flags(libc::O_NOFOLLOW)
             .open(self.file_path.with_extension("account.lock"))?;
         guard.lock()?;
-        Ok(guard)
+        Ok(FileLockGuard(guard))
     }
 
     /// A writer must distinguish a missing or corrupt cache from an empty vault.
@@ -602,5 +618,49 @@ mod tests {
         assert!(target_file.exists(), "Target file must be preserved");
         let content = fs::read_to_string(&target_file).unwrap();
         assert_eq!(content, "{\"new\":true}");
+    }
+
+    #[test]
+    fn cipher_write_guard_unlocks_even_with_cloned_descriptor() {
+        let dir = tempdir().unwrap();
+        let mgr = StorageManager::new(dir.path().join("data.json"));
+        mgr.save(&VaultStorage::default()).unwrap();
+
+        let pending = mgr.begin_cipher_write().unwrap();
+        // Simulate a concurrent fork() inheriting the open file description
+        // before execve() closes O_CLOEXEC descriptors.
+        let inherited = pending.0.try_clone().unwrap();
+        assert_eq!(
+            mgr.snapshot().err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+
+        drop(pending);
+        assert!(
+            mgr.snapshot().is_ok(),
+            "dropping the write guard must release flock even while a duplicate fd exists"
+        );
+        drop(inherited);
+    }
+
+    #[test]
+    fn account_guard_unlocks_even_with_cloned_descriptor() {
+        let dir = tempdir().unwrap();
+        let mgr = StorageManager::new(dir.path().join("data.json"));
+
+        let guard = mgr.account_guard().unwrap();
+        let inherited = guard.0.try_clone().unwrap();
+        drop(guard);
+
+        let probe = fs::OpenOptions::new()
+            .write(true)
+            .open(mgr.file_path.with_extension("account.lock"))
+            .unwrap();
+        assert!(
+            probe.try_lock().is_ok(),
+            "dropping account_guard must release flock even while a duplicate fd exists"
+        );
+        drop(probe);
+        drop(inherited);
     }
 }
