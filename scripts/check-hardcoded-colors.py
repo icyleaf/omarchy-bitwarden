@@ -22,6 +22,47 @@ import sys
 HEX_PATTERN = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 NUMERIC_RGBA_PATTERN = re.compile(r"Qt\.rgba\(\s*[\d\.]+\s*,\s*[\d\.]+\s*,\s*[\d\.]+\s*,", re.IGNORECASE)
 QT_DARKER_FOREGROUND_PATTERN = re.compile(r"Qt\.darker\([^)]*foreground", re.IGNORECASE)
+COMBOBOX_START_PATTERN = re.compile(r"\bComboBox\s*\{")
+POPUP_PROP_PATTERN = re.compile(r"\bpopup\s*:")
+DELEGATE_PROP_PATTERN = re.compile(r"\bdelegate\s*:")
+
+
+def scan_combobox_theming(path: str, stripped_lines: list[tuple[int, str]]) -> list[str]:
+    """
+    ADR-0026 Decision 1: Every ComboBox in production QML must explicitly declare
+    both `popup:` (Color.popups.background/border) and `delegate:`
+    (Color.menu.selectedBackground/selectedText) so dropdown surfaces never fall
+    back to unthemed Qt defaults.
+    """
+    violations = []
+    idx = 0
+    total = len(stripped_lines)
+    while idx < total:
+        line_num, line = stripped_lines[idx]
+        if COMBOBOX_START_PATTERN.search(line):
+            depth = line.count("{") - line.count("}")
+            block_lines = [line]
+            end_idx = idx
+            while depth > 0 and end_idx + 1 < total:
+                end_idx += 1
+                _, next_line = stripped_lines[end_idx]
+                depth += next_line.count("{") - next_line.count("}")
+                block_lines.append(next_line)
+            block_text = "\n".join(block_lines)
+            missing = []
+            if not POPUP_PROP_PATTERN.search(block_text):
+                missing.append("popup:")
+            if not DELEGATE_PROP_PATTERN.search(block_text):
+                missing.append("delegate:")
+            if missing:
+                violations.append(
+                    f"{path}:{line_num}: ComboBox missing themed {' and '.join(missing)}\n"
+                    f"  Remediation: Define explicit popup (Color.popups.background/border) and delegate (Color.menu.selectedBackground/selectedText) per ADR 0026 Decision 1."
+                )
+            idx = end_idx + 1
+            continue
+        idx += 1
+    return violations
 
 
 def strip_comments(text: str) -> list[tuple[int, str]]:
@@ -94,6 +135,9 @@ def scan_file(path: str, is_palette_exempt: bool = False) -> list[str]:
                 f"  Remediation: Move status color to components/StatusPalette.qml or use an existing palette role."
             )
 
+    # Check 4: ComboBox popup/delegate theme compliance (ADR 0026 Decision 1)
+    violations.extend(scan_combobox_theming(path, stripped_lines))
+
     return violations
 
 
@@ -148,7 +192,21 @@ def run_self_tests() -> bool:
         v_comments = scan_file(comments_file, is_palette_exempt=False)
         assert len(v_comments) == 0, f"Expected 0 violations for comments, got {len(v_comments)}"
 
-    print("PASS: check-hardcoded-colors self-tests (all 5 fixture checks succeeded).")
+        # Fixture 6: Unthemed ComboBox fails
+        bad_combo = os.path.join(tmpdir, "BadCombo.qml")
+        with open(bad_combo, "w") as f:
+            f.write("Item {\n  ComboBox {\n    model: ['A', 'B']\n  }\n}\n")
+        v_bad_combo = scan_file(bad_combo, is_palette_exempt=False)
+        assert len(v_bad_combo) == 1, f"Expected 1 violation for unthemed ComboBox, got {len(v_bad_combo)}"
+
+        # Fixture 7: Themed ComboBox with popup and delegate passes
+        good_combo = os.path.join(tmpdir, "GoodCombo.qml")
+        with open(good_combo, "w") as f:
+            f.write("Item {\n  ComboBox {\n    delegate: ItemDelegate {}\n    popup: Popup {}\n  }\n}\n")
+        v_good_combo = scan_file(good_combo, is_palette_exempt=False)
+        assert len(v_good_combo) == 0, f"Expected 0 violations for themed ComboBox, got {len(v_good_combo)}"
+
+    print("PASS: check-hardcoded-colors self-tests (all 7 fixture checks succeeded).")
     return True
 
 

@@ -72,3 +72,10 @@ All surface, text, selection, and status color rules live in one place: [ADR 002
 - Semantic status colors exist only in `components/StatusPalette.qml`; labels on colored fills come from `StatusPalette.textOn` / `textOnTint` / `labelOnTint` instead of hand-picked white or black.
 - `scripts/check-hardcoded-colors.py` enforces the zero-hardcode rule and fails CI on any hex literal or numeric-RGB `Qt.rgba` outside that file.
 - `tests/tst_theme_color_adaptation.qml` covers both presets and asserts WCAG contrast for colored badges, chips, toasts and confirmation buttons.
+
+---
+
+## 6. Headless QML Testing Discipline
+
+- **Prefer behavioral seam assertions over source-string grepping**: Test new UI behavior through exported JS helpers (`CipherMutation.js`, `CardFormatter.js`, `IconPolicy.js`) and component public interfaces (`submit()`, `handleKey()`, emitted signals, and payload shapes).
+- **Avoid adding fragile `indexOf` checks on `.qml` source files**: Only use XHR source checks for structural security invariants (e.g. verifying `stdinEnabled: true` or zero-argv command construction), not for control-flow or helper-name implementation details that break during routine refactors.

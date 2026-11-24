@@ -11,7 +11,9 @@ echo "=== Running Cargo Clippy ==="
 (cd "${ROOT_DIR}/omawarden" && cargo clippy --all-targets --all-features -- -D warnings)
 
 echo "=== Running Cargo Test Suite ==="
-(cd "${ROOT_DIR}/omawarden" && env -u WAYLAND_DISPLAY -u DISPLAY XDG_RUNTIME_DIR=/tmp cargo test --all-targets)
+TMP_RUNTIME_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_RUNTIME_DIR}"' EXIT
+(cd "${ROOT_DIR}/omawarden" && env -u WAYLAND_DISPLAY -u DISPLAY XDG_RUNTIME_DIR="${TMP_RUNTIME_DIR}" cargo test --all-targets)
 
 echo "=== Running Python Workflow Tests ==="
 python3 "${ROOT_DIR}/tests/test_workflow_action_pinning.py"

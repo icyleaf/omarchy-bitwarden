@@ -63,10 +63,15 @@ elif command -v qml >/dev/null 2>&1; then
 fi
 
 if [ -n "$QML_EXEC" ]; then
+  QML_TEST_TIMEOUT="${QML_TEST_TIMEOUT:-30s}"
   for test_file in tests/tst_*.qml; do
     if [ -f "$test_file" ]; then
       echo "Running $test_file..."
-      "$QML_EXEC" "$test_file"
+      if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=5s "$QML_TEST_TIMEOUT" "$QML_EXEC" "$test_file"
+      else
+        "$QML_EXEC" "$test_file"
+      fi
     fi
   done
 else

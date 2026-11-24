@@ -232,10 +232,10 @@ These rules were distilled from real-world vulnerabilities and architectural pit
 
 ### Rule 11: Zero-Argv & Zero-Environ Principle for Sensitive Credentials
 
-**Principle**: Master passwords, session tokens, TOTP secrets, two-factor authentication (2FA) verification codes, and private keys MUST NEVER be accepted or passed as command-line arguments (`argv`) OR environment variables (`environ`). On Linux, command-line arguments are globally readable via `/proc/<pid>/cmdline`, and environment variables are readable via `/proc/<pid>/environ` by any process running under the same user UID.
+**Principle**: Master passwords, session tokens, TOTP secrets, two-factor authentication (2FA) verification codes, private keys, and sensitive cipher creation secrets (Card `number` and `code`, Identity `ssn`, `passportNumber`, and `licenseNumber`) MUST NEVER be accepted or passed as command-line arguments (`argv`) OR environment variables (`environ`). On Linux, command-line arguments are globally readable via `/proc/<pid>/cmdline`, and environment variables are readable via `/proc/<pid>/environ` by any process running under the same user UID.
 
 - ❌ **Anti-Pattern**:
-  - Providing flags like `--session <token>`, `--secret <base32/uri>`, or `--code <2fa_code>` on the CLI.
+  - Providing flags like `--session <token>`, `--secret <base32/uri>`, `--code <2fa_code>`, `vault create card --number <pan> --code <cvv>`, or `vault create identity --ssn <ssn> --passport-number <num> --license-number <num>` on the CLI.
   - Allowing raw `otpauth://` URIs or plaintext secrets as positional CLI arguments (e.g. `omawarden totp otpauth://totp/...`).
   - Reading credentials or session tokens from environment variables (`BW_SESSION`, `OMAWARDEN_SESSION`, `BW_2FA_CODE`, `OMAWARDEN_2FA_CODE`).
   - Relying on command-line argument masking, which contains unavoidable kernel-level race conditions before the process mutates its `argv`.
