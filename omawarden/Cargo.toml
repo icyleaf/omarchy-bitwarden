@@ -18,7 +18,7 @@ totp-rs = { version = "6.0", features = ["otpauth"] }
 base32 = "0.5"
 base64 = "0.23"
 hmac = "0.12"
-sha1 = "0.10"
+sha1 = "0.11"
 sha2 = "0.10"
 aes = "0.8"
 cbc = "0.1"
