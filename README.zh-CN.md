@@ -467,7 +467,7 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 
 ### 阶段四：已完成（密码库条目新建与内嵌编辑）
 
-- [x] 覆盖层检查器内嵌编辑表单（`CipherEditor.qml`）与快速类型选择器（<kbd>Ctrl</kbd>+<kbd>N</kbd>，支持 Login 与 Secure Note）
+- [x] 覆盖层检查器内嵌编辑表单（`CipherEditor.qml`）与快速类型选择器（<kbd>Ctrl</kbd>+<kbd>N</kbd>，支持全部 5 类个人 Cipher：Login、Secure Note、Card、Identity、SSH Key）
 - [x] 基于用户主密钥的客户端密文载荷加密（AES-256-CBC / HMAC）
 - [x] Bitwarden REST API POST `/ciphers` 创建与 PUT `/ciphers/{id}` 更新接口对接及静默会话自动续期
 - [x] 创建与更新后本地零知识密文缓存与内存索引即时同步
@@ -475,19 +475,28 @@ omawarden generate --passphrase -w 5 -s . --capitalize -c
 - [x] 零参数标准输入安全契约（`omawarden vault edit <target> --stdin --json`），杜绝进程参数明文泄露
 - [x] 条目就地编辑（账号密码、备注、多条动态 URI、自定义文本/隐藏/布尔字段、文件夹归属调整）
 - [x] 动态自定义字段支持（文本、隐藏、布尔字段及严格的反序列化安全校验）
-- [ ] Card 与 Identity 类型新建与编辑（计划后续迭代支持）
+- [x] 完整的 Card（6 字段）与 Identity（18 字段含 `address3`）新建与编辑，以及 SSH Key 元数据编辑（ADR 0036、Daemon Schema v3、Zero-Argv Rule 11）
 
-### 阶段五：进行中（密码库条目生命周期、回收站与删除管理）
+### 阶段五：已完成（密码库条目生命周期、回收站与删除管理）
 
 - [x] CLI 回收站（Trash）列表与检索（`omawarden vault list --trash`、`vault search --trash`）
 - [x] 回收站条目一键恢复（`omawarden vault restore <target>`）与缓存/索引即时更新
 - [x] 作用域隔离的永久彻底删除（`omawarden vault delete <target> --trash`）
-- [x] 覆盖层软删除与永久删除确认模态窗口（<kbd>Ctrl</kbd>+<kbd>D</kbd>）
-- [x] 快捷收藏切换（<kbd>Ctrl</kbd>+<kbd>B</kbd>、检查器星标按钮及动作面板）
-- [x] 混部版本守护进程能力协商与严格反序列化校验，防止扩展字段静默丢弃
-- [ ] 组织集合重新归属与协作条目修改
+- [x] 覆盖层软删除与永久删除确认模态窗口（<kbd>Ctrl</kbd>+<kbd>D</kbd>），全覆盖 5 类个人 Cipher
+- [x] 快捷收藏切换（<kbd>Ctrl</kbd>+<kbd>B</kbd>、检查器星标按钮及动作面板），全覆盖 5 类个人 Cipher
+- [x] 混部版本守护进程能力协商（Schema v2 / v3）与严格反序列化校验，防止扩展字段静默丢弃
 
-### 阶段六：远期规划（系统自动化与生物识别）
+### 阶段六：规划中（Bitwarden CLI 能力补齐与密码库管理）
+
+- [ ] 文件夹（Folder）管理（CLI 与覆盖层支持列表、新建、重命名、删除）
+- [ ] 附件（Attachment）上传与删除（`omawarden attachment upload|delete`）
+- [ ] 面向脚本管道的单条目读取命令（`omawarden vault get <target> [--field ...]`），直接输出纯文本或 JSON
+- [ ] Login TOTP 密钥与 URI 匹配规则编辑（CLI `vault edit` 与覆盖层内嵌编辑表单）
+- [ ] 密码库导出与导入（加密 JSON、明文 JSON、CSV）
+- [ ] 组织集合重新归属与协作条目修改
+- [ ] Bitwarden Send（`omawarden send`）阅后即焚加密文本/文件分享
+
+### 阶段七：远期规划（系统自动化与生物识别）
 
 - [ ] Wayland 自动填充 / 模拟按键输入（例如基于 `ydotool` / `wtype` 集成）
 - [x] 快速生物识别 / PAM / 指纹系统级解锁（ADR 0025）— 已在阶段 3.5 通过 polkit 落地
