@@ -6,6 +6,7 @@ CipherEditor 1.0 CipherEditor.qml
 DeleteCipherModal 1.0 DeleteCipherModal.qml
 DependencyCheckView 1.0 DependencyCheckView.qml
 EmptyInspector 1.0 EmptyInspector.qml
+FolderManagerModal 1.0 FolderManagerModal.qml
 FooterBar 1.0 FooterBar.qml
 GhostIconButton 1.0 GhostIconButton.qml
 ItemInspector 1.0 ItemInspector.qml

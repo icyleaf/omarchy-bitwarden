@@ -10,6 +10,7 @@ pub mod config;
 pub mod credential_slots;
 pub mod crypto;
 pub mod daemon;
+mod folder_write;
 pub mod fs_util;
 pub mod generator;
 pub mod health;
