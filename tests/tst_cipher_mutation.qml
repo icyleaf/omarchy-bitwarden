@@ -892,6 +892,79 @@ Item {
     editor.cardNumber = "4111111111111112"
     check(editor.cardBrand === "", "manually cleared brand is not overwritten by BIN auto-suggest")
 
+    // Identity create mode: all 18 fields including address3
+    editor.active = false
+    editor.mode = "create"
+    editor.cipherType = "identity"
+    editor.originalItem = null
+    editor.active = true
+    check(editor.isIdentity === true, "CipherEditor recognizes identity create mode")
+    check(editor.title === "New Identity", "identity create mode sets title to New Identity")
+    editor.cipherName = "Work Identity"
+    editor.idTitle = "Dr"
+    editor.idFirstName = "Ada"
+    editor.idMiddleName = "Augusta"
+    editor.idLastName = "Lovelace"
+    editor.idUsername = "ada"
+    editor.idCompany = "Analytical Engines"
+    editor.idSsn = "123-45-6789"
+    editor.idPassportNumber = "P998877"
+    editor.idLicenseNumber = "DL-42"
+    editor.idEmail = "ada@example.com"
+    editor.idPhone = "+44 20 7946 0958"
+    editor.idAddress1 = "12 St James Sq"
+    editor.idAddress2 = "Floor 2"
+    editor.idAddress3 = "Suite B"
+    editor.idCity = "London"
+    editor.idState = "Greater London"
+    editor.idPostalCode = "SW1Y 4LB"
+    editor.idCountry = "UK"
+    var idCreateBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === idCreateBefore + 1, "identity create submits payload")
+    var idCreatePayload = testRunner.editorSubmitted
+    check(idCreatePayload && idCreatePayload.cipher_type === "identity", "identity create emits cipher_type identity")
+    check(idCreatePayload && idCreatePayload.identity && idCreatePayload.identity.title === "Dr", "identity create includes title")
+    check(idCreatePayload && idCreatePayload.identity.address3 === "Suite B", "identity create includes address3")
+    check(idCreatePayload && idCreatePayload.identity.ssn === "123-45-6789", "identity create includes ssn")
+    check(idCreatePayload && idCreatePayload.identity.licenseNumber === "DL-42", "identity create includes licenseNumber")
+
+    // Identity edit mode: minimal dirty diff emits only modified identity sub-fields
+    editor.active = false
+    editor.mode = "edit"
+    editor.cipherType = "identity"
+    editor.originalItem = {
+      id: "id-1",
+      type_name: "identity",
+      name: "Work Identity",
+      folder_id: "f1",
+      notes: "Notes",
+      identity: {
+        title: "Dr",
+        firstName: "Ada",
+        lastName: "Lovelace",
+        address1: "12 St James Sq",
+        address3: "Suite B",
+        city: "London",
+        ssn: "123-45-6789"
+      },
+      fields: []
+    }
+    editor.active = true
+    check(editor.isDirty === false, "pristine identity edit is not dirty")
+    editor.idCity = "Oxford"
+    editor.idAddress3 = ""
+    check(editor.isDirty === true, "modifying identity sub-fields marks editor dirty")
+    var idEditBefore = testRunner.editorSubmitCount
+    editor.submit()
+    check(testRunner.editorSubmitCount === idEditBefore + 1, "identity edit submits minimal diff")
+    var idEditDiff = testRunner.editorSubmitted
+    check(idEditDiff && idEditDiff.name === undefined, "unchanged name is omitted from identity diff")
+    check(idEditDiff && idEditDiff.identity && idEditDiff.identity.city === "Oxford", "modified city is emitted")
+    check(idEditDiff && idEditDiff.identity.address3 === "", "cleared address3 emits empty string")
+    check(idEditDiff && idEditDiff.identity.firstName === undefined && idEditDiff.identity.ssn === undefined,
+          "untouched identity sub-fields are omitted from minimal diff")
+
     editor.active = false
     editor.mode = "create"
     editor.cipherType = "login"

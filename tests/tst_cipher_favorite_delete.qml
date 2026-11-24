@@ -86,7 +86,7 @@ Item {
     check(CipherMutation.isEditableType(note) === true, "Secure Notes are editable")
     check(CipherMutation.isEditableType(ssh) === true, "SSH keys are metadata-editable")
     check(CipherMutation.isEditableType(card) === true, "Cards are editable in Inspector Form")
-    check(CipherMutation.isEditableType(identity) === false, "Identities are not yet editable in Inspector Form")
+    check(CipherMutation.isEditableType(identity) === true, "Identities are editable in Inspector Form")
     check(CipherMutation.isEditableType(null) === false, "null is not editable")
 
     check(CipherMutation.isOrganizationOwned(orgLogin) === true, "organization login is detected")

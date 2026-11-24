@@ -1925,6 +1925,10 @@ pub fn decrypt_sync_ciphers_with_context(
                         id_obj.get("address2").and_then(|v| v.as_str()),
                         &cipher_key,
                     );
+                    let address3 = decrypt_cipher_string(
+                        id_obj.get("address3").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
                     let city = decrypt_cipher_string(
                         id_obj.get("city").and_then(|v| v.as_str()),
                         &cipher_key,
@@ -1977,6 +1981,7 @@ pub fn decrypt_sync_ciphers_with_context(
                         "lastName": last_name,
                         "address1": address1,
                         "address2": address2,
+                        "address3": address3,
                         "city": city,
                         "state": state,
                         "postalCode": postal_code,
@@ -2391,6 +2396,8 @@ mod tests {
                     "phone": encrypt_test_string("+1-555-0199", &user_key),
                     "company": encrypt_test_string("Acme Corp", &user_key),
                     "address1": encrypt_test_string("123 Tech Lane", &user_key),
+                    "address2": encrypt_test_string("Floor 4", &user_key),
+                    "address3": encrypt_test_string("Suite B", &user_key),
                     "city": encrypt_test_string("San Francisco", &user_key),
                     "state": encrypt_test_string("CA", &user_key),
                     "postalCode": encrypt_test_string("94105", &user_key),
@@ -2435,6 +2442,8 @@ mod tests {
         assert_eq!(id_val.get("email").unwrap(), "alice@example.com");
         assert_eq!(id_val.get("phone").unwrap(), "+1-555-0199");
         assert_eq!(id_val.get("company").unwrap(), "Acme Corp");
+        assert_eq!(id_val.get("address2").unwrap(), "Floor 4");
+        assert_eq!(id_val.get("address3").unwrap(), "Suite B");
         assert_eq!(id_val.get("city").unwrap(), "San Francisco");
 
         // Note assertions

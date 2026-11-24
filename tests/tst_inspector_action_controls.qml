@@ -162,6 +162,31 @@ Item {
               "folder and org badges are placed in the subtitle row alongside categoryLabel")
       }
 
+      // 6. Identity Inspector displays address3 when present
+      inspector.item = {
+        id: "test-identity",
+        name: "Work Identity",
+        type_name: "identity",
+        favorite: false,
+        identity: {
+          firstName: "Ada",
+          lastName: "Lovelace",
+          address1: "12 St James Sq",
+          address2: "Floor 2",
+          address3: "Suite B",
+          city: "London",
+          country: "UK"
+        },
+        fields: [],
+        attachments: []
+      }
+      var idAddressText = findChildByName(inspector, "identityAddressText")
+      check(idAddressText !== null, "Inspector exposes identityAddressText")
+      if (idAddressText) {
+        check(idAddressText.text.indexOf("Suite B") !== -1,
+              "Inspector displays address3 in the formatted identity address (" + idAddressText.text + ")")
+      }
+
       if (failures > 0) {
         console.error("TOTAL FAILURES:", failures)
         Qt.exit(1)

@@ -5,7 +5,7 @@ import qs.Commons
 import qs.Commons as Commons
 
 // Lightweight centered picker for choosing the cipher type to create (Ctrl+N).
-// Keyboard-driven: single-key L / N / S, Up / Down navigation, Enter to confirm,
+// Keyboard-driven: single-key L / N / C / I / S, Up / Down navigation, Enter to confirm,
 // Esc to dismiss, and repeated Ctrl+N cycles the highlighted option.
 Rectangle {
   id: pickerRoot
@@ -23,6 +23,7 @@ Rectangle {
     { type: "login", label: "Login", hint: "L" },
     { type: "note", label: "Secure Note", hint: "N" },
     { type: "card", label: "Card", hint: "C" },
+    { type: "identity", label: "Identity", hint: "I" },
     { type: "ssh_key", label: "SSH Key", hint: "S" }
   ]
 

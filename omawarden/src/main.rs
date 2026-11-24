@@ -141,15 +141,23 @@ fn cipher_update_payload_has_login_fields(payload: &Value) -> bool {
 
 fn cipher_mutation_required_schema_version(request: &Value) -> u32 {
     let action = request.get("action").and_then(Value::as_str);
-    let is_card_type = match request.get("type") {
-        Some(Value::Number(n)) => n.as_u64() == Some(3),
-        Some(Value::String(s)) => s == "3" || s.eq_ignore_ascii_case("card"),
+    let is_card_or_identity_type = match request.get("type") {
+        Some(Value::Number(n)) => matches!(n.as_u64(), Some(3 | 4)),
+        Some(Value::String(s)) => {
+            s == "3"
+                || s == "4"
+                || s.eq_ignore_ascii_case("card")
+                || s.eq_ignore_ascii_case("identity")
+        }
         _ => request
             .get("cipher_type")
             .and_then(Value::as_str)
-            .is_some_and(|t| t.eq_ignore_ascii_case("card")),
+            .is_some_and(|t| t.eq_ignore_ascii_case("card") || t.eq_ignore_ascii_case("identity")),
     };
-    if request.get("card").is_some() || (action == Some("cipher_create") && is_card_type) {
+    if request.get("card").is_some()
+        || request.get("identity").is_some()
+        || (action == Some("cipher_create") && is_card_or_identity_type)
+    {
         return 3;
     }
 
@@ -559,6 +567,7 @@ enum HookAction {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum VaultAction {
     #[command(about = "Sync vault from Bitwarden server")]
     Sync,
@@ -797,6 +806,7 @@ enum VaultAction {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum CreateItemAction {
     #[command(about = "Create a new Login cipher")]
     Login {
@@ -920,6 +930,70 @@ enum CreateItemAction {
         exp_month: Option<String>,
         #[arg(long, help = "Expiration year (4-digit, e.g. 2029)")]
         exp_year: Option<String>,
+        #[arg(long, help = "Optional notes")]
+        notes: Option<String>,
+        #[arg(
+            long = "field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Text custom field (repeatable)"
+        )]
+        fields: Vec<String>,
+        #[arg(
+            long = "hidden-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=VALUE",
+            help = "Hidden custom field (repeatable)"
+        )]
+        hidden_fields: Vec<String>,
+        #[arg(
+            long = "bool-field",
+            action = clap::ArgAction::Append,
+            value_name = "NAME=true|false",
+            help = "Boolean custom field (repeatable)"
+        )]
+        bool_fields: Vec<String>,
+        #[arg(long, help = "Optional folder ID")]
+        folder_id: Option<String>,
+        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        organization_id: Option<String>,
+        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
+        collection_id: Option<String>,
+    },
+    #[command(about = "Create a new Identity cipher")]
+    Identity {
+        #[arg(long, help = "Name of the identity cipher")]
+        name: String,
+        #[arg(long, help = "Title (e.g. Mr, Mrs, Ms, Mx, Dr)")]
+        title: Option<String>,
+        #[arg(long, help = "First name")]
+        first_name: Option<String>,
+        #[arg(long, help = "Middle name")]
+        middle_name: Option<String>,
+        #[arg(long, help = "Last name")]
+        last_name: Option<String>,
+        #[arg(long, help = "Username")]
+        username: Option<String>,
+        #[arg(long, help = "Company")]
+        company: Option<String>,
+        #[arg(long, help = "Email address")]
+        email: Option<String>,
+        #[arg(long, help = "Phone number")]
+        phone: Option<String>,
+        #[arg(long, help = "Address line 1")]
+        address1: Option<String>,
+        #[arg(long, help = "Address line 2")]
+        address2: Option<String>,
+        #[arg(long, help = "Address line 3")]
+        address3: Option<String>,
+        #[arg(long, help = "City / town")]
+        city: Option<String>,
+        #[arg(long, help = "State / province")]
+        state: Option<String>,
+        #[arg(long, help = "Zip / postal code")]
+        postal_code: Option<String>,
+        #[arg(long, help = "Country")]
+        country: Option<String>,
         #[arg(long, help = "Optional notes")]
         notes: Option<String>,
         #[arg(
@@ -2621,6 +2695,139 @@ fn main() -> ExitCode {
                             }
                             (req, "card cipher", name)
                         }
+                        Some(CreateItemAction::Identity {
+                            name,
+                            title,
+                            first_name,
+                            middle_name,
+                            last_name,
+                            username,
+                            company,
+                            email,
+                            phone,
+                            address1,
+                            address2,
+                            address3,
+                            city,
+                            state,
+                            postal_code,
+                            country,
+                            notes,
+                            fields,
+                            hidden_fields,
+                            bool_fields,
+                            folder_id,
+                            organization_id,
+                            collection_id,
+                        }) => {
+                            if organization_id
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
+                            {
+                                emit_vault_error(json, "Organization ciphers are read-only.");
+                                return ExitCode::FAILURE;
+                            }
+
+                            let custom_fields =
+                                match build_custom_fields(&fields, &hidden_fields, &bool_fields) {
+                                    Ok(list) => list,
+                                    Err(err_msg) => {
+                                        emit_vault_error(json, &err_msg);
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
+
+                            let is_interactive = (io::stdin().is_terminal()
+                                || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                                && !json;
+
+                            let read_id_secret = |prompt_msg: &str| -> zeroize::Zeroizing<String> {
+                                if io::stdin().is_terminal() {
+                                    zeroize::Zeroizing::new(
+                                        rpassword::prompt_password(prompt_msg).unwrap_or_default(),
+                                    )
+                                } else {
+                                    eprint!("{prompt_msg}");
+                                    let _ = io::stderr().flush();
+                                    let mut buf = zeroize::Zeroizing::new(String::new());
+                                    let _ = io::stdin().read_line(&mut buf);
+                                    zeroize::Zeroizing::new(
+                                        buf.trim_end_matches(['\r', '\n']).to_string(),
+                                    )
+                                }
+                            };
+
+                            let ssn_val = if is_interactive {
+                                let v = read_id_secret("Enter SSN (optional, Enter to skip): ");
+                                (!v.trim().is_empty()).then_some(v)
+                            } else {
+                                None
+                            };
+                            let passport_val = if is_interactive {
+                                let v = read_id_secret(
+                                    "Enter passport number (optional, Enter to skip): ",
+                                );
+                                (!v.trim().is_empty()).then_some(v)
+                            } else {
+                                None
+                            };
+                            let license_val = if is_interactive {
+                                let v = read_id_secret(
+                                    "Enter license number (optional, Enter to skip): ",
+                                );
+                                (!v.trim().is_empty()).then_some(v)
+                            } else {
+                                None
+                            };
+
+                            let mut id_obj = serde_json::Map::new();
+                            for (wire_key, val) in [
+                                ("title", title),
+                                ("firstName", first_name),
+                                ("middleName", middle_name),
+                                ("lastName", last_name),
+                                ("username", username),
+                                ("company", company),
+                                ("email", email),
+                                ("phone", phone),
+                                ("address1", address1),
+                                ("address2", address2),
+                                ("address3", address3),
+                                ("city", city),
+                                ("state", state),
+                                ("postalCode", postal_code),
+                                ("country", country),
+                            ] {
+                                if let Some(v) = val {
+                                    id_obj.insert(wire_key.into(), json!(v));
+                                }
+                            }
+                            if let Some(ref v) = ssn_val {
+                                id_obj.insert("ssn".into(), json!(v.as_str()));
+                            }
+                            if let Some(ref v) = passport_val {
+                                id_obj.insert("passportNumber".into(), json!(v.as_str()));
+                            }
+                            if let Some(ref v) = license_val {
+                                id_obj.insert("licenseNumber".into(), json!(v.as_str()));
+                            }
+
+                            let mut req = json!({
+                                "action": "cipher_create",
+                                "type": 4,
+                                "cipher_type": "identity",
+                                "name": name,
+                                "notes": notes,
+                                "folder_id": folder_id,
+                                "identity": Value::Object(id_obj),
+                            });
+                            if !custom_fields.is_empty() {
+                                req["fields"] = json!(custom_fields);
+                            }
+                            (req, "identity cipher", name)
+                        }
                         None => {
                             let raw_json = if stdin {
                                 read_json_payload_stdin()
@@ -2646,7 +2853,7 @@ fn main() -> ExitCode {
                                     }
                                 }
                             } else {
-                                let err_msg = "Specify a cipher type subcommand (e.g. 'login', 'note', 'card') or pass --stdin / --from-json.";
+                                let err_msg = "Specify a cipher type subcommand (e.g. 'login', 'note', 'card', 'identity') or pass --stdin / --from-json.";
                                 if json {
                                     println!(
                                         "{}",
@@ -3155,6 +3362,13 @@ fn main() -> ExitCode {
                             emit_vault_error(
                                 json,
                                 "Card fields can only be updated on card ciphers.",
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        if item_type != "identity" && payload.get("identity").is_some() {
+                            emit_vault_error(
+                                json,
+                                "Identity fields can only be updated on identity ciphers.",
                             );
                             return ExitCode::FAILURE;
                         }
@@ -4637,6 +4851,27 @@ const CARD_EDITOR_FIELDS: &[(&str, &str)] = &[
     ("code", "Security Code"),
 ];
 
+const IDENTITY_EDITOR_FIELDS: &[(&str, &str)] = &[
+    ("title", "Title"),
+    ("firstName", "First Name"),
+    ("middleName", "Middle Name"),
+    ("lastName", "Last Name"),
+    ("username", "Username"),
+    ("company", "Company"),
+    ("ssn", "SSN"),
+    ("passportNumber", "Passport Number"),
+    ("licenseNumber", "License Number"),
+    ("email", "Email"),
+    ("phone", "Phone"),
+    ("address1", "Address 1"),
+    ("address2", "Address 2"),
+    ("address3", "Address 3"),
+    ("city", "City"),
+    ("state", "State"),
+    ("postalCode", "Postal Code"),
+    ("country", "Country"),
+];
+
 #[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct ParsedEditorCipher {
     name: String,
@@ -4644,6 +4879,7 @@ struct ParsedEditorCipher {
     password: Option<String>,
     uris: Vec<String>,
     card: Vec<(String, String)>,
+    identity: Vec<(String, String)>,
     fields: Vec<ParsedEditorField>,
     folder_id: Option<String>,
     favorite: bool,
@@ -4699,6 +4935,15 @@ fn format_editor_template(
         for (wire_key, label) in CARD_EDITOR_FIELDS {
             let val = card
                 .and_then(|c| c.get(*wire_key))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let _ = writeln!(out, "{label}: {val}");
+        }
+    } else if item_type == "identity" {
+        let identity = item_details.and_then(|i| i.identity.as_ref());
+        for (wire_key, label) in IDENTITY_EDITOR_FIELDS {
+            let val = identity
+                .and_then(|id| id.get(*wire_key))
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let _ = writeln!(out, "{label}: {val}");
@@ -4790,6 +5035,14 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
     } else {
         Vec::new()
     };
+    let mut identity_values: Vec<(String, String)> = if item_type == "identity" {
+        IDENTITY_EDITOR_FIELDS
+            .iter()
+            .map(|(wire_key, _)| ((*wire_key).to_string(), String::new()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut fields: Vec<ParsedEditorField> = Vec::new();
     let mut folder_id = String::new();
     let mut favorite = false;
@@ -4816,7 +5069,7 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
             let val = val.trim();
             match key.as_str() {
                 "name" => name = val.to_string(),
-                "username" => username = val.to_string(),
+                "username" if item_type == "login" => username = val.to_string(),
                 "password" => password = val.to_string(),
                 "uri" => {
                     if !val.is_empty() {
@@ -4844,6 +5097,18 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
                                 *slot = val.to_string();
                             }
                         }
+                    } else if item_type == "identity" {
+                        if let Some((wire_key, _)) =
+                            IDENTITY_EDITOR_FIELDS.iter().find(|(wk, lbl)| {
+                                lbl.eq_ignore_ascii_case(other) || wk.eq_ignore_ascii_case(other)
+                            })
+                        {
+                            if let Some((_, slot)) =
+                                identity_values.iter_mut().find(|(k, _)| k == wire_key)
+                            {
+                                *slot = val.to_string();
+                            }
+                        }
                     }
                 }
             }
@@ -4864,6 +5129,7 @@ fn parse_editor_template(content: &str, item_type: &str) -> Result<ParsedEditorC
         password: if has_login { Some(password) } else { None },
         uris: if has_login { uris } else { Vec::new() },
         card: card_values,
+        identity: identity_values,
         fields,
         folder_id: folder_opt,
         favorite,
@@ -5149,11 +5415,27 @@ fn handle_editor_edit(
     }
     let card_changed = !card_diff.is_empty();
 
+    let mut identity_diff = serde_json::Map::new();
+    if item_type == "identity" {
+        let orig_identity = full_item.as_ref().and_then(|i| i.identity.as_ref());
+        for (wire_key, new_val) in &parsed.identity {
+            let orig_val = orig_identity
+                .and_then(|id| id.get(wire_key.as_str()))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if new_val != orig_val {
+                identity_diff.insert(wire_key.clone(), json!(new_val));
+            }
+        }
+    }
+    let identity_changed = !identity_diff.is_empty();
+
     if !name_changed
         && !username_changed
         && !password_changed
         && !uris_changed
         && !card_changed
+        && !identity_changed
         && !folder_changed
         && !favorite_changed
         && !notes_changed
@@ -5182,6 +5464,9 @@ fn handle_editor_edit(
     }
     if card_changed {
         daemon_req["card"] = Value::Object(card_diff);
+    }
+    if identity_changed {
+        daemon_req["identity"] = Value::Object(identity_diff);
     }
     if !upsert_fields.is_empty() {
         daemon_req["fields"] = json!(upsert_fields);
@@ -6768,5 +7053,140 @@ Bool Field: Active = maybe
         assert!(parsed.card.iter().any(|(k, v)| k == "brand" && v == "Visa"));
         assert!(parsed.card.iter().any(|(k, v)| k == "code" && v == "123"));
         assert_eq!(parsed.notes, "Card notes");
+    }
+
+    #[test]
+    fn test_schema_version_requirements_for_identity_mutations() {
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_create",
+                "cipher_type": "identity",
+                "name": "Work ID"
+            })),
+            3
+        );
+        assert_eq!(
+            cipher_mutation_required_schema_version(&json!({
+                "action": "cipher_update",
+                "id": "uuid-3",
+                "identity": {"city": "London"}
+            })),
+            3
+        );
+    }
+
+    #[test]
+    fn test_clap_vault_create_identity_and_zero_argv_rule_11() {
+        let id_cli = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "create",
+            "identity",
+            "--name",
+            "Work ID",
+            "--title",
+            "Dr",
+            "--first-name",
+            "Ada",
+            "--address3",
+            "Suite B",
+            "--country",
+            "UK",
+        ])
+        .unwrap();
+        match id_cli.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Create {
+                        item:
+                            Some(CreateItemAction::Identity {
+                                name,
+                                title,
+                                first_name,
+                                address3,
+                                country,
+                                ..
+                            }),
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "Work ID");
+                assert_eq!(title.as_deref(), Some("Dr"));
+                assert_eq!(first_name.as_deref(), Some("Ada"));
+                assert_eq!(address3.as_deref(), Some("Suite B"));
+                assert_eq!(country.as_deref(), Some("UK"));
+            }
+            _ => panic!("Expected VaultAction::Create(Identity)"),
+        }
+
+        // Security Rule 11 (Zero-Argv): sensitive ID numbers must be rejected in argv
+        for bad_flag in ["--ssn", "--passport-number", "--license-number"] {
+            assert!(
+                Cli::try_parse_from([
+                    "omawarden",
+                    "vault",
+                    "create",
+                    "identity",
+                    "--name",
+                    "Work ID",
+                    bad_flag,
+                    "SECRET-123",
+                ])
+                .is_err(),
+                "{bad_flag} must be rejected in argv (Zero-Argv Rule 11)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_editor_template_roundtrip_identity() {
+        let id_item = VaultItem {
+            id: "id-1".into(),
+            name: "Work ID".into(),
+            item_type: 4,
+            type_name: "identity".into(),
+            sub_title: "Ada".into(),
+            notes: Some("Identity notes".into()),
+            favorite: false,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            folder_id: None,
+            folder_name: None,
+            organization_id: None,
+            organization_name: None,
+            collection_ids: None,
+            login: None,
+            card: None,
+            identity: Some(json!({
+                "title": "Dr",
+                "firstName": "Ada",
+                "username": "ada_lovelace",
+                "ssn": "123-45-6789",
+                "address3": "Suite B",
+                "country": "UK"
+            })),
+            ssh_key: None,
+            fields: vec![],
+            attachments: vec![],
+            search_text: String::new(),
+        };
+        let tpl = format_editor_template("id-1", "Work ID", "identity", Some(&id_item));
+        assert!(tpl.contains("Title: Dr"));
+        assert!(tpl.contains("Username: ada_lovelace"));
+        assert!(tpl.contains("Address 3: Suite B"));
+
+        let parsed = parse_editor_template(&tpl, "identity").unwrap();
+        assert_eq!(parsed.name, "Work ID");
+        assert!(parsed.username.is_none());
+        assert!(parsed
+            .identity
+            .iter()
+            .any(|(k, v)| k == "username" && v == "ada_lovelace"));
+        assert!(parsed
+            .identity
+            .iter()
+            .any(|(k, v)| k == "address3" && v == "Suite B"));
+        assert_eq!(parsed.notes, "Identity notes");
     }
 }

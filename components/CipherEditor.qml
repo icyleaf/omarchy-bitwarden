@@ -24,7 +24,7 @@ ScrollView {
 
   property bool active: false
   property string mode: "create" // "create" | "edit"
-  property string cipherType: "login" // "login" | "note" | "card" | "ssh_key"
+  property string cipherType: "login" // "login" | "note" | "card" | "identity" | "ssh_key"
   property var folders: [] // [{ id, name }]
   property string defaultFolderId: ""
   // In edit mode this is the selected vault item. Saving diffs against it.
@@ -51,9 +51,10 @@ ScrollView {
   readonly property color textOnAccent: StatusPalette.textOn(accent)
   readonly property bool isLogin: cipherType === "login"
   readonly property bool isCard: cipherType === "card"
+  readonly property bool isIdentity: cipherType === "identity"
   readonly property bool isSshKey: cipherType === "ssh_key"
   readonly property bool isEdit: mode === "edit"
-  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : (isCard ? "New Card" : "New Secure Note"))
+  readonly property string title: isEdit ? "Edit Item" : (isLogin ? "New Login" : (isCard ? "New Card" : (isIdentity ? "New Identity" : "New Secure Note")))
   // Recomputed on every form mutation so the discard guard stays accurate even
   // when the user reverts their edits back to the original cipher.
   property bool isDirty: false
@@ -74,6 +75,25 @@ ScrollView {
   property string cardExpYear: ""
   property string cardCode: ""
   property bool cardCodeRevealed: false
+  property string idTitle: ""
+  property string idFirstName: ""
+  property string idMiddleName: ""
+  property string idLastName: ""
+  property string idUsername: ""
+  property string idCompany: ""
+  property string idSsn: ""
+  property bool idSsnRevealed: false
+  property string idPassportNumber: ""
+  property string idLicenseNumber: ""
+  property string idEmail: ""
+  property string idPhone: ""
+  property string idAddress1: ""
+  property string idAddress2: ""
+  property string idAddress3: ""
+  property string idCity: ""
+  property string idState: ""
+  property string idPostalCode: ""
+  property string idCountry: ""
   property string notes: ""
 
   signal submitRequested(var payload)
@@ -162,6 +182,25 @@ ScrollView {
     cardExpYear = ""
     cardCode = ""
     cardCodeRevealed = false
+    idTitle = ""
+    idFirstName = ""
+    idMiddleName = ""
+    idLastName = ""
+    idUsername = ""
+    idCompany = ""
+    idSsn = ""
+    idSsnRevealed = false
+    idPassportNumber = ""
+    idLicenseNumber = ""
+    idEmail = ""
+    idPhone = ""
+    idAddress1 = ""
+    idAddress2 = ""
+    idAddress3 = ""
+    idCity = ""
+    idState = ""
+    idPostalCode = ""
+    idCountry = ""
     notes = ""
     uriModel.clear()
     fieldModel.clear()
@@ -197,6 +236,25 @@ ScrollView {
         cardExpMonth = String(originalItem.card.expMonth || "")
         cardExpYear = String(originalItem.card.expYear || "")
         cardCode = String(originalItem.card.code || "")
+      } else if (isIdentity && originalItem.identity) {
+        idTitle = String(originalItem.identity.title || "")
+        idFirstName = String(originalItem.identity.firstName || "")
+        idMiddleName = String(originalItem.identity.middleName || "")
+        idLastName = String(originalItem.identity.lastName || "")
+        idUsername = String(originalItem.identity.username || "")
+        idCompany = String(originalItem.identity.company || "")
+        idSsn = String(originalItem.identity.ssn || "")
+        idPassportNumber = String(originalItem.identity.passportNumber || "")
+        idLicenseNumber = String(originalItem.identity.licenseNumber || "")
+        idEmail = String(originalItem.identity.email || "")
+        idPhone = String(originalItem.identity.phone || "")
+        idAddress1 = String(originalItem.identity.address1 || "")
+        idAddress2 = String(originalItem.identity.address2 || "")
+        idAddress3 = String(originalItem.identity.address3 || "")
+        idCity = String(originalItem.identity.city || "")
+        idState = String(originalItem.identity.state || "")
+        idPostalCode = String(originalItem.identity.postalCode || "")
+        idCountry = String(originalItem.identity.country || "")
       }
 
       var fields = originalFields()
@@ -261,8 +319,36 @@ ScrollView {
       if (String(cardExpMonth || "") !== "") return true
       if (String(cardExpYear || "") !== "") return true
       if (String(cardCode || "") !== "") return true
+    } else if (isIdentity) {
+      var idPairs = identityFieldPairs()
+      for (var ii = 0; ii < idPairs.length; ii++) {
+        if (idPairs[ii][1] !== "") return true
+      }
     }
     return false
+  }
+
+  function identityFieldPairs() {
+    return [
+      ["title", String(idTitle || "")],
+      ["firstName", String(idFirstName || "")],
+      ["middleName", String(idMiddleName || "")],
+      ["lastName", String(idLastName || "")],
+      ["username", String(idUsername || "")],
+      ["company", String(idCompany || "")],
+      ["ssn", String(idSsn || "")],
+      ["passportNumber", String(idPassportNumber || "")],
+      ["licenseNumber", String(idLicenseNumber || "")],
+      ["email", String(idEmail || "")],
+      ["phone", String(idPhone || "")],
+      ["address1", String(idAddress1 || "")],
+      ["address2", String(idAddress2 || "")],
+      ["address3", String(idAddress3 || "")],
+      ["city", String(idCity || "")],
+      ["state", String(idState || "")],
+      ["postalCode", String(idPostalCode || "")],
+      ["country", String(idCountry || "")]
+    ]
   }
 
   function recomputeDirty() {
@@ -284,6 +370,24 @@ ScrollView {
   onCardExpMonthChanged: recomputeDirty()
   onCardExpYearChanged: recomputeDirty()
   onCardCodeChanged: recomputeDirty()
+  onIdTitleChanged: recomputeDirty()
+  onIdFirstNameChanged: recomputeDirty()
+  onIdMiddleNameChanged: recomputeDirty()
+  onIdLastNameChanged: recomputeDirty()
+  onIdUsernameChanged: recomputeDirty()
+  onIdCompanyChanged: recomputeDirty()
+  onIdSsnChanged: recomputeDirty()
+  onIdPassportNumberChanged: recomputeDirty()
+  onIdLicenseNumberChanged: recomputeDirty()
+  onIdEmailChanged: recomputeDirty()
+  onIdPhoneChanged: recomputeDirty()
+  onIdAddress1Changed: recomputeDirty()
+  onIdAddress2Changed: recomputeDirty()
+  onIdAddress3Changed: recomputeDirty()
+  onIdCityChanged: recomputeDirty()
+  onIdStateChanged: recomputeDirty()
+  onIdPostalCodeChanged: recomputeDirty()
+  onIdCountryChanged: recomputeDirty()
   onNotesChanged: recomputeDirty()
   onFolderIdChanged: recomputeDirty()
 
@@ -466,6 +570,13 @@ ScrollView {
       if (cardExpYear && String(cardExpYear).trim().length > 0) cardObj.expYear = String(cardExpYear).trim()
       if (cardCode && cardCode.length > 0) cardObj.code = cardCode
       payload.card = cardObj
+    } else if (isIdentity) {
+      var idObj = {}
+      var idPairs = identityFieldPairs()
+      for (var ii = 0; ii < idPairs.length; ii++) {
+        if (idPairs[ii][1].length > 0) idObj[idPairs[ii][0]] = idPairs[ii][1]
+      }
+      payload.identity = idObj
     }
 
     var fields = []
@@ -547,6 +658,20 @@ ScrollView {
       }
       if (Object.keys(cardDiff).length > 0) {
         payload.card = cardDiff
+      }
+    } else if (isIdentity) {
+      var origId = original.identity || {}
+      var idDiff = {}
+      var idPairs = identityFieldPairs()
+      for (var ii = 0; ii < idPairs.length; ii++) {
+        var ik = idPairs[ii][0]
+        var iv = idPairs[ii][1]
+        if (iv !== String(origId[ik] || "")) {
+          idDiff[ik] = iv
+        }
+      }
+      if (Object.keys(idDiff).length > 0) {
+        payload.identity = idDiff
       }
     }
 
@@ -675,7 +800,7 @@ ScrollView {
       spacing: 8
 
       Text {
-        text: editorRoot.isSshKey ? "\uf084" : (editorRoot.isCard ? "\uf09d" : (editorRoot.isLogin ? "\uf023" : "\uf0f6"))
+        text: editorRoot.isSshKey ? "\uf084" : (editorRoot.isCard ? "\uf09d" : (editorRoot.isIdentity ? "\uf2c2" : (editorRoot.isLogin ? "\uf023" : "\uf0f6")))
         font.family: editorRoot.fontFamily
         font.pixelSize: Style.font.subtitle
         color: editorRoot.accent
@@ -1642,13 +1767,451 @@ ScrollView {
       }
     }
 
+    // Identity-only fields (4 flat sections: Personal, Identification, Contact, Address)
+    ColumnLayout {
+      visible: editorRoot.isIdentity
+      Layout.fillWidth: true
+      spacing: 12
+
+      // Section 1: Personal
+      Text {
+        text: "PERSONAL"
+        color: editorRoot.accent
+        font.pixelSize: Style.font.caption
+        font.weight: Font.DemiBold
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.preferredWidth: 110
+          spacing: 4
+          Text { text: "Title"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          ComboBox {
+            id: idTitleCombo
+            Layout.fillWidth: true
+            height: 32
+            model: ["", "Mr", "Mrs", "Ms", "Mx", "Dr"]
+            currentIndex: Math.max(0, model.indexOf(editorRoot.idTitle))
+            onActivated: editorRoot.idTitle = currentText
+            displayText: editorRoot.idTitle ? editorRoot.idTitle : "Title"
+            background: Rectangle {
+              radius: 4
+              color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+              border.color: idTitleCombo.activeFocus ? editorRoot.accent : editorRoot.borderColor
+              border.width: 1
+            }
+            contentItem: Text {
+              leftPadding: 8
+              rightPadding: 24
+              text: idTitleCombo.displayText
+              color: editorRoot.idTitle ? editorRoot.foreground : editorRoot.muted
+              font.pixelSize: Style.font.body
+              verticalAlignment: Text.AlignVCenter
+              elide: Text.ElideRight
+            }
+            delegate: ItemDelegate {
+              width: idTitleCombo.width
+              height: 28
+              highlighted: idTitleCombo.highlightedIndex === index
+              background: Rectangle { color: highlighted ? Commons.Color.menu.selectedBackground : "transparent" }
+              contentItem: Text {
+                text: modelData ? modelData : "None"
+                color: highlighted ? Commons.Color.menu.selectedText : (modelData ? editorRoot.foreground : editorRoot.muted)
+                font.pixelSize: Style.font.bodySmall
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+              }
+            }
+            popup: Popup {
+              y: idTitleCombo.height + 2
+              width: idTitleCombo.width
+              padding: 2
+              background: Rectangle {
+                radius: 4
+                color: Commons.Color.popups.background
+                border.color: Commons.Color.popups.border
+                border.width: 1
+              }
+              contentItem: ListView {
+                clip: true
+                implicitHeight: Math.min(contentHeight, 200)
+                model: idTitleCombo.popup.visible ? idTitleCombo.delegateModel : null
+                currentIndex: idTitleCombo.highlightedIndex
+              }
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "First Name"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idFirstNameInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idFirstNameInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idFirstName; onTextChanged: editorRoot.idFirstName = text
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Middle Name"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idMiddleNameInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idMiddleNameInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idMiddleName; onTextChanged: editorRoot.idMiddleName = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Last Name"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idLastNameInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idLastNameInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idLastName; onTextChanged: editorRoot.idLastName = text
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Username"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idUsernameInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idUsernameInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idUsername; onTextChanged: editorRoot.idUsername = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Company"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idCompanyInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idCompanyInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idCompany; onTextChanged: editorRoot.idCompany = text
+            }
+          }
+        }
+      }
+
+      // Section 2: Identification
+      Text {
+        text: "IDENTIFICATION"
+        color: editorRoot.accent
+        font.pixelSize: Style.font.caption
+        font.weight: Font.DemiBold
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        Text { text: "SSN"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+        Rectangle {
+          Layout.fillWidth: true; height: 32; radius: 4
+          color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: idSsnInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+          RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 4; spacing: 4
+            TextInput {
+              id: idSsnInput; Layout.fillWidth: true; verticalAlignment: Text.AlignVCenter
+              color: editorRoot.foreground; font.pixelSize: Style.font.body
+              echoMode: editorRoot.idSsnRevealed ? TextInput.Normal : TextInput.Password
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idSsn; onTextChanged: editorRoot.idSsn = text
+            }
+            GhostIconButton {
+              iconText: editorRoot.idSsnRevealed ? "\uf070" : "\uf06e"
+              tooltip: editorRoot.idSsnRevealed ? "Hide SSN" : "Show SSN"
+              fontFamily: editorRoot.fontFamily
+              onClicked: editorRoot.idSsnRevealed = !editorRoot.idSsnRevealed
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Passport Number"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idPassportInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idPassportInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idPassportNumber; onTextChanged: editorRoot.idPassportNumber = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "License Number"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idLicenseInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idLicenseInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idLicenseNumber; onTextChanged: editorRoot.idLicenseNumber = text
+            }
+          }
+        }
+      }
+
+      // Section 3: Contact
+      Text {
+        text: "CONTACT"
+        color: editorRoot.accent
+        font.pixelSize: Style.font.caption
+        font.weight: Font.DemiBold
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Email"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idEmailInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idEmailInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idEmail; onTextChanged: editorRoot.idEmail = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Phone"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idPhoneInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idPhoneInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idPhone; onTextChanged: editorRoot.idPhone = text
+            }
+          }
+        }
+      }
+
+      // Section 4: Address
+      Text {
+        text: "ADDRESS"
+        color: editorRoot.accent
+        font.pixelSize: Style.font.caption
+        font.weight: Font.DemiBold
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        Text { text: "Address 1"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+        Rectangle {
+          Layout.fillWidth: true; height: 32; radius: 4
+          color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: idAddress1Input.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+          TextInput {
+            id: idAddress1Input; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+            verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+            selectByMouse: true; clip: true; activeFocusOnTab: true
+            text: editorRoot.idAddress1; onTextChanged: editorRoot.idAddress1 = text
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Address 2"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idAddress2Input.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idAddress2Input; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idAddress2; onTextChanged: editorRoot.idAddress2 = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Address 3"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idAddress3Input.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idAddress3Input; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idAddress3; onTextChanged: editorRoot.idAddress3 = text
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "City / Town"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idCityInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idCityInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idCity; onTextChanged: editorRoot.idCity = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "State / Province"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idStateInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idStateInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idState; onTextChanged: editorRoot.idState = text
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Zip / Postal Code"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idPostalCodeInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idPostalCodeInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idPostalCode; onTextChanged: editorRoot.idPostalCode = text
+            }
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 4
+          Text { text: "Country"; color: editorRoot.muted; font.pixelSize: Style.font.bodySmall; font.weight: Font.Medium }
+          Rectangle {
+            Layout.fillWidth: true; height: 32; radius: 4
+            color: Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: idCountryInput.activeFocus ? editorRoot.accent : editorRoot.borderColor; border.width: 1
+            TextInput {
+              id: idCountryInput; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+              verticalAlignment: Text.AlignVCenter; color: editorRoot.foreground; font.pixelSize: Style.font.body
+              selectByMouse: true; clip: true; activeFocusOnTab: true
+              text: editorRoot.idCountry; onTextChanged: editorRoot.idCountry = text
+            }
+          }
+        }
+      }
+    }
+
     // Notes / note body
     ColumnLayout {
       Layout.fillWidth: true
       spacing: 4
 
       Text {
-        text: (editorRoot.isLogin || editorRoot.isCard || editorRoot.isSshKey) ? "Notes (optional)" : "Note"
+        text: (editorRoot.isLogin || editorRoot.isCard || editorRoot.isIdentity || editorRoot.isSshKey) ? "Notes (optional)" : "Note"
         color: editorRoot.muted
         font.pixelSize: Style.font.bodySmall
         font.weight: Font.Medium
