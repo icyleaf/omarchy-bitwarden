@@ -14,16 +14,64 @@ use zeroize::ZeroizeOnDrop;
 #[serde(untagged)]
 pub(crate) enum LoginUriDraft {
     Plain(String),
-    Object { uri: String },
+    Object {
+        uri: String,
+        #[serde(default, rename = "match")]
+        #[zeroize(skip)]
+        match_type: Option<u32>,
+    },
 }
 
 impl LoginUriDraft {
     pub(crate) fn uri(&self) -> &str {
         match self {
             Self::Plain(s) => s.as_str(),
-            Self::Object { uri } => uri.as_str(),
+            Self::Object { uri, .. } => uri.as_str(),
         }
     }
+
+    fn resolve_match(
+        &self,
+        existing_uris: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Value, String> {
+        match self {
+            Self::Plain(u_str) => Ok(existing_uris
+                .and_then(|map| map.get(u_str))
+                .cloned()
+                .unwrap_or(Value::Null)),
+            Self::Object { match_type, .. } => validate_uri_match_rule(*match_type),
+        }
+    }
+}
+
+fn validate_uri_match_rule(match_type: Option<u32>) -> Result<Value, String> {
+    match match_type {
+        None => Ok(Value::Null),
+        Some(m) if m <= 5 => Ok(json!(m)),
+        Some(m) => Err(format!(
+            "Invalid URI match rule '{m}'. Expected 0 (Base Domain) through 5 (Never), or null for Default."
+        )),
+    }
+}
+
+fn decrypt_existing_uri_matches(
+    uris: Option<&Value>,
+    cipher_key: &SymmetricCryptoKey,
+) -> std::collections::HashMap<String, Value> {
+    uris.and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|u| {
+                    let enc_uri = u["uri"].as_str()?;
+                    let plain_uri = EncString::parse(enc_uri)
+                        .ok()
+                        .and_then(|enc| enc.decrypt_string(cipher_key).ok())?;
+                    let match_val = u.get("match").cloned().unwrap_or(Value::Null);
+                    Some((plain_uri, match_val))
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default()
 }
 
 /// Wire representation of a Bitwarden custom field. `type` maps to `0`
@@ -129,6 +177,7 @@ pub(crate) struct CipherCreateDraft {
     pub(crate) identity: Option<IdentityDraft>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
+    pub(crate) totp: Option<String>,
     pub(crate) uri: Option<String>,
     pub(crate) uris: Option<Vec<LoginUriDraft>>,
     pub(crate) fields: Option<Vec<CipherFieldDraft>>,
@@ -148,6 +197,7 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) name: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
+    pub(crate) totp: Option<String>,
     pub(crate) notes: Option<String>,
     pub(crate) uri: Option<String>,
     pub(crate) uris: Option<Vec<LoginUriDraft>>,
@@ -428,6 +478,7 @@ impl VaultManager {
             let is_login = cipher_type == 1;
             if (draft.username.is_some()
                 || draft.password.is_some()
+                || draft.totp.is_some()
                 || draft.uri.is_some()
                 || draft.uris.is_some()
                 || draft.add_uris.is_some()
@@ -509,6 +560,7 @@ impl VaultManager {
 
         let has_login_updates = draft.username.is_some()
             || draft.password.is_some()
+            || draft.totp.is_some()
             || draft.uri.is_some()
             || draft.uris.is_some()
             || draft.add_uris.is_some()
@@ -534,31 +586,35 @@ impl VaultManager {
                 field_changed = true;
             }
 
+            if let Some(ref totp_raw) = draft.totp {
+                if totp_raw.is_empty() {
+                    payload["login"]["totp"] = Value::Null;
+                } else {
+                    crate::totp::validate_totp_seed(totp_raw).map_err(WriteError::Rejected)?;
+                    payload["login"]["totp"] = json!(cipher_key
+                        .encrypt_string(totp_raw)
+                        .map_err(|_| "Could not encrypt TOTP seed.".to_string())?);
+                }
+                field_changed = true;
+            }
+
             if draft.clear_uris == Some(true) {
                 payload["login"]["uris"] = json!([]);
                 field_changed = true;
             } else if let Some(ref replace_uris) = draft.uris {
                 let mut enc_uris = Vec::new();
-                // Preserve match values from existing URIs when replacing
-                let existing_uris = payload["login"]["uris"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|u| {
-                                let uri = u["uri"].as_str()?;
-                                let match_val = u["match"].clone();
-                                Some((uri.to_string(), match_val))
-                            })
-                            .collect::<std::collections::HashMap<_, _>>()
-                    })
-                    .unwrap_or_default();
+                // Decrypt existing URIs so plain-string replacements preserve their match rule
+                let existing_uris =
+                    decrypt_existing_uri_matches(payload["login"].get("uris"), &cipher_key);
                 for u in replace_uris {
                     let u_str = u.uri();
                     if !u_str.is_empty() {
+                        let match_val = u
+                            .resolve_match(Some(&existing_uris))
+                            .map_err(WriteError::Rejected)?;
                         let enc_uri = cipher_key
                             .encrypt_string(u_str)
                             .map_err(|_| "Could not encrypt URI.".to_string())?;
-                        let match_val = existing_uris.get(u_str).cloned().unwrap_or(Value::Null);
                         enc_uris.push(json!({"uri": enc_uri, "match": match_val}));
                     }
                 }
@@ -572,26 +628,17 @@ impl VaultManager {
                 for u in add_uris {
                     let u_str = u.uri();
                     if !u_str.is_empty() {
+                        let match_val = u.resolve_match(None).map_err(WriteError::Rejected)?;
                         let enc_uri = cipher_key
                             .encrypt_string(u_str)
                             .map_err(|_| "Could not encrypt URI.".to_string())?;
-                        uris_arr.push(json!({"uri": enc_uri, "match": Value::Null}));
+                        uris_arr.push(json!({"uri": enc_uri, "match": match_val}));
                         field_changed = true;
                     }
                 }
             } else if let Some(ref uri) = draft.uri {
-                let existing_uris = payload["login"]["uris"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|u| {
-                                let uri_val = u["uri"].as_str()?;
-                                let match_val = u["match"].clone();
-                                Some((uri_val.to_string(), match_val))
-                            })
-                            .collect::<std::collections::HashMap<_, _>>()
-                    })
-                    .unwrap_or_default();
+                let existing_uris =
+                    decrypt_existing_uri_matches(payload["login"].get("uris"), &cipher_key);
                 let u_str = uri;
                 if u_str.is_empty() {
                     payload["login"]["uris"] = json!([]);
@@ -1439,7 +1486,10 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
                 ResolvedType::Card
             } else if draft.identity.is_some() {
                 ResolvedType::Identity
-            } else if draft.login.is_some() || draft.username.is_some() || draft.password.is_some()
+            } else if draft.login.is_some()
+                || draft.username.is_some()
+                || draft.password.is_some()
+                || draft.totp.is_some()
             {
                 ResolvedType::Login
             } else if draft.notes.is_some() {
@@ -1453,6 +1503,7 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
     let has_login_payload = draft.login.is_some()
         || draft.username.is_some()
         || draft.password.is_some()
+        || draft.totp.is_some()
         || draft.uri.is_some()
         || draft.uris.is_some();
     if !matches!(resolved_type, ResolvedType::Login) && has_login_payload {
@@ -1534,13 +1585,19 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         .filter(|s| !s.is_empty())
         .map(encrypt)
         .transpose()?;
-    let totp = draft
+    let totp = match draft
         .login
         .as_ref()
         .and_then(|l| l.totp.as_deref())
+        .or(draft.totp.as_deref())
         .filter(|s| !s.is_empty())
-        .map(encrypt)
-        .transpose()?;
+    {
+        Some(raw) => {
+            crate::totp::validate_totp_seed(raw)?;
+            Some(encrypt(raw)?)
+        }
+        None => None,
+    };
 
     let mut uris_list = Vec::new();
     let all_uris = draft
@@ -1553,9 +1610,10 @@ fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result
         for u in uris {
             let uri_str = u.uri();
             if !uri_str.is_empty() {
+                let match_val = u.resolve_match(None)?;
                 uris_list.push(json!({
                     "uri": encrypt(uri_str)?,
-                    "match": null
+                    "match": match_val
                 }));
             }
         }

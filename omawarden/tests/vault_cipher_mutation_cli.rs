@@ -6903,3 +6903,600 @@ fn test_delete_cipher_trash_ambiguous_matches_fail_closed() {
     assert!(stderr.contains("aaaaaaaa-1111-2222-3333-444444444444"));
     assert!(stderr.contains("bbbbbbbb-1111-2222-3333-444444444444"));
 }
+
+#[test]
+fn test_create_and_edit_login_totp_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let _daemon = start_unlocked_daemon(dir);
+
+    let full_otpauth = "otpauth://totp/Example:alice@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example&digits=8&period=60&algorithm=SHA256";
+
+    // 1. Create Login with --totp-stdin (verbatim otpauth:// URI)
+    let mut cli = make_command(dir)
+        .args([
+            "vault",
+            "create",
+            "login",
+            "--name",
+            "TOTP Login",
+            "--username",
+            "alice",
+            "--password",
+            "secret-pass",
+            "--totp-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    cli.stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{full_otpauth}\n").as_bytes())
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut created_cipher_id = String::new();
+    let mut received_create = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "create CLI did not finish");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api/ciphers");
+        received_create = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_totp = payload["login"]["totp"]
+            .as_str()
+            .expect("encrypted login.totp must be sent");
+        let dec_totp = EncString::parse(enc_totp)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(dec_totp, full_otpauth, "TOTP URI must be stored verbatim");
+
+        let mut resp_cipher = payload.clone();
+        created_cipher_id = "70700000-1111-2222-3333-444444444444".to_string();
+        resp_cipher["id"] = json!(created_cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T01:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received_create);
+
+    // 2. Verify live TOTP generation immediately uses the cached verbatim URI (8 digits, 60s)
+    let totp_out = make_command(dir)
+        .args(["totp", &created_cipher_id])
+        .output()
+        .unwrap();
+    assert!(
+        totp_out.status.success(),
+        "totp failed: {}",
+        String::from_utf8_lossy(&totp_out.stderr)
+    );
+    let totp_json: Value = serde_json::from_slice(&totp_out.stdout).unwrap();
+    assert_eq!(totp_json["ok"], true);
+    assert_eq!(totp_json["code"].as_str().unwrap().len(), 8);
+    assert_eq!(totp_json["period"], 60);
+
+    // 3. Reject invalid TOTP seed fail-closed before hitting server
+    let mut bad_cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            &created_cipher_id,
+            "--totp-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    bad_cli
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not-valid-base32!!!\n")
+        .unwrap();
+    let bad_out = bad_cli.wait_with_output().unwrap();
+    assert!(!bad_out.status.success());
+    let bad_json: Value = serde_json::from_slice(&bad_out.stdout).unwrap();
+    assert_eq!(bad_json["ok"], false);
+    assert!(
+        bad_json["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("totp")
+            || bad_json["error"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("base32")
+    );
+
+    // 4. Update Login TOTP via --totp-stdin to a raw Base32 secret
+    let raw_secret = "JBSWY3DPEHPK3PXP";
+    let mut edit_cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            &created_cipher_id,
+            "--totp-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    edit_cli
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{raw_secret}\n").as_bytes())
+        .unwrap();
+
+    let mut received_edit = false;
+    while edit_cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "edit CLI did not finish");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{created_cipher_id}"));
+        received_edit = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_totp = payload["login"]["totp"].as_str().unwrap();
+        let dec_totp = EncString::parse(enc_totp)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(dec_totp, raw_secret);
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(created_cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T02:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let edit_out = edit_cli.wait_with_output().unwrap();
+    assert!(
+        edit_out.status.success(),
+        "edit failed: {}",
+        String::from_utf8_lossy(&edit_out.stderr)
+    );
+    assert!(received_edit);
+
+    // 5. Clear Login TOTP via --clear-totp -> login.totp becomes null
+    let mut clear_cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            &created_cipher_id,
+            "--clear-totp",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received_clear = false;
+    while clear_cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "clear CLI did not finish");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{created_cipher_id}"));
+        received_clear = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            payload["login"]["totp"].is_null(),
+            "login.totp must be cleared to null"
+        );
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(created_cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T03:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let clear_out = clear_cli.wait_with_output().unwrap();
+    assert!(
+        clear_out.status.success(),
+        "clear failed: {}",
+        String::from_utf8_lossy(&clear_out.stderr)
+    );
+    assert!(received_clear);
+}
+
+#[test]
+fn test_edit_login_totp_in_editor() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let cipher_id = "7070ed17-1111-2222-3333-444444444444";
+    let cipher_name = "Editor TOTP Site";
+
+    let cache_path = dir.join("data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    data["ciphers"].as_array_mut().unwrap().push(json!({
+        "id": cipher_id,
+        "type": 1,
+        "name": user_key.encrypt_string(cipher_name).unwrap(),
+        "notes": null,
+        "favorite": false,
+        "login": {
+            "username": user_key.encrypt_string("alice").unwrap(),
+            "password": user_key.encrypt_string("pass123").unwrap(),
+            "totp": user_key.encrypt_string("JBSWY3DPEHPK3PXP").unwrap(),
+            "uris": []
+        },
+        "revisionDate": "2026-11-24T00:00:00.000Z"
+    }));
+    fs::write(&cache_path, data.to_string()).unwrap();
+
+    let _daemon = start_unlocked_daemon(dir);
+
+    let new_uri = "otpauth://totp/Acme:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Acme";
+    let sed_uri = new_uri.replace('&', "\\&");
+    let editor_script = dir.join("mock_editor_totp.sh");
+    fs::write(
+        &editor_script,
+        format!(
+            "#!/bin/sh\n\
+             GREP=/usr/bin/grep\n\
+             [ -x \"$GREP\" ] || GREP=/bin/grep\n\
+             \"$GREP\" -q '^TOTP: JBSWY3DPEHPK3PXP$' \"$1\" || exit 2\n\
+             SED=/usr/bin/sed\n\
+             [ -x \"$SED\" ] || SED=/bin/sed\n\
+             \"$SED\" -i 's|^TOTP: .*|TOTP: {sed_uri}|' \"$1\"\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut cli = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = false;
+    while cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "editor CLI did not finish");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let enc_totp = payload["login"]["totp"].as_str().unwrap();
+        let dec_totp = EncString::parse(enc_totp)
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap();
+        assert_eq!(dec_totp, new_uri);
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T01:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let out = cli.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "editor edit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(received);
+}
+
+#[test]
+fn test_login_uri_match_rules_and_preservation_end_to_end() {
+    let (temp, api, _server_url, user_key) = setup_test_environment();
+    let dir = temp.path();
+    let _daemon = start_unlocked_daemon(dir);
+    let socket = dir.join("omawarden.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    // 1. Create Login via --stdin with explicit URI match rules (Exact = 3, Default = null)
+    let create_draft = json!({
+        "cipher_type": "login",
+        "name": "Match Rule Login",
+        "username": "alice",
+        "password": "secret",
+        "uris": [
+            { "uri": "https://app.example.com/login", "match": 3 },
+            { "uri": "https://example.com", "match": null }
+        ]
+    });
+    let mut create_cli = make_command(dir)
+        .args(["vault", "create", "--stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    create_cli
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(create_draft.to_string().as_bytes())
+        .unwrap();
+
+    let cipher_id = "11112222-3333-4444-5555-666666666666";
+    let mut received_create = false;
+    while create_cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "create CLI timed out");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api/ciphers");
+        received_create = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris = payload["login"]["uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 2);
+        assert_eq!(
+            EncString::parse(uris[0]["uri"].as_str().unwrap())
+                .unwrap()
+                .decrypt_string(&user_key)
+                .unwrap(),
+            "https://app.example.com/login"
+        );
+        assert_eq!(uris[0]["match"], json!(3));
+        assert_eq!(uris[1]["match"], Value::Null);
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T01:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let create_out = create_cli.wait_with_output().unwrap();
+    assert!(
+        create_out.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&create_out.stderr)
+    );
+    assert!(received_create);
+
+    // 2. Verify decrypted VaultItem exposes login.uris[].match
+    let get_resp = ipc(&socket, json!({"action": "get_item", "query": cipher_id}));
+    assert_eq!(get_resp["ok"], true);
+    let decrypted_uris = get_resp["item"]["login"]["uris"].as_array().unwrap();
+    assert_eq!(decrypted_uris[0]["uri"], "https://app.example.com/login");
+    assert_eq!(decrypted_uris[0]["match"], json!(3));
+    assert_eq!(decrypted_uris[1]["match"], Value::Null);
+
+    // 3. Reject out-of-range match rule (match: 6) fail-closed
+    let mut bad_cli = make_command(dir)
+        .args(["vault", "edit", cipher_id, "--stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    bad_cli
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"uris": [{"uri": "https://app.example.com/login", "match": 6}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let bad_out = bad_cli.wait_with_output().unwrap();
+    assert!(!bad_out.status.success());
+
+    // 4. Plain --uri replacement preserves existing match rule (ciphertext-key bug fix)
+    let mut plain_cli = make_command(dir)
+        .args([
+            "vault",
+            "edit",
+            cipher_id,
+            "--uri",
+            "https://app.example.com/login",
+            "--uri",
+            "https://new.example.com",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received_plain = false;
+    while plain_cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "plain edit CLI timed out");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received_plain = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris = payload["login"]["uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 2);
+        assert_eq!(
+            uris[0]["match"],
+            json!(3),
+            "existing match rule must be preserved on plain URI replacement"
+        );
+        assert_eq!(uris[1]["match"], Value::Null);
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T02:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let plain_out = plain_cli.wait_with_output().unwrap();
+    assert!(
+        plain_out.status.success(),
+        "plain edit failed: {}",
+        String::from_utf8_lossy(&plain_out.stderr)
+    );
+    assert!(received_plain);
+
+    // 5. $EDITOR renders `URI: <url> [exact]` and parses `[host]` and `[regex]`
+    let editor_script = dir.join("mock_editor_uri_match.sh");
+    fs::write(
+        &editor_script,
+        "#!/bin/sh\n\
+         GREP=/usr/bin/grep\n\
+         [ -x \"$GREP\" ] || GREP=/bin/grep\n\
+         \"$GREP\" -q '^URI: https://app.example.com/login \\[exact\\]$' \"$1\" || exit 2\n\
+         \"$GREP\" -q '^URI: https://new.example.com$' \"$1\" || exit 3\n\
+         SED=/usr/bin/sed\n\
+         [ -x \"$SED\" ] || SED=/bin/sed\n\
+         \"$SED\" -i 's|^URI: https://app.example.com/login \\[exact\\]$|URI: https://app.example.com/login [host]|' \"$1\"\n\
+         \"$SED\" -i 's|^URI: https://new.example.com$|URI: https://regex.example [regex]|' \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut editor_cli = make_command(dir)
+        .env("EDITOR", &editor_script)
+        .env("OMA_FORCE_PROMPT", "1")
+        .args(["vault", "edit", cipher_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut received_editor = false;
+    while editor_cli.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "editor CLI timed out");
+        let (mut stream, _) = match api.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let (method, path, body) = read_request_with_method(&mut stream);
+        assert_eq!(method, "PUT");
+        assert_eq!(path, format!("/api/ciphers/{cipher_id}"));
+        received_editor = true;
+
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let uris = payload["login"]["uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 2);
+        assert_eq!(uris[0]["match"], json!(1)); // host
+        assert_eq!(uris[1]["match"], json!(4)); // regex
+
+        let mut resp_cipher = payload.clone();
+        resp_cipher["id"] = json!(cipher_id);
+        resp_cipher["revisionDate"] = json!("2026-11-24T03:00:00.000Z");
+        let resp_body = resp_cipher.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+    let editor_out = editor_cli.wait_with_output().unwrap();
+    assert!(
+        editor_out.status.success(),
+        "editor edit failed: {}",
+        String::from_utf8_lossy(&editor_out.stderr)
+    );
+    assert!(received_editor);
+}
