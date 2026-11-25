@@ -1116,7 +1116,7 @@ enum CreateItemAction {
 
 #[derive(Subcommand)]
 enum AttachmentAction {
-    #[command(about = "Download or view an attachment")]
+    #[command(about = "Download or preview an attachment")]
     Download {
         #[arg(long, required = true)]
         item_id: String,
@@ -1126,8 +1126,6 @@ enum AttachmentAction {
         filename: String,
         #[arg(long)]
         output_dir: Option<String>,
-        #[arg(long)]
-        open: bool,
         #[arg(long)]
         preview: bool,
         #[arg(long, hide = true)]
@@ -4221,7 +4219,6 @@ fn main() -> ExitCode {
                 attachment_id,
                 filename,
                 output_dir,
-                open,
                 preview,
                 expected_lock_generation,
             } => {
@@ -4230,11 +4227,9 @@ fn main() -> ExitCode {
                     &attachment_id,
                     &filename,
                     output_dir.as_deref(),
-                    open,
                     preview,
                     None,
                     expected_lock_generation.as_deref(),
-                    true,
                 );
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 if res.ok {
@@ -7701,5 +7696,61 @@ Bool Field: Active = maybe
             .iter()
             .any(|(k, v)| k == "address3" && v == "Suite B"));
         assert_eq!(parsed.notes, "Identity notes");
+    }
+
+    #[test]
+    fn test_attachment_download_cli_rejects_open_flag() {
+        assert!(
+            Cli::try_parse_from([
+                "omawarden",
+                "attachment",
+                "download",
+                "--item-id",
+                "item-1",
+                "--attachment-id",
+                "att-1",
+                "--filename",
+                "secret.txt",
+                "--open",
+            ])
+            .is_err(),
+            "attachment download must reject removed --open flag"
+        );
+
+        let parsed = Cli::try_parse_from([
+            "omawarden",
+            "attachment",
+            "download",
+            "--item-id",
+            "item-1",
+            "--attachment-id",
+            "att-1",
+            "--filename",
+            "secret.txt",
+            "--output-dir",
+            "/tmp/out",
+            "--preview",
+        ])
+        .unwrap();
+        match parsed.command {
+            Commands::Attachment {
+                action:
+                    AttachmentAction::Download {
+                        item_id,
+                        attachment_id,
+                        filename,
+                        output_dir,
+                        preview,
+                        ..
+                    },
+            } => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(attachment_id, "att-1");
+                assert_eq!(filename, "secret.txt");
+                assert_eq!(output_dir.as_deref(), Some("/tmp/out"));
+                assert!(preview);
+            }
+            _ => panic!("Expected AttachmentAction::Download"),
+        }
     }
 }
