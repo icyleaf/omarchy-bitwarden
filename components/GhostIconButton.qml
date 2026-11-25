@@ -54,9 +54,12 @@ Rectangle {
   MouseArea {
     id: mouseArea
     anchors.fill: parent
-    enabled: ghostBtnRoot.enabled && !ghostBtnRoot.isBusy
-    hoverEnabled: enabled
-    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    onClicked: ghostBtnRoot.clicked()
+    hoverEnabled: true
+    cursorShape: (ghostBtnRoot.enabled && !ghostBtnRoot.isBusy) ? Qt.PointingHandCursor : Qt.ArrowCursor
+    onClicked: {
+      if (ghostBtnRoot.enabled && !ghostBtnRoot.isBusy) {
+        ghostBtnRoot.clicked()
+      }
+    }
   }
 }

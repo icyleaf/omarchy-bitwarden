@@ -47,6 +47,14 @@ pub struct VaultItem {
     pub organization_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub edit: bool,
+    #[serde(default)]
+    pub view_password: bool,
+    #[serde(default)]
+    pub can_delete: bool,
+    #[serde(default)]
+    pub can_restore: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +75,31 @@ pub enum CipherTargetResolution {
     Exact(Box<VaultItem>),
     Ambiguous(Vec<VaultItem>),
     NotFound(String),
+}
+
+pub(crate) fn extract_cipher_permissions(raw: &Value, is_org: bool) -> (bool, bool, bool, bool) {
+    let default_val = !is_org;
+    let edit = raw
+        .get("edit")
+        .and_then(Value::as_bool)
+        .unwrap_or(default_val);
+    let view_password = raw
+        .get("viewPassword")
+        .or_else(|| raw.get("view_password"))
+        .and_then(Value::as_bool)
+        .unwrap_or(default_val);
+    let perms = raw.get("permissions");
+    let can_delete = perms
+        .and_then(|p| p.get("delete"))
+        .and_then(Value::as_bool)
+        .or_else(|| raw.get("can_delete").and_then(Value::as_bool))
+        .unwrap_or(default_val);
+    let can_restore = perms
+        .and_then(|p| p.get("restore"))
+        .and_then(Value::as_bool)
+        .or_else(|| raw.get("can_restore").and_then(Value::as_bool))
+        .unwrap_or(default_val);
+    (edit, view_password, can_delete, can_restore)
 }
 
 pub fn is_fuzzy_match(pattern: &str, text: &str) -> bool {
@@ -1414,6 +1447,169 @@ impl VaultManager {
         self.user_key.read().ok().and_then(|k| k.clone())
     }
 
+    /// Returns joined Organizations and Collections from local storage with
+    /// fail-closed permission defaults (`read_only: true`, `hide_passwords: true`,
+    /// `manage: false`) and decrypted Collection names when Organization keys are available.
+    pub(crate) fn list_organizations(&self) -> Result<(Vec<Value>, Vec<Value>), String> {
+        let unlocked = self
+            .is_unlocked
+            .read()
+            .map_err(|_| "Vault state unavailable".to_string())?;
+        if !*unlocked {
+            return Err("Vault is locked.".to_string());
+        }
+        let user_key = self
+            .user_key
+            .read()
+            .map_err(|_| "Vault key unavailable".to_string())?
+            .clone();
+        let storage = self
+            .storage
+            .read()
+            .map_err(|_| "Vault state unavailable".to_string())?;
+
+        // Best-effort unwrap of Organization keys for decrypting Collection names.
+        let mut org_keys: std::collections::HashMap<String, SymmetricCryptoKey> =
+            std::collections::HashMap::new();
+        if let Some(ref uk) = user_key {
+            let rsa_priv = storage
+                .enc_private_key
+                .as_deref()
+                .and_then(|s| EncString::parse(s).ok())
+                .and_then(|enc| enc.decrypt(uk).ok())
+                .and_then(|der| parse_rsa_private_key_der(&der).ok());
+
+            for org in &storage.organizations {
+                let Some(org_id) = org
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                if let Some(org_key_enc) = org.get("key").and_then(Value::as_str) {
+                    if let Ok(enc_str) = EncString::parse(org_key_enc) {
+                        let raw_key = match enc_str.enc_type {
+                            3..=6 => rsa_priv
+                                .as_ref()
+                                .and_then(|rsa| enc_str.decrypt_rsa(rsa).ok()),
+                            0..=2 => enc_str.decrypt(uk).ok(),
+                            _ => None,
+                        };
+                        if let Some(key_bytes) = raw_key {
+                            if let Some(sym_key) =
+                                parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                            {
+                                org_keys.insert(org_id.to_string(), sym_key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut organizations: Vec<Value> = storage
+            .organizations
+            .iter()
+            .filter_map(|org| {
+                let id = org
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())?;
+                let name = org
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Organization");
+                let org_type = org.get("type").and_then(Value::as_u64);
+                let enabled = org.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                let limit_item_deletion = org
+                    .get("limitItemDeletion")
+                    .or_else(|| org.get("limit_item_deletion"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Some(json!({
+                    "id": id,
+                    "name": name,
+                    "type": org_type,
+                    "enabled": enabled,
+                    "limit_item_deletion": limit_item_deletion,
+                }))
+            })
+            .collect();
+        organizations.sort_by(|a, b| {
+            let na = a["name"].as_str().unwrap_or("").to_lowercase();
+            let nb = b["name"].as_str().unwrap_or("").to_lowercase();
+            na.cmp(&nb)
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+
+        let mut collections: Vec<Value> = storage
+            .collections
+            .iter()
+            .filter_map(|col| {
+                let id = col
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())?;
+                let organization_id = col
+                    .get("organizationId")
+                    .or_else(|| col.get("organization_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let raw_name = col.get("name").and_then(Value::as_str).unwrap_or("");
+                let name = if let Some(org_key) = org_keys.get(organization_id) {
+                    EncString::parse(raw_name)
+                        .ok()
+                        .and_then(|enc| enc.decrypt_string(org_key).ok())
+                        .unwrap_or_else(|| {
+                            if raw_name.is_empty() {
+                                "Collection".to_string()
+                            } else {
+                                raw_name.to_string()
+                            }
+                        })
+                } else if raw_name.is_empty() {
+                    "Collection".to_string()
+                } else {
+                    raw_name.to_string()
+                };
+                // Fail-closed defaults when permission flags are absent in cached JSON
+                let read_only = col
+                    .get("readOnly")
+                    .or_else(|| col.get("read_only"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let hide_passwords = col
+                    .get("hidePasswords")
+                    .or_else(|| col.get("hide_passwords"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let manage = col.get("manage").and_then(Value::as_bool).unwrap_or(false);
+                let writable = !read_only || manage;
+                Some(json!({
+                    "id": id,
+                    "organization_id": organization_id,
+                    "name": name,
+                    "read_only": read_only,
+                    "hide_passwords": hide_passwords,
+                    "manage": manage,
+                    "writable": writable,
+                }))
+            })
+            .collect();
+        collections.sort_by(|a, b| {
+            let oa = a["organization_id"].as_str().unwrap_or("");
+            let ob = b["organization_id"].as_str().unwrap_or("");
+            let na = a["name"].as_str().unwrap_or("").to_lowercase();
+            let nb = b["name"].as_str().unwrap_or("").to_lowercase();
+            oa.cmp(ob)
+                .then_with(|| na.cmp(&nb))
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+
+        Ok((organizations, collections))
+    }
+
     pub fn find_item(&self, query: &str, category: Option<&str>) -> Option<VaultItem> {
         let items = self.get_items();
         let target = query.trim();
@@ -1948,6 +2144,10 @@ impl VaultManager {
                 None
             };
 
+            let is_org = organization_id.as_deref().is_some_and(|s| !s.is_empty());
+            let (edit, view_password, can_delete, can_restore) =
+                extract_cipher_permissions(raw, is_org);
+
             parsed.push(VaultItem {
                 id,
                 name,
@@ -1964,6 +2164,10 @@ impl VaultManager {
                 organization_id,
                 organization_name: None,
                 collection_ids,
+                edit,
+                view_password,
+                can_delete,
+                can_restore,
                 login: if item_type == 1 {
                     raw.get("login").cloned()
                 } else {

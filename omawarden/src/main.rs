@@ -295,6 +295,11 @@ enum Commands {
         #[command(subcommand)]
         action: FolderAction,
     },
+    #[command(about = "Inspect joined Organizations and Collections")]
+    Org {
+        #[command(subcommand)]
+        action: OrgAction,
+    },
     #[command(about = "Clipboard operations (copy vault item field, pipe stdin, or clear)")]
     Copy {
         #[arg(index = 1, help = "Vault item ID or name query")]
@@ -844,7 +849,7 @@ enum VaultAction {
             help = "Remove a custom field by name (repeatable)"
         )]
         remove_fields: Vec<String>,
-        #[arg(long, help = "Folder ID for the cipher")]
+        #[arg(long, alias = "folder", help = "Folder ID for the cipher")]
         folder_id: Option<String>,
         #[arg(
             long,
@@ -906,6 +911,18 @@ enum VaultAction {
             help = "Path to JSON file containing cipher update payload"
         )]
         from_json: Option<PathBuf>,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrgAction {
+    #[command(
+        about = "List joined Organizations and Collections with permission metadata",
+        alias = "ls"
+    )]
+    List {
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
@@ -3501,27 +3518,16 @@ fn main() -> ExitCode {
                     let item_name = resolved["name"].as_str().unwrap_or("").to_string();
                     let item_type = resolved["type"].as_str().unwrap_or("");
 
-                    if resolved
+                    let is_org = resolved
                         .get("organization_id")
                         .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
-                    {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&json!({
-                                    "ok": false,
-                                    "error": "Organization ciphers are read-only.",
-                                }))
-                                .unwrap()
-                            );
-                        } else {
-                            eprintln!("Error: Organization ciphers are read-only.");
-                        }
-                        return ExitCode::FAILURE;
-                    }
+                        .is_some_and(|s| !s.is_empty());
 
                     if !has_field_flags && !has_json_payload {
+                        if is_org {
+                            emit_vault_error(json, "Organization ciphers are read-only.");
+                            return ExitCode::FAILURE;
+                        }
                         return handle_editor_edit(&cfg, &resolved, client_ctx.as_ref());
                     }
 
@@ -3694,6 +3700,36 @@ fn main() -> ExitCode {
                         daemon_req["client"] = json!(ctx);
                     }
 
+                    if is_org {
+                        let is_partial_only = daemon_req.as_object().is_some_and(|obj| {
+                            let has_partial_key = obj.get("favorite").is_some_and(|v| !v.is_null())
+                                || obj.get("folder_id").is_some_and(|v| !v.is_null());
+                            let only_partial_keys = obj.iter().all(|(k, v)| {
+                                v.is_null()
+                                    || matches!(
+                                        k.as_str(),
+                                        "action"
+                                            | "id"
+                                            | "target"
+                                            | "client"
+                                            | "favorite"
+                                            | "folder_id"
+                                    )
+                            });
+                            has_partial_key && only_partial_keys
+                        });
+                        if !is_partial_only {
+                            emit_vault_error(json, "Organization ciphers are read-only.");
+                            return ExitCode::FAILURE;
+                        }
+                        if let Err(err_msg) =
+                            ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                        {
+                            emit_vault_error(json, &err_msg);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+
                     match submit_cipher_mutation(&daemon_req) {
                         Ok(receipt) => {
                             if json {
@@ -3730,6 +3766,95 @@ fn main() -> ExitCode {
                 }
             }
         }
+
+        Commands::Org { action } => match action {
+            OrgAction::List { json } => {
+                use omawarden::daemon::{
+                    dispatch_daemon_request, DispatchError, CAPABILITY_ORG_WRITE,
+                };
+
+                let ping = match ensure_daemon_capability(CAPABILITY_ORG_WRITE) {
+                    Ok(p) => p,
+                    Err(err_msg) => {
+                        emit_vault_error(json, &err_msg);
+                        return ExitCode::FAILURE;
+                    }
+                };
+                if ping["unlocked"] != true {
+                    emit_vault_error(json, "Unlock the vault before listing organizations.");
+                    return ExitCode::FAILURE;
+                }
+                match dispatch_daemon_request(&json!({ "action": "org_list" })) {
+                    Ok(resp) if resp["ok"] == true => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                        } else {
+                            let orgs = resp["organizations"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default();
+                            let cols = resp["collections"].as_array().cloned().unwrap_or_default();
+                            if orgs.is_empty() {
+                                println!("No organizations found.");
+                            } else {
+                                for org in &orgs {
+                                    let org_id = org["id"].as_str().unwrap_or("");
+                                    let org_name = org["name"].as_str().unwrap_or("Organization");
+                                    println!("{org_name} [{org_id}]");
+                                    for col in cols
+                                        .iter()
+                                        .filter(|c| c["organization_id"].as_str() == Some(org_id))
+                                    {
+                                        let col_id = col["id"].as_str().unwrap_or("");
+                                        let col_name = col["name"].as_str().unwrap_or("Collection");
+                                        let read_only = col["read_only"].as_bool().unwrap_or(true);
+                                        let hide_passwords =
+                                            col["hide_passwords"].as_bool().unwrap_or(true);
+                                        let manage = col["manage"].as_bool().unwrap_or(false);
+                                        let mut perms = Vec::new();
+                                        if manage {
+                                            perms.push("manage");
+                                        }
+                                        if read_only {
+                                            perms.push("read-only");
+                                        } else {
+                                            perms.push("writable");
+                                        }
+                                        if hide_passwords {
+                                            perms.push("hide-passwords");
+                                        }
+                                        println!(
+                                            "  - {col_name} [{}] ({})",
+                                            col_id,
+                                            perms.join(", ")
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Ok(resp) => {
+                        let msg = resp["error"]
+                            .as_str()
+                            .unwrap_or("Failed to list organizations.");
+                        emit_vault_error(json, msg);
+                        ExitCode::FAILURE
+                    }
+                    Err(DispatchError::IncompatibleProtocol { .. }) => {
+                        emit_vault_error(
+                            json,
+                            "Daemon protocol version is incompatible with this client.",
+                        );
+                        ExitCode::FAILURE
+                    }
+                    Err(e) => {
+                        emit_vault_error(json, &format!("Daemon request failed: {e}"));
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
 
         Commands::Folder { action } => match action {
             FolderAction::List { json } => {
@@ -8172,6 +8297,10 @@ Bool Field: Active = maybe
             organization_id: None,
             organization_name: None,
             collection_ids: None,
+            edit: true,
+            view_password: true,
+            can_delete: true,
+            can_restore: true,
             login: None,
             card: None,
             identity: None,
@@ -8329,6 +8458,10 @@ Bool Field: Active = maybe
             organization_id: None,
             organization_name: None,
             collection_ids: None,
+            edit: true,
+            view_password: true,
+            can_delete: true,
+            can_restore: true,
             login: None,
             card: Some(json!({
                 "cardholderName": "Jane Doe",
@@ -8460,6 +8593,10 @@ Bool Field: Active = maybe
             organization_id: None,
             organization_name: None,
             collection_ids: None,
+            edit: true,
+            view_password: true,
+            can_delete: true,
+            can_restore: true,
             login: None,
             card: None,
             identity: Some(json!({

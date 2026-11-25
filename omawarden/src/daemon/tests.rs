@@ -58,6 +58,10 @@ fn test_daemon_totp_action_with_item_query() {
         organization_id: None,
         organization_name: None,
         collection_ids: None,
+        edit: true,
+        view_password: true,
+        can_delete: true,
+        can_restore: true,
         login: Some(serde_json::json!({
             "username": "user",
             "totp": "JBSWY3DPEHPK3PXP"
@@ -228,6 +232,7 @@ fn test_handle_client_selective_activity_touch() {
     assert!(caps.contains(&"folder_crud"));
     assert!(caps.contains(&"login_totp_uri_match"));
     assert!(caps.contains(&"vault_get"));
+    assert!(caps.contains(&"org_write"));
     assert_eq!(*state.last_activity.lock().unwrap(), past);
 
     // 8. "vault_get" refreshes activity when unlocked
@@ -236,11 +241,66 @@ fn test_handle_client_selective_activity_touch() {
     assert_eq!(vg_res["ok"], false);
     assert!(*state.last_activity.lock().unwrap() > past);
 
-    // 9. "vault_get" fails closed when vault is locked
+    // 9. "org_list" refreshes activity when unlocked and enforces fail-closed collection defaults
+    {
+        let mut storage = state.vault_mgr.storage.write().unwrap();
+        storage.organizations = vec![json!({
+            "id": "org-1",
+            "name": "Acme Corp",
+            "type": 2,
+            "enabled": true,
+        })];
+        storage.collections = vec![
+            json!({
+                "id": "col-legacy",
+                "organizationId": "org-1",
+                "name": "Legacy Collection",
+            }),
+            json!({
+                "id": "col-writable",
+                "organizationId": "org-1",
+                "name": "Writable Collection",
+                "readOnly": false,
+                "hidePasswords": false,
+                "manage": true,
+            }),
+        ];
+    }
+    *state.last_activity.lock().unwrap() = past;
+    let org_res = send_req(json!({ "action": "org_list" }));
+    assert_eq!(org_res["ok"], true);
+    assert!(*state.last_activity.lock().unwrap() > past);
+    let orgs = org_res["organizations"]
+        .as_array()
+        .expect("organizations array");
+    assert_eq!(orgs.len(), 1);
+    assert_eq!(orgs[0]["id"], "org-1");
+    assert_eq!(orgs[0]["name"], "Acme Corp");
+    let cols = org_res["collections"]
+        .as_array()
+        .expect("collections array");
+    assert_eq!(cols.len(), 2);
+    let legacy_col = cols.iter().find(|c| c["id"] == "col-legacy").unwrap();
+    assert_eq!(legacy_col["read_only"], true);
+    assert_eq!(legacy_col["hide_passwords"], true);
+    assert_eq!(legacy_col["manage"], false);
+    let writable_col = cols.iter().find(|c| c["id"] == "col-writable").unwrap();
+    assert_eq!(writable_col["read_only"], false);
+    assert_eq!(writable_col["hide_passwords"], false);
+    assert_eq!(writable_col["manage"], true);
+
+    // 10. "vault_get" and "org_list" fail closed when vault is locked
     *state.vault_mgr.is_unlocked.write().unwrap() = false;
     let locked_vg = send_req(json!({ "action": "vault_get", "target": "anything" }));
     assert_eq!(locked_vg["ok"], false);
     assert!(locked_vg["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("locked"));
+    let locked_org = send_req(json!({ "action": "org_list" }));
+    assert_eq!(locked_org["ok"], false);
+    assert!(locked_org["error"]
         .as_str()
         .unwrap_or("")
         .to_lowercase()

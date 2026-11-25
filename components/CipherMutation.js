@@ -32,6 +32,59 @@ function canMutate(item) {
   return isMutableType(item) && !isOrganizationOwned(item)
 }
 
+// Per-user Favorite & Folder assignment work on all readable personal and
+// Organization Ciphers via `PUT /ciphers/{id}/partial`.
+function canFavorite(item) {
+  return isMutableType(item)
+}
+
+function canAssignFolder(item) {
+  return isMutableType(item)
+}
+
+// Organization Cipher full content editing and deletion are gated by per-cipher
+// permission flags (fail-closed false when absent). Ticket #452 keeps full Org
+// edits and deletes disabled until their dedicated slices (#453, #454) land.
+function canEdit(item) {
+  return isEditableType(item) && !isOrganizationOwned(item)
+}
+
+function editGuardError(item) {
+  if (!isEditableType(item)) return ""
+  if (!isOrganizationOwned(item)) return ""
+  if (!item.edit) return "You do not have permission to edit this Organization cipher."
+  if (!item.view_password) return "Cannot edit this Organization cipher because passwords are hidden."
+  return "Organization cipher editing is not enabled yet."
+}
+
+function canDelete(item) {
+  return isMutableType(item) && !isOrganizationOwned(item)
+}
+
+function deleteGuardError(item) {
+  if (!isMutableType(item)) return ""
+  if (!isOrganizationOwned(item)) return ""
+  if (!item.can_delete) return "You do not have permission to delete this Organization cipher."
+  return "Organization cipher deletion is not enabled yet."
+}
+
+function withFolder(items, itemId, folderId, folderName) {
+  var out = []
+  var src = items || []
+  for (var i = 0; i < src.length; i++) {
+    var row = src[i]
+    if (row && row.id === itemId) {
+      var copy = Object.assign({}, row)
+      copy.folder_id = folderId || null
+      copy.folder_name = folderId ? (folderName || null) : null
+      out.push(copy)
+    } else {
+      out.push(row)
+    }
+  }
+  return out
+}
+
 function nextFavorite(item) {
   return !Boolean(item && item.favorite)
 }

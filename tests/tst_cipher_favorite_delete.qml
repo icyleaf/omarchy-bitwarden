@@ -103,6 +103,22 @@ Item {
     check(CipherMutation.canMutate(orgIdentity) === false, "organization identity cannot mutate")
     check(CipherMutation.canMutate(orgSsh) === false, "organization SSH key cannot mutate")
 
+    // Organization Ciphers support per-user Favorite & Folder via /partial regardless of edit flag
+    var orgReadOnly = { id: "org-ro", type_name: "login", organization_id: "org-1", edit: false, view_password: false, can_delete: false, can_restore: false }
+    var orgHidePass = { id: "org-hp", type_name: "login", organization_id: "org-1", edit: true, view_password: false, can_delete: true, can_restore: true }
+    check(CipherMutation.canFavorite(login) === true, "personal login can be favorited")
+    check(CipherMutation.canFavorite(orgReadOnly) === true, "read-only organization login can be favorited via /partial")
+    check(CipherMutation.canFavorite(orgHidePass) === true, "hide-password organization login can be favorited via /partial")
+    check(CipherMutation.canAssignFolder(orgReadOnly) === true, "read-only organization login supports personal folder assignment via /partial")
+    check(CipherMutation.canEdit(login) === true, "personal login can be edited")
+    check(CipherMutation.canEdit(orgReadOnly) === false, "read-only organization login cannot be edited")
+    check(CipherMutation.canEdit(orgHidePass) === false, "hide-password organization login cannot be edited (fail-closed)")
+    check(CipherMutation.editGuardError(orgReadOnly).indexOf("permission") !== -1, "read-only organization edit guard explains missing permission")
+    check(CipherMutation.editGuardError(orgHidePass).indexOf("hidden") !== -1, "hide-password organization edit guard explains hidden passwords")
+    check(CipherMutation.canDelete(login) === true, "personal login can be deleted")
+    check(CipherMutation.canDelete(orgReadOnly) === false, "non-deletable organization login cannot be deleted")
+    check(CipherMutation.deleteGuardError(orgReadOnly).indexOf("permission") !== -1, "non-deletable organization delete guard explains missing permission")
+
     check(CipherMutation.nextFavorite(login) === true, "favorite toggles false to true")
     check(CipherMutation.nextFavorite({ favorite: true }) === false, "favorite toggles true to false")
     check(CipherMutation.nextFavorite(null) === true, "missing item defaults to favoriting")
@@ -246,14 +262,9 @@ Item {
           "root exposes openDeleteCipherModal")
     check(src.indexOf("function toggleCipherFavorite(item)") !== -1,
           "root exposes toggleCipherFavorite")
-    check(src.indexOf("function cipherMutationGuard(item)") !== -1,
-          "root exposes the shared mutation guard")
-
-    var guardWindow = sourceWindow(src, "function cipherMutationGuard(item)", 0, 400)
-    check(guardWindow.indexOf('"Organization ciphers are read-only."') !== -1,
-          "organization ciphers surface a read-only error")
-    check(guardWindow.indexOf("CipherMutation.isMutableType") !== -1,
-          "the guard rejects non-mutable cipher types")
+    var folderAssignProcWindow = sourceWindow(src, "id: cipherFolderAssignProc", 0, 1600)
+    check(folderAssignProcWindow.indexOf("stdinEnabled: true") !== -1,
+          "folder assignment process enables stdin (Zero-Argv)")
 
     check(src.indexOf('label: item.favorite ? "Unfavorite Item" : "Favorite Item"') !== -1,
           "action palette exposes Favorite/Unfavorite Item")

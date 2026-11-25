@@ -657,6 +657,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "cipher_delete"
             | "cipher_resolve"
             | "folder_list"
+            | "org_list"
             | "folder_create"
             | "folder_update"
             | "folder_delete"

@@ -211,6 +211,25 @@ pub(crate) struct CipherUpdateDraft {
     pub(crate) favorite: Option<bool>,
 }
 
+impl CipherUpdateDraft {
+    fn is_partial_only(&self) -> bool {
+        (self.folder_id.is_some() || self.favorite.is_some())
+            && self.name.is_none()
+            && self.username.is_none()
+            && self.password.is_none()
+            && self.totp.is_none()
+            && self.notes.is_none()
+            && self.uri.is_none()
+            && self.uris.is_none()
+            && self.add_uris.is_none()
+            && self.clear_uris.is_none()
+            && self.card.is_none()
+            && self.identity.is_none()
+            && self.fields.is_none()
+            && self.remove_fields.is_none()
+    }
+}
+
 impl VaultManager {
     pub(crate) fn create_cipher(
         &self,
@@ -381,9 +400,9 @@ impl VaultManager {
             decrypt_sync_ciphers_with_context(
                 std::slice::from_ref(cipher),
                 &updated.folders,
-                &[],
+                &updated.organizations,
                 key.as_ref()?,
-                None,
+                updated.enc_private_key.as_deref(),
             )
             .pop()?
         };
@@ -419,7 +438,9 @@ impl VaultManager {
         let draft: CipherUpdateDraft = serde_json::from_value(req_payload)
             .map_err(|_| WriteError::Rejected("Invalid cipher update fields.".into()))?;
 
-        let (target_id, target_name, base_cipher) = {
+        let is_partial_only = draft.is_partial_only();
+
+        let (target_id, target_name, base_cipher, is_org_partial) = {
             let unlocked = self
                 .is_unlocked
                 .read()
@@ -445,16 +466,6 @@ impl VaultManager {
                 return Err(WriteError::Rejected("Missing cipher target.".into()));
             };
 
-            if resolved_item
-                .organization_id
-                .as_deref()
-                .is_some_and(|s| !s.is_empty())
-            {
-                return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
-                ));
-            }
-
             let cipher_in_storage = storage
                 .ciphers
                 .iter()
@@ -462,46 +473,173 @@ impl VaultManager {
                 .cloned()
                 .ok_or_else(|| WriteError::Rejected("Cipher not found in local cache.".into()))?;
 
-            if cipher_in_storage["organizationId"]
-                .as_str()
+            let is_org = resolved_item
+                .organization_id
+                .as_deref()
                 .is_some_and(|s| !s.is_empty())
-            {
+                || cipher_in_storage["organizationId"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty());
+
+            if is_org && !is_partial_only {
                 return Err(WriteError::Rejected(
                     "Organization ciphers are read-only.".into(),
                 ));
             }
 
-            let cipher_type = cipher_in_storage
-                .get("type")
-                .and_then(Value::as_i64)
-                .unwrap_or(1);
-            let is_login = cipher_type == 1;
-            if (draft.username.is_some()
-                || draft.password.is_some()
-                || draft.totp.is_some()
-                || draft.uri.is_some()
-                || draft.uris.is_some()
-                || draft.add_uris.is_some()
-                || draft.clear_uris.is_some())
-                && !is_login
-            {
-                return Err(WriteError::Rejected(
-                    "Username, password, and URI can only be updated on login ciphers.".into(),
-                ));
-            }
-            if draft.card.is_some() && cipher_type != 3 {
-                return Err(WriteError::Rejected(
-                    "Card fields can only be updated on card ciphers.".into(),
-                ));
-            }
-            if draft.identity.is_some() && cipher_type != 4 {
-                return Err(WriteError::Rejected(
-                    "Identity fields can only be updated on identity ciphers.".into(),
-                ));
+            if !is_org {
+                let cipher_type = cipher_in_storage
+                    .get("type")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                let is_login = cipher_type == 1;
+                if (draft.username.is_some()
+                    || draft.password.is_some()
+                    || draft.totp.is_some()
+                    || draft.uri.is_some()
+                    || draft.uris.is_some()
+                    || draft.add_uris.is_some()
+                    || draft.clear_uris.is_some())
+                    && !is_login
+                {
+                    return Err(WriteError::Rejected(
+                        "Username, password, and URI can only be updated on login ciphers.".into(),
+                    ));
+                }
+                if draft.card.is_some() && cipher_type != 3 {
+                    return Err(WriteError::Rejected(
+                        "Card fields can only be updated on card ciphers.".into(),
+                    ));
+                }
+                if draft.identity.is_some() && cipher_type != 4 {
+                    return Err(WriteError::Rejected(
+                        "Identity fields can only be updated on identity ciphers.".into(),
+                    ));
+                }
             }
 
-            (resolved_item.id, resolved_item.name, cipher_in_storage)
+            (
+                resolved_item.id,
+                resolved_item.name,
+                cipher_in_storage,
+                is_org && is_partial_only,
+            )
         };
+
+        // Per-user Favorite & Folder updates on Organization Ciphers route through
+        // `PUT /ciphers/{id}/partial` (allowed on any readable Organization Cipher).
+        if is_org_partial {
+            let effective_folder_id: Option<String> = match draft.folder_id.as_deref() {
+                Some(raw) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => base_cipher["folderId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            };
+            let effective_favorite = draft
+                .favorite
+                .unwrap_or_else(|| base_cipher["favorite"].as_bool().unwrap_or(false));
+
+            let server = if storage.server_url.is_empty() {
+                &self.server_url
+            } else {
+                &storage.server_url
+            };
+            let client = BitwardenApiClient::for_cipher_write(server, context).map_err(|_| {
+                WriteError::Rejected("Could not initialize the cipher HTTP client.".into())
+            })?;
+            let token = self.keyring_mgr.for_storage(&storage).access_token();
+            let renew = || self.renew_for_account(&storage, context, generation);
+            let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
+                Some(t) => t,
+                None => renew()?,
+            };
+            let mut renewed_after_rejection = false;
+            let _pending = self
+                .storage_mgr
+                .begin_cipher_write()
+                .map_err(|e| e.to_string())?;
+
+            let cipher = loop {
+                let claims = crate::auth::jwt_claims(&token);
+                let subject = claims
+                    .as_ref()
+                    .and_then(|c| c["sub"].as_str())
+                    .filter(|s| !s.is_empty());
+                let stored = storage.user_id.as_deref().filter(|s| !s.is_empty());
+                if stored.zip(subject).is_some_and(|(a, b)| a != b) {
+                    return Err(WriteError::Rejected(
+                        "Credential belongs to a different account.".into(),
+                    ));
+                }
+
+                let same_account = self
+                    .storage_mgr
+                    .load_existing()
+                    .is_ok_and(|s| s.same_active_slot(&storage));
+                let current = self
+                    .is_unlocked
+                    .read()
+                    .is_ok_and(|unlocked| *unlocked && self.lock_generation() == generation);
+                if !same_account || !current {
+                    return Err(WriteError::Rejected(
+                        "Session changed before updating the cipher.".into(),
+                    ));
+                }
+
+                match client.update_cipher_partial(
+                    &token,
+                    &target_id,
+                    effective_folder_id.as_deref(),
+                    effective_favorite,
+                ) {
+                    Err(ApiError::HttpStatus(reqwest::StatusCode::UNAUTHORIZED, _))
+                        if !renewed_after_rejection =>
+                    {
+                        renewed_after_rejection = true;
+                        token = renew()?;
+                    }
+                    result => break result?,
+                }
+            };
+
+            let updated_cipher = if cipher.get("id").and_then(Value::as_str).is_some()
+                && cipher.get("name").is_some()
+            {
+                cipher
+            } else {
+                let mut merged = base_cipher;
+                merged["folderId"] = match effective_folder_id {
+                    Some(ref fid) => json!(fid),
+                    None => Value::Null,
+                };
+                merged["favorite"] = json!(effective_favorite);
+                merged
+            };
+
+            let id = updated_cipher["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&target_id);
+            let receipt = json!({
+                "id": id,
+                "name": target_name,
+                "revisionDate": updated_cipher["revisionDate"].as_str(),
+            });
+            let cached = self
+                .cache_created_cipher(&storage, generation, &updated_cipher, id)
+                .is_some();
+            return Ok(
+                json!({"ok": true, "outcome": if cached { "saved" } else { "saved_needs_sync" }, "item": receipt}),
+            );
+        }
 
         // Prepare updated payload
         let mut payload = base_cipher;
