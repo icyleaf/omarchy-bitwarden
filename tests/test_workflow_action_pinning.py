@@ -87,6 +87,32 @@ class TestWorkflowActionPinning(unittest.TestCase):
         self.assertFalse(is_release_bump("bump: omawarden 0.12.0.dev"))
         self.assertFalse(is_release_bump("feat(ui): add something"))
 
+    def test_ci_includes_blocking_macos_job(self):
+        workflow = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        content = workflow.read_text(encoding="utf-8")
+        self.assertIn("backend-macos:", content)
+        self.assertIn("runs-on: macos-latest", content)
+        self.assertNotIn("continue-on-error: true", content)
+
+    def test_release_workflows_include_macos_targets_and_safe_aur_matching(self):
+        for wf_name in ("release-omawarden.yml", "release-dev-omawarden.yml"):
+            workflow = REPO_ROOT / ".github" / "workflows" / wf_name
+            content = workflow.read_text(encoding="utf-8")
+            with self.subTest(workflow=wf_name):
+                self.assertIn("target: aarch64-apple-darwin", content)
+                self.assertIn("target: x86_64-apple-darwin", content)
+                self.assertIn("os: macos-latest", content)
+                self.assertIn("shasum -a 256", content)
+                self.assertIn("*-linux-*", content)
+
+        release_content = (
+            REPO_ROOT / ".github" / "workflows" / "release-omawarden.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("*x86_64-unknown-linux-gnu.tar.gz", release_content)
+        self.assertIn("*aarch64-unknown-linux-gnu.tar.gz", release_content)
+        self.assertNotIn('"*x86_64*.tar.gz"', release_content)
+        self.assertNotIn('"*aarch64*.tar.gz"', release_content)
+
 
 
 if __name__ == "__main__":
