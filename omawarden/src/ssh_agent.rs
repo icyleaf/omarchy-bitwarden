@@ -98,6 +98,11 @@ pub struct Prompt {
     /// Whether approving is remembered for this key, program and app until
     /// logout (first-use policy and not forwarded), so the UI can say so.
     pub remembered: bool,
+    /// Explains why a `first-use` approval cannot be remembered (for example
+    /// when the requester's executable path could not be identified). Omitted
+    /// from JSON when not applicable for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remember_unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -275,6 +280,11 @@ fn notification_text(p: &Prompt) -> (String, String) {
         body.push_str("\nForwarded from a remote host");
     } else if p.remembered {
         body.push_str("\nRemembered until logout");
+    } else if let Some(reason) = p.remember_unavailable_reason.as_deref() {
+        if !reason.is_empty() {
+            body.push('\n');
+            body.push_str(reason);
+        }
     }
     (p.title.clone(), escape_markup(&body))
 }
@@ -812,9 +822,21 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
         "{scope}|{}|{}|{}",
         key.fingerprint, conn.peer.exe, conn.peer.app
     );
-    // Without /proc/<pid>/exe the requester can't be told apart from any other
-    // such request, so nothing is remembered for it.
-    let remembers = policy == Confirm::FirstUse && !conn.forwarded && !conn.peer.exe.is_empty();
+    // Without a verified executable path the requester can't be told apart from
+    // any other such request, so nothing is remembered for it.
+    let (remembers, remember_unavailable_reason) = if policy == Confirm::FirstUse && !conn.forwarded
+    {
+        if conn.peer.exe.is_empty() {
+            (
+                false,
+                Some("Cannot identify requester; approval will not be remembered".to_string()),
+            )
+        } else {
+            (true, None)
+        }
+    } else {
+        (false, None)
+    };
     let needs_prompt = conn.forwarded
         || match policy {
             Confirm::Never => false,
@@ -837,9 +859,10 @@ fn sign(host: &Arc<dyn Host>, conn: &Conn, body: &[u8]) -> Result<Vec<u8>, Strin
             key_name: key.name.clone(),
             fingerprint: key.fingerprint.clone(),
             client: conn.peer.describe(),
-            command: conn.peer.cmdline.clone(),
+            command: conn.peer.command_for_prompt(),
             forwarded: conn.forwarded,
             remembered: remembers,
+            remember_unavailable_reason,
         };
         drop(key);
         let decision = ask(host, prompt, generation);
@@ -1095,9 +1118,28 @@ struct Peer {
     cmdline: String,
     /// Executable of the app the request comes from (see [`Peer::find_app`]).
     app: String,
+    /// True when the host OS does not implement peer process inspection.
+    platform_unsupported: bool,
 }
 
 impl Peer {
+    #[allow(dead_code)]
+    fn unsupported_platform() -> Peer {
+        Peer {
+            platform_unsupported: true,
+            ..Peer::default()
+        }
+    }
+
+    fn command_for_prompt(&self) -> String {
+        if !self.cmdline.is_empty() {
+            self.cmdline.clone()
+        } else if self.platform_unsupported {
+            "Unavailable on this platform".to_string()
+        } else {
+            "Command unavailable".to_string()
+        }
+    }
     #[cfg(target_os = "linux")]
     fn of(stream: &UnixStream) -> Peer {
         let mut cred = libc::ucred {
@@ -1124,11 +1166,35 @@ impl Peer {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn of(_stream: &UnixStream) -> Peer {
-        Peer::default()
+    #[cfg(target_os = "macos")]
+    fn of(stream: &UnixStream) -> Peer {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let ok = unsafe {
+            libc::getsockopt(
+                std::os::fd::AsRawFd::as_raw_fd(stream),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                &mut pid as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        } == 0
+            && pid > 0;
+        if ok {
+            let mut peer = Peer::from_pid(pid);
+            peer.app = peer.find_app();
+            peer
+        } else {
+            Peer::default()
+        }
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn of(_stream: &UnixStream) -> Peer {
+        Peer::unsupported_platform()
+    }
+
+    #[cfg(target_os = "linux")]
     fn from_pid(pid: i32) -> Peer {
         let proc = PathBuf::from(format!("/proc/{pid}"));
         let exe = fs::read_link(proc.join("exe"))
@@ -1157,20 +1223,58 @@ impl Peer {
             comm,
             cmdline,
             app: String::new(),
+            platform_unsupported: false,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn from_pid(pid: i32) -> Peer {
+        let mut path_buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let path_len = unsafe {
+            libc::proc_pidpath(
+                pid,
+                path_buf.as_mut_ptr() as *mut libc::c_void,
+                path_buf.len() as u32,
+            )
+        };
+        let exe = if path_len > 0 {
+            String::from_utf8_lossy(&path_buf[..path_len as usize]).into_owned()
+        } else {
+            String::new()
+        };
+        let comm = Path::new(&exe)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cmdline = macos_cmdline(pid);
+        Peer {
+            pid,
+            exe,
+            comm,
+            cmdline,
+            app: String::new(),
+            platform_unsupported: false,
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn from_pid(_pid: i32) -> Peer {
+        Peer::unsupported_platform()
     }
 
     /// The first ancestor that isn't a shell or an ssh/git wrapper: the
     /// terminal, editor or tool the person is using. Remembered approvals are
     /// scoped to it, so approving `ssh` in a terminal doesn't approve every
-    /// other program that runs `ssh`. Read from `exe` links, which a process
-    /// can't rename.
+    /// other program that runs `ssh`. Read from kernel executable paths, which
+    /// a process can't rename.
     #[allow(dead_code)]
     fn find_app(&self) -> String {
         let mut next = self.parent();
         for _ in 0..16 {
             let Some(p) = next else { break };
-            if !is_wrapper(&p.exe) {
+            // Skip wrappers and unreadable intermediate ancestors (e.g. setuid
+            // `/usr/bin/login` on macOS where `proc_pidpath` may fail with EPERM).
+            if !p.exe.is_empty() && !is_wrapper(&p.exe) {
                 return p.exe;
             }
             next = p.parent();
@@ -1178,6 +1282,7 @@ impl Peer {
         String::new()
     }
 
+    #[cfg(target_os = "linux")]
     fn parent(&self) -> Option<Peer> {
         let stat = fs::read_to_string(format!("/proc/{}/stat", self.pid)).ok()?;
         // Fields after the parenthesised comm (which may contain spaces).
@@ -1191,6 +1296,34 @@ impl Peer {
         (ppid > 1).then(|| Peer::from_pid(ppid))
     }
 
+    #[cfg(target_os = "macos")]
+    fn parent(&self) -> Option<Peer> {
+        if self.pid <= 1 {
+            return None;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                self.pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret == size && info.pbi_ppid > 1 {
+            Some(Peer::from_pid(info.pbi_ppid as i32))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn parent(&self) -> Option<Peer> {
+        None
+    }
+
     /// "git (ssh)", "ssh", "ssh-keygen"…
     fn describe(&self) -> String {
         let mut who = if self.comm.is_empty() {
@@ -1200,22 +1333,24 @@ impl Peer {
         };
         if self.comm == "ssh" {
             if let Some(parent) = self.parent() {
-                if !parent.comm.is_empty()
-                    && !matches!(parent.comm.as_str(), "bash" | "zsh" | "fish" | "sh" | "nu")
-                {
+                if !parent.comm.is_empty() && !is_shell_or_login(parent.comm.as_str()) {
                     who = format!("{} (ssh)", parent.comm);
                 }
             }
         }
-        let app = Path::new(&self.app)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let app = app_display_name(&self.app);
         if !app.is_empty() && !who.starts_with(&app) {
             who = format!("{who} in {app}");
         }
         who
     }
+}
+
+fn is_shell_or_login(name: &str) -> bool {
+    matches!(
+        name,
+        "sh" | "bash" | "dash" | "zsh" | "fish" | "nu" | "login"
+    )
 }
 
 #[allow(dead_code)]
@@ -1224,10 +1359,106 @@ fn is_wrapper(exe: &str) -> bool {
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    matches!(
-        name.as_ref(),
-        "sh" | "bash" | "dash" | "zsh" | "fish" | "nu" | "ssh" | "git" | "ssh-keygen"
-    )
+    is_shell_or_login(name.as_ref()) || matches!(name.as_ref(), "ssh" | "git" | "ssh-keygen")
+}
+
+/// Human-readable display name for an ancestor application executable path.
+/// For macOS `.app` bundles (`.../Foo.app/Contents/MacOS/...`), returns the
+/// outermost bundle name (`Foo`) so Electron/helper runtimes show the app name;
+/// otherwise returns the executable's basename.
+fn app_display_name(exe: &str) -> String {
+    let parts: Vec<&str> = exe.split('/').collect();
+    for pair in parts.windows(2) {
+        if pair[1] == "Contents" {
+            if let Some(name) = pair[0].strip_suffix(".app") {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    Path::new(exe)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Decode a macOS `sysctl(KERN_PROCARGS2)` buffer into a space-joined command line.
+/// Layout: `argc: i32` (native endian), `exec_path\0`, zero or more NUL padding
+/// bytes, then `argc` NUL-terminated `argv` strings.
+#[allow(dead_code)]
+fn parse_macos_procargs2(buf: &[u8]) -> String {
+    if buf.len() < 4 {
+        return String::new();
+    }
+    let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if argc <= 0 {
+        return String::new();
+    }
+    let rest = &buf[4..];
+    let Some(exec_end) = rest.iter().position(|&b| b == 0) else {
+        return String::new();
+    };
+    let mut cursor = &rest[exec_end + 1..];
+    while let Some((&0, tail)) = cursor.split_first() {
+        cursor = tail;
+    }
+    let mut args = Vec::new();
+    for _ in 0..argc {
+        if cursor.is_empty() {
+            break;
+        }
+        let end = cursor.iter().position(|&b| b == 0).unwrap_or(cursor.len());
+        let arg = &cursor[..end];
+        if !arg.is_empty() {
+            args.push(String::from_utf8_lossy(arg).into_owned());
+        }
+        if end >= cursor.len() {
+            break;
+        }
+        cursor = &cursor[end + 1..];
+    }
+    args.join(" ")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cmdline(pid: i32) -> String {
+    let mut argmax: libc::c_int = 0;
+    let mut argmax_len = std::mem::size_of::<libc::c_int>();
+    let mut argmax_mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let ok_max = unsafe {
+        libc::sysctl(
+            argmax_mib.as_mut_ptr(),
+            2,
+            &mut argmax as *mut _ as *mut libc::c_void,
+            &mut argmax_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    let buf_size = if ok_max && argmax > 0 {
+        (argmax as usize).clamp(4096, 4 * 1024 * 1024)
+    } else {
+        256 * 1024
+    };
+    let mut buf = vec![0u8; buf_size];
+    let mut len = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret == 0 && len > 0 {
+        parse_macos_procargs2(&buf[..len])
+    } else {
+        String::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,6 +1521,7 @@ mod tests {
             command: String::new(),
             forwarded: false,
             remembered: true,
+            remember_unavailable_reason: None,
         };
         let (title, body) = notification_text(&p);
         assert_eq!(title, "Log in to github.com?");
@@ -1303,6 +1535,15 @@ mod tests {
         assert!(notification_text(&p).1.contains("Forwarded"));
         p.key_name = "<b>&".into();
         assert!(notification_text(&p).1.contains("&lt;b&gt;&amp;"));
+
+        p.forwarded = false;
+        p.key_name = "Work".into();
+        p.remember_unavailable_reason =
+            Some("Cannot identify requester; approval will not be remembered".into());
+        assert_eq!(
+            notification_text(&p).1,
+            "SSH login as git@github.com\nWork \u{b7} git (ssh)\nCannot identify requester; approval will not be remembered"
+        );
     }
 
     #[test]
@@ -1484,6 +1725,7 @@ mod tests {
                     command: "cmd".into(),
                     forwarded: false,
                     remembered: true,
+                    remember_unavailable_reason: None,
                 },
                 decision: None,
             },
@@ -1501,6 +1743,7 @@ mod tests {
     #[test]
     fn wrappers_are_skipped_when_finding_the_app() {
         assert!(is_wrapper("/usr/bin/zsh"));
+        assert!(is_wrapper("/usr/bin/login"));
         assert!(is_wrapper("/usr/bin/ssh"));
         assert!(is_wrapper("/usr/bin/git"));
         assert!(!is_wrapper("/usr/bin/ghostty"));
@@ -1514,6 +1757,110 @@ mod tests {
         assert_eq!(peer("ssh", "/usr/bin/ghostty").describe(), "ssh in ghostty");
         assert_eq!(peer("lazygit", "/usr/bin/lazygit").describe(), "lazygit");
         assert_eq!(peer("ssh", "").describe(), "ssh");
+        assert_eq!(
+            peer("ssh", "/Applications/Ghostty.app/Contents/MacOS/ghostty").describe(),
+            "ssh in Ghostty"
+        );
+        assert_eq!(
+            peer(
+                "ssh",
+                "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+            )
+            .describe(),
+            "ssh in Visual Studio Code"
+        );
+        assert_eq!(
+            peer(
+                "ssh",
+                "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper"
+            )
+            .describe(),
+            "ssh in Visual Studio Code"
+        );
+    }
+
+    #[test]
+    fn app_display_name_extracts_macos_bundles_and_unix_basenames() {
+        assert_eq!(app_display_name("/usr/bin/ghostty"), "ghostty");
+        assert_eq!(
+            app_display_name("/Applications/Ghostty.app/Contents/MacOS/ghostty"),
+            "Ghostty"
+        );
+        assert_eq!(
+            app_display_name("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+            "Visual Studio Code"
+        );
+        assert_eq!(
+            app_display_name(
+                "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper"
+            ),
+            "Cursor"
+        );
+        assert_eq!(app_display_name(""), "");
+    }
+
+    #[test]
+    fn parse_macos_procargs2_decodes_argv_and_handles_malformed_buffers() {
+        let make_buf = |argc: i32, exec_path: &[u8], pad_nuls: usize, args: &[&[u8]]| -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&argc.to_ne_bytes());
+            buf.extend_from_slice(exec_path);
+            buf.push(0);
+            buf.extend(std::iter::repeat_n(0u8, pad_nuls));
+            for a in args {
+                buf.extend_from_slice(a);
+                buf.push(0);
+            }
+            buf
+        };
+
+        let normal = make_buf(
+            3,
+            b"/usr/bin/ssh",
+            4,
+            &[b"ssh", b"-T", b"git@github.com", b"PATH=/usr/bin"],
+        );
+        assert_eq!(parse_macos_procargs2(&normal), "ssh -T git@github.com");
+
+        // Non-UTF-8 bytes are decoded lossily without panicking.
+        let non_utf8 = make_buf(2, b"/usr/bin/ssh", 1, &[b"ssh", b"\xffhost"]);
+        assert_eq!(parse_macos_procargs2(&non_utf8), "ssh \u{fffd}host");
+
+        // Excessive argc stops cleanly at buffer end without panicking.
+        let truncated_argc = make_buf(i32::MAX, b"/usr/bin/ssh", 2, &[b"ssh", b"vps"]);
+        assert_eq!(parse_macos_procargs2(&truncated_argc), "ssh vps");
+
+        // Malformed / empty / zero / negative argc buffers return empty string.
+        assert_eq!(parse_macos_procargs2(&[]), "");
+        assert_eq!(parse_macos_procargs2(&[1, 2]), "");
+        assert_eq!(
+            parse_macos_procargs2(&make_buf(0, b"/usr/bin/ssh", 1, &[b"ssh"])),
+            ""
+        );
+        assert_eq!(
+            parse_macos_procargs2(&make_buf(-1, b"/usr/bin/ssh", 1, &[b"ssh"])),
+            ""
+        );
+        // Missing NUL terminator after exec_path.
+        let mut no_nul = 1i32.to_ne_bytes().to_vec();
+        no_nul.extend_from_slice(b"/usr/bin/ssh");
+        assert_eq!(parse_macos_procargs2(&no_nul), "");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn peers_are_identified_on_macos() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let peer = Peer::of(&ours);
+        assert_eq!(peer.pid, std::process::id() as i32);
+        assert!(!peer.exe.is_empty());
+        assert!(!peer.comm.is_empty());
+        assert!(!peer.cmdline.is_empty());
+        assert!(!peer.platform_unsupported);
+
+        let direct = Peer::from_pid(std::process::id() as i32);
+        assert_eq!(direct.exe, peer.exe);
+        assert_eq!(direct.comm, peer.comm);
     }
 
     #[test]
@@ -1720,17 +2067,22 @@ mod tests {
     struct Client(UnixStream);
 
     impl Client {
-        fn connect(host: &Arc<FakeHost>, exe: &str, app: &str) -> Client {
+        fn connect_peer(host: &Arc<FakeHost>, peer: Peer) -> Client {
             let (ours, theirs) = UnixStream::pair().unwrap();
             let host: Arc<dyn Host> = host.clone();
-            let peer = Peer {
-                exe: exe.into(),
-                comm: "ssh".into(),
-                app: app.into(),
-                ..Peer::default()
-            };
             std::thread::spawn(move || serve(&host, theirs, peer));
             Client(ours)
+        }
+        fn connect(host: &Arc<FakeHost>, exe: &str, app: &str) -> Client {
+            Self::connect_peer(
+                host,
+                Peer {
+                    exe: exe.into(),
+                    comm: "ssh".into(),
+                    app: app.into(),
+                    ..Peer::default()
+                },
+            )
         }
         fn request(&mut self, kind: u8, body: &[u8]) -> (u8, Vec<u8>) {
             send(&mut self.0, kind, body).unwrap();
@@ -2062,12 +2414,93 @@ mod tests {
         let host = FakeHost::new(Confirm::FirstUse, Card::Approve);
         // No /proc/<pid>/exe (the process is gone): nothing to scope a
         // remembered approval to.
-        let mut c = Client::connect(&host, "", "");
+        let mut c = Client::connect_peer(&host, Peer::default());
         assert!(c.sign(&host).is_some());
         assert!(c.sign(&host).is_some());
         assert_eq!(host.cards(), 2);
-        assert!(!host.prompts.lock().unwrap()[0].remembered);
+        let prompts = host.prompts.lock().unwrap();
+        assert!(!prompts[0].remembered);
+        assert_eq!(prompts[0].client, "A program");
+        assert_eq!(prompts[0].command, "Command unavailable");
+        assert_eq!(
+            prompts[0].remember_unavailable_reason.as_deref(),
+            Some("Cannot identify requester; approval will not be remembered")
+        );
+        let json = serde_json::to_value(&prompts[0]).unwrap();
+        assert_eq!(
+            json["remember_unavailable_reason"],
+            "Cannot identify requester; approval will not be remembered"
+        );
         assert!(host.agent.approvals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsupported_platform_peer_reports_honest_command_and_reason() {
+        let host = FakeHost::new(Confirm::FirstUse, Card::Approve);
+        let mut c = Client::connect_peer(&host, Peer::unsupported_platform());
+        assert!(c.sign(&host).is_some());
+        let prompts = host.prompts.lock().unwrap();
+        assert_eq!(prompts[0].client, "A program");
+        assert_eq!(prompts[0].command, "Unavailable on this platform");
+        assert!(!prompts[0].remembered);
+        assert_eq!(
+            prompts[0].remember_unavailable_reason.as_deref(),
+            Some("Cannot identify requester; approval will not be remembered")
+        );
+    }
+
+    #[test]
+    fn remember_unavailable_reason_is_omitted_for_always_and_forwarded() {
+        let host = FakeHost::new(Confirm::Always, Card::Approve);
+        let mut c = Client::connect_peer(&host, Peer::default());
+        assert!(c.sign(&host).is_some());
+        {
+            let prompts = host.prompts.lock().unwrap();
+            assert!(prompts[0].remember_unavailable_reason.is_none());
+            let json = serde_json::to_value(&prompts[0]).unwrap();
+            assert!(json.get("remember_unavailable_reason").is_none());
+        }
+
+        let host_fwd = FakeHost::new(Confirm::FirstUse, Card::Approve);
+        let mut c_fwd = Client::connect_peer(&host_fwd, Peer::default());
+        assert_eq!(c_fwd.session_bind(true), SUCCESS);
+        assert!(c_fwd.sign(&host_fwd).is_some());
+        let prompts_fwd = host_fwd.prompts.lock().unwrap();
+        assert!(prompts_fwd[0].forwarded);
+        assert!(prompts_fwd[0].remember_unavailable_reason.is_none());
+        let json_fwd = serde_json::to_value(&prompts_fwd[0]).unwrap();
+        assert!(json_fwd.get("remember_unavailable_reason").is_none());
+    }
+
+    #[test]
+    fn partial_identification_still_remembers_first_use_and_reports_unavailable_command() {
+        let host = FakeHost::new(Confirm::FirstUse, Card::Approve);
+        let peer = Peer {
+            exe: "/usr/bin/ssh".into(),
+            comm: "ssh".into(),
+            cmdline: String::new(),
+            app: "/Applications/Ghostty.app/Contents/MacOS/ghostty".into(),
+            ..Peer::default()
+        };
+        let mut c = Client::connect_peer(&host, peer);
+        assert!(c.sign(&host).is_some());
+        assert!(c.sign(&host).is_some());
+        assert_eq!(host.cards(), 1, "partial success still remembers first-use");
+
+        let prompts = host.prompts.lock().unwrap();
+        assert_eq!(prompts[0].client, "ssh in Ghostty");
+        assert_eq!(prompts[0].command, "Command unavailable");
+        assert!(prompts[0].remembered);
+        assert!(prompts[0].remember_unavailable_reason.is_none());
+
+        // Approval key uses the full executable path, not just the display name.
+        let approvals = host.agent.approvals.lock().unwrap();
+        assert!(
+            approvals
+                .iter()
+                .any(|k| k
+                    .ends_with("|/usr/bin/ssh|/Applications/Ghostty.app/Contents/MacOS/ghostty"))
+        );
     }
 
     #[test]
@@ -2385,6 +2818,7 @@ mod tests {
                     command: String::new(),
                     forwarded: false,
                     remembered: false,
+                    remember_unavailable_reason: None,
                 },
                 decision: None,
             },
