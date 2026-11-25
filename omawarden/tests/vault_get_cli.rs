@@ -626,3 +626,243 @@ fn vault_get_missing_capability_auto_restarts_standalone_daemon() {
         "after auto-restart, expected locked-vault error (proving capability check passed), got: {err}"
     );
 }
+
+#[test]
+fn vault_get_login_common_shorthand_and_custom_field_selectors() {
+    let env = TestVaultEnv::new();
+
+    // Mutually exclusive selector flags fail
+    let conflict = env.cli(&["vault", "get", "GitHub Production", "--password", "--username"]);
+    assert!(!conflict.status.success());
+    let conflict2 = env.cli(&[
+        "vault",
+        "get",
+        "GitHub Production",
+        "--field",
+        "username",
+        "--password",
+    ]);
+    assert!(!conflict2.status.success());
+
+    // Shorthand flags
+    let pw = env.cli(&["vault", "get", "GitHub Production", "--password"]);
+    assert!(pw.status.success());
+    assert_eq!(String::from_utf8_lossy(&pw.stdout), "super-secret-login-pw\n");
+
+    let user = env.cli(&["vault", "get", "GitHub Production", "--username"]);
+    assert!(user.status.success());
+    assert_eq!(String::from_utf8_lossy(&user.stdout), "octocat\n");
+
+    let uri = env.cli(&["vault", "get", "GitHub Production", "--uri"]);
+    assert!(uri.status.success());
+    assert_eq!(String::from_utf8_lossy(&uri.stdout), "https://github.com/login\n");
+
+    let notes = env.cli(&["vault", "get", "GitHub Production", "--notes"]);
+    assert!(notes.status.success());
+    assert_eq!(String::from_utf8_lossy(&notes.stdout), "Login operational notes\n");
+
+    // Live TOTP (text + --json with ttl & period)
+    let totp_txt = env.cli(&["vault", "get", "GitHub Production", "--totp"]);
+    assert!(totp_txt.status.success());
+    let code = String::from_utf8_lossy(&totp_txt.stdout);
+    assert_eq!(code.trim().len(), 6);
+    assert!(code.ends_with('\n'));
+
+    let totp_json = env.cli(&["vault", "get", "GitHub Production", "-f", "totp", "--json"]);
+    assert!(totp_json.status.success());
+    let tj: Value = serde_json::from_slice(&totp_json.stdout).unwrap();
+    assert_eq!(tj["ok"], true);
+    assert_eq!(tj["field"], "totp");
+    assert_eq!(tj["sensitive"], true);
+    assert_eq!(tj["period"], 30);
+    assert!(tj["ttl"].as_u64().is_some());
+    assert_eq!(tj["value"].as_str().unwrap().len(), 6);
+
+    // Raw totp_secret
+    let secret = env.cli(&["vault", "get", "GitHub Production", "-f", "totp-secret"]);
+    assert!(secret.status.success());
+    assert_eq!(String::from_utf8_lossy(&secret.stdout), "JBSWY3DPEHPK3PXP\n");
+
+    // Multi-valued uris (text: one per line; --json: structured { uri, match } array)
+    let uris_txt = env.cli(&["vault", "get", "GitHub Production", "-f", "uris"]);
+    assert!(uris_txt.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&uris_txt.stdout),
+        "https://github.com/login\nhttps://api.github.com\n"
+    );
+
+    let uris_json = env.cli(&["vault", "get", "GitHub Production", "-f", "uris", "--json"]);
+    assert!(uris_json.status.success());
+    let uj: Value = serde_json::from_slice(&uris_json.stdout).unwrap();
+    assert_eq!(uj["ok"], true);
+    assert_eq!(uj["field"], "uris");
+    assert_eq!(uj["sensitive"], false);
+    assert_eq!(uj["value"].as_array().unwrap().len(), 2);
+    assert_eq!(uj["value"][0]["uri"], "https://github.com/login");
+    assert_eq!(uj["value"][0]["match"], 0);
+    assert_eq!(uj["value"][1]["uri"], "https://api.github.com");
+    assert_eq!(uj["value"][1]["match"], 1);
+
+    // Common metadata selectors
+    for (sel, expected) in [
+        ("id", "11111111-1111-1111-1111-111111111111"),
+        ("name", "GitHub Production"),
+        ("type", "login"),
+        ("folder", "Work"),
+        ("folder_id", "folder-work-0001"),
+        ("favorite", "true"),
+        ("created_at", "2026-01-01T00:00:00Z"),
+        ("updated_at", "2026-02-01T00:00:00Z"),
+    ] {
+        let out = env.cli(&["vault", "get", "GitHub Production", "-f", sel]);
+        assert!(
+            out.status.success(),
+            "selector {sel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+    }
+
+    // Custom field collision: built-in `password` wins; `custom.password` forces custom field
+    let builtin_pw = env.cli(&["vault", "get", "GitHub Production", "-f", "password"]);
+    assert_eq!(
+        String::from_utf8_lossy(&builtin_pw.stdout),
+        "super-secret-login-pw\n"
+    );
+    let custom_pw = env.cli(&["vault", "get", "GitHub Production", "-f", "custom.password"]);
+    assert!(custom_pw.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&custom_pw.stdout),
+        "custom-password-field-value\n"
+    );
+
+    // Fallback custom field lookup (exact & case-insensitive) + hidden sensitivity in --json
+    let custom_env = env.cli(&["vault", "get", "GitHub Production", "-f", "environment"]);
+    assert!(custom_env.status.success());
+    assert_eq!(String::from_utf8_lossy(&custom_env.stdout), "production\n");
+
+    let custom_hidden = env.cli(&[
+        "vault",
+        "get",
+        "GitHub Production",
+        "-f",
+        "api secret",
+        "--json",
+    ]);
+    assert!(custom_hidden.status.success());
+    let ch: Value = serde_json::from_slice(&custom_hidden.stdout).unwrap();
+    assert_eq!(ch["ok"], true);
+    assert_eq!(ch["sensitive"], true);
+    assert_eq!(ch["value"], "hidden-api-token-999");
+
+    // Missing / empty / type-mismatched fields fail closed with exit 1 and empty stdout
+    for (target, sel) in [
+        ("GitHub Production", "organization_id"),
+        ("GitHub Production", "card.number"),
+        ("GitHub Production", "nonexistent_field"),
+        ("Corporate Visa", "username"),
+        ("Recovery Codes", "folder"),
+    ] {
+        let out = env.cli(&["vault", "get", target, "-f", sel]);
+        assert!(
+            !out.status.success(),
+            "expected failure for {target} -f {sel}"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "stdout must be empty on error for {target} -f {sel}"
+        );
+    }
+}
+
+#[test]
+fn vault_get_note_card_identity_and_ssh_key_selectors() {
+    let env = TestVaultEnv::new();
+
+    // Secure Note
+    let note = env.cli(&["vault", "get", "Recovery Codes", "--notes", "--json"]);
+    assert!(note.status.success());
+    let nj: Value = serde_json::from_slice(&note.stdout).unwrap();
+    assert_eq!(nj["sensitive"], true);
+    assert_eq!(nj["value"], "recovery-code-alpha-beta");
+
+    // Card (all 6 fields + hyphen normalization)
+    for (sel, expected) in [
+        ("card.cardholder-name", "Alice Example"),
+        ("card.brand", "Visa"),
+        ("card.number", "4111222233334444"),
+        ("card.exp-month", "12"),
+        ("card.exp_year", "2030"),
+        ("card.code", "987"),
+    ] {
+        let out = env.cli(&["vault", "get", "Corporate Visa", "-f", sel]);
+        assert!(
+            out.status.success(),
+            "card selector {sel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+    }
+
+    // Identity (all 18 fields + hyphen normalization)
+    for (sel, expected) in [
+        ("identity.title", "Dr"),
+        ("identity.first-name", "Alice"),
+        ("identity.middle_name", "Marie"),
+        ("identity.last_name", "Example"),
+        ("identity.address1", "123 Main St"),
+        ("identity.address2", "Suite 400"),
+        ("identity.address3", "Floor 4"),
+        ("identity.city", "Tokyo"),
+        ("identity.state", "Tokyo"),
+        ("identity.postal-code", "100-0001"),
+        ("identity.country", "JP"),
+        ("identity.company", "Omarchy Corp"),
+        ("identity.email", "alice@example.com"),
+        ("identity.phone", "+81-3-0000-0000"),
+        ("identity.ssn", "123-45-6789"),
+        ("identity.username", "alice_id"),
+        ("identity.passport-number", "P12345678"),
+        ("identity.license_number", "DL-987654"),
+    ] {
+        let out = env.cli(&["vault", "get", "Alice Identity", "-f", sel]);
+        assert!(
+            out.status.success(),
+            "identity selector {sel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+    }
+
+    // SSH Key (ssh.* and short aliases, plus single trailing newline on PEM ending in \n)
+    let expected_pem =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA-FAKE-KEY-BODY\n-----END OPENSSH PRIVATE KEY-----\n";
+    for sel in ["ssh.private_key", "private_key"] {
+        let out = env.cli(&["vault", "get", "Prod Bastion Key", "-f", sel]);
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, expected_pem, "must not double-append newline on PEM");
+    }
+    for (sel, expected) in [
+        (
+            "ssh.public_key",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakePublicKey alice@bastion",
+        ),
+        (
+            "public_key",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakePublicKey alice@bastion",
+        ),
+        ("ssh.fingerprint", "SHA256:FakeFingerprint123456"),
+        ("fingerprint", "SHA256:FakeFingerprint123456"),
+        ("ssh.passphrase", "ssh-passphrase-secret"),
+        ("passphrase", "ssh-passphrase-secret"),
+    ] {
+        let out = env.cli(&["vault", "get", "Prod Bastion Key", "-f", sel]);
+        assert!(
+            out.status.success(),
+            "ssh selector {sel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+    }
+}
