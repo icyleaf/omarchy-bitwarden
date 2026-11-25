@@ -4914,8 +4914,6 @@ Item {
               data.attachment_id = attachmentProc.activeAttachmentId
               data.item_id = attachmentProc.activeItemId
               root.activeAttachmentPreview = data
-            } else if (data.action === "view") {
-              root.statusMessage = "Opened " + (data.filename || "attachment") + "."
             } else {
               root.statusMessage = "Saved " + (data.filename || "attachment") + " to " + (data.path || "Downloads")
             }

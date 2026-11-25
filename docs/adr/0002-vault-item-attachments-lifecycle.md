@@ -49,3 +49,11 @@ Key requirements:
   - 100% native Rust execution without external Node.js `bw` CLI dependencies.
   - Exact adherence to Bitwarden `EncArrayBuffer` format guarantees error-free image and document rendering.
 - **Security**: Temporary files in `/tmp` are scoped per item and session with `0600` permissions. Raw ciphertext is never saved as unreadable files.
+
+## Amendment (2026-11-25)
+
+Supersedes Context items 3 (`xdg-open` fallback) and 7 (`notify-send -A`), as well as Decision section 4 (Desktop Notifications), per #436 / #434:
+
+- **Omawarden**'s `attachment` module is strictly a platform-agnostic decryption and file-materialization engine. It writes decrypted **Attachment** bytes to disk and returns the resulting `path` in `AttachmentResponse`.
+- `--open`, `open_file`, `notify`, and `send_notification_with_actions` are removed from the CLI and Rust library API (`AttachmentResponse.action` emits only `"preview"` or `"download"`).
+- Host file opening (`xdg-open`, `open`, etc.) and user-facing download notifications are the responsibility of callers (CLI users, **Overlay**, or `omawarden-app`).

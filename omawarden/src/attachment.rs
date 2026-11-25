@@ -3,8 +3,6 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
 
 use crate::config::ConfigManager;
 use crate::crypto::{Engine, BASE64};
@@ -59,43 +57,6 @@ pub fn is_same_origin(u1_str: &str, u2_str: &str) -> bool {
         }
         _ => false,
     }
-}
-
-pub fn send_notification_with_actions(title: &str, body: &str, file_path: &Path) {
-    let t = title.to_string();
-    let b = body.to_string();
-    let p = file_path.to_path_buf();
-
-    thread::spawn(move || {
-        let output = Command::new("notify-send")
-            .args([
-                "--app-name=Bitwarden",
-                "-i",
-                "document-save",
-                "-A",
-                "open=Open File",
-                "-A",
-                "folder=Open Folder",
-                &t,
-                &b,
-            ])
-            .output();
-
-        if let Ok(out) = output {
-            let action = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if action == "open" {
-                let _ = Command::new("xdg-open").arg(&p).spawn();
-            } else if action == "folder" {
-                if let Some(parent) = p.parent() {
-                    let _ = Command::new("xdg-open").arg(parent).spawn();
-                }
-            }
-        } else {
-            let _ = Command::new("notify-send")
-                .args(["--app-name=Bitwarden", "-i", "document-save", &t, &b])
-                .spawn();
-        }
-    });
 }
 
 /// Validates that a server-provided identifier is safe to use as a single
@@ -169,17 +130,14 @@ pub fn clean_previews(item_id: Option<&str>) -> io::Result<()> {
     clear_preview_attachments()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn get_attachment(
     item_id: &str,
     attachment_id: &str,
     filename: &str,
     output_dir: Option<&str>,
-    open_file: bool,
     preview: bool,
     session_token: Option<&str>,
     expected_lock_generation: Option<&str>,
-    notify: bool,
 ) -> AttachmentResponse {
     if item_id.is_empty() || attachment_id.is_empty() {
         return AttachmentResponse {
@@ -301,7 +259,7 @@ pub fn get_attachment(
         .join(&session.credential_id)
         .join(item_id)
         .join(attachment_id);
-    let target_dir = if open_file || preview {
+    let target_dir = if preview {
         preview_dir.clone()
     } else {
         let dest_dir_str = output_dir.unwrap_or(&cfg.download_dir);
@@ -314,7 +272,7 @@ pub fn get_attachment(
         PathBuf::from(expanded)
     };
 
-    let dir_res = if open_file || preview {
+    let dir_res = if preview {
         crate::fs_util::create_secure_dir_all(&target_dir, 0o700)
     } else {
         fs::create_dir_all(&target_dir)
@@ -348,15 +306,7 @@ pub fn get_attachment(
                 Ok(gate) => gate,
                 Err(error) => return AttachmentResponse::failed(error.to_string()),
             };
-            return build_attachment_response(
-                &dest_path,
-                &safe_filename,
-                &target_dir,
-                open_file,
-                preview,
-                notify,
-                &cached_bytes,
-            );
+            return build_attachment_response(&dest_path, &safe_filename, preview, &cached_bytes);
         }
         Ok(None) => {}
         Err(error) => return AttachmentResponse::failed(error.to_string()),
@@ -760,15 +710,7 @@ pub fn get_attachment(
         Err(error) => return AttachmentResponse::failed(error.to_string()),
     };
 
-    build_attachment_response(
-        &dest_path,
-        &safe_filename,
-        &target_dir,
-        open_file,
-        preview,
-        notify,
-        &bytes,
-    )
+    build_attachment_response(&dest_path, &safe_filename, preview, &bytes)
 }
 
 fn publish_attachment(generation: u64, path: &Path, bytes: &[u8]) -> std::io::Result<fs::File> {
@@ -983,10 +925,7 @@ fn is_cached_file_valid(path: &Path, expected_encrypted_size: Option<u64>, bytes
 fn build_attachment_response(
     dest_path: &Path,
     safe_filename: &str,
-    target_dir: &Path,
-    open_file: bool,
     preview: bool,
-    notify: bool,
     bytes: &[u8],
 ) -> AttachmentResponse {
     let ext = dest_path
@@ -1051,19 +990,9 @@ fn build_attachment_response(
         }
     }
 
-    let action_str = if open_file {
-        let _ = Command::new("xdg-open").arg(dest_path).spawn();
-        "view".to_string()
-    } else if preview {
+    let action_str = if preview {
         "preview".to_string()
     } else {
-        if notify {
-            send_notification_with_actions(
-                "Bitwarden Attachment",
-                &format!("Saved {} to {}", safe_filename, target_dir.display()),
-                dest_path,
-            );
-        }
         "download".to_string()
     };
 
@@ -1194,34 +1123,14 @@ mod tests {
 
     #[test]
     fn test_missing_ids() {
-        let res = get_attachment(
-            "",
-            "att1",
-            "file.txt",
-            None,
-            false,
-            false,
-            Some("tok"),
-            None,
-            false,
-        );
+        let res = get_attachment("", "att1", "file.txt", None, false, Some("tok"), None);
         assert!(!res.ok);
         assert_eq!(
             res.error.unwrap(),
             "Item ID and Attachment ID are required."
         );
 
-        let res2 = get_attachment(
-            "item1",
-            "",
-            "file.txt",
-            None,
-            false,
-            false,
-            Some("tok"),
-            None,
-            false,
-        );
+        let res2 = get_attachment("item1", "", "file.txt", None, false, Some("tok"), None);
         assert!(!res2.ok);
         assert_eq!(
             res2.error.unwrap(),
@@ -1232,9 +1141,7 @@ mod tests {
     #[test]
     fn test_missing_session_or_network_error() {
         let _lock = crate::env_lock();
-        let res = get_attachment(
-            "item1", "att1", "file.txt", None, false, false, None, None, false,
-        );
+        let res = get_attachment("item1", "att1", "file.txt", None, false, None, None);
         if !res.ok {
             assert!(res.error.is_some());
         }
@@ -1251,10 +1158,8 @@ mod tests {
             "../../../etc/passwd",
             Some(target),
             false,
-            false,
             Some("fake_token"),
             None,
-            false,
         );
         if res.ok {
             assert_eq!(res.filename.unwrap(), "passwd");
@@ -1297,10 +1202,8 @@ mod tests {
             "test_file.txt",
             Some(dl_target),
             false,
-            false,
             Some("fake_token"),
             None,
-            false,
         );
         let cleaned = clean_previews(Some("test_item_999"));
         if let Some(old_data_dir) = old_data_dir {
@@ -1345,6 +1248,100 @@ mod tests {
             fs::read_to_string(&old_file).unwrap(),
             "old account attachment"
         );
+    }
+
+    #[test]
+    fn test_attachment_download_and_preview_return_path_without_desktop_side_effects() {
+        let _lock = crate::env_lock();
+        let _daemon = unlocked_daemon();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dl_target = temp_dir.path().to_str().unwrap();
+        let storage = StorageManager::new(temp_dir.path().join("data.json"));
+        storage
+            .save(&VaultStorage {
+                credential_id: Some(CREDENTIAL_ID.into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let preview_dir = preview_root()
+            .join(CREDENTIAL_ID)
+            .join("item_pure/att_pure");
+        fs::create_dir_all(&preview_dir).unwrap();
+        let preview_file = preview_dir.join("note.txt");
+        fs::write(&preview_file, b"pure engine attachment").unwrap();
+
+        // Canary binaries on PATH to ensure neither xdg-open nor notify-send is invoked
+        let bin_dir = tempfile::tempdir().unwrap();
+        let opener_marker = temp_dir.path().join("opener_invoked");
+        let notify_marker = temp_dir.path().join("notify_invoked");
+        crate::write_test_executable(
+            &bin_dir.path().join("xdg-open"),
+            format!("#!/bin/sh\ntouch \"{}\"\n", opener_marker.display()),
+        );
+        crate::write_test_executable(
+            &bin_dir.path().join("notify-send"),
+            format!("#!/bin/sh\ntouch \"{}\"\n", notify_marker.display()),
+        );
+
+        let old_data_dir = std::env::var_os("OMAWARDEN_DATA_DIR");
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
+        std::env::set_var("PATH", bin_dir.path());
+
+        let preview_res = get_attachment(
+            "item_pure",
+            "att_pure",
+            "note.txt",
+            Some(dl_target),
+            true,
+            Some("fake_token"),
+            None,
+        );
+        let download_res = get_attachment(
+            "item_pure",
+            "att_pure",
+            "note.txt",
+            Some(dl_target),
+            false,
+            Some("fake_token"),
+            None,
+        );
+
+        let cleaned = clean_previews(Some("item_pure"));
+        if let Some(old_data_dir) = old_data_dir {
+            std::env::set_var("OMAWARDEN_DATA_DIR", old_data_dir);
+        } else {
+            std::env::remove_var("OMAWARDEN_DATA_DIR");
+        }
+        if let Some(old_path) = old_path {
+            std::env::set_var("PATH", old_path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+
+        assert!(preview_res.ok, "preview failed: {:?}", preview_res.error);
+        assert_eq!(preview_res.action.as_deref(), Some("preview"));
+        assert_eq!(
+            preview_res.path.as_deref(),
+            Some(preview_file.to_string_lossy().as_ref())
+        );
+
+        assert!(download_res.ok, "download failed: {:?}", download_res.error);
+        assert_eq!(download_res.action.as_deref(), Some("download"));
+        let expected_dest = temp_dir.path().join("note.txt");
+        assert_eq!(
+            download_res.path.as_deref(),
+            Some(expected_dest.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            fs::read_to_string(&expected_dest).unwrap(),
+            "pure engine attachment"
+        );
+
+        assert!(!opener_marker.exists(), "xdg-open must never be invoked");
+        assert!(!notify_marker.exists(), "notify-send must never be invoked");
+        cleaned.unwrap();
     }
 
     #[test]
@@ -1459,10 +1456,8 @@ mod tests {
             "file.txt",
             None,
             false,
-            false,
             Some("tok"),
             None,
-            false,
         );
         assert!(!res.ok);
         assert_eq!(
@@ -1555,10 +1550,8 @@ mod tests {
             "large.bin",
             None,
             false,
-            false,
             Some("fake_token"),
             None,
-            false,
         );
 
         if let Some(old) = old_data_dir {
@@ -1639,10 +1632,8 @@ mod tests {
             "stream.bin",
             None,
             false,
-            false,
             Some("fake_token"),
             None,
-            false,
         );
 
         if let Some(old) = old_config_dir {
