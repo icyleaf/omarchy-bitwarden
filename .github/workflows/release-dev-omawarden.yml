@@ -29,6 +29,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_cross: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            use_cross: false
 
     steps:
       - name: Checkout repository
@@ -62,18 +68,28 @@ jobs:
           mkdir -p "${DIST_DIR}"
           cp "omawarden/target/${{ matrix.target }}/release/omawarden" "${DIST_DIR}/"
           cp LICENSE README.md "${DIST_DIR}/"
-          # Same payload as the release workflow: quick unlock needs the
-          # polkit policy shipped alongside the binary, dev builds included.
-          # The .install scriptlet rides along so manual installs can clean
-          # up the pre-rename policy path the same way pacman upgrades do.
-          cp packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "${DIST_DIR}/"
-          cp packaging/omawarden-policy.install "${DIST_DIR}/"
+          if [[ "${{ matrix.target }}" == *-linux-* ]]; then
+            # Same payload as the release workflow: quick unlock needs the
+            # polkit policy shipped alongside the binary, dev builds included.
+            # The .install scriptlet rides along so manual installs can clean
+            # up the pre-rename policy path the same way pacman upgrades do.
+            cp packaging/org.omarchy.plugin.icyleaf.omarchy-bitwarden.policy "${DIST_DIR}/"
+            cp packaging/omawarden-policy.install "${DIST_DIR}/"
+          fi
+
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1"
+            else
+              shasum -a 256 "$1"
+            fi
+          }
 
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-          sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+          sha256_file "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
           cp "${ARCHIVE_NAME}.tar.gz" "omawarden-${{ matrix.target }}.tar.gz"
-          sha256sum "omawarden-${{ matrix.target }}.tar.gz" > "omawarden-${{ matrix.target }}.tar.gz.sha256"
+          sha256_file "omawarden-${{ matrix.target }}.tar.gz" > "omawarden-${{ matrix.target }}.tar.gz.sha256"
           cd ..
 
       - name: Attest Build Provenance

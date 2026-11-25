@@ -43,6 +43,7 @@ fn ipc(socket: &Path, request: Value) -> Value {
 }
 
 fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -125,7 +126,8 @@ store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1))
             .env("PATH", dir)
             .env("XDG_RUNTIME_DIR", dir)
             .env("OMAWARDEN_DATA_DIR", dir)
-            .env("OMAWARDEN_CONFIG_DIR", dir);
+            .env("OMAWARDEN_CONFIG_DIR", dir)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool");
         cmd
     };
     let _daemon = Daemon(

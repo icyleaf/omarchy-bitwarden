@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::Write;

@@ -102,6 +102,7 @@ impl ActivationProxy {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                client.set_nonblocking(false).unwrap();
                 let daemon = UnixStream::connect(&target).unwrap();
                 for stream in [&client, &daemon] {
                     stream
@@ -186,6 +187,7 @@ fn a_second_daemon_cannot_replace_the_live_login_authority() {
                 .env("XDG_RUNTIME_DIR", runtime)
                 .env("OMAWARDEN_DATA_DIR", root)
                 .env("OMAWARDEN_CONFIG_DIR", root)
+                .env("OMA_KEYRING_PROVIDER", "secret-tool")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -269,7 +271,9 @@ fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
             .env("PATH", root)
             .env("XDG_RUNTIME_DIR", root)
             .env("OMAWARDEN_DATA_DIR", root)
-            .env("OMAWARDEN_CONFIG_DIR", root);
+            .env("OMAWARDEN_CONFIG_DIR", root)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland");
         cmd
     };
     let _daemon = Daemon(
@@ -457,7 +461,7 @@ fn password_login_case(case: LoginCase) {
         let clipboard = dir.path().join("wl-copy");
         std::fs::write(
             &clipboard,
-            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nif [ \"${1:-}\" = --clear ]; then\n  [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n  exec /usr/bin/rm -f \"$selection\"\nfi\nexec /usr/bin/cat > \"$selection\"\n",
+            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nRM=/bin/rm\n[ -x \"$RM\" ] || RM=/usr/bin/rm\nCAT=/bin/cat\n[ -x \"$CAT\" ] || CAT=/usr/bin/cat\nif [ \"${1:-}\" = --clear ]; then\n  [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n  exec \"$RM\" -f \"$selection\"\nfi\nexec \"$CAT\" > \"$selection\"\n",
         )
         .unwrap();
         std::fs::set_permissions(clipboard, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -469,7 +473,9 @@ fn password_login_case(case: LoginCase) {
             .env("PATH", dir.path())
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("OMAWARDEN_DATA_DIR", dir.path())
-            .env("OMAWARDEN_CONFIG_DIR", dir.path());
+            .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland");
         cmd
     };
     let socket = dir.path().join("omawarden.sock");
@@ -588,6 +594,7 @@ fn password_login_case(case: LoginCase) {
             }
             Err(e) => panic!("{e}"),
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -814,6 +821,7 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
             while !api_stop.load(Ordering::SeqCst) {
                 match api.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();
@@ -837,6 +845,7 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("OMAWARDEN_DATA_DIR", dir.path())
             .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
             .output()
             .unwrap();
         stop.store(true, Ordering::SeqCst);

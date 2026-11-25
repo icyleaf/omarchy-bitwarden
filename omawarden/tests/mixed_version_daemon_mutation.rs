@@ -130,7 +130,8 @@ fn make_command(dir: &Path) -> Command {
         .env("PATH", dir)
         .env("XDG_RUNTIME_DIR", dir)
         .env("OMAWARDEN_DATA_DIR", dir)
-        .env("OMAWARDEN_CONFIG_DIR", dir);
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool");
     cmd
 }
 
@@ -165,6 +166,7 @@ impl MockOldDaemon {
                     }
                     Err(e) => panic!("Mock daemon accept error: {e}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

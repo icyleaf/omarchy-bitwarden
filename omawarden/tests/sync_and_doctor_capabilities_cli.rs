@@ -37,6 +37,7 @@ fn write_test_executable(path: &std::path::Path, content: impl AsRef<[u8]>) {
 }
 
 fn handle_connection(mut stream: TcpStream, config_status: u16, ssh_agent_v2_enabled: bool) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -164,6 +165,7 @@ fn test_doctor_command_with_enabled_ssh_agent_v2() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -202,6 +204,7 @@ fn test_doctor_command_with_enabled_ssh_agent_v2() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "doctor"])
         .output()
         .expect("Failed to execute omawarden doctor");
@@ -270,6 +273,7 @@ fn test_doctor_command_with_disabled_ssh_agent_v2_outputs_info_and_guidance() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "doctor"])
         .output()
         .expect("Failed to execute omawarden doctor");
@@ -370,6 +374,7 @@ fn test_sync_updates_capabilities_and_is_resilient_to_config_500() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "daemon"]);
     let daemon_proc = cmd.spawn().expect("failed to spawn daemon");
     let _guard = ChildGuard(daemon_proc);
@@ -405,6 +410,7 @@ fn test_sync_updates_capabilities_and_is_resilient_to_config_500() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "vault", "sync"])
         .output()
         .expect("Failed to sync");
@@ -496,6 +502,7 @@ fn test_sync_updates_capabilities_on_http_200() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "daemon"]);
     let daemon_proc = cmd.spawn().expect("failed to spawn daemon");
     let _guard = ChildGuard(daemon_proc);
@@ -531,6 +538,7 @@ fn test_sync_updates_capabilities_on_http_200() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "vault", "sync"])
         .output()
         .expect("Failed to sync");
@@ -576,6 +584,7 @@ fn write_doctor_executable(path: &std::path::Path, content: &str) {
 }
 
 fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -657,6 +666,7 @@ fn run_doctor(dir: &std::path::Path, config_path: &std::path::Path, json: bool) 
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(args)
         .output()
         .expect("Failed to execute omawarden doctor");

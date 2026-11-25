@@ -65,6 +65,43 @@ jobs:
       - name: Run test suite
         run: cargo test --all-targets
 
+  backend-macos:
+    name: Backend macOS Test & Lint
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: omawarden
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: omawarden -> target
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Provision ephemeral unlocked Keychain
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/omawarden-ci.keychain-db"
+          KEYCHAIN_PASS="omawarden-ci-ephemeral"
+          security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security default-keychain -s "${KEYCHAIN_PATH}"
+
+      - name: Run test suite
+        run: cargo test --all-targets
+
   frontend:
     name: Frontend Lint & Workflow Checks
     runs-on: ubuntu-latest

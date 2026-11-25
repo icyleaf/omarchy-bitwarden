@@ -171,6 +171,7 @@ mod tests {
         loop {
             match api.accept() {
                 Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(10)))
                         .unwrap();
@@ -257,6 +258,7 @@ mod tests {
         while !task.is_finished() {
             match api.accept() {
                 Ok((mut fresh, _)) => {
+                    fresh.set_nonblocking(false).unwrap();
                     assert_eq!(request(&mut fresh).0, "/api/sync");
                     reply(&mut fresh, json!({"ciphers":[cipher]}));
                     assert!(!refetched, "sync must not refetch indefinitely");

@@ -42,6 +42,7 @@ fn ipc(socket: &Path, request: Value) -> Value {
 }
 
 fn read_request_with_method(stream: &mut TcpStream) -> (String, String, Vec<u8>) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -112,7 +113,8 @@ fn make_command(dir: &Path) -> Command {
         .env("PATH", dir)
         .env("XDG_RUNTIME_DIR", dir)
         .env("OMAWARDEN_DATA_DIR", dir)
-        .env("OMAWARDEN_CONFIG_DIR", dir);
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool");
     cmd
 }
 
