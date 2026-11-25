@@ -58,6 +58,20 @@ Item {
     check(markup !== null && markup.textFormat === Text.PlainText && markup.text === "root<font size=7>@x</font>",
           "markup in the action is shown literally")
 
+    // When first-use cannot remember due to an unidentified requester, the footer explains why as plain text
+    modal.prompt = ({ id: 4, title: "Use SSH key?", action: "SSH login as root", key_name: "Work", fingerprint: "SHA256:abc",
+                      client: "A program", command: "Command unavailable", forwarded: false, remembered: false,
+                      remember_unavailable_reason: "<b>Cannot</b> identify requester; approval will not be remembered" })
+    var reasonFooter = findText(modal, "Enter allow · Esc deny · <b>Cannot</b> identify requester; approval will not be remembered")
+    check(reasonFooter !== null && reasonFooter.textFormat === Text.PlainText,
+          "footer displays remember_unavailable_reason literally as plain text")
+
+    // Without remember_unavailable_reason and with remembered=false, the standard footer is shown
+    modal.prompt = ({ id: 2, title: "<b>Log in</b>", action: "root<font size=7>@x</font>", key_name: "<i>k</i>", fingerprint: "SHA256:abc",
+                      client: "ssh", command: "ssh <u>vps</u>", forwarded: true, remembered: false })
+    var defaultFooter = findText(modal, "Enter allow · Esc deny")
+    check(defaultFooter !== null, "standard footer shown when remember_unavailable_reason is omitted")
+
     // The card opens by itself: Allow is ignored until it has been up briefly
     replies = []
     check(modal.armed === false, "a new prompt starts unarmed")

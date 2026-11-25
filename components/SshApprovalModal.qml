@@ -222,9 +222,13 @@ Rectangle {
         spacing: 8
 
         Text {
-          text: approvalRoot.prompt && approvalRoot.prompt.remembered
-                ? "Enter allow · Esc deny · remembered for this program and app until you log out"
-                : "Enter allow · Esc deny"
+          text: "Enter allow · Esc deny" + (
+                approvalRoot.prompt && approvalRoot.prompt.remembered
+                ? " · remembered for this program and app until you log out"
+                : (approvalRoot.prompt && approvalRoot.prompt.remember_unavailable_reason
+                   ? " · " + approvalRoot.prompt.remember_unavailable_reason
+                   : ""))
+          textFormat: Text.PlainText
           color: approvalRoot.muted
           font.pixelSize: Style.font.caption
           Layout.fillWidth: true
