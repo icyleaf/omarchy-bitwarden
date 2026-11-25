@@ -37,6 +37,7 @@ fn write_test_executable(path: &std::path::Path, content: impl AsRef<[u8]>) {
 }
 
 fn handle_connection(mut stream: TcpStream, config_status: u16, ssh_agent_v2_enabled: bool) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -583,6 +584,7 @@ fn write_doctor_executable(path: &std::path::Path, content: &str) {
 }
 
 fn handle_doctor_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {

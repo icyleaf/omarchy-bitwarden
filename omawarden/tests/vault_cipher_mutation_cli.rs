@@ -42,6 +42,7 @@ fn ipc(socket: &Path, request: Value) -> Value {
 }
 
 fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -63,6 +64,7 @@ fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
 }
 
 fn read_request_with_method(stream: &mut TcpStream) -> (String, String, Vec<u8>) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -4024,7 +4026,12 @@ fn test_edit_cipher_in_editor() {
     let editor_script = dir.join("mock_editor.sh");
     fs::write(
         &editor_script,
-        "#!/bin/sh\nif [ -x /usr/bin/sed ]; then /usr/bin/sed -i 's/Username: editor_old/Username: editor_new/' \"$1\"; else /bin/sed -i 's/Username: editor_old/Username: editor_new/' \"$1\"; fi\n",
+        "#!/bin/sh\n\
+         SED=/usr/bin/sed\n\
+         [ -x \"$SED\" ] || SED=/bin/sed\n\
+         MV=/bin/mv\n\
+         [ -x \"$MV\" ] || MV=/usr/bin/mv\n\
+         \"$SED\" 's/Username: editor_old/Username: editor_new/' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n",
     )
     .unwrap();
     fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
@@ -5613,12 +5620,15 @@ fn test_edit_cipher_in_editor_multiple_uris_and_custom_fields() {
     fs::write(
         &editor_script,
         "#!/bin/sh\n\
+         set -eu\n\
          SED=/usr/bin/sed\n\
          [ -x \"$SED\" ] || SED=/bin/sed\n\
-         \"$SED\" -i '/URI: https:\\/\\/two.example/d' \"$1\"\n\
-         \"$SED\" -i '/Field: Old = x/d' \"$1\"\n\
-         \"$SED\" -i 's/Field: PIN = 1234/Field: PIN = 9999/' \"$1\"\n\
-         \"$SED\" -i '/# Custom Fields:/a Hidden Field: Added = fresh' \"$1\"\n",
+         MV=/bin/mv\n\
+         [ -x \"$MV\" ] || MV=/usr/bin/mv\n\
+         \"$SED\" '/URI: https:\\/\\/two.example/d' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n\
+         \"$SED\" '/Field: Old = x/d' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n\
+         \"$SED\" 's/Field: PIN = 1234/Field: PIN = 9999/' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n\
+         \"$SED\" '/# Custom Fields:/a\\\nHidden Field: Added = fresh\n' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n",
     )
     .unwrap();
     fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
@@ -5740,9 +5750,12 @@ fn test_edit_cipher_in_editor_malformed_field_keeps_draft() {
     fs::write(
         &editor_script,
         "#!/bin/sh\n\
+         set -eu\n\
          SED=/usr/bin/sed\n\
          [ -x \"$SED\" ] || SED=/bin/sed\n\
-         \"$SED\" -i '/# Custom Fields:/a Field: NoSeparator' \"$1\"\n",
+         MV=/bin/mv\n\
+         [ -x \"$MV\" ] || MV=/usr/bin/mv\n\
+         \"$SED\" '/# Custom Fields:/a\\\nField: NoSeparator\n' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n",
     )
     .unwrap();
     fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();
@@ -7203,7 +7216,9 @@ fn test_edit_login_totp_in_editor() {
              \"$GREP\" -q '^TOTP: JBSWY3DPEHPK3PXP$' \"$1\" || exit 2\n\
              SED=/usr/bin/sed\n\
              [ -x \"$SED\" ] || SED=/bin/sed\n\
-             \"$SED\" -i 's|^TOTP: .*|TOTP: {sed_uri}|' \"$1\"\n"
+             MV=/bin/mv\n\
+             [ -x \"$MV\" ] || MV=/usr/bin/mv\n\
+             \"$SED\" 's|^TOTP: .*|TOTP: {sed_uri}|' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n"
         ),
     )
     .unwrap();
@@ -7448,8 +7463,10 @@ fn test_login_uri_match_rules_and_preservation_end_to_end() {
          \"$GREP\" -q '^URI: https://new.example.com$' \"$1\" || exit 3\n\
          SED=/usr/bin/sed\n\
          [ -x \"$SED\" ] || SED=/bin/sed\n\
-         \"$SED\" -i 's|^URI: https://app.example.com/login \\[exact\\]$|URI: https://app.example.com/login [host]|' \"$1\"\n\
-         \"$SED\" -i 's|^URI: https://new.example.com$|URI: https://regex.example [regex]|' \"$1\"\n",
+         MV=/bin/mv\n\
+         [ -x \"$MV\" ] || MV=/usr/bin/mv\n\
+         \"$SED\" 's|^URI: https://app.example.com/login \\[exact\\]$|URI: https://app.example.com/login [host]|' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n\
+         \"$SED\" 's|^URI: https://new.example.com$|URI: https://regex.example [regex]|' \"$1\" > \"$1.tmp\" && \"$MV\" \"$1.tmp\" \"$1\"\n",
     )
     .unwrap();
     fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o700)).unwrap();

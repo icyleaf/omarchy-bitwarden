@@ -812,6 +812,7 @@ fn test_session_anchor_ceiling_wipes_retained_key_while_soft_locked() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_quick_unlock_re_arms_unlocked_at_but_not_session_anchor() {
     let _lock = crate::env_lock();
     let dir = tempdir().unwrap();
@@ -1146,6 +1147,7 @@ fn test_set_quick_unlock_ipc_refreshes_cache_and_ping_reports_enabled() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_quick_unlock_ipc_authorized_and_three_denies_wipe() {
     let _lock = crate::env_lock();
     let dir = tempdir().unwrap();
@@ -1340,6 +1342,7 @@ fn test_logout_requests_end_retention_with_readiness_false() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_poisoned_busy_mutex_does_not_jam_quick_unlock() {
     let _lock = crate::env_lock();
     let dir = tempdir().unwrap();
@@ -1729,6 +1732,7 @@ fn test_daemon_generate_password_action() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_stop_action_graceful_shutdown_without_process_exit() {
     let _lock = crate::env_lock();
     let runtime = tempdir().unwrap();
@@ -1988,6 +1992,7 @@ fn test_programmatic_shutdown_via_handle() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_server_url_switch_does_not_abort_process() {
     let _lock = crate::env_lock();
     let runtime = tempdir().unwrap();

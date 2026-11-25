@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -202,6 +204,7 @@ fn vault_item_and_totp_copies_validate_the_generation_that_supplied_the_value() 
                         }
                         Err(error) => panic!("{error}"),
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();

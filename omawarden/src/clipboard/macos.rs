@@ -20,13 +20,12 @@ mod pasteboard_ffi {
 
     pub fn get_pasteboard_change_count() -> Option<i64> {
         unsafe {
-            let class_name = b"NSPasteboard\0";
-            let cls = objc_getClass(class_name.as_ptr() as *const c_char);
+            let cls = objc_getClass(c"NSPasteboard".as_ptr());
             if cls.is_null() {
                 return None;
             }
 
-            let sel_general = sel_registerName(b"generalPasteboard\0".as_ptr() as *const c_char);
+            let sel_general = sel_registerName(c"generalPasteboard".as_ptr());
             if sel_general.is_null() {
                 return None;
             }
@@ -38,7 +37,7 @@ mod pasteboard_ffi {
                 return None;
             }
 
-            let sel_change_count = sel_registerName(b"changeCount\0".as_ptr() as *const c_char);
+            let sel_change_count = sel_registerName(c"changeCount".as_ptr());
             if sel_change_count.is_null() {
                 return None;
             }

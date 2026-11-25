@@ -551,7 +551,7 @@ pub fn stop(state: &DaemonState) {
 /// Bind the agent socket and serve it on background threads.
 pub fn spawn(state: Arc<DaemonState>) -> std::io::Result<()> {
     let path = socket_path();
-    if path.exists() {
+    if fs::symlink_metadata(&path).is_ok() {
         crate::daemon::validate_socket_path(&path)?;
         let _ = fs::remove_file(&path);
     }

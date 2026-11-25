@@ -534,6 +534,7 @@ fn test_daemon_ssh_agent_apply_ipc_gating() {
 // ---------------------------------------------------------------------------
 
 fn handle_capability_connection(mut stream: TcpStream, config_body: &Value, version_body: &str) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {

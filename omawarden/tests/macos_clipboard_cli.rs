@@ -3,8 +3,14 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
+
+// Serialize tests in this binary: both observe the global macOS NSPasteboard
+// `changeCount`, so running them concurrently causes one test's real copy to
+// bump `changeCount` and make the other test's holder intentionally skip clear.
+static PASTEBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 struct MacOsFixture {
     dir: TempDir,
@@ -43,6 +49,7 @@ exit 0
 
 #[test]
 fn test_macos_clipboard_holder_with_explicit_provider() {
+    let _guard = PASTEBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = MacOsFixture::new();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_omawarden"));
 
@@ -87,6 +94,7 @@ fn test_macos_clipboard_holder_with_explicit_provider() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_real_cli_copy_and_pasteboard() {
+    let _guard = PASTEBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_omawarden"));
 
     let dir = tempfile::tempdir().unwrap();

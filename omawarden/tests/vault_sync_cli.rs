@@ -102,6 +102,7 @@ impl ActivationProxy {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                client.set_nonblocking(false).unwrap();
                 let daemon = UnixStream::connect(&target).unwrap();
                 for stream in [&client, &daemon] {
                     stream
@@ -460,7 +461,7 @@ fn password_login_case(case: LoginCase) {
         let clipboard = dir.path().join("wl-copy");
         std::fs::write(
             &clipboard,
-            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nif [ \"${1:-}\" = --clear ]; then\n  [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n  exec /usr/bin/rm -f \"$selection\"\nfi\nexec /usr/bin/cat > \"$selection\"\n",
+            "#!/bin/sh\nselection=\"$XDG_RUNTIME_DIR/selection\"\nRM=/bin/rm\n[ -x \"$RM\" ] || RM=/usr/bin/rm\nCAT=/bin/cat\n[ -x \"$CAT\" ] || CAT=/usr/bin/cat\nif [ \"${1:-}\" = --clear ]; then\n  [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n  exec \"$RM\" -f \"$selection\"\nfi\nexec \"$CAT\" > \"$selection\"\n",
         )
         .unwrap();
         std::fs::set_permissions(clipboard, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -593,6 +594,7 @@ fn password_login_case(case: LoginCase) {
             }
             Err(e) => panic!("{e}"),
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -819,6 +821,7 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
             while !api_stop.load(Ordering::SeqCst) {
                 match api.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();

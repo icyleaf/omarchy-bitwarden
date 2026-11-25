@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 fn handle_connection(mut stream: TcpStream, fallback_only: bool) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {

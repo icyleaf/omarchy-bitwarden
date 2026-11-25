@@ -7,6 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::keyring::KeyringManager;
@@ -25,6 +26,15 @@ pub struct CredentialSlot {
     marker: PathBuf,
     name: String,
     _lease: File,
+    inherited: AtomicBool,
+}
+
+impl Drop for CredentialSlot {
+    fn drop(&mut self) {
+        if !self.inherited.load(Ordering::Acquire) {
+            let _ = self._lease.unlock();
+        }
+    }
 }
 
 impl CredentialSlot {
@@ -58,6 +68,7 @@ impl CredentialSlot {
                 Ok(())
             });
         }
+        self.inherited.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -202,6 +213,7 @@ impl StorageManager {
             marker: self.credential_slots_dir().join(id),
             name: id.into(),
             _lease: lease,
+            inherited: AtomicBool::new(false),
         })
     }
 
@@ -278,6 +290,7 @@ impl StorageManager {
                 marker,
                 name: name.into(),
                 _lease: lease,
+                inherited: AtomicBool::new(false),
             })),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(error)) => Err(error),

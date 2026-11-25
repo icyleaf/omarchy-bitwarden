@@ -68,6 +68,7 @@ jobs:
   backend-macos:
     name: Backend macOS Test & Lint
     runs-on: macos-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: omawarden
