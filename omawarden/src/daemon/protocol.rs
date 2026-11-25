@@ -154,13 +154,16 @@ pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 /// Version 3 adds support for Card (and upcoming Identity) cipher mutations.
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
+/// Capability identifier for the `vault_get` Daemon Protocol action (ADR-0037).
+pub const CAPABILITY_VAULT_GET: &str = "vault_get";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
     "cipher_mutation_v3",
     "folder_crud",
     "login_totp_uri_match",
-    "vault_get",
+    CAPABILITY_VAULT_GET,
 ];
 
 /// Returns `true` when a `ping` response advertises the requested Daemon Capability.

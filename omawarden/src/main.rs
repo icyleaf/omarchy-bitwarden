@@ -5218,8 +5218,11 @@ fn resolve_vault_get_field(
         return Err("Field selector cannot be empty.".to_string());
     }
 
-    // Explicit `custom.<name>` bypasses built-in selectors
-    if trimmed.len() > 7 && trimmed[..7].eq_ignore_ascii_case("custom.") {
+    // Explicit `custom.<name>` bypasses built-in selectors (UTF-8 safe boundary check)
+    if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("custom."))
+    {
         return lookup_custom_field(item, &trimmed[7..]);
     }
 
@@ -5489,7 +5492,7 @@ fn handle_vault_get(
     json_mode: bool,
     reveal: bool,
 ) -> ExitCode {
-    use omawarden::daemon::{dispatch_daemon_request, DispatchError};
+    use omawarden::daemon::{dispatch_daemon_request, DispatchError, CAPABILITY_VAULT_GET};
 
     const TTY_REVEAL_HINT: &str = "Refusing to print sensitive output to an interactive terminal. Pass --reveal to display in a terminal, pipe stdout, or use 'omawarden copy'.";
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -5498,7 +5501,7 @@ fn handle_vault_get(
         return emit_vault_get_error(true, TTY_REVEAL_HINT, None);
     }
 
-    let ping = match ensure_daemon_capability("vault_get") {
+    let ping = match ensure_daemon_capability(CAPABILITY_VAULT_GET) {
         Ok(p) => p,
         Err(err) => return emit_vault_get_error(json_mode, &err, None),
     };

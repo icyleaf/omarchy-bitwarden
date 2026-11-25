@@ -1557,21 +1557,36 @@ impl VaultManager {
         }
 
         let opposite = filter_by_type(self.get_items_by_state(!trash));
-        if let Some(CipherTargetResolution::Exact(item)) =
-            Self::match_cipher_candidates(&opposite, trimmed)
-        {
-            let msg = if trash {
-                format!(
-                    "Cipher '{}' is not in the trash. Omit --trash to retrieve it from the active vault.",
-                    item.name
-                )
-            } else {
-                format!(
-                    "Cipher '{}' is in the trash. Pass --trash to retrieve it.",
-                    item.name
-                )
-            };
-            return Ok(CipherTargetResolution::NotFound(msg));
+        match Self::match_cipher_candidates(&opposite, trimmed) {
+            Some(CipherTargetResolution::Exact(item)) => {
+                let msg = if trash {
+                    format!(
+                        "Cipher '{}' is not in the trash. Omit --trash to retrieve it from the active vault.",
+                        item.name
+                    )
+                } else {
+                    format!(
+                        "Cipher '{}' is in the trash. Pass --trash to retrieve it.",
+                        item.name
+                    )
+                };
+                return Ok(CipherTargetResolution::NotFound(msg));
+            }
+            Some(CipherTargetResolution::Ambiguous(_)) => {
+                let msg = if trash {
+                    format!(
+                        "Multiple ciphers matching '{}' exist in the active vault, not in the trash. Omit --trash to inspect them.",
+                        target
+                    )
+                } else {
+                    format!(
+                        "Multiple ciphers matching '{}' exist in the trash. Pass --trash to inspect them.",
+                        target
+                    )
+                };
+                return Ok(CipherTargetResolution::NotFound(msg));
+            }
+            _ => {}
         }
 
         if trash {

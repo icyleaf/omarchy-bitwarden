@@ -786,6 +786,8 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
         ("GitHub Production", "organization_id"),
         ("GitHub Production", "card.number"),
         ("GitHub Production", "nonexistent_field"),
+        ("GitHub Production", "custom."),
+        ("GitHub Production", "密码密码密码"),
         ("Corporate Visa", "username"),
         ("Recovery Codes", "folder"),
     ] {
