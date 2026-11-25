@@ -154,6 +154,22 @@ pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 /// Version 3 adds support for Card (and upcoming Identity) cipher mutations.
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
+/// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
+/// in `ping.capabilities` (ADR-0037).
+pub const DAEMON_CAPABILITIES: &[&str] = &[
+    "cipher_mutation_v3",
+    "folder_crud",
+    "login_totp_uri_match",
+    "vault_get",
+];
+
+/// Returns `true` when a `ping` response advertises the requested Daemon Capability.
+pub fn ping_has_capability(ping: &Value, capability: &str) -> bool {
+    ping.get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability)))
+}
+
 /// The minimum protocol version this client/server understands.
 /// Version 0 represents legacy unversioned daemons.
 pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 0;

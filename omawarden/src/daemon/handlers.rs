@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use crate::crypto::{Engine, BASE64};
 
-use super::protocol::{get_socket_path, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION};
+use super::protocol::{
+    get_socket_path, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, DAEMON_CAPABILITIES,
+};
 use super::server::{get_peer_pid, verify_peer_credentials};
 use super::state::{should_touch_activity, DaemonState};
 
@@ -63,7 +65,13 @@ pub fn handle_client_with_peer(
 
     let reads_plaintext = matches!(
         action,
-        "list" | "search" | "get_item" | "get_ssh_key" | "get_attachment_key" | "folder_list"
+        "list"
+            | "search"
+            | "get_item"
+            | "vault_get"
+            | "get_ssh_key"
+            | "get_attachment_key"
+            | "folder_list"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()));
     let is_privileged = reads_plaintext
@@ -211,6 +219,7 @@ pub fn handle_client_with_peer(
             "pong": true,
             "protocol_version": CURRENT_PROTOCOL_VERSION,
             "schema_version": CURRENT_SCHEMA_VERSION,
+            "capabilities": DAEMON_CAPABILITIES,
             "ssh_write_receipt": true,
             "account_activation_v1": true,
             "unlock_context": state.vault_mgr.unlock_context(),
@@ -528,6 +537,51 @@ pub fn handle_client_with_peer(
                 json!({ "ok": true, "item": item, "lock_generation": session.map(|s| s.generation) })
             } else {
                 json!({ "ok": false, "error": format!("Item '{}' not found in vault", query) })
+            }
+        }
+        "vault_get" => {
+            let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let trash = req.get("trash").and_then(Value::as_bool).unwrap_or(false);
+            let cipher_type = req.get("type").and_then(|v| v.as_str());
+            match state
+                .vault_mgr
+                .resolve_cipher_target_for_get(target, trash, cipher_type)
+            {
+                Ok(crate::vault::CipherTargetResolution::Exact(item)) => json!({
+                    "ok": true,
+                    "item": item,
+                }),
+                Ok(crate::vault::CipherTargetResolution::Ambiguous(candidates)) => {
+                    let candidate_items: Vec<Value> = candidates
+                        .into_iter()
+                        .map(|item| {
+                            json!({
+                                "id": item.id,
+                                "name": item.name,
+                                "type": item.type_name,
+                                "sub_title": item.sub_title,
+                            })
+                        })
+                        .collect();
+                    let ids: Vec<&str> = candidate_items
+                        .iter()
+                        .filter_map(|c| c["id"].as_str())
+                        .collect();
+                    json!({
+                        "ok": false,
+                        "ambiguous": true,
+                        "candidates": candidate_items,
+                        "error": format!(
+                            "Multiple ciphers matched '{}': [{}]. Specify by ID, narrower name, or --type.",
+                            target,
+                            ids.join(", ")
+                        ),
+                    })
+                }
+                Ok(crate::vault::CipherTargetResolution::NotFound(err)) => {
+                    json!({ "ok": false, "error": err })
+                }
+                Err(err) => json!({ "ok": false, "error": err }),
             }
         }
         "get_ssh_key" => {

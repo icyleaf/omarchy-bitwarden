@@ -1512,6 +1512,81 @@ impl VaultManager {
         )))
     }
 
+    /// Fail-closed target resolution for `vault get`, supporting optional
+    /// `--type` filtering and active-vs-Trash cross-state diagnostics.
+    pub fn resolve_cipher_target_for_get(
+        &self,
+        target: &str,
+        trash: bool,
+        cipher_type: Option<&str>,
+    ) -> Result<CipherTargetResolution, String> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err("Target cipher cannot be empty.".to_string());
+        }
+
+        let normalized_type = match cipher_type.map(|t| t.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(ref t) if t.is_empty() => None,
+            Some(ref t)
+                if matches!(
+                    t.as_str(),
+                    "login" | "note" | "card" | "identity" | "ssh_key"
+                ) =>
+            {
+                Some(t.clone())
+            }
+            Some(other) => {
+                return Err(format!(
+                    "Invalid cipher type '{}'. Expected one of: login, note, card, identity, ssh_key.",
+                    other
+                ));
+            }
+        };
+
+        let filter_by_type = |items: Vec<VaultItem>| -> Vec<VaultItem> {
+            match normalized_type.as_deref() {
+                Some(ty) => items.into_iter().filter(|i| i.type_name == ty).collect(),
+                None => items,
+            }
+        };
+
+        let primary = filter_by_type(self.get_items_by_state(trash));
+        if let Some(resolution) = Self::match_cipher_candidates(&primary, trimmed) {
+            return Ok(resolution);
+        }
+
+        let opposite = filter_by_type(self.get_items_by_state(!trash));
+        if let Some(CipherTargetResolution::Exact(item)) =
+            Self::match_cipher_candidates(&opposite, trimmed)
+        {
+            let msg = if trash {
+                format!(
+                    "Cipher '{}' is not in the trash. Omit --trash to retrieve it from the active vault.",
+                    item.name
+                )
+            } else {
+                format!(
+                    "Cipher '{}' is in the trash. Pass --trash to retrieve it.",
+                    item.name
+                )
+            };
+            return Ok(CipherTargetResolution::NotFound(msg));
+        }
+
+        if trash {
+            Ok(CipherTargetResolution::NotFound(format!(
+                "Cipher '{}' not found in trash.",
+                target
+            )))
+        } else {
+            Ok(CipherTargetResolution::NotFound(format!(
+                "Cipher '{}' not found in vault.",
+                target
+            )))
+        }
+    }
+
     /// Active-scoped resolution for `delete` / `edit` mutations. When the
     /// target is missing from the active vault but present in the Trash,
     /// returns an actionable cross-state diagnostic instead of "not found".
