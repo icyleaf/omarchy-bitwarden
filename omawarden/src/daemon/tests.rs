@@ -130,6 +130,7 @@ fn test_should_touch_activity_classification() {
         "cipher_delete",
         "cipher_resolve",
         "get_item",
+        "vault_get",
         "get_ssh_key",
         "get_attachment_key",
         "copy",
@@ -213,6 +214,37 @@ fn test_handle_client_selective_activity_touch() {
     let search_res = send_req(json!({ "action": "search", "query": "test" }));
     assert!(search_res.is_array());
     assert!(*state.last_activity.lock().unwrap() > past);
+
+    // 7. "ping" advertises Daemon Capabilities without touching activity
+    *state.last_activity.lock().unwrap() = past;
+    let ping_res = send_req(json!({ "action": "ping" }));
+    let caps: Vec<&str> = ping_res["capabilities"]
+        .as_array()
+        .expect("ping must include capabilities array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(caps.contains(&"cipher_mutation_v3"));
+    assert!(caps.contains(&"folder_crud"));
+    assert!(caps.contains(&"login_totp_uri_match"));
+    assert!(caps.contains(&"vault_get"));
+    assert_eq!(*state.last_activity.lock().unwrap(), past);
+
+    // 8. "vault_get" refreshes activity when unlocked
+    *state.last_activity.lock().unwrap() = past;
+    let vg_res = send_req(json!({ "action": "vault_get", "target": "nonexistent" }));
+    assert_eq!(vg_res["ok"], false);
+    assert!(*state.last_activity.lock().unwrap() > past);
+
+    // 9. "vault_get" fails closed when vault is locked
+    *state.vault_mgr.is_unlocked.write().unwrap() = false;
+    let locked_vg = send_req(json!({ "action": "vault_get", "target": "anything" }));
+    assert_eq!(locked_vg["ok"], false);
+    assert!(locked_vg["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("locked"));
 }
 
 #[test]

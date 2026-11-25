@@ -31,8 +31,12 @@ A platform-specific clipboard backend adapter responsible for low-level clipboar
 _Avoid_: Clipboard backend, clipboard wrapper, clipboard helper
 
 **Daemon Protocol**:
-The framed JSON wire interface exposed over the local Unix domain socket by Omawarden, versioned with a monotonically increasing integer (`protocol_version`) to govern compatibility between clients and the resident daemon independently of build commit hashes.
+The framed JSON wire interface exposed over the local Unix domain socket by Omawarden, evolved across three layers: a monotonically increasing integer (`protocol_version`) for breaking wire-framing or transport changes, a per-release-cycle `schema_version` baseline for coarse-grained IPC contract changes, and **Daemon Capabilities** (`ping.capabilities`) for fine-grained additive feature negotiation.
 _Avoid_: Socket API, daemon version, API version
+
+**Daemon Capabilities**:
+The authoritative list of fine-grained local Omawarden Daemon Protocol feature identifiers advertised in the `ping` response (`ping.capabilities`, e.g., `"cipher_mutation_v3"`, `"folder_crud"`, `"login_totp_uri_match"`, `"vault_get"`). Clients use Daemon Capabilities for fail-closed runtime feature gating and standalone daemon auto-restart. Distinct from **Capability Discovery** and the **Server Capability Matrix**, which govern upstream Bitwarden/Vaultwarden server features.
+_Avoid_: Daemon feature flags, ping booleans, server capabilities
 
 **Capability Discovery**:
 The background interrogation of the upstream server's `/api/config` and `/api/version` endpoints during sync and initialization to detect server versions, active feature flags, and API deprecations without blocking core vault operations.
