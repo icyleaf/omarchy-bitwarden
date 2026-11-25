@@ -365,9 +365,11 @@ exit 0
     #[cfg(target_os = "macos")]
     fn test_macos_real_system_pasteboard_changecount() {
         let provider = MacOsClipboardProvider::default();
-        if !provider.is_available() {
-            return;
-        }
+        assert!(
+            provider.is_available(),
+            "MacOsClipboardProvider must be available on macOS: {:?}",
+            provider.unavailable_reason()
+        );
 
         // 1. Initial changeCount
         let initial_count = provider.current_change_count();

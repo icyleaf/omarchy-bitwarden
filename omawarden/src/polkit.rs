@@ -174,6 +174,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(target_os = "linux")]
     fn mock_pkcheck(
         dir: &Path,
         name: &str,
@@ -194,6 +195,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_authorized_on_exit_zero() {
         let dir = tempfile::tempdir().unwrap();
         let bin = mock_pkcheck(dir.path(), "pk-ok", "0", 0);
@@ -238,6 +240,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_denied_on_exit_one() {
         let dir = tempfile::tempdir().unwrap();
         let bin = mock_pkcheck(dir.path(), "pk-deny", "1", 0);
@@ -248,6 +251,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_dismissed_dialog_counts_as_denied() {
         let dir = tempfile::tempdir().unwrap();
         // pkcheck exit 3 = "the authentication dialog was dismissed by the
@@ -260,6 +264,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_unavailable_on_unexpected_exit() {
         let dir = tempfile::tempdir().unwrap();
         // Exit 4+: not authorized for an unspecified reason beyond deny (1)
@@ -282,6 +287,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_unavailable_on_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let bin = mock_pkcheck(dir.path(), "pk-slow", "0", 30);
@@ -293,6 +299,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_custom_action_id_is_forwarded() {
         let dir = tempfile::tempdir().unwrap();
         let bin = mock_pkcheck(dir.path(), "pk-custom", "0", 0);
@@ -316,6 +323,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_process_subject_is_pid_starttime_uid() {
         let subject = process_subject().expect("/proc/self/stat must be parseable on Linux");
         let parts: Vec<&str> = subject.split(',').collect();
@@ -332,6 +340,7 @@ exit {exit_code}
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_check_passes_unambiguous_process_subject() {
         let dir = tempfile::tempdir().unwrap();
         let bin = mock_pkcheck(dir.path(), "pk-subject", "0", 0);

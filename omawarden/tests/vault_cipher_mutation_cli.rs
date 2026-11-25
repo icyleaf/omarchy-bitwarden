@@ -132,7 +132,8 @@ fn make_command(dir: &Path) -> Command {
         .env("PATH", dir)
         .env("XDG_RUNTIME_DIR", dir)
         .env("OMAWARDEN_DATA_DIR", dir)
-        .env("OMAWARDEN_CONFIG_DIR", dir);
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool");
     cmd
 }
 
@@ -5782,7 +5783,8 @@ fn install_wl_copy_stub(dir: &Path) {
 
 fn copy_command(dir: &Path) -> Command {
     let mut cmd = make_command(dir);
-    cmd.env("WAYLAND_DISPLAY", "fixture-wayland");
+    cmd.env("WAYLAND_DISPLAY", "fixture-wayland")
+        .env("OMA_CLIPBOARD_PROVIDER", "wayland");
     cmd
 }
 

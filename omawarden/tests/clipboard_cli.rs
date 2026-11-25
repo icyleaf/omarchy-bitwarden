@@ -45,6 +45,8 @@ impl Clipboard {
             .env("OMAWARDEN_DATA_DIR", dir)
             .env("HOME", dir)
             .env("WAYLAND_DISPLAY", "fixture-wayland")
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland")
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
             .env_remove("WAYLAND_SOCKET")
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))

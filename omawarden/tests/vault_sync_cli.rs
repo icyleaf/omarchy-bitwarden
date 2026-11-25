@@ -186,6 +186,7 @@ fn a_second_daemon_cannot_replace_the_live_login_authority() {
                 .env("XDG_RUNTIME_DIR", runtime)
                 .env("OMAWARDEN_DATA_DIR", root)
                 .env("OMAWARDEN_CONFIG_DIR", root)
+                .env("OMA_KEYRING_PROVIDER", "secret-tool")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -269,7 +270,9 @@ fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
             .env("PATH", root)
             .env("XDG_RUNTIME_DIR", root)
             .env("OMAWARDEN_DATA_DIR", root)
-            .env("OMAWARDEN_CONFIG_DIR", root);
+            .env("OMAWARDEN_CONFIG_DIR", root)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland");
         cmd
     };
     let _daemon = Daemon(
@@ -469,7 +472,9 @@ fn password_login_case(case: LoginCase) {
             .env("PATH", dir.path())
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("OMAWARDEN_DATA_DIR", dir.path())
-            .env("OMAWARDEN_CONFIG_DIR", dir.path());
+            .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland");
         cmd
     };
     let socket = dir.path().join("omawarden.sock");
@@ -837,6 +842,7 @@ fn missing_or_malformed_sync_receipts_never_start_a_local_sync() {
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("OMAWARDEN_DATA_DIR", dir.path())
             .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
             .output()
             .unwrap();
         stop.store(true, Ordering::SeqCst);

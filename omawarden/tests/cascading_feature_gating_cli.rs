@@ -95,6 +95,7 @@ fn test_ssh_key_create_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -131,6 +132,7 @@ fn test_ssh_key_create_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -155,6 +157,7 @@ fn test_ssh_key_create_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -201,6 +204,7 @@ fn test_ssh_key_import_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -237,6 +241,7 @@ fn test_ssh_key_import_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -261,6 +266,7 @@ fn test_ssh_key_import_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -307,6 +313,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "ssh-agent"])
         .output()
         .expect("failed to run ssh-agent");
@@ -336,6 +343,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -363,6 +371,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -384,6 +393,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -405,6 +415,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -426,6 +437,7 @@ fn test_ssh_agent_command_gating_and_override() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -471,6 +483,7 @@ fn test_daemon_ssh_agent_apply_ipc_gating() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "daemon"]);
     let daemon_proc = cmd.spawn().expect("failed to spawn daemon");
     let _guard = ChildGuard(daemon_proc);
@@ -615,6 +628,7 @@ fn run_cli(
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(full_args)
         .output()
         .expect("failed to run omawarden")

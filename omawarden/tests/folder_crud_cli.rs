@@ -112,7 +112,8 @@ fn make_command(dir: &Path) -> Command {
         .env("PATH", dir)
         .env("XDG_RUNTIME_DIR", dir)
         .env("OMAWARDEN_DATA_DIR", dir)
-        .env("OMAWARDEN_CONFIG_DIR", dir);
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool");
     cmd
 }
 

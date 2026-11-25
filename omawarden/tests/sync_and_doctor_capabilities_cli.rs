@@ -164,6 +164,7 @@ fn test_doctor_command_with_enabled_ssh_agent_v2() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -202,6 +203,7 @@ fn test_doctor_command_with_enabled_ssh_agent_v2() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "doctor"])
         .output()
         .expect("Failed to execute omawarden doctor");
@@ -270,6 +272,7 @@ fn test_doctor_command_with_disabled_ssh_agent_v2_outputs_info_and_guidance() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "doctor"])
         .output()
         .expect("Failed to execute omawarden doctor");
@@ -370,6 +373,7 @@ fn test_sync_updates_capabilities_and_is_resilient_to_config_500() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "daemon"]);
     let daemon_proc = cmd.spawn().expect("failed to spawn daemon");
     let _guard = ChildGuard(daemon_proc);
@@ -405,6 +409,7 @@ fn test_sync_updates_capabilities_and_is_resilient_to_config_500() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "vault", "sync"])
         .output()
         .expect("Failed to sync");
@@ -496,6 +501,7 @@ fn test_sync_updates_capabilities_on_http_200() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "daemon"]);
     let daemon_proc = cmd.spawn().expect("failed to spawn daemon");
     let _guard = ChildGuard(daemon_proc);
@@ -531,6 +537,7 @@ fn test_sync_updates_capabilities_on_http_200() {
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(["--config", config_path.to_str().unwrap(), "vault", "sync"])
         .output()
         .expect("Failed to sync");
@@ -657,6 +664,7 @@ fn run_doctor(dir: &std::path::Path, config_path: &std::path::Path, json: bool) 
         .env("OMAWARDEN_DATA_DIR", dir)
         .env("OMAWARDEN_CONFIG_DIR", dir)
         .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
         .args(args)
         .output()
         .expect("Failed to execute omawarden doctor");

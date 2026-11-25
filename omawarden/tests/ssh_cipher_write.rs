@@ -125,7 +125,8 @@ store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1))
             .env("PATH", dir)
             .env("XDG_RUNTIME_DIR", dir)
             .env("OMAWARDEN_DATA_DIR", dir)
-            .env("OMAWARDEN_CONFIG_DIR", dir);
+            .env("OMAWARDEN_CONFIG_DIR", dir)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool");
         cmd
     };
     let _daemon = Daemon(

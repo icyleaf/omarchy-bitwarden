@@ -1864,6 +1864,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn find_app_walks_past_shells_to_the_launching_program() {
         // Spawns `sh`, which tests that change $PATH would hide.
         let _lock = crate::env_lock();
@@ -3063,6 +3064,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn peers_are_identified_from_proc() {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let me = Peer::of(&ours);
@@ -3105,18 +3107,21 @@ mod tests {
         );
 
         // An ssh run by a program that isn't a shell names that program.
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "sleep 5; true"])
-            .spawn()
-            .unwrap();
-        let sh = child.id() as i32;
-        let sleep = eventually_child(sh);
-        let mut ssh = Peer::from_pid(sleep);
-        ssh.comm = "ssh".into();
-        let shell = ssh.describe();
-        let _ = child.kill();
-        let _ = child.wait();
-        assert_eq!(shell, "ssh", "run from a shell: just ssh");
+        #[cfg(target_os = "linux")]
+        {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 5; true"])
+                .spawn()
+                .unwrap();
+            let sh = child.id() as i32;
+            let sleep = eventually_child(sh);
+            let mut ssh = Peer::from_pid(sleep);
+            ssh.comm = "ssh".into();
+            let shell = ssh.describe();
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(shell, "ssh", "run from a shell: just ssh");
+        }
 
         let me = Peer::from_pid(std::process::id() as i32);
         let mut under_runner = Peer {
@@ -3131,6 +3136,7 @@ mod tests {
     }
 
     /// The first child of `parent`, once it has started.
+    #[cfg(target_os = "linux")]
     fn eventually_child(parent: i32) -> i32 {
         (0..100)
             .find_map(|_| {
