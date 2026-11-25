@@ -30,8 +30,7 @@ fn ipc(socket: &Path, request: Value) -> Value {
         match UnixStream::connect(socket) {
             Ok(s) => break s,
             Err(e)
-                if e.kind() == ErrorKind::ConnectionRefused
-                    || e.kind() == ErrorKind::NotFound =>
+                if e.kind() == ErrorKind::ConnectionRefused || e.kind() == ErrorKind::NotFound =>
             {
                 assert!(
                     Instant::now() < deadline,
@@ -402,7 +401,10 @@ fn vault_get_ambiguity_type_filter_and_trash_hints() {
         String::from_utf8_lossy(&narrow.stderr)
     );
     let narrow_val: Value = serde_json::from_slice(&narrow.stdout).unwrap();
-    assert_eq!(narrow_val["item"]["id"], "77777777-7777-7777-7777-777777777777");
+    assert_eq!(
+        narrow_val["item"]["id"],
+        "77777777-7777-7777-7777-777777777777"
+    );
 
     // Active lookup for trashed item gives cross-state --trash hint
     let trashed_miss = env.cli(&["vault", "get", "Archived Login"]);
@@ -421,7 +423,10 @@ fn vault_get_ambiguity_type_filter_and_trash_hints() {
         String::from_utf8_lossy(&trashed_hit.stderr)
     );
     let hit_val: Value = serde_json::from_slice(&trashed_hit.stdout).unwrap();
-    assert_eq!(hit_val["item"]["id"], "88888888-8888-8888-8888-888888888888");
+    assert_eq!(
+        hit_val["item"]["id"],
+        "88888888-8888-8888-8888-888888888888"
+    );
 
     // --trash for an active item gives cross-state active hint
     let active_in_trash = env.cli(&["vault", "get", "GitHub Production", "--trash"]);
@@ -632,7 +637,13 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
     let env = TestVaultEnv::new();
 
     // Mutually exclusive selector flags fail
-    let conflict = env.cli(&["vault", "get", "GitHub Production", "--password", "--username"]);
+    let conflict = env.cli(&[
+        "vault",
+        "get",
+        "GitHub Production",
+        "--password",
+        "--username",
+    ]);
     assert!(!conflict.status.success());
     let conflict2 = env.cli(&[
         "vault",
@@ -647,7 +658,10 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
     // Shorthand flags
     let pw = env.cli(&["vault", "get", "GitHub Production", "--password"]);
     assert!(pw.status.success());
-    assert_eq!(String::from_utf8_lossy(&pw.stdout), "super-secret-login-pw\n");
+    assert_eq!(
+        String::from_utf8_lossy(&pw.stdout),
+        "super-secret-login-pw\n"
+    );
 
     let user = env.cli(&["vault", "get", "GitHub Production", "--username"]);
     assert!(user.status.success());
@@ -655,11 +669,17 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
 
     let uri = env.cli(&["vault", "get", "GitHub Production", "--uri"]);
     assert!(uri.status.success());
-    assert_eq!(String::from_utf8_lossy(&uri.stdout), "https://github.com/login\n");
+    assert_eq!(
+        String::from_utf8_lossy(&uri.stdout),
+        "https://github.com/login\n"
+    );
 
     let notes = env.cli(&["vault", "get", "GitHub Production", "--notes"]);
     assert!(notes.status.success());
-    assert_eq!(String::from_utf8_lossy(&notes.stdout), "Login operational notes\n");
+    assert_eq!(
+        String::from_utf8_lossy(&notes.stdout),
+        "Login operational notes\n"
+    );
 
     // Live TOTP (text + --json with ttl & period)
     let totp_txt = env.cli(&["vault", "get", "GitHub Production", "--totp"]);
@@ -681,7 +701,10 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
     // Raw totp_secret
     let secret = env.cli(&["vault", "get", "GitHub Production", "-f", "totp-secret"]);
     assert!(secret.status.success());
-    assert_eq!(String::from_utf8_lossy(&secret.stdout), "JBSWY3DPEHPK3PXP\n");
+    assert_eq!(
+        String::from_utf8_lossy(&secret.stdout),
+        "JBSWY3DPEHPK3PXP\n"
+    );
 
     // Multi-valued uris (text: one per line; --json: structured { uri, match } array)
     let uris_txt = env.cli(&["vault", "get", "GitHub Production", "-f", "uris"]);
@@ -720,7 +743,10 @@ fn vault_get_login_common_shorthand_and_custom_field_selectors() {
             "selector {sel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{expected}\n")
+        );
     }
 
     // Custom field collision: built-in `password` wins; `custom.password` forces custom field
@@ -801,7 +827,10 @@ fn vault_get_note_card_identity_and_ssh_key_selectors() {
             "card selector {sel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{expected}\n")
+        );
     }
 
     // Identity (all 18 fields + hyphen normalization)
@@ -831,7 +860,10 @@ fn vault_get_note_card_identity_and_ssh_key_selectors() {
             "identity selector {sel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{expected}\n")
+        );
     }
 
     // SSH Key (ssh.* and short aliases, plus single trailing newline on PEM ending in \n)
@@ -841,7 +873,10 @@ fn vault_get_note_card_identity_and_ssh_key_selectors() {
         let out = env.cli(&["vault", "get", "Prod Bastion Key", "-f", sel]);
         assert!(out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout, expected_pem, "must not double-append newline on PEM");
+        assert_eq!(
+            stdout, expected_pem,
+            "must not double-append newline on PEM"
+        );
     }
     for (sel, expected) in [
         (
@@ -863,6 +898,225 @@ fn vault_get_note_card_identity_and_ssh_key_selectors() {
             "ssh selector {sel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{expected}\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{expected}\n")
+        );
     }
+}
+
+#[cfg(unix)]
+fn run_cli_in_pty(env: &TestVaultEnv, args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    use std::ffi::CStr;
+    use std::io::Read;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+
+    let dir = env.temp.path();
+
+    // Create a real kernel PTY pair via POSIX openpt/grantpt/unlockpt/ptsname
+    let (master_file, slave_file) = unsafe {
+        let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master_fd >= 0, "posix_openpt failed");
+        assert_eq!(libc::grantpt(master_fd), 0, "grantpt failed");
+        assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt failed");
+        let name_ptr = libc::ptsname(master_fd);
+        assert!(!name_ptr.is_null(), "ptsname failed");
+        let slave_name = CStr::from_ptr(name_ptr).to_str().unwrap().to_string();
+        let slave = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&slave_name)
+            .expect("open PTY slave");
+        (fs::File::from_raw_fd(master_fd), slave)
+    };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        .args(args)
+        .env_clear()
+        .env("HOME", dir)
+        .env("PATH", dir)
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave_file))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Drain PTY master concurrently so the child never blocks on a full PTY buffer
+    let master_fd_raw = master_file.into_raw_fd();
+    let reader_handle = thread::spawn(move || {
+        let mut f = unsafe { fs::File::from_raw_fd(master_fd_raw) };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match f.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).replace("\r\n", "\n")
+    });
+
+    let mut stderr_buf = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr_buf);
+    }
+    let status = child.wait().unwrap();
+    let stdout_str = reader_handle.join().unwrap();
+    (status, stdout_str, stderr_buf)
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_get_tty_safety_guard_redaction_and_reveal() {
+    let env = TestVaultEnv::new();
+    let expected_hint =
+        "Pass --reveal to display in a terminal, pipe stdout, or use 'omawarden copy'";
+
+    // 1. Summary card on TTY redacts sensitive fields by default
+    let (status, stdout, stderr) = run_cli_in_pty(&env, &["vault", "get", "GitHub Production"]);
+    assert!(status.success(), "stderr: {stderr}");
+    assert!(stdout.contains("octocat"));
+    assert!(stdout.contains("Login operational notes"));
+    assert!(stdout.contains("production"));
+    assert!(stdout.contains("••••••••"));
+    assert!(!stdout.contains("super-secret-login-pw"));
+    assert!(!stdout.contains("hidden-api-token-999"));
+
+    // Summary card on Secure Note redacts notes on TTY
+    let (status, stdout, _) = run_cli_in_pty(&env, &["vault", "get", "Recovery Codes"]);
+    assert!(status.success());
+    assert!(stdout.contains("••••••••"));
+    assert!(!stdout.contains("recovery-code-alpha-beta"));
+
+    // 2. Summary card on TTY with --reveal displays unredacted secrets
+    let (status, stdout, stderr) =
+        run_cli_in_pty(&env, &["vault", "get", "GitHub Production", "--reveal"]);
+    assert!(status.success(), "stderr: {stderr}");
+    assert!(stdout.contains("super-secret-login-pw"));
+    assert!(stdout.contains("hidden-api-token-999"));
+
+    let (status, stdout, _) = run_cli_in_pty(&env, &["vault", "get", "Recovery Codes", "--reveal"]);
+    assert!(status.success());
+    assert!(stdout.contains("recovery-code-alpha-beta"));
+
+    // 3. Sensitive single fields refuse on TTY without --reveal
+    for (target, flag_args) in [
+        ("GitHub Production", vec!["--password"]),
+        ("GitHub Production", vec!["--totp"]),
+        ("GitHub Production", vec!["-f", "totp_secret"]),
+        ("GitHub Production", vec!["-f", "api secret"]),
+        ("Recovery Codes", vec!["--notes"]),
+        ("Corporate Visa", vec!["-f", "card.number"]),
+        ("Corporate Visa", vec!["-f", "card.code"]),
+        ("Alice Identity", vec!["-f", "identity.ssn"]),
+        ("Alice Identity", vec!["-f", "identity.passport_number"]),
+        ("Alice Identity", vec!["-f", "identity.license_number"]),
+        ("Prod Bastion Key", vec!["-f", "ssh.private_key"]),
+        ("Prod Bastion Key", vec!["-f", "ssh.passphrase"]),
+    ] {
+        let mut args = vec!["vault", "get", target];
+        args.extend(flag_args.iter().copied());
+        let (status, stdout, stderr) = run_cli_in_pty(&env, &args);
+        assert!(
+            !status.success(),
+            "expected TTY refusal for {:?}, stdout={stdout}",
+            args
+        );
+        assert!(
+            stdout.is_empty(),
+            "TTY refusal must not leak secret on stdout for {:?}",
+            args
+        );
+        assert!(
+            stderr.contains(expected_hint),
+            "expected TTY hint in stderr for {:?}, got: {stderr}",
+            args
+        );
+    }
+
+    // 4. Sensitive single fields succeed on TTY with --reveal
+    let (status, stdout, _) = run_cli_in_pty(
+        &env,
+        &[
+            "vault",
+            "get",
+            "GitHub Production",
+            "--password",
+            "--reveal",
+        ],
+    );
+    assert!(status.success());
+    assert_eq!(stdout, "super-secret-login-pw\n");
+
+    let (status, stdout, _) = run_cli_in_pty(
+        &env,
+        &["vault", "get", "Recovery Codes", "--notes", "--reveal"],
+    );
+    assert!(status.success());
+    assert_eq!(stdout, "recovery-code-alpha-beta\n");
+
+    // 5. Non-sensitive single fields succeed on TTY WITHOUT --reveal
+    for (target, flag_args, expected) in [
+        ("GitHub Production", vec!["--username"], "octocat\n"),
+        (
+            "GitHub Production",
+            vec!["--notes"],
+            "Login operational notes\n",
+        ),
+        (
+            "GitHub Production",
+            vec!["-f", "environment"],
+            "production\n",
+        ),
+        ("Corporate Visa", vec!["-f", "card.brand"], "Visa\n"),
+        ("Corporate Visa", vec!["--notes"], "Card billing note\n"),
+        (
+            "Alice Identity",
+            vec!["-f", "identity.email"],
+            "alice@example.com\n",
+        ),
+        ("Alice Identity", vec!["--notes"], "Identity note\n"),
+        (
+            "Prod Bastion Key",
+            vec!["-f", "ssh.fingerprint"],
+            "SHA256:FakeFingerprint123456\n",
+        ),
+        ("Prod Bastion Key", vec!["--notes"], "Bastion SSH note\n"),
+    ] {
+        let mut args = vec!["vault", "get", target];
+        args.extend(flag_args.iter().copied());
+        let (status, stdout, stderr) = run_cli_in_pty(&env, &args);
+        assert!(
+            status.success(),
+            "non-sensitive {:?} should succeed on TTY, stderr: {stderr}",
+            args
+        );
+        assert_eq!(stdout, expected);
+    }
+
+    // 6. --json refuses on TTY without --reveal, succeeds with --reveal
+    let (status, stdout, _) =
+        run_cli_in_pty(&env, &["vault", "get", "GitHub Production", "--json"]);
+    assert!(!status.success());
+    let refused: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains(expected_hint));
+
+    let (status, stdout, stderr) = run_cli_in_pty(
+        &env,
+        &["vault", "get", "GitHub Production", "--json", "--reveal"],
+    );
+    assert!(status.success(), "stderr: {stderr}");
+    let revealed: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(revealed["ok"], true);
+    assert_eq!(revealed["item"]["name"], "GitHub Production");
 }

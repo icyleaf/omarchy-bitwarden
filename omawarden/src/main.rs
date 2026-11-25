@@ -676,6 +676,11 @@ enum VaultAction {
         trash: bool,
         #[arg(long, help = "Output structured JSON")]
         json: bool,
+        #[arg(
+            long,
+            help = "Reveal sensitive fields or JSON output in an interactive terminal"
+        )]
+        reveal: bool,
     },
     #[command(about = "Create a new vault cipher")]
     Create {
@@ -2475,6 +2480,7 @@ fn main() -> ExitCode {
                     cipher_type,
                     trash,
                     json: json_mode,
+                    reveal,
                 } => {
                     let selector = if let Some(f) = field {
                         Some(f)
@@ -2491,13 +2497,14 @@ fn main() -> ExitCode {
                     } else {
                         None
                     };
-                    return handle_vault_get(
+                    handle_vault_get(
                         &target,
                         selector.as_deref(),
                         cipher_type.as_deref(),
                         trash,
                         json_mode,
-                    );
+                        reveal,
+                    )
                 }
                 VaultAction::Create {
                     item,
@@ -5094,10 +5101,10 @@ fn render_vault_get_summary_card(item: &VaultItem, redact_sensitive: bool) -> St
                 if let Some(ref pk) = ssh.public_key.as_deref().filter(|s| !s.is_empty()) {
                     lines.push(format!("Public:   {pk}"));
                 }
-                if let Some(ref privk) = ssh.private_key.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(privk) = ssh.private_key.as_deref().filter(|s| !s.is_empty()) {
                     lines.push(format!("Private:  {}", mask(privk, true)));
                 }
-                if let Some(ref pp) = ssh.passphrase.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(pp) = ssh.passphrase.as_deref().filter(|s| !s.is_empty()) {
                     lines.push(format!("Passphr:  {}", mask(pp, true)));
                 }
             }
@@ -5105,7 +5112,7 @@ fn render_vault_get_summary_card(item: &VaultItem, redact_sensitive: bool) -> St
         _ => {}
     }
 
-    if let Some(ref notes) = item.notes.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(notes) = item.notes.as_deref().filter(|s| !s.is_empty()) {
         let sensitive_notes = item.item_type == 2;
         lines.push(format!("Notes:    {}", mask(notes, sensitive_notes)));
     }
@@ -5480,8 +5487,16 @@ fn handle_vault_get(
     cipher_type: Option<&str>,
     trash: bool,
     json_mode: bool,
+    reveal: bool,
 ) -> ExitCode {
     use omawarden::daemon::{dispatch_daemon_request, DispatchError};
+
+    const TTY_REVEAL_HINT: &str = "Refusing to print sensitive output to an interactive terminal. Pass --reveal to display in a terminal, pipe stdout, or use 'omawarden copy'.";
+    let stdout_is_tty = std::io::stdout().is_terminal();
+
+    if json_mode && stdout_is_tty && !reveal {
+        return emit_vault_get_error(true, TTY_REVEAL_HINT, None);
+    }
 
     let ping = match ensure_daemon_capability("vault_get") {
         Ok(p) => p,
@@ -5544,6 +5559,9 @@ fn handle_vault_get(
             Ok(r) => r,
             Err(err) => return emit_vault_get_error(json_mode, &err, None),
         };
+        if resolved.sensitive && stdout_is_tty && !reveal {
+            return emit_vault_get_error(json_mode, TTY_REVEAL_HINT, None);
+        }
         if json_mode {
             let mut env = json!({
                 "ok": true,
@@ -5577,7 +5595,10 @@ fn handle_vault_get(
             .unwrap()
         );
     } else {
-        println!("{}", render_vault_get_summary_card(&item, false));
+        println!(
+            "{}",
+            render_vault_get_summary_card(&item, stdout_is_tty && !reveal)
+        );
     }
     ExitCode::SUCCESS
 }
