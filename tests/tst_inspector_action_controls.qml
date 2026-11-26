@@ -119,9 +119,12 @@ Item {
       // 2. Delete uses the widely available FA4 trash glyph.
       var deleteButton = findChildByName(inspector, "deleteButton")
       var editButton = findChildByName(inspector, "editButton")
+      var shareButton = findChildByName(inspector, "shareButton")
+      check(shareButton !== null && shareButton.visible === true,
+            "shareButton is visible on personal non-trashed Cipher")
       // Permission-aware Inspector controls on read-only Organization Cipher:
       // Favorite stays enabled; Edit & Delete remain visible for layout stability
-      // but render visually disabled.
+      // but render visually disabled; Share is hidden on Organization Ciphers.
       inspector.item = {
         id: "org-ro-1",
         name: "Shared Corp",
@@ -137,6 +140,8 @@ Item {
         fields: [],
         attachments: []
       }
+      check(shareButton && shareButton.visible === false,
+            "shareButton is hidden on Organization-owned Cipher")
       check(favoriteButton && favoriteButton.visible && favoriteButton.enabled === true,
             "favoriteButton stays visible and enabled on read-only Organization Cipher")
       check(editButton && editButton.visible && editButton.enabled === false,

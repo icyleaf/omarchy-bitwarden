@@ -37,6 +37,7 @@ ScrollView {
   signal exportSshKeyRequested(var item)
   signal editRequested(var item)
   signal favoriteToggled(var item)
+  signal shareRequested(var item)
   signal deleteRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
@@ -638,6 +639,17 @@ ScrollView {
           tooltip: enabled ? "Edit item (Ctrl+E)" : (CipherMutation.editGuardError(inspectorRoot.item) || "Edit unavailable")
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.editRequested(inspectorRoot.item)
+        }
+
+        GhostIconButton {
+          objectName: "shareButton"
+          visible: Boolean(inspectorRoot.item && CipherMutation.canShare(inspectorRoot.item))
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf1e0"
+          iconColor: inspectorRoot.accent
+          tooltip: "Share to Organization"
+          fontFamily: inspectorRoot.fontFamily
+          onClicked: inspectorRoot.shareRequested(inspectorRoot.item)
         }
 
         GhostIconButton {

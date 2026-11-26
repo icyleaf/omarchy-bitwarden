@@ -360,15 +360,17 @@ Item {
   // Set after a successful create/edit so the reloaded list can select the row.
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
+  property bool showShareCipherModal: false
   property bool showFolderManagerModal: false
   property var vaultFolders: []
   property var vaultOrganizations: []
   property var vaultCollections: []
   property var deleteCipherItem: null
+  property var shareCipherItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
   // shortcuts are suspended while a draft is being edited.
-  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showFolderManagerModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showShareCipherModal || root.showFolderManagerModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -479,14 +481,20 @@ Item {
     }
 
     root.showDeleteCipherModal = false
+    root.showShareCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
+    root.shareCipherItem = null
     if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
     if (cipherDeleteProc.running) {
       cipherDeleteProc.running = false
+      root.isBusy = false
+    }
+    if (cipherShareProc.running) {
+      cipherShareProc.running = false
       root.isBusy = false
     }
 
@@ -576,11 +584,13 @@ Item {
       root.cipherEditorEditItem = null
       root.pendingSelectItemId = ""
       root.showDeleteCipherModal = false
+      root.showShareCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
     root.vaultCollections = []
       root.deleteCipherItem = null
+      root.shareCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
       root.showCardNumberRevealed = false
@@ -658,11 +668,13 @@ Item {
     root.cipherEditorEditItem = null
     root.pendingSelectItemId = ""
     root.showDeleteCipherModal = false
+    root.showShareCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
+    root.shareCipherItem = null
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1321,6 +1333,11 @@ Item {
       root.restoreSearchFocus()
     }
   }
+  onShowShareCipherModalChanged: {
+    if (!root.showShareCipherModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
   onShowFolderManagerModalChanged: {
     if (!root.showFolderManagerModal && !root.hasActiveModal) {
       root.restoreSearchFocus()
@@ -1412,7 +1429,25 @@ Item {
     root.showPasswordGeneratorModal = false
     root.showCipherEditor = false
     root.cipherEditorEditItem = null
+    root.showShareCipherModal = false
+    root.shareCipherItem = null
     root.showDeleteCipherModal = true
+  }
+
+  function openShareCipherModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item) return
+    if (!CipherMutation.canShare(item)) return
+    root.shareCipherItem = item
+    root.showActionPalette = false
+    root.showTypePicker = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherEditor = false
+    root.cipherEditorEditItem = null
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+    root.showShareCipherModal = true
   }
 
   // Applies the optimistic favorite flag to both the raw list and the visible
@@ -1578,6 +1613,66 @@ Item {
     if (deleteCipherModalComponent) {
       deleteCipherModalComponent.isBusy = false
       deleteCipherModalComponent.errorMessage = message
+    } else {
+      root.errorMessage = message
+    }
+  }
+
+  function submitCipherShare(organizationId, collectionIds) {
+    var item = root.shareCipherItem
+    if (!item || !item.id || cipherShareProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!organizationId || !collectionIds || collectionIds.length === 0) return
+    root.isBusy = true
+    if (shareCipherModalComponent) {
+      shareCipherModalComponent.isBusy = true
+      shareCipherModalComponent.errorMessage = ""
+    }
+    cipherShareProc.revision = root.vaultRevision
+    cipherShareProc.errorReported = false
+    cipherShareProc.lastStderr = ""
+    cipherShareProc.itemId = item.id
+    cipherShareProc.itemName = item.name || ""
+    cipherShareProc.organizationId = organizationId
+    var cmd = [root.helperPath, "vault", "share", item.id, "--organization-id", organizationId]
+    for (var i = 0; i < collectionIds.length; i++) {
+      cmd.push("--collection-id")
+      cmd.push(String(collectionIds[i]))
+    }
+    cmd.push("--yes")
+    cmd.push("--json")
+    cipherShareProc.command = cmd
+    cipherShareProc.running = true
+  }
+
+  function handleCipherShareSuccess(data) {
+    root.isBusy = false
+    if (shareCipherModalComponent) shareCipherModalComponent.isBusy = false
+    root.showShareCipherModal = false
+    root.shareCipherItem = null
+
+    var name = cipherShareProc.itemName
+    var sharedId = (data && data.item && data.item.id) ? data.item.id : cipherShareProc.itemId
+    root.pendingSelectItemId = sharedId || ""
+    if (data && data.outcome === "shared_needs_sync") {
+      root.statusMessage = "Cipher '" + name + "' shared to Organization. Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = "Cipher '" + name + "' shared to Organization."
+    if (root.activeVaultScope === "personal") {
+      root.activeVaultScope = "all"
+    }
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function handleCipherShareFailure(message) {
+    root.isBusy = false
+    if (shareCipherModalComponent) {
+      shareCipherModalComponent.isBusy = false
+      shareCipherModalComponent.errorMessage = message
     } else {
       root.errorMessage = message
     }
@@ -2174,6 +2269,15 @@ Item {
         icon: "\uf1f8",
         shortcut: "Ctrl+D",
         action: function() { root.openDeleteCipherModal(item) }
+      })
+    }
+
+    if (CipherMutation.canShare(item)) {
+      actions.push({
+        label: "Share to Organization",
+        icon: "\uf1e0",
+        shortcut: "",
+        action: function() { root.openShareCipherModal(item) }
       })
     }
 
@@ -2889,6 +2993,11 @@ Item {
           } else if (root.showFolderManagerModal) {
             if (folderManagerModalComponent) folderManagerModalComponent.requestClose()
             else root.showFolderManagerModal = false
+          } else if (root.showShareCipherModal) {
+            if (!shareCipherModalComponent || !shareCipherModalComponent.isBusy) {
+              root.showShareCipherModal = false
+              root.shareCipherItem = null
+            }
           } else if (root.showDeleteCipherModal) {
             if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
               root.showDeleteCipherModal = false
@@ -2958,6 +3067,16 @@ Item {
           if (event.key === Qt.Key_Escape) {
             if (folderManagerModalComponent) folderManagerModalComponent.requestClose()
             else root.showFolderManagerModal = false
+            event.accepted = true
+          }
+          return
+        }
+        if (root.showShareCipherModal) {
+          if (event.key === Qt.Key_Escape) {
+            if (!shareCipherModalComponent || !shareCipherModalComponent.isBusy) {
+              root.showShareCipherModal = false
+              root.shareCipherItem = null
+            }
             event.accepted = true
           }
           return
@@ -3237,6 +3356,7 @@ Item {
                 onEditRequested: function(item) { root.openCipherEditModal(item) }
                 onFavoriteToggled: function(item) { root.toggleCipherFavorite(item) }
                 onDeleteRequested: function(item) { root.openDeleteCipherModal(item) }
+                onShareRequested: function(item) { root.openShareCipherModal(item) }
                 onClosePreviewRequested: {
                   var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
                   root.activeAttachmentPreview = null
@@ -3594,6 +3714,28 @@ Item {
           if (!deleteCipherModalComponent.isBusy) {
             root.showDeleteCipherModal = false
             root.deleteCipherItem = null
+          }
+        }
+      }
+
+      // 10b. Share Cipher modal for personal-to-Organization ownership transfer.
+      ShareCipherModal {
+        id: shareCipherModalComponent
+        active: root.showShareCipherModal
+        itemName: root.shareCipherItem ? (root.shareCipherItem.name || "Untitled") : ""
+        organizations: root.vaultOrganizations
+        collections: root.vaultCollections
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onConfirmRequested: function(orgId, colIds) { root.submitCipherShare(orgId, colIds) }
+        onCloseRequested: {
+          if (!shareCipherModalComponent.isBusy) {
+            root.showShareCipherModal = false
+            root.shareCipherItem = null
           }
         }
       }
@@ -4026,6 +4168,64 @@ Item {
       if (cipherDeleteProc.revision !== root.vaultRevision) return
       if (code !== 0) {
         root.handleCipherDeleteFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+  Process {
+    id: cipherShareProc
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property string organizationId: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherShareProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showShareCipherModal = false
+          root.shareCipherItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherShareProc.errorReported = true
+          root.handleCipherShareSuccess(data)
+          return
+        }
+        cipherShareProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherShareProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Failed to share cipher to Organization."
+        root.handleCipherShareFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var cleaned = (text || "").trim()
+        cipherShareProc.lastStderr = cleaned
+        root.handleProcessStderr(text, "omawarden:vault")
+        if (cleaned && cipherShareProc.revision === root.vaultRevision) {
+          var sanitized = cleaned.replace(/^Error:\s*/i, "")
+          if (sanitized && shareCipherModalComponent && !shareCipherModalComponent.errorMessage && !cipherShareProc.errorReported) {
+            shareCipherModalComponent.errorMessage = sanitized
+          }
+        }
+      }
+    }
+    onExited: function(code) {
+      if (cipherShareProc.errorReported) return
+      if (cipherShareProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherShareFailure("Process exited with error code " + code)
       }
     }
   }

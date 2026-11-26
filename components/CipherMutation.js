@@ -64,6 +64,13 @@ function canDelete(item) {
   return Boolean(item.can_delete)
 }
 
+function canShare(item) {
+  if (!isMutableType(item)) return false
+  if (isOrganizationOwned(item)) return false
+  if (item.deleted_at) return false
+  return true
+}
+
 function deleteGuardError(item) {
   if (!isMutableType(item)) return ""
   if (!isOrganizationOwned(item)) return ""

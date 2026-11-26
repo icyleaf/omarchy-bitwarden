@@ -16,6 +16,7 @@ ReleaseNotesModal 1.0 ReleaseNotesModal.qml
 ScopeDropdown 1.0 ScopeDropdown.qml
 SearchHeader 1.0 SearchHeader.qml
 SettingsModal 1.0 SettingsModal.qml
+ShareCipherModal 1.0 ShareCipherModal.qml
 SshApprovalModal 1.0 SshApprovalModal.qml
 SshKeyModal 1.0 SshKeyModal.qml
 ToastAlert 1.0 ToastAlert.qml

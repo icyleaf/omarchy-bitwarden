@@ -1770,6 +1770,464 @@ impl VaultManager {
         .ok()?;
         Some(())
     }
+
+    pub(crate) fn share_cipher(
+        &self,
+        request: Value,
+        context: Option<&ClientContext>,
+    ) -> Result<Value, WriteError> {
+        let generation = self.lock_generation();
+        let storage = self
+            .storage_mgr
+            .load_existing()
+            .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
+
+        let inner = request.get("mutation").unwrap_or(&request);
+        let org_id = inner
+            .get("organization_id")
+            .or_else(|| inner.get("organizationId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                WriteError::Rejected("Target Organization ID is required to share a cipher.".into())
+            })?;
+
+        let mut collection_ids: Vec<String> = Vec::new();
+        for key in ["collection_ids", "collectionIds"] {
+            if let Some(arr) = inner.get(key).and_then(Value::as_array) {
+                for v in arr {
+                    if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !collection_ids.iter().any(|c| c == s) {
+                            collection_ids.push(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for key in ["collection_id", "collectionId"] {
+            if let Some(s) = inner
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if !collection_ids.iter().any(|c| c == s) {
+                    collection_ids.push(s.to_string());
+                }
+            }
+        }
+
+        let (target_id, target_name, mut payload) = {
+            let unlocked = self
+                .is_unlocked
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            let active = self
+                .storage
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            if !*unlocked
+                || generation != self.lock_generation()
+                || !active.same_active_slot(&storage)
+            {
+                return Err(WriteError::Rejected("Vault session changed.".into()));
+            }
+            drop(active);
+
+            let raw_target = inner
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    inner
+                        .get("target")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                })
+                .ok_or_else(|| WriteError::Rejected("Missing cipher target.".into()))?;
+
+            let resolved_item = match self.resolve_cipher_target(raw_target) {
+                Ok(item) => item,
+                Err(err) => {
+                    if self
+                        .resolve_cipher_target_by_state(raw_target, true)
+                        .is_ok()
+                    {
+                        return Err(WriteError::Rejected(
+                            "Cannot share a cipher that is in Trash. Restore it first.".into(),
+                        ));
+                    }
+                    return Err(WriteError::Rejected(err));
+                }
+            };
+
+            let cipher_in_storage = storage
+                .ciphers
+                .iter()
+                .find(|c| c["id"] == resolved_item.id)
+                .cloned()
+                .ok_or_else(|| WriteError::Rejected("Cipher not found in local cache.".into()))?;
+
+            if resolved_item
+                .deleted_at
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+                || cipher_in_storage
+                    .get("deletedDate")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            {
+                return Err(WriteError::Rejected(
+                    "Cannot share a cipher that is in Trash. Restore it first.".into(),
+                ));
+            }
+
+            let existing_org_id = resolved_item
+                .organization_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    cipher_in_storage["organizationId"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                });
+            if existing_org_id.is_some() {
+                return Err(WriteError::Rejected(
+                    "Cipher already belongs to an Organization and cannot be shared again.".into(),
+                ));
+            }
+
+            validate_writable_collections(&storage, &org_id, &collection_ids)?;
+
+            let key_guard = self
+                .user_key
+                .read()
+                .map_err(|_| "Vault key unavailable".to_string())?;
+            let user_key = key_guard
+                .as_ref()
+                .ok_or_else(|| "Vault is locked".to_string())?;
+            let org_key = resolve_org_key(&storage, user_key, &org_id)?;
+
+            // Fail-closed Attachment guards before any cryptographic rewrite or HTTP call.
+            let attachments = cipher_in_storage
+                .get("attachments")
+                .and_then(Value::as_array);
+            let has_attachments = attachments.is_some_and(|arr| !arr.is_empty());
+            let existing_cipher_key_enc = cipher_in_storage
+                .get("key")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+
+            if existing_cipher_key_enc.is_none() && has_attachments {
+                return Err(WriteError::Rejected(
+                    "Cannot share a legacy cipher (without a per-cipher key) that has attachments. Remove or re-upload attachments before sharing."
+                        .into(),
+                ));
+            }
+            if let Some(arr) = attachments {
+                for att in arr {
+                    let has_att_key = att
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .is_some();
+                    if !has_att_key {
+                        return Err(WriteError::Rejected(
+                            "Cannot share a cipher with legacy unkeyed attachments (attachment.key is null). Re-upload attachments before sharing."
+                                .into(),
+                        ));
+                    }
+                }
+            }
+
+            let mut payload = cipher_in_storage;
+            if let Some(ref enc_k) = existing_cipher_key_enc {
+                // Modern personal Cipher: unwrap cipher.key under user_key and re-wrap in place
+                // under org_key, preserving field ciphertexts and modern keyed attachments.
+                let parsed_k = EncString::parse(enc_k)
+                    .map_err(|_| WriteError::Rejected("Malformed personal cipher key.".into()))?;
+                let raw_k = Zeroizing::new(parsed_k.decrypt(user_key).map_err(|_| {
+                    WriteError::Rejected(
+                        "Could not decrypt personal cipher key under user key.".into(),
+                    )
+                })?);
+                if parse_symmetric_key_from_decrypted_bytes(&raw_k).is_none() {
+                    return Err(WriteError::Rejected(
+                        "Invalid decrypted personal cipher key length.".into(),
+                    ));
+                }
+                let rewrapped_k = org_key.encrypt(raw_k.as_slice()).map_err(|_| {
+                    WriteError::Rejected("Could not wrap cipher key under Organization key.".into())
+                })?;
+                payload["key"] = json!(rewrapped_k);
+            } else {
+                // Legacy personal Cipher (cipher.key == null, zero attachments): decrypt every
+                // encrypted field under user_key, generate a fresh 64-byte cipher_key wrapped
+                // under org_key, and re-encrypt all fields under cipher_key.
+                let (cipher_key, raw_cipher_key) = generate_random_cipher_key()?;
+                let wrapped_k = org_key.encrypt(raw_cipher_key.as_slice()).map_err(|_| {
+                    WriteError::Rejected("Could not wrap Organization cipher key.".into())
+                })?;
+                reencrypt_legacy_cipher_fields(&mut payload, user_key, &cipher_key)?;
+                payload["key"] = json!(wrapped_k);
+            }
+
+            payload["organizationId"] = json!(&org_id);
+            if let Some(obj) = payload.as_object_mut() {
+                obj.remove("encryptedByKeyId");
+            }
+            if let Some(cached_rev) = payload
+                .get("revisionDate")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+            {
+                payload["lastKnownRevisionDate"] = json!(cached_rev);
+            }
+
+            (resolved_item.id, resolved_item.name, payload)
+        };
+
+        let server = if storage.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &storage.server_url
+        };
+        let client = BitwardenApiClient::for_cipher_write(server, context).map_err(|_| {
+            WriteError::Rejected("Could not initialize the cipher HTTP client.".into())
+        })?;
+        let token = self.keyring_mgr.for_storage(&storage).access_token();
+        let renew = || self.renew_for_account(&storage, context, generation);
+        let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
+            Some(t) => t,
+            None => renew()?,
+        };
+        let mut renewed_after_rejection = false;
+        let _pending = self
+            .storage_mgr
+            .begin_cipher_write()
+            .map_err(|e| e.to_string())?;
+
+        let cipher = loop {
+            let claims = crate::auth::jwt_claims(&token);
+            let subject = claims
+                .as_ref()
+                .and_then(|c| c["sub"].as_str())
+                .filter(|s| !s.is_empty());
+            let stored = storage.user_id.as_deref().filter(|s| !s.is_empty());
+            if stored.zip(subject).is_some_and(|(a, b)| a != b) {
+                return Err(WriteError::Rejected(
+                    "Credential belongs to a different account.".into(),
+                ));
+            }
+            let encrypted_for = stored
+                .or(subject)
+                .ok_or_else(|| WriteError::Rejected("Missing account ID. Sign in again.".into()))?;
+            payload["encryptedFor"] = json!(encrypted_for);
+
+            let same_account = self
+                .storage_mgr
+                .load_existing()
+                .is_ok_and(|s| s.same_active_slot(&storage));
+            let current = self
+                .is_unlocked
+                .read()
+                .is_ok_and(|unlocked| *unlocked && self.lock_generation() == generation);
+            if !same_account || !current {
+                return Err(WriteError::Rejected(
+                    "Session changed before sharing the cipher.".into(),
+                ));
+            }
+
+            match client.share_cipher(&token, &target_id, &payload, &collection_ids) {
+                Err(ApiError::HttpStatus(reqwest::StatusCode::UNAUTHORIZED, _))
+                    if !renewed_after_rejection =>
+                {
+                    renewed_after_rejection = true;
+                    token = renew()?;
+                }
+                result => break result?,
+            }
+        };
+
+        let id = cipher["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&target_id);
+        let receipt = json!({
+            "id": id,
+            "name": target_name,
+            "organization_id": org_id,
+            "collection_ids": collection_ids,
+            "revisionDate": cipher["revisionDate"].as_str(),
+        });
+        let cached = self
+            .cache_created_cipher(&storage, generation, &cipher, id)
+            .is_some();
+        Ok(
+            json!({"ok": true, "outcome": if cached { "shared" } else { "shared_needs_sync" }, "item": receipt}),
+        )
+    }
+}
+
+fn reencrypt_enc_field(
+    val: &mut Value,
+    from_key: &SymmetricCryptoKey,
+    to_key: &SymmetricCryptoKey,
+) -> Result<(), WriteError> {
+    let Some(enc_str) = val.as_str().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let parsed = EncString::parse(enc_str)
+        .map_err(|_| WriteError::Rejected("Malformed encrypted field on legacy cipher.".into()))?;
+    let plain = Zeroizing::new(parsed.decrypt_string(from_key).map_err(|_| {
+        WriteError::Rejected("Could not decrypt legacy cipher field under user key.".into())
+    })?);
+    let reencrypted = to_key.encrypt_string(&plain).map_err(|_| {
+        WriteError::Rejected("Could not re-encrypt legacy cipher field under cipher key.".into())
+    })?;
+    *val = json!(reencrypted);
+    Ok(())
+}
+
+fn reencrypt_object_fields(
+    obj: &mut Value,
+    keys: &[&str],
+    from_key: &SymmetricCryptoKey,
+    to_key: &SymmetricCryptoKey,
+) -> Result<(), WriteError> {
+    if let Some(map) = obj.as_object_mut() {
+        for &k in keys {
+            if let Some(v) = map.get_mut(k) {
+                reencrypt_enc_field(v, from_key, to_key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-encrypts every encrypted string field of a legacy personal cipher
+/// (`cipher.key == null`, zero attachments) from `user_key` to a fresh
+/// per-cipher `cipher_key` across all five Bitwarden Cipher types.
+fn reencrypt_legacy_cipher_fields(
+    payload: &mut Value,
+    user_key: &SymmetricCryptoKey,
+    cipher_key: &SymmetricCryptoKey,
+) -> Result<(), WriteError> {
+    reencrypt_object_fields(payload, &["name", "notes"], user_key, cipher_key)?;
+
+    if let Some(fields) = payload.get_mut("fields").and_then(Value::as_array_mut) {
+        for field in fields {
+            reencrypt_object_fields(field, &["name", "value"], user_key, cipher_key)?;
+        }
+    }
+
+    if let Some(history) = payload
+        .get_mut("passwordHistory")
+        .and_then(Value::as_array_mut)
+    {
+        for entry in history {
+            reencrypt_object_fields(entry, &["password"], user_key, cipher_key)?;
+        }
+    }
+
+    if let Some(login) = payload.get_mut("login") {
+        reencrypt_object_fields(
+            login,
+            &["username", "password", "totp"],
+            user_key,
+            cipher_key,
+        )?;
+        if let Some(uris) = login.get_mut("uris").and_then(Value::as_array_mut) {
+            for u in uris {
+                reencrypt_object_fields(u, &["uri", "uriChecksum"], user_key, cipher_key)?;
+            }
+        }
+        if let Some(fido2) = login
+            .get_mut("fido2Credentials")
+            .and_then(Value::as_array_mut)
+        {
+            for cred in fido2 {
+                reencrypt_object_fields(
+                    cred,
+                    &[
+                        "credentialId",
+                        "keyType",
+                        "keyAlgorithm",
+                        "keyCurve",
+                        "keyValue",
+                        "rpId",
+                        "userHandle",
+                        "userName",
+                        "counter",
+                        "rpName",
+                        "userDisplayName",
+                        "discoverable",
+                    ],
+                    user_key,
+                    cipher_key,
+                )?;
+            }
+        }
+    }
+
+    if let Some(card) = payload.get_mut("card") {
+        reencrypt_object_fields(
+            card,
+            &[
+                "cardholderName",
+                "brand",
+                "number",
+                "expMonth",
+                "expYear",
+                "code",
+            ],
+            user_key,
+            cipher_key,
+        )?;
+    }
+
+    if let Some(identity) = payload.get_mut("identity") {
+        reencrypt_object_fields(
+            identity,
+            &[
+                "title",
+                "firstName",
+                "middleName",
+                "lastName",
+                "address1",
+                "address2",
+                "address3",
+                "city",
+                "state",
+                "postalCode",
+                "country",
+                "company",
+                "email",
+                "phone",
+                "ssn",
+                "username",
+                "passportNumber",
+                "licenseNumber",
+            ],
+            user_key,
+            cipher_key,
+        )?;
+    }
+
+    if let Some(ssh_key) = payload.get_mut("sshKey") {
+        reencrypt_object_fields(
+            ssh_key,
+            &["privateKey", "publicKey", "keyFingerprint"],
+            user_key,
+            cipher_key,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn encrypt_cipher(key: &SymmetricCryptoKey, draft: &CipherCreateDraft) -> Result<Value, String> {
