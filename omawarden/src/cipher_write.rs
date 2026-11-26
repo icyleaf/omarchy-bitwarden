@@ -1,14 +1,160 @@
 //! Daemon-owned cipher mutations. Only encrypted payloads cross the HTTP
 //! boundary, and only receipts cross the return IPC boundary.
 use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient, ClientContext};
-use crate::crypto::{parse_symmetric_key_from_decrypted_bytes, EncString, SymmetricCryptoKey};
+use crate::crypto::{
+    parse_rsa_private_key_der, parse_symmetric_key_from_decrypted_bytes, EncString,
+    SymmetricCryptoKey,
+};
 use crate::ssh_write::WriteError;
 use crate::storage::VaultStorage;
 use crate::vault::VaultManager;
 use crate::vault_cache::{CacheSession, IndexUpdate};
+use rand_core::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+/// Strictly resolves an Organization's 64-byte symmetric key (`org_key`).
+/// Fails closed if `enc_private_key` or the Organization's key is missing or
+/// undecryptable; NEVER falls back to `user_key`.
+pub(crate) fn resolve_org_key(
+    storage: &VaultStorage,
+    user_key: &SymmetricCryptoKey,
+    org_id: &str,
+) -> Result<SymmetricCryptoKey, WriteError> {
+    let org = storage
+        .organizations
+        .iter()
+        .find(|o| o.get("id").and_then(Value::as_str) == Some(org_id))
+        .ok_or_else(|| {
+            WriteError::Rejected(format!(
+                "Organization '{org_id}' not found in local vault cache. Sync the vault and try again."
+            ))
+        })?;
+
+    let org_key_enc = org
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            WriteError::Rejected(format!(
+                "Missing encryption key for Organization '{org_id}'. Cannot write Organization cipher."
+            ))
+        })?;
+
+    let enc_str = EncString::parse(org_key_enc).map_err(|_| {
+        WriteError::Rejected(format!(
+            "Malformed encryption key for Organization '{org_id}'."
+        ))
+    })?;
+
+    let raw_key = Zeroizing::new(match enc_str.enc_type {
+        3..=6 => {
+            let enc_priv = storage
+                .enc_private_key
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    WriteError::Rejected(
+                        "Missing encrypted user private key. Cannot unwrap Organization encryption key."
+                            .into(),
+                    )
+                })?;
+            let enc_priv_str = EncString::parse(enc_priv).map_err(|_| {
+                WriteError::Rejected("Malformed encrypted user private key.".into())
+            })?;
+            let der_bytes =
+                Zeroizing::new(enc_priv_str.decrypt(user_key).map_err(|_| {
+                    WriteError::Rejected("Could not decrypt user private key.".into())
+                })?);
+            let rsa_priv = parse_rsa_private_key_der(&der_bytes).map_err(|_| {
+                WriteError::Rejected("Could not parse user RSA private key.".into())
+            })?;
+            enc_str.decrypt_rsa(&rsa_priv).map_err(|_| {
+                WriteError::Rejected(format!(
+                    "Could not decrypt RSA-wrapped key for Organization '{org_id}'."
+                ))
+            })?
+        }
+        0..=2 => enc_str.decrypt(user_key).map_err(|_| {
+            WriteError::Rejected(format!(
+                "Could not decrypt symmetric key for Organization '{org_id}'."
+            ))
+        })?,
+        other => {
+            return Err(WriteError::Rejected(format!(
+                "Unsupported Organization key encryption type ({other}) for '{org_id}'."
+            )));
+        }
+    });
+
+    parse_symmetric_key_from_decrypted_bytes(&raw_key).ok_or_else(|| {
+        WriteError::Rejected(format!(
+            "Invalid decrypted symmetric key length for Organization '{org_id}'."
+        ))
+    })
+}
+
+/// Validates that `collection_ids` is non-empty and that every collection exists
+/// in `storage.collections`, belongs to `org_id`, and is writable (`!read_only || manage`).
+/// Absent permission flags default fail-closed (`readOnly: true`, `manage: false`).
+pub(crate) fn validate_writable_collections(
+    storage: &VaultStorage,
+    org_id: &str,
+    collection_ids: &[String],
+) -> Result<(), WriteError> {
+    if collection_ids.is_empty() {
+        return Err(WriteError::Rejected(
+            "You must select at least one collection for an Organization cipher.".into(),
+        ));
+    }
+
+    for col_id in collection_ids {
+        let col = storage
+            .collections
+            .iter()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(col_id.as_str()))
+            .ok_or_else(|| {
+                WriteError::Rejected(format!(
+                    "Collection '{col_id}' not found in local vault cache. Sync the vault and try again."
+                ))
+            })?;
+
+        let col_org_id = col
+            .get("organizationId")
+            .or_else(|| col.get("organization_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if col_org_id != org_id {
+            return Err(WriteError::Rejected(format!(
+                "Collection '{col_id}' does not belong to Organization '{org_id}'."
+            )));
+        }
+
+        let read_only = col
+            .get("readOnly")
+            .or_else(|| col.get("read_only"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let manage = col.get("manage").and_then(Value::as_bool).unwrap_or(false);
+        if read_only && !manage {
+            return Err(WriteError::Rejected(format!(
+                "You do not have write permission for collection '{col_id}'."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_random_cipher_key() -> Result<(SymmetricCryptoKey, Zeroizing<[u8; 64]>), WriteError> {
+    let mut raw = Zeroizing::new([0u8; 64]);
+    rand_core::OsRng.fill_bytes(raw.as_mut());
+    let key = SymmetricCryptoKey::from_raw_bytes(raw.as_slice()).map_err(|_| {
+        WriteError::Rejected("Could not generate per-cipher encryption key.".into())
+    })?;
+    Ok((key, raw))
+}
 
 #[derive(Deserialize, ZeroizeOnDrop, Clone, Debug)]
 #[serde(untagged)]
@@ -246,44 +392,45 @@ impl VaultManager {
         } else {
             request
         };
-        let mut payload = {
+        let (mut payload, org_collection_ids) = {
             let draft: CipherCreateDraft = serde_json::from_value(req_payload)
                 .map_err(|_| WriteError::Rejected("Invalid cipher fields.".into()))?;
-            let has_org = draft
+            let org_id = draft
                 .organization_id
                 .as_deref()
+                .or(draft.organization_id_camel.as_deref())
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .is_some()
-                || draft
-                    .organization_id_camel
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .is_some();
-            let has_col_single = draft
-                .collection_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .is_some()
-                || draft
-                    .collection_id_camel
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .is_some();
-            let has_cols = draft
-                .collection_ids
-                .as_ref()
-                .filter(|c| !c.is_empty())
-                .is_some()
-                || draft
-                    .collection_ids_camel
-                    .as_ref()
-                    .filter(|c| !c.is_empty())
-                    .is_some();
-            if has_org || has_col_single || has_cols {
+                .map(str::to_string);
+
+            let mut collection_ids: Vec<String> = Vec::new();
+            for list in [&draft.collection_ids, &draft.collection_ids_camel]
+                .into_iter()
+                .flatten()
+            {
+                for cid in list {
+                    let trimmed = cid.trim();
+                    if !trimmed.is_empty() && !collection_ids.iter().any(|c| c == trimmed) {
+                        collection_ids.push(trimmed.to_string());
+                    }
+                }
+            }
+            for single in [&draft.collection_id, &draft.collection_id_camel]
+                .into_iter()
+                .flatten()
+            {
+                let trimmed = single.trim();
+                if !trimmed.is_empty() && !collection_ids.iter().any(|c| c == trimmed) {
+                    collection_ids.push(trimmed.to_string());
+                }
+            }
+
+            if org_id.is_none() && !collection_ids.is_empty() {
                 return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
+                    "Collection IDs require an Organization ID.".into(),
                 ));
             }
+
             let unlocked = self
                 .is_unlocked
                 .read()
@@ -303,10 +450,23 @@ impl VaultManager {
                 .user_key
                 .read()
                 .map_err(|_| "Vault key unavailable".to_string())?;
-            encrypt_cipher(
-                key.as_ref().ok_or_else(|| "Vault is locked".to_string())?,
-                &draft,
-            )?
+            let user_key = key.as_ref().ok_or_else(|| "Vault is locked".to_string())?;
+
+            if let Some(ref oid) = org_id {
+                validate_writable_collections(&storage, oid, &collection_ids)?;
+                let org_key = resolve_org_key(&storage, user_key, oid)?;
+                let (cipher_key, raw_cipher_key) = generate_random_cipher_key()?;
+                let wrapped_cipher_key =
+                    org_key.encrypt(raw_cipher_key.as_slice()).map_err(|_| {
+                        WriteError::Rejected("Could not wrap Organization cipher key.".into())
+                    })?;
+                let mut encrypted = encrypt_cipher(&cipher_key, &draft)?;
+                encrypted["organizationId"] = json!(oid);
+                encrypted["key"] = json!(wrapped_cipher_key);
+                (encrypted, Some(collection_ids))
+            } else {
+                (encrypt_cipher(user_key, &draft)?, None)
+            }
         };
 
         let server = if storage.server_url.is_empty() {
@@ -358,7 +518,12 @@ impl VaultManager {
                     "Session changed before sending the cipher.".into(),
                 ));
             }
-            match client.create_cipher(&token, &payload) {
+            let create_res = if let Some(ref cols) = org_collection_ids {
+                client.create_org_cipher(&token, &payload, cols)
+            } else {
+                client.create_cipher(&token, &payload)
+            };
+            match create_res {
                 Err(ApiError::HttpStatus(reqwest::StatusCode::UNAUTHORIZED, _))
                     if !renewed_after_rejection =>
                 {
@@ -440,7 +605,7 @@ impl VaultManager {
 
         let is_partial_only = draft.is_partial_only();
 
-        let (target_id, target_name, base_cipher, is_org_partial) = {
+        let (target_id, target_name, base_cipher, org_id_opt, is_org_partial) = {
             let unlocked = self
                 .is_unlocked
                 .read()
@@ -473,21 +638,33 @@ impl VaultManager {
                 .cloned()
                 .ok_or_else(|| WriteError::Rejected("Cipher not found in local cache.".into()))?;
 
-            let is_org = resolved_item
+            let org_id_opt = resolved_item
                 .organization_id
                 .as_deref()
-                .is_some_and(|s| !s.is_empty())
-                || cipher_in_storage["organizationId"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty());
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    cipher_in_storage["organizationId"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+                .map(str::to_string);
+            let is_org = org_id_opt.is_some();
 
             if is_org && !is_partial_only {
-                return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
-                ));
+                if !resolved_item.edit {
+                    return Err(WriteError::Rejected(
+                        "You do not have permission to edit this Organization cipher.".into(),
+                    ));
+                }
+                if !resolved_item.view_password {
+                    return Err(WriteError::Rejected(
+                        "Cannot edit Organization cipher while passwords are hidden (viewPassword is false)."
+                            .into(),
+                    ));
+                }
             }
 
-            if !is_org {
+            if !(is_org && is_partial_only) {
                 let cipher_type = cipher_in_storage
                     .get("type")
                     .and_then(Value::as_i64)
@@ -522,6 +699,7 @@ impl VaultManager {
                 resolved_item.id,
                 resolved_item.name,
                 cipher_in_storage,
+                org_id_opt,
                 is_org && is_partial_only,
             )
         };
@@ -652,19 +830,45 @@ impl VaultManager {
             .ok_or_else(|| "Vault is locked".to_string())?;
 
         // Resolve cipher encryption key:
-        // Individual Bitwarden vault ciphers carry their own 64-byte symmetric key
-        // in `cipher.key` (encrypted by user_key). Sensitive fields must be encrypted
-        // with this item key if present, falling back to user_key.
-        let mut cipher_key = user_key.clone();
-        if let Some(enc_k) = payload.get("key").and_then(Value::as_str) {
-            if let Ok(parsed_k) = EncString::parse(enc_k) {
-                if let Ok(raw_k_bytes) = parsed_k.decrypt(user_key) {
-                    if let Some(k) = parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes) {
-                        cipher_key = k;
+        // - For Organization ciphers: resolve `org_key` strictly (fail-closed, never
+        //   fall back to `user_key`) and unwrap `cipher.key` strictly with `org_key`.
+        // - For personal ciphers: unwrap `cipher.key` with `user_key`, falling back to
+        //   `user_key` when `cipher.key` is absent (legacy personal cipher).
+        let cipher_key = if let Some(ref oid) = org_id_opt {
+            let org_key = resolve_org_key(&storage, user_key, oid)?;
+            payload["organizationId"] = json!(oid);
+            if let Some(enc_k) = payload
+                .get("key")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                let parsed_k = EncString::parse(enc_k).map_err(|_| {
+                    WriteError::Rejected("Malformed Organization cipher key.".into())
+                })?;
+                let raw_k_bytes = Zeroizing::new(parsed_k.decrypt(&org_key).map_err(|_| {
+                    WriteError::Rejected(
+                        "Could not decrypt Organization cipher key under Organization key.".into(),
+                    )
+                })?);
+                parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes).ok_or_else(|| {
+                    WriteError::Rejected("Invalid decrypted Organization cipher key length.".into())
+                })?
+            } else {
+                org_key
+            }
+        } else {
+            let mut key = user_key.clone();
+            if let Some(enc_k) = payload.get("key").and_then(Value::as_str) {
+                if let Ok(parsed_k) = EncString::parse(enc_k) {
+                    if let Ok(raw_k_bytes) = parsed_k.decrypt(user_key) {
+                        if let Some(k) = parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes) {
+                            key = k;
+                        }
                     }
                 }
             }
-        }
+            key
+        };
 
         let mut field_changed = false;
 
@@ -2221,5 +2425,92 @@ mod tests {
         assert!(encrypt_cipher(&key, &id_on_card)
             .unwrap_err()
             .contains("Identity fields"));
+    }
+
+    #[test]
+    fn resolve_org_key_fails_closed_without_user_key_fallback() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use rsa::pkcs8::EncodePrivateKey;
+
+        let user_key = test_key();
+        let wrong_user_key = SymmetricCryptoKey::from_raw_bytes(&[99u8; 64]).unwrap();
+        let raw_org = [88u8; 64];
+        let enc_org = user_key.encrypt(&raw_org).unwrap();
+        let wrong_enc_org = wrong_user_key.encrypt(&raw_org).unwrap();
+
+        // Generate RSA keypair for type-4 RSA-OAEP SHA-1 org key unwrap
+        let mut rng = rand_core::OsRng;
+        let priv_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub_key = rsa::RsaPublicKey::from(&priv_key);
+        let priv_der = priv_key.to_pkcs8_der().unwrap();
+        let enc_private_key = user_key
+            .encrypt_string(&BASE64.encode(priv_der.as_bytes()))
+            .unwrap();
+        let enc_org_rsa = pub_key
+            .encrypt(&mut rng, rsa::Oaep::new::<sha1::Sha1>(), &raw_org)
+            .unwrap();
+        let rsa_org_key_str = format!("4.{}", BASE64.encode(&enc_org_rsa));
+
+        let storage_no_priv = VaultStorage {
+            organizations: vec![
+                json!({ "id": "org-sym", "name": "Sym Org", "key": enc_org }),
+                json!({ "id": "org-wrong", "name": "Wrong Key Org", "key": wrong_enc_org }),
+                json!({ "id": "org-rsa", "name": "RSA Org", "key": rsa_org_key_str }),
+                json!({ "id": "org-no-key", "name": "No Key Org" }),
+            ],
+            ..Default::default()
+        };
+
+        // Valid symmetric org key unwraps cleanly
+        let resolved = resolve_org_key(&storage_no_priv, &user_key, "org-sym")
+            .ok()
+            .expect("valid org key must resolve");
+        assert_eq!(resolved.enc_key.as_slice(), &raw_org[..32]);
+
+        // Missing org_id, wrong-key ciphertext, missing enc_private_key, and missing key all fail closed
+        assert!(resolve_org_key(&storage_no_priv, &user_key, "org-unknown").is_err());
+        assert!(resolve_org_key(&storage_no_priv, &user_key, "org-wrong").is_err());
+        assert!(resolve_org_key(&storage_no_priv, &user_key, "org-rsa").is_err());
+        assert!(resolve_org_key(&storage_no_priv, &user_key, "org-no-key").is_err());
+
+        // Undecryptable enc_private_key fails closed
+        let mut storage_bad_priv = storage_no_priv.clone();
+        storage_bad_priv.enc_private_key = Some(wrong_user_key.encrypt_string("bad-der").unwrap());
+        assert!(resolve_org_key(&storage_bad_priv, &user_key, "org-rsa").is_err());
+
+        // Valid RSA-wrapped org key unwraps cleanly
+        let mut storage_with_priv = storage_no_priv;
+        storage_with_priv.enc_private_key = Some(enc_private_key);
+        let resolved_rsa = resolve_org_key(&storage_with_priv, &user_key, "org-rsa")
+            .ok()
+            .expect("valid RSA-wrapped org key must resolve");
+        assert_eq!(resolved_rsa.enc_key.as_slice(), &raw_org[..32]);
+    }
+
+    #[test]
+    fn validate_writable_collections_enforces_fail_closed_defaults() {
+        let storage = VaultStorage {
+            collections: vec![
+                json!({ "id": "col-w", "organizationId": "org-1", "readOnly": false, "manage": false }),
+                json!({ "id": "col-m", "organizationId": "org-1", "readOnly": true, "manage": true }),
+                json!({ "id": "col-ro", "organizationId": "org-1", "readOnly": true, "manage": false }),
+                json!({ "id": "col-legacy", "organizationId": "org-1" }),
+                json!({ "id": "col-other", "organizationId": "org-2", "readOnly": false, "manage": true }),
+            ],
+            ..Default::default()
+        };
+
+        assert!(validate_writable_collections(&storage, "org-1", &[]).is_err());
+        assert!(validate_writable_collections(
+            &storage,
+            "org-1",
+            &["col-w".into(), "col-m".into()]
+        )
+        .is_ok());
+        assert!(validate_writable_collections(&storage, "org-1", &["col-ro".into()]).is_err());
+        assert!(validate_writable_collections(&storage, "org-1", &["col-legacy".into()]).is_err());
+        assert!(validate_writable_collections(&storage, "org-1", &["col-other".into()]).is_err());
+        assert!(validate_writable_collections(&storage, "org-1", &["col-missing".into()]).is_err());
     }
 }

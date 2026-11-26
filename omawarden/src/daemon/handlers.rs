@@ -503,6 +503,10 @@ pub fn handle_client_with_peer(
                         "name": item.name,
                         "type": item.type_name,
                         "organization_id": item.organization_id,
+                        "edit": item.edit,
+                        "view_password": item.view_password,
+                        "can_delete": item.can_delete,
+                        "can_restore": item.can_restore,
                     }
                 }),
                 Ok(crate::vault::CipherTargetResolution::Ambiguous(candidates)) => {
@@ -515,6 +519,10 @@ pub fn handle_client_with_peer(
                                 "type": item.type_name,
                                 "sub_title": item.sub_title,
                                 "organization_id": item.organization_id,
+                                "edit": item.edit,
+                                "view_password": item.view_password,
+                                "can_delete": item.can_delete,
+                                "can_restore": item.can_restore,
                             })
                         })
                         .collect();

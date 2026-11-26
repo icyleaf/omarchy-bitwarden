@@ -1035,10 +1035,14 @@ enum CreateItemAction {
         bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
-        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        #[arg(long, help = "Organization ID for creating an Organization cipher")]
         organization_id: Option<String>,
-        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
-        collection_id: Option<String>,
+        #[arg(
+            long = "collection-id",
+            action = clap::ArgAction::Append,
+            help = "Collection ID for Organization cipher (repeatable; required when --organization-id is set)"
+        )]
+        collection_ids: Vec<String>,
     },
     #[command(about = "Create a new Secure Note cipher", alias = "secure-note")]
     Note {
@@ -1079,10 +1083,14 @@ enum CreateItemAction {
         bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
-        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        #[arg(long, help = "Organization ID for creating an Organization cipher")]
         organization_id: Option<String>,
-        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
-        collection_id: Option<String>,
+        #[arg(
+            long = "collection-id",
+            action = clap::ArgAction::Append,
+            help = "Collection ID for Organization cipher (repeatable; required when --organization-id is set)"
+        )]
+        collection_ids: Vec<String>,
     },
     #[command(about = "Create a new Card cipher")]
     Card {
@@ -1121,10 +1129,14 @@ enum CreateItemAction {
         bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
-        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        #[arg(long, help = "Organization ID for creating an Organization cipher")]
         organization_id: Option<String>,
-        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
-        collection_id: Option<String>,
+        #[arg(
+            long = "collection-id",
+            action = clap::ArgAction::Append,
+            help = "Collection ID for Organization cipher (repeatable; required when --organization-id is set)"
+        )]
+        collection_ids: Vec<String>,
     },
     #[command(about = "Create a new Identity cipher")]
     Identity {
@@ -1185,10 +1197,14 @@ enum CreateItemAction {
         bool_fields: Vec<String>,
         #[arg(long, help = "Optional folder ID")]
         folder_id: Option<String>,
-        #[arg(long, help = "Organization ID (organization ciphers are read-only)")]
+        #[arg(long, help = "Organization ID for creating an Organization cipher")]
         organization_id: Option<String>,
-        #[arg(long, help = "Collection ID (organization ciphers are read-only)")]
-        collection_id: Option<String>,
+        #[arg(
+            long = "collection-id",
+            action = clap::ArgAction::Append,
+            help = "Collection ID for Organization cipher (repeatable; required when --organization-id is set)"
+        )]
+        collection_ids: Vec<String>,
     },
 }
 
@@ -2564,27 +2580,22 @@ fn main() -> ExitCode {
                             bool_fields,
                             folder_id,
                             organization_id,
-                            collection_id,
+                            collection_ids,
                         }) => {
-                            if organization_id
+                            let org_id = organization_id
                                 .as_deref()
+                                .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .is_some()
-                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
-                            {
-                                let err_msg = "Organization ciphers are read-only.";
-                                if json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string_pretty(&json!({
-                                            "ok": false,
-                                            "error": err_msg,
-                                        }))
-                                        .unwrap()
-                                    );
-                                } else {
-                                    eprintln!("Error: {err_msg}");
-                                }
+                                .map(str::to_string);
+                            if org_id.is_some() && collection_ids.is_empty() {
+                                emit_vault_error(
+                                    json,
+                                    "You must select at least one collection (--collection-id) for an Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if org_id.is_none() && !collection_ids.is_empty() {
+                                emit_vault_error(json, "Collection IDs require --organization-id.");
                                 return ExitCode::FAILURE;
                             }
 
@@ -2714,6 +2725,10 @@ fn main() -> ExitCode {
                                 req["uris"] = json!(uris);
                                 req["login"] = json!({ "uris": uris });
                             }
+                            if let Some(ref oid) = org_id {
+                                req["organization_id"] = json!(oid);
+                                req["collection_ids"] = json!(collection_ids);
+                            }
                             if !custom_fields.is_empty() {
                                 req["fields"] = json!(custom_fields);
                             }
@@ -2728,27 +2743,22 @@ fn main() -> ExitCode {
                             bool_fields,
                             folder_id,
                             organization_id,
-                            collection_id,
+                            collection_ids,
                         }) => {
-                            if organization_id
+                            let org_id = organization_id
                                 .as_deref()
+                                .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .is_some()
-                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
-                            {
-                                let err_msg = "Organization ciphers are read-only.";
-                                if json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string_pretty(&json!({
-                                            "ok": false,
-                                            "error": err_msg,
-                                        }))
-                                        .unwrap()
-                                    );
-                                } else {
-                                    eprintln!("Error: {err_msg}");
-                                }
+                                .map(str::to_string);
+                            if org_id.is_some() && collection_ids.is_empty() {
+                                emit_vault_error(
+                                    json,
+                                    "You must select at least one collection (--collection-id) for an Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if org_id.is_none() && !collection_ids.is_empty() {
+                                emit_vault_error(json, "Collection IDs require --organization-id.");
                                 return ExitCode::FAILURE;
                             }
 
@@ -2793,6 +2803,10 @@ fn main() -> ExitCode {
                             if !custom_fields.is_empty() {
                                 req["fields"] = json!(custom_fields);
                             }
+                            if let Some(ref oid) = org_id {
+                                req["organization_id"] = json!(oid);
+                                req["collection_ids"] = json!(collection_ids);
+                            }
                             (req, "note cipher", name)
                         }
                         Some(CreateItemAction::Card {
@@ -2807,15 +2821,22 @@ fn main() -> ExitCode {
                             bool_fields,
                             folder_id,
                             organization_id,
-                            collection_id,
+                            collection_ids,
                         }) => {
-                            if organization_id
+                            let org_id = organization_id
                                 .as_deref()
+                                .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .is_some()
-                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
-                            {
-                                emit_vault_error(json, "Organization ciphers are read-only.");
+                                .map(str::to_string);
+                            if org_id.is_some() && collection_ids.is_empty() {
+                                emit_vault_error(
+                                    json,
+                                    "You must select at least one collection (--collection-id) for an Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if org_id.is_none() && !collection_ids.is_empty() {
+                                emit_vault_error(json, "Collection IDs require --organization-id.");
                                 return ExitCode::FAILURE;
                             }
 
@@ -2907,6 +2928,10 @@ fn main() -> ExitCode {
                             if !custom_fields.is_empty() {
                                 req["fields"] = json!(custom_fields);
                             }
+                            if let Some(ref oid) = org_id {
+                                req["organization_id"] = json!(oid);
+                                req["collection_ids"] = json!(collection_ids);
+                            }
                             (req, "card cipher", name)
                         }
                         Some(CreateItemAction::Identity {
@@ -2932,15 +2957,22 @@ fn main() -> ExitCode {
                             bool_fields,
                             folder_id,
                             organization_id,
-                            collection_id,
+                            collection_ids,
                         }) => {
-                            if organization_id
+                            let org_id = organization_id
                                 .as_deref()
+                                .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .is_some()
-                                || collection_id.as_deref().filter(|s| !s.is_empty()).is_some()
-                            {
-                                emit_vault_error(json, "Organization ciphers are read-only.");
+                                .map(str::to_string);
+                            if org_id.is_some() && collection_ids.is_empty() {
+                                emit_vault_error(
+                                    json,
+                                    "You must select at least one collection (--collection-id) for an Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if org_id.is_none() && !collection_ids.is_empty() {
+                                emit_vault_error(json, "Collection IDs require --organization-id.");
                                 return ExitCode::FAILURE;
                             }
 
@@ -3039,6 +3071,10 @@ fn main() -> ExitCode {
                             });
                             if !custom_fields.is_empty() {
                                 req["fields"] = json!(custom_fields);
+                            }
+                            if let Some(ref oid) = org_id {
+                                req["organization_id"] = json!(oid);
+                                req["collection_ids"] = json!(collection_ids);
                             }
                             (req, "identity cipher", name)
                         }
@@ -3143,20 +3179,18 @@ fn main() -> ExitCode {
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                     .is_some();
-                            if has_org || has_cols {
-                                let err_msg = "Organization ciphers are read-only.";
-                                if json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string_pretty(&json!({
-                                            "ok": false,
-                                            "error": err_msg,
-                                        }))
-                                        .unwrap()
-                                    );
-                                } else {
-                                    eprintln!("Error: {err_msg}");
-                                }
+                            if has_org && !has_cols {
+                                emit_vault_error(
+                                    json,
+                                    "You must select at least one collection for an Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if !has_org && has_cols {
+                                emit_vault_error(
+                                    json,
+                                    "Collection IDs require an Organization ID.",
+                                );
                                 return ExitCode::FAILURE;
                             }
 
@@ -3196,6 +3230,19 @@ fn main() -> ExitCode {
 
                     if let Some(ref ctx) = client_ctx {
                         daemon_req["client"] = json!(ctx);
+                    }
+                    let is_org_create = daemon_req
+                        .get("organization_id")
+                        .or_else(|| daemon_req.get("organizationId"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                    if is_org_create {
+                        if let Err(err_msg) =
+                            ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                        {
+                            emit_vault_error(json, &err_msg);
+                            return ExitCode::FAILURE;
+                        }
                     }
                     match submit_cipher_mutation(&daemon_req) {
                         Ok(receipt) => {
@@ -3522,11 +3569,37 @@ fn main() -> ExitCode {
                         .get("organization_id")
                         .and_then(Value::as_str)
                         .is_some_and(|s| !s.is_empty());
+                    let org_can_edit = resolved
+                        .get("edit")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(!is_org);
+                    let org_can_view_password = resolved
+                        .get("view_password")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(!is_org);
 
                     if !has_field_flags && !has_json_payload {
                         if is_org {
-                            emit_vault_error(json, "Organization ciphers are read-only.");
-                            return ExitCode::FAILURE;
+                            if !org_can_edit {
+                                emit_vault_error(
+                                    json,
+                                    "You do not have permission to edit this Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if !org_can_view_password {
+                                emit_vault_error(
+                                    json,
+                                    "Cannot edit Organization cipher while passwords are hidden (viewPassword is false).",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if let Err(err_msg) =
+                                ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                            {
+                                emit_vault_error(json, &err_msg);
+                                return ExitCode::FAILURE;
+                            }
                         }
                         return handle_editor_edit(&cfg, &resolved, client_ctx.as_ref());
                     }
@@ -3719,8 +3792,20 @@ fn main() -> ExitCode {
                             has_partial_key && only_partial_keys
                         });
                         if !is_partial_only {
-                            emit_vault_error(json, "Organization ciphers are read-only.");
-                            return ExitCode::FAILURE;
+                            if !org_can_edit {
+                                emit_vault_error(
+                                    json,
+                                    "You do not have permission to edit this Organization cipher.",
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if !org_can_view_password {
+                                emit_vault_error(
+                                    json,
+                                    "Cannot edit Organization cipher while passwords are hidden (viewPassword is false).",
+                                );
+                                return ExitCode::FAILURE;
+                            }
                         }
                         if let Err(err_msg) =
                             ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)

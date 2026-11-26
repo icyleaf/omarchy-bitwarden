@@ -143,6 +143,42 @@ Item {
             "editButton stays visible for layout stability and renders disabled on read-only Organization Cipher")
       check(deleteButton && deleteButton.visible && deleteButton.enabled === false,
             "deleteButton stays visible for layout stability and renders disabled on non-deletable Organization Cipher")
+      // Writable Organization Cipher (edit && view_password) enables editButton
+      inspector.item = {
+        id: "org-w-1",
+        name: "Shared Writable",
+        type_name: "login",
+        favorite: false,
+        organization_id: "org-1",
+        organization_name: "Acme Corp",
+        edit: true,
+        view_password: true,
+        can_delete: false,
+        can_restore: false,
+        login: { username: "svc", password: "secret", uris: [] },
+        fields: [],
+        attachments: []
+      }
+      check(editButton && editButton.visible && editButton.enabled === true,
+            "editButton is enabled on writable Organization Cipher (edit && view_password)")
+      // Hidden-password Organization Cipher (edit && !view_password) disables editButton
+      inspector.item = {
+        id: "org-hp-1",
+        name: "Shared Hidden",
+        type_name: "login",
+        favorite: false,
+        organization_id: "org-1",
+        organization_name: "Acme Corp",
+        edit: true,
+        view_password: false,
+        can_delete: false,
+        can_restore: false,
+        login: { username: "svc", password: "secret", uris: [] },
+        fields: [],
+        attachments: []
+      }
+      check(editButton && editButton.visible && editButton.enabled === false,
+            "editButton stays disabled on Organization Cipher with hidden passwords")
       // Restore personal item for subsequent layout assertions
       inspector.item = {
         id: "test-login",

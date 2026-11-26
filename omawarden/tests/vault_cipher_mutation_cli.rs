@@ -854,11 +854,11 @@ fn test_create_cipher_organization_scope_rejected() {
     assert!(!out_org.status.success());
     let stderr_org = String::from_utf8_lossy(&out_org.stderr);
     assert!(
-        stderr_org.contains("Organization ciphers are read-only"),
+        stderr_org.contains("at least one collection"),
         "Unexpected error: {stderr_org}"
     );
 
-    // Reject collectionIds
+    // Reject collectionIds without organizationId
     let mut cli_col = make_command(dir)
         .args(["vault", "create", "--stdin"])
         .stdin(Stdio::piped())
@@ -886,11 +886,11 @@ fn test_create_cipher_organization_scope_rejected() {
     assert!(!out_col.status.success());
     let stderr_col = String::from_utf8_lossy(&out_col.stderr);
     assert!(
-        stderr_col.contains("Organization ciphers are read-only"),
+        stderr_col.contains("Organization ID"),
         "Unexpected error: {stderr_col}"
     );
 
-    // Reject collectionId as singular string
+    // Reject collectionId as singular string without organizationId
     let mut cli_col_single = make_command(dir)
         .args(["vault", "create", "--stdin"])
         .stdin(Stdio::piped())
@@ -918,11 +918,11 @@ fn test_create_cipher_organization_scope_rejected() {
     assert!(!out_col_single.status.success());
     let stderr_col_single = String::from_utf8_lossy(&out_col_single.stderr);
     assert!(
-        stderr_col_single.contains("Organization ciphers are read-only"),
+        stderr_col_single.contains("Organization ID"),
         "Unexpected error: {stderr_col_single}"
     );
 
-    // Reject CLI flags --organization-id and --collection-id
+    // Reject CLI flag --organization-id without --collection-id
     let out_cli_flags = make_command(dir)
         .args([
             "vault",
@@ -940,7 +940,7 @@ fn test_create_cipher_organization_scope_rejected() {
     assert!(!out_cli_flags.status.success());
     let stderr_cli = String::from_utf8_lossy(&out_cli_flags.stderr);
     assert!(
-        stderr_cli.contains("Organization ciphers are read-only"),
+        stderr_cli.contains("at least one collection"),
         "Unexpected error: {stderr_cli}"
     );
 }
@@ -2579,7 +2579,7 @@ fn test_edit_cipher_organization_read_only_rejected() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("Organization ciphers are read-only."),
+        stderr.contains("You do not have permission to edit this Organization cipher."),
         "Unexpected error output: {stderr}"
     );
 }
