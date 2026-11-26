@@ -743,6 +743,37 @@ enum VaultAction {
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
+    #[command(about = "Share (transfer) a personal cipher into an Organization")]
+    Share {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target personal cipher name or 32-character / UUID ID to share"
+        )]
+        target: String,
+        #[arg(
+            long = "organization-id",
+            value_name = "ORG_ID",
+            required = true,
+            help = "Target Organization ID"
+        )]
+        organization_id: String,
+        #[arg(
+            long = "collection-id",
+            value_name = "COL_ID",
+            required = true,
+            action = clap::ArgAction::Append,
+            help = "Target writable Collection ID (repeatable)"
+        )]
+        collection_ids: Vec<String>,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Confirm irreversible ownership transfer without interactive prompt (required in --json mode)"
+        )]
+        yes: bool,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
     #[command(about = "Edit an existing vault cipher")]
     Edit {
         #[arg(
@@ -3483,6 +3514,150 @@ fn main() -> ExitCode {
                             } else {
                                 eprintln!("Error: {}", err_msg);
                             }
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                VaultAction::Share {
+                    target,
+                    organization_id,
+                    collection_ids,
+                    yes,
+                    json,
+                } => {
+                    if json && !yes {
+                        emit_vault_error(
+                            true,
+                            "Sharing a cipher transfers ownership irreversibly to the Organization. Pass --yes to confirm in --json mode.",
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
+                    let trimmed_org_id = organization_id.trim().to_string();
+                    if trimmed_org_id.is_empty() {
+                        emit_vault_error(
+                            json,
+                            "Target Organization ID is required to share a cipher.",
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    let mut clean_cols: Vec<String> = Vec::new();
+                    for cid in &collection_ids {
+                        let trimmed = cid.trim();
+                        if !trimmed.is_empty() && !clean_cols.iter().any(|c| c == trimmed) {
+                            clean_cols.push(trimmed.to_string());
+                        }
+                    }
+                    if clean_cols.is_empty() {
+                        emit_vault_error(
+                            json,
+                            "You must specify at least one collection (--collection-id) to share a cipher.",
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
+                    if let Err(err_msg) =
+                        ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                    {
+                        emit_vault_error(json, &err_msg);
+                        return ExitCode::FAILURE;
+                    }
+
+                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
+                    let is_interactive = (std::io::stdin().is_terminal()
+                        || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                        && !yes
+                        && !json;
+
+                    if !yes && !is_interactive {
+                        emit_vault_error(
+                            json,
+                            "Sharing a cipher transfers ownership irreversibly to the Organization. Pass --yes to confirm in non-interactive mode.",
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
+                    let resolved = match resolve_target_cipher(
+                        &target,
+                        "share",
+                        client_ctx.as_ref(),
+                        is_interactive,
+                        json,
+                        false,
+                    ) {
+                        Ok(item) => item,
+                        Err(code) => return code,
+                    };
+
+                    let item_id = resolved["id"].as_str().unwrap_or("").to_string();
+                    let item_name = resolved["name"].as_str().unwrap_or("").to_string();
+
+                    let is_org = resolved
+                        .get("organization_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty());
+                    if is_org {
+                        emit_vault_error(
+                            json,
+                            "Cipher already belongs to an Organization and cannot be shared again.",
+                        );
+                        return ExitCode::FAILURE;
+                    }
+
+                    if is_interactive {
+                        eprintln!(
+                            "Warning: Sharing '{}' transfers ownership permanently to Organization '{}'. This action is irreversible.",
+                            item_name, trimmed_org_id
+                        );
+                        eprint!(
+                            "Transfer ownership to Organization '{}'? [y/N] ",
+                            trimmed_org_id
+                        );
+                        let _ = io::stderr().flush();
+                        let mut input = String::new();
+                        if io::stdin().read_line(&mut input).is_err() {
+                            eprintln!("Share aborted.");
+                            return ExitCode::FAILURE;
+                        }
+                        let trimmed = input.trim();
+                        if !trimmed.eq_ignore_ascii_case("y")
+                            && !trimmed.eq_ignore_ascii_case("yes")
+                        {
+                            eprintln!("Share aborted.");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+
+                    let mut daemon_req = json!({
+                        "action": "cipher_share",
+                        "id": item_id,
+                        "organization_id": trimmed_org_id,
+                        "collection_ids": clean_cols,
+                    });
+                    if let Some(ref ctx) = client_ctx {
+                        daemon_req["client"] = json!(ctx);
+                    }
+
+                    match submit_cipher_mutation(&daemon_req) {
+                        Ok(receipt) => {
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+                            } else {
+                                let id = receipt["item"]["id"].as_str().unwrap_or(&item_id);
+                                let name = receipt["item"]["name"].as_str().unwrap_or(&item_name);
+                                println!(
+                                    "Shared cipher \"{}\" ({}) to Organization {}.",
+                                    name, id, trimmed_org_id
+                                );
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            let err_msg = error
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Failed to share cipher");
+                            emit_vault_error(json, err_msg);
                             ExitCode::FAILURE
                         }
                     }
@@ -7712,6 +7887,44 @@ mod tests {
                 assert_eq!(target, "target-remove");
             }
             _ => panic!("Expected VaultAction::Delete for alias remove"),
+        }
+    }
+
+    #[test]
+    fn test_cli_vault_share_flags() {
+        let cli = Cli::try_parse_from([
+            "omawarden",
+            "vault",
+            "share",
+            "my-personal-login",
+            "--organization-id",
+            "org-1",
+            "--collection-id",
+            "col-a",
+            "--collection-id",
+            "col-b",
+            "--yes",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Vault {
+                action:
+                    VaultAction::Share {
+                        target,
+                        organization_id,
+                        collection_ids,
+                        yes,
+                        json,
+                    },
+            } => {
+                assert_eq!(target, "my-personal-login");
+                assert_eq!(organization_id, "org-1");
+                assert_eq!(collection_ids, vec!["col-a", "col-b"]);
+                assert!(yes);
+                assert!(json);
+            }
+            _ => panic!("Expected VaultAction::Share"),
         }
     }
 

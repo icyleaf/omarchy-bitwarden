@@ -1518,6 +1518,39 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    pub fn share_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        cipher: &Value,
+        collection_ids: &[String],
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/share", self.urls.api_url, id);
+        let body = json!({
+            "cipher": cipher,
+            "collectionIds": collection_ids,
+        });
+        let mut resp = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&body)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Share cipher failed (HTTP {}): {}", status, err_body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
     pub fn update_cipher(
         &self,
         access_token: &str,
