@@ -27,6 +27,8 @@ ScrollView {
   property string mode: "create" // "create" | "edit"
   property string cipherType: "login" // "login" | "note" | "card" | "identity" | "ssh_key"
   property var folders: [] // [{ id, name }]
+  property var organizations: [] // [{ id, name }]
+  property var collections: [] // [{ id, organization_id, name, read_only, hide_passwords, manage }]
   property string defaultFolderId: ""
   // In edit mode this is the selected vault item. Saving diffs against it.
   property var originalItem: null
@@ -61,6 +63,9 @@ ScrollView {
   property bool isDirty: false
 
   // Editable form state.
+  property string organizationId: ""
+  property var selectedCollectionIds: []
+  readonly property bool canSubmit: !isBusy && (isEdit || !organizationId || (selectedCollectionIds && selectedCollectionIds.length > 0))
   property string cipherName: ""
   property string folderId: ""
   property string username: ""
@@ -233,6 +238,8 @@ ScrollView {
 
   function resetForm() {
     isResettingForm = true
+    organizationId = ""
+    selectedCollectionIds = []
     clearDraft()
 
     var linked = []
@@ -553,6 +560,73 @@ ScrollView {
   // Payload + submission
   // ----------------------------------------------------------------
 
+  function isCollectionWritable(col) {
+    if (!col || !col.id) return false
+    var ro = (col.read_only !== undefined) ? Boolean(col.read_only) : true
+    var mg = Boolean(col.manage)
+    return !ro || mg
+  }
+
+  function writableCollectionsForOrg(orgId) {
+    if (!orgId) return []
+    var src = collections || []
+    var out = []
+    for (var i = 0; i < src.length; i++) {
+      var col = src[i]
+      if (col && col.organization_id === orgId && isCollectionWritable(col)) {
+        out.push(col)
+      }
+    }
+    return out
+  }
+
+  function writableCollectionsForSelectedOrg() {
+    return writableCollectionsForOrg(organizationId)
+  }
+
+  function writableOrganizations() {
+    var orgs = organizations || []
+    var out = []
+    for (var i = 0; i < orgs.length; i++) {
+      var org = orgs[i]
+      if (org && org.id && writableCollectionsForOrg(org.id).length > 0) {
+        out.push(org)
+      }
+    }
+    return out
+  }
+
+  function selectOrganization(orgId) {
+    var next = String(orgId || "")
+    if (organizationId === next) return
+    organizationId = next
+    selectedCollectionIds = []
+    errorMessage = ""
+    if (!isResettingForm) isDirty = true
+  }
+
+  function isCollectionSelected(colId) {
+    var sel = selectedCollectionIds || []
+    return sel.indexOf(colId) !== -1
+  }
+
+  function toggleCollection(colId) {
+    if (!colId || !organizationId) return
+    var allowed = writableCollectionsForSelectedOrg()
+    var valid = false
+    for (var i = 0; i < allowed.length; i++) {
+      if (allowed[i].id === colId) { valid = true; break }
+    }
+    if (!valid) return
+    var next = (selectedCollectionIds || []).slice()
+    var idx = next.indexOf(colId)
+    if (idx >= 0) next.splice(idx, 1)
+    else next.push(colId)
+    selectedCollectionIds = next
+    errorMessage = ""
+    if (!isResettingForm) isDirty = true
+  }
+
   function buildPayload() {
     var trimmedName = String(cipherName || "").trim()
     if (!trimmedName) {
@@ -586,10 +660,21 @@ ScrollView {
 
     if (isEdit && originalItem) return buildEditPayload(trimmedName)
 
+    if (organizationId) {
+      if (!selectedCollectionIds || selectedCollectionIds.length === 0) {
+        errorMessage = "Select at least one collection for this Organization cipher."
+        return null
+      }
+    }
+
     var payload = {
       cipher_type: cipherType,
       name: trimmedName,
       folder_id: folderId ? folderId : null
+    }
+    if (organizationId) {
+      payload.organization_id = organizationId
+      payload.collection_ids = selectedCollectionIds.slice()
     }
 
     if (notes && notes.length > 0) payload.notes = notes
@@ -1027,6 +1112,160 @@ ScrollView {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: editorRoot.confirmDiscard()
+            }
+          }
+        }
+      }
+    }
+
+    // Ownership & Collection Picker (Create mode only, when >= 1 Organization has writable Collections)
+    ColumnLayout {
+      objectName: "ownershipSection"
+      visible: !editorRoot.isEdit && editorRoot.writableOrganizations().length > 0
+      Layout.fillWidth: true
+      spacing: 6
+
+      Text {
+        text: "Owner"
+        color: editorRoot.muted
+        font.pixelSize: Style.font.bodySmall
+        font.weight: Font.Medium
+      }
+
+      Flow {
+        Layout.fillWidth: true
+        spacing: 6
+
+        Rectangle {
+          objectName: "ownerPersonalChip"
+          implicitHeight: 26
+          implicitWidth: personalChipRow.implicitWidth + 16
+          radius: 4
+          color: editorRoot.organizationId === "" ? editorRoot.accent : Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+          border.color: editorRoot.organizationId === "" ? editorRoot.accent : editorRoot.borderColor
+          border.width: 1
+
+          RowLayout {
+            id: personalChipRow
+            anchors.centerIn: parent
+            spacing: 4
+
+            Text {
+              text: "\uf007"
+              font.family: editorRoot.fontFamily
+              font.pixelSize: Style.font.caption
+              color: editorRoot.organizationId === "" ? editorRoot.textOnAccent : editorRoot.muted
+            }
+
+            Text {
+              text: "Personal"
+              font.pixelSize: Style.font.caption
+              font.weight: Font.Medium
+              color: editorRoot.organizationId === "" ? editorRoot.textOnAccent : editorRoot.foreground
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: editorRoot.selectOrganization("")
+          }
+        }
+
+        Repeater {
+          model: editorRoot.writableOrganizations()
+
+          Rectangle {
+            required property var modelData
+            readonly property bool selected: editorRoot.organizationId === modelData.id
+            implicitHeight: 26
+            implicitWidth: orgChipRow.implicitWidth + 16
+            radius: 4
+            color: selected ? editorRoot.accent : Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.08)
+            border.color: selected ? editorRoot.accent : editorRoot.borderColor
+            border.width: 1
+
+            RowLayout {
+              id: orgChipRow
+              anchors.centerIn: parent
+              spacing: 4
+
+              Text {
+                text: "\uf1ad"
+                font.family: editorRoot.fontFamily
+                font.pixelSize: Style.font.caption
+                color: selected ? editorRoot.textOnAccent : editorRoot.muted
+              }
+
+              Text {
+                text: modelData.name || "Organization"
+                font.pixelSize: Style.font.caption
+                font.weight: Font.Medium
+                color: selected ? editorRoot.textOnAccent : editorRoot.foreground
+              }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: editorRoot.selectOrganization(modelData.id)
+            }
+          }
+        }
+      }
+
+      ColumnLayout {
+        objectName: "collectionChecklist"
+        visible: editorRoot.organizationId !== ""
+        Layout.fillWidth: true
+        spacing: 4
+
+        Text {
+          text: "Collections * (select at least one)"
+          color: editorRoot.muted
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.Medium
+        }
+
+        Repeater {
+          model: editorRoot.writableCollectionsForSelectedOrg()
+
+          Rectangle {
+            required property var modelData
+            readonly property bool checked: editorRoot.isCollectionSelected(modelData.id)
+            Layout.fillWidth: true
+            implicitHeight: 28
+            radius: 4
+            color: checked ? Qt.rgba(editorRoot.accent.r, editorRoot.accent.g, editorRoot.accent.b, 0.14) : Qt.rgba(editorRoot.foreground.r, editorRoot.foreground.g, editorRoot.foreground.b, 0.05)
+            border.color: checked ? editorRoot.accent : editorRoot.borderColor
+            border.width: 1
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.leftMargin: 8
+              anchors.rightMargin: 8
+              spacing: 8
+
+              Text {
+                text: checked ? "\uf14a" : "\uf096"
+                font.family: editorRoot.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                color: checked ? editorRoot.accent : editorRoot.muted
+              }
+
+              Text {
+                text: modelData.name || "Collection"
+                color: editorRoot.foreground
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: editorRoot.toggleCollection(modelData.id)
             }
           }
         }
@@ -2785,11 +3024,12 @@ ScrollView {
       }
 
       Rectangle {
+        objectName: "submitButton"
         implicitHeight: 30
         implicitWidth: 100
         radius: 4
-        color: submitMouse.containsMouse ? Qt.lighter(editorRoot.accent, 1.1) : editorRoot.accent
-        opacity: editorRoot.isBusy ? 0.6 : 1.0
+        color: (editorRoot.canSubmit && submitMouse.containsMouse) ? Qt.lighter(editorRoot.accent, 1.1) : editorRoot.accent
+        opacity: editorRoot.canSubmit ? 1.0 : 0.5
 
         RowLayout {
           anchors.centerIn: parent
@@ -2814,7 +3054,7 @@ ScrollView {
         MouseArea {
           id: submitMouse
           anchors.fill: parent
-          enabled: !editorRoot.isBusy
+          enabled: editorRoot.canSubmit
           hoverEnabled: true
           cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
           onClicked: editorRoot.submit()

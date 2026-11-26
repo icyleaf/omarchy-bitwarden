@@ -977,7 +977,7 @@ Item {
     editor.originalItem = null
 
     var editSuccessIdx = src.indexOf("function handleCipherEditSuccess(data)")
-    var editSuccessWindow = editSuccessIdx >= 0 ? src.substring(editSuccessIdx, editSuccessIdx + 900) : ""
+    var editSuccessWindow = editSuccessIdx >= 0 ? src.substring(editSuccessIdx, editSuccessIdx + 1100) : ""
     check(editSuccessWindow.indexOf('data.outcome === "saved_needs_sync"') !== -1,
           "edit success handles saved_needs_sync")
     check(editSuccessWindow.indexOf("root.syncVault(true, true)") !== -1,
@@ -1198,6 +1198,56 @@ Item {
     check(clearTotpDiff && clearTotpDiff.uris === undefined, "unchanged URIs are omitted when only TOTP changes")
 
     editor.active = false
+
+    // ==================================================================
+    // Organization Ownership Selector & Writable Collection Checklist (#453)
+    // ==================================================================
+    editor.mode = "create"
+    editor.originalItem = null
+    editor.cipherType = "login"
+    editor.organizations = [
+      { id: "org-1", name: "Acme Corp" },
+      { id: "org-ro", name: "ReadOnly Org" }
+    ]
+    editor.collections = [
+      { id: "col-w", organization_id: "org-1", name: "Engineering", read_only: false, hide_passwords: false, manage: false },
+      { id: "col-m", organization_id: "org-1", name: "Admins", read_only: true, hide_passwords: false, manage: true },
+      { id: "col-ro", organization_id: "org-1", name: "ReadOnly Col", read_only: true, hide_passwords: true, manage: false },
+      { id: "col-ro-org", organization_id: "org-ro", name: "Archive", read_only: true, hide_passwords: true, manage: false }
+    ]
+    editor.resetForm()
+    var wOrgs = editor.writableOrganizations()
+    check(wOrgs.length === 1 && wOrgs[0].id === "org-1", "only Organizations with >= 1 writable Collection appear in ownership selector")
+    check(editor.organizationId === "", "create mode defaults to Personal ownership")
+    check(editor.canSubmit === true, "Personal create mode allows submit without collections")
+
+    editor.cipherName = "Shared DB"
+    editor.selectOrganization("org-1")
+    check(editor.organizationId === "org-1", "selectOrganization updates organizationId")
+    check(editor.writableCollectionsForSelectedOrg().length === 2, "writableCollectionsForSelectedOrg lists !read_only || manage collections")
+    check(editor.canSubmit === false, "submit is disabled when Organization selected with 0 collections")
+    check(editor.buildPayload() === null, "buildPayload fails closed when 0 collections selected for Organization")
+    check(editor.errorMessage.toLowerCase().indexOf("collection") !== -1, "missing collection error explains requirement")
+
+    editor.toggleCollection("col-ro")
+    check(editor.selectedCollectionIds.length === 0, "toggling a non-writable collection is ignored")
+
+    editor.toggleCollection("col-w")
+    check(editor.canSubmit === true, "submit enabled once >= 1 writable collection is checked")
+    editor.toggleCollection("col-m")
+    var orgPayload = editor.buildPayload()
+    check(orgPayload !== null, "buildPayload succeeds with writable collections")
+    check(orgPayload.organization_id === "org-1", "org create payload includes organization_id")
+    check(orgPayload.collection_ids && orgPayload.collection_ids.length === 2
+          && orgPayload.collection_ids.indexOf("col-w") !== -1
+          && orgPayload.collection_ids.indexOf("col-m") !== -1,
+          "org create payload includes all selected writable collection_ids")
+
+    editor.selectOrganization("")
+    check(editor.organizationId === "" && editor.selectedCollectionIds.length === 0, "switching back to Personal clears org and collections")
+    var personalPayload = editor.buildPayload()
+    check(personalPayload && personalPayload.organization_id === undefined && personalPayload.collection_ids === undefined,
+          "Personal payload omits organization_id and collection_ids")
 
     console.log("CipherEditor Tests Completed: " + (failures === 0 ? "ALL PASSED" : failures + " FAILURES"))
     Qt.exit(failures === 0 ? 0 : 1)

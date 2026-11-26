@@ -42,11 +42,12 @@ function canAssignFolder(item) {
   return isMutableType(item)
 }
 
-// Organization Cipher full content editing and deletion are gated by per-cipher
-// permission flags (fail-closed false when absent). Ticket #452 keeps full Org
-// edits and deletes disabled until their dedicated slices (#453, #454) land.
+// Organization Cipher full content editing is gated by `edit && view_password`
+// (fail-closed false when absent). Deletion remains gated until Ticket #454 lands.
 function canEdit(item) {
-  return isEditableType(item) && !isOrganizationOwned(item)
+  if (!isEditableType(item)) return false
+  if (!isOrganizationOwned(item)) return true
+  return Boolean(item.edit) && Boolean(item.view_password)
 }
 
 function editGuardError(item) {
@@ -54,7 +55,7 @@ function editGuardError(item) {
   if (!isOrganizationOwned(item)) return ""
   if (!item.edit) return "You do not have permission to edit this Organization cipher."
   if (!item.view_password) return "Cannot edit this Organization cipher because passwords are hidden."
-  return "Organization cipher editing is not enabled yet."
+  return ""
 }
 
 function canDelete(item) {

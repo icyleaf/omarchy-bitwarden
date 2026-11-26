@@ -362,6 +362,8 @@ Item {
   property bool showDeleteCipherModal: false
   property bool showFolderManagerModal: false
   property var vaultFolders: []
+  property var vaultOrganizations: []
+  property var vaultCollections: []
   property var deleteCipherItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
@@ -479,6 +481,8 @@ Item {
     root.showDeleteCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
+    root.vaultOrganizations = []
+    root.vaultCollections = []
     root.deleteCipherItem = null
     if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
     if (cipherDeleteProc.running) {
@@ -574,6 +578,8 @@ Item {
       root.showDeleteCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
+    root.vaultOrganizations = []
+    root.vaultCollections = []
       root.deleteCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
@@ -654,6 +660,8 @@ Item {
     root.showDeleteCipherModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
+    root.vaultOrganizations = []
+    root.vaultCollections = []
     root.deleteCipherItem = null
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
@@ -852,6 +860,12 @@ Item {
     folderListProc.lastStderr = ""
     folderListProc.command = [root.helperPath, "folder", "list", "--json"]
     folderListProc.running = true
+    if (orgListProc.running) orgListProc.running = false
+    orgListProc.revision = root.vaultRevision
+    orgListProc.errorReported = false
+    orgListProc.lastStderr = ""
+    orgListProc.command = [root.helperPath, "org", "list", "--json"]
+    orgListProc.running = true
   }
 
   function openFolderManagerModal() {
@@ -1606,6 +1620,7 @@ Item {
     cipherCreateProc.lastStderr = ""
     cipherCreateProc.createdType = payload.cipher_type || "login"
     cipherCreateProc.createdFolderId = payload.folder_id || ""
+    cipherCreateProc.createdOrganizationId = payload.organization_id || ""
     cipherCreateProc.createdName = payload.name || ""
     cipherCreateProc.payload = JSON.stringify(payload)
     // Secrets travel over stdin only: argv stays free of plaintext.
@@ -1613,10 +1628,11 @@ Item {
     cipherCreateProc.running = true
   }
 
-  function revealCreatedCipher(cipherType, folderId) {
-    // Drop only the filters that would hide the new personal cipher.
+  function revealCreatedCipher(cipherType, folderId, organizationId) {
+    // Drop only the filters that would hide the created or edited cipher.
     if (root.searchQuery) root.searchQuery = ""
-    if (root.activeVaultScope !== "all" && root.activeVaultScope !== "personal") {
+    var expectedScope = organizationId ? organizationId : "personal"
+    if (root.activeVaultScope !== "all" && root.activeVaultScope !== expectedScope) {
       root.activeVaultScope = "all"
     }
     var category = cipherType || "login"
@@ -1655,7 +1671,7 @@ Item {
     var newId = receipt.id || ""
     var createdName = cipherCreateProc.createdName
     root.pendingSelectItemId = newId
-    root.revealCreatedCipher(cipherCreateProc.createdType, cipherCreateProc.createdFolderId)
+    root.revealCreatedCipher(cipherCreateProc.createdType, cipherCreateProc.createdFolderId, cipherCreateProc.createdOrganizationId)
 
     if (data && data.outcome === "saved_needs_sync") {
       root.statusMessage = "Cipher '" + createdName + "' saved on the server. Sync the vault to refresh the local copy."
@@ -1701,9 +1717,10 @@ Item {
     var receipt = (data && data.item) ? data.item : {}
     var editedId = receipt.id || cipherEditProc.itemId
     var editedName = receipt.name || cipherEditProc.editedName
+    var editedOrgId = (root.cipherEditorEditItem && root.cipherEditorEditItem.organization_id) ? root.cipherEditorEditItem.organization_id : ""
     root.cipherEditorEditItem = null
     root.pendingSelectItemId = editedId
-    root.revealCreatedCipher(cipherEditProc.editedType, cipherEditProc.editedFolderId)
+    root.revealCreatedCipher(cipherEditProc.editedType, cipherEditProc.editedFolderId, editedOrgId)
 
     if (data && data.outcome === "saved_needs_sync") {
       root.statusMessage = "Cipher '" + editedName + "' saved on the server. Sync the vault to refresh the local copy."
@@ -3261,6 +3278,8 @@ Item {
                 mode: root.cipherEditorEditItem ? "edit" : "create"
                 cipherType: root.cipherEditorType
                 folders: root.getAvailableFolders()
+                organizations: root.vaultOrganizations
+                collections: root.vaultCollections
                 defaultFolderId: root.cipherEditorDefaultFolderId
                 originalItem: root.cipherEditorEditItem
                 isEngineOutdated: root.isGeneratorEngineOutdated
@@ -3707,6 +3726,7 @@ Item {
     property int revision: 0
     property string createdType: "login"
     property string createdFolderId: ""
+    property string createdOrganizationId: ""
     property string createdName: ""
     property bool errorReported: false
     property string lastStderr: ""
@@ -4839,6 +4859,47 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.handleProcessStderr(text, "omawarden:vault")
+    }
+  }
+
+  Process {
+    id: orgListProc
+    property int revision: 0
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (orgListProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") return
+        try {
+          var data = JSON.parse((text || "").trim())
+          if (data && data.ok) {
+            orgListProc.errorReported = true
+            root.vaultOrganizations = Array.isArray(data.organizations) ? data.organizations : []
+            root.vaultCollections = Array.isArray(data.collections) ? data.collections : []
+          } else if (data && data.ok === false) {
+            orgListProc.errorReported = true
+            root.logError("omarchy:org", data.error ? String(data.error) : "Failed to load organizations.")
+          }
+        } catch (e) {
+          root.logError("omarchy:org", "Failed to parse organization list: " + e)
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        orgListProc.lastStderr = (text || "").trim().replace(/^Error:\s*/i, "")
+        root.handleProcessStderr(text, "omawarden:org")
+      }
+    }
+    onExited: function(code) {
+      if (orgListProc.revision !== root.vaultRevision) return
+      if (code !== 0 && !orgListProc.errorReported) {
+        root.logError("omarchy:org", orgListProc.lastStderr || ("Failed to load organizations (exit code " + code + ")."))
+      }
     }
   }
 

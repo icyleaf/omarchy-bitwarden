@@ -106,11 +106,14 @@ Item {
     // Organization Ciphers support per-user Favorite & Folder via /partial regardless of edit flag
     var orgReadOnly = { id: "org-ro", type_name: "login", organization_id: "org-1", edit: false, view_password: false, can_delete: false, can_restore: false }
     var orgHidePass = { id: "org-hp", type_name: "login", organization_id: "org-1", edit: true, view_password: false, can_delete: true, can_restore: true }
+    var orgWritable = { id: "org-w", type_name: "login", organization_id: "org-1", edit: true, view_password: true, can_delete: true, can_restore: true }
     check(CipherMutation.canFavorite(login) === true, "personal login can be favorited")
     check(CipherMutation.canFavorite(orgReadOnly) === true, "read-only organization login can be favorited via /partial")
     check(CipherMutation.canFavorite(orgHidePass) === true, "hide-password organization login can be favorited via /partial")
     check(CipherMutation.canAssignFolder(orgReadOnly) === true, "read-only organization login supports personal folder assignment via /partial")
     check(CipherMutation.canEdit(login) === true, "personal login can be edited")
+    check(CipherMutation.canEdit(orgWritable) === true, "writable organization login (edit && view_password) can be edited")
+    check(CipherMutation.editGuardError(orgWritable) === "", "writable organization login has no edit guard error")
     check(CipherMutation.canEdit(orgReadOnly) === false, "read-only organization login cannot be edited")
     check(CipherMutation.canEdit(orgHidePass) === false, "hide-password organization login cannot be edited (fail-closed)")
     check(CipherMutation.editGuardError(orgReadOnly).indexOf("permission") !== -1, "read-only organization edit guard explains missing permission")
