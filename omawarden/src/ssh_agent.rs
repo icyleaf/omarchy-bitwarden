@@ -2682,9 +2682,7 @@ mod tests {
 
     #[test]
     fn the_accept_loop_ends_once_the_agent_is_off() {
-        let _lock = crate::env_lock();
-        let runtime = tempfile::tempdir().unwrap();
-        let _env = EnvVars::set(&[("XDG_RUNTIME_DIR", runtime.path().as_os_str())]);
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let state = state_in(dir.path());
         spawn(state.clone()).unwrap();
@@ -2693,6 +2691,8 @@ mod tests {
         // wakes it, and it hangs up instead of serving.
         state.ssh_agent.running.store(false, Ordering::SeqCst);
         let mut late = UnixStream::connect(socket_path()).unwrap();
+        late.set_read_timeout(Some(crate::test_support::MOCK_IO_TIMEOUT))
+            .unwrap();
         let mut buf = [0u8; 1];
         assert_eq!(late.read(&mut buf).unwrap(), 0);
         remove_socket();
@@ -3314,6 +3314,7 @@ mod tests {
 
     #[test]
     fn vault_keys_come_from_ssh_key_items() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let state = state_in(dir.path());
         *state.vault_mgr.is_unlocked.write().unwrap() = true;
@@ -3387,16 +3388,14 @@ mod tests {
 
     #[test]
     fn the_daemon_hosts_the_agent() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
         crate::write_test_executable(&bin.path().join("omarchy-shell"), "#!/bin/sh\necho ok\n");
-        let _env = EnvVars::set(&[
-            ("OMAWARDEN_CONFIG_DIR", dir.path().as_os_str()),
-            ("HOME", home.path().as_os_str()),
-            ("PATH", path_with(bin.path()).as_os_str()),
-        ]);
+        env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        env.set_var("HOME", home.path());
+        env.set_var("PATH", path_with(bin.path()));
         let state = state_in(dir.path());
         let host: &dyn Host = &*state;
 
@@ -3424,11 +3423,11 @@ mod tests {
 
     #[test]
     fn the_daemon_hosts_notifications() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
         crate::write_test_executable(&bin.path().join("notify-send"), "#!/bin/sh\necho default\n");
-        let _env = EnvVars::set(&[("PATH", path_with(bin.path()).as_os_str())]);
+        env.set_var("PATH", path_with(bin.path()));
         let state = state_in(dir.path());
         let (tx, rx) = std::sync::mpsc::channel();
         assert!(Host::notify(
@@ -3444,13 +3443,11 @@ mod tests {
 
     #[test]
     fn the_agent_follows_the_setting_over_a_real_socket() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let _env = EnvVars::set(&[
-            ("XDG_RUNTIME_DIR", runtime.path().as_os_str()),
-            ("OMAWARDEN_CONFIG_DIR", config.path().as_os_str()),
-        ]);
+        env.set_var("XDG_RUNTIME_DIR", runtime.path());
+        env.set_var("OMAWARDEN_CONFIG_DIR", config.path());
         let state = state_in(config.path());
         let enable = |on: bool| {
             let mut cfg = crate::config::ConfigManager::default().load();
@@ -3481,6 +3478,12 @@ mod tests {
         // The vault is unlocked and empty: a real client sees an empty list.
         *state.vault_mgr.is_unlocked.write().unwrap() = true;
         let mut stream = UnixStream::connect(socket_path()).unwrap();
+        stream
+            .set_read_timeout(Some(crate::test_support::MOCK_IO_TIMEOUT))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(crate::test_support::MOCK_IO_TIMEOUT))
+            .unwrap();
         send(&mut stream, REQUEST_IDENTITIES, &[]).unwrap();
         let mut len = [0u8; 4];
         stream.read_exact(&mut len).unwrap();
@@ -3499,13 +3502,11 @@ mod tests {
 
     #[test]
     fn a_hijacked_socket_path_is_not_followed() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let _env = EnvVars::set(&[
-            ("XDG_RUNTIME_DIR", runtime.path().as_os_str()),
-            ("OMAWARDEN_CONFIG_DIR", config.path().as_os_str()),
-        ]);
+        env.set_var("XDG_RUNTIME_DIR", runtime.path());
+        env.set_var("OMAWARDEN_CONFIG_DIR", config.path());
         let state = state_in(config.path());
         std::os::unix::fs::symlink("/tmp/elsewhere", socket_path()).unwrap();
         assert!(spawn(state.clone()).is_err());

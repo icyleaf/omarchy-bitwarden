@@ -399,9 +399,9 @@ mod tests {
 
     #[test]
     fn test_provider_resolution_precedence() {
-        let _guard = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
 
-        std::env::set_var("OMA_KEYRING_PROVIDER", "mock");
+        env.set_var("OMA_KEYRING_PROVIDER", "mock");
         let env_resolved = resolve_provider(None, None);
         assert_eq!(env_resolved.name(), "mock");
         assert!(env_resolved.is_available());
@@ -410,14 +410,14 @@ mod tests {
         let explicit = resolve_provider(Some("secret-tool"), None);
         assert_eq!(explicit.name(), "secret-tool");
 
-        std::env::remove_var("OMA_KEYRING_PROVIDER");
+        env.remove_var("OMA_KEYRING_PROVIDER");
 
         // OMA_SECRET_TOOL_PATH selects SecretToolKeyringProvider when no provider name is set.
-        std::env::set_var("OMA_SECRET_TOOL_PATH", "/custom/bin/secret-tool");
+        env.set_var("OMA_SECRET_TOOL_PATH", "/custom/bin/secret-tool");
         let path_env_resolved = resolve_provider(None, None);
         assert_eq!(path_env_resolved.name(), "secret-tool");
         assert!(!path_env_resolved.is_available());
-        std::env::remove_var("OMA_SECRET_TOOL_PATH");
+        env.remove_var("OMA_SECRET_TOOL_PATH");
 
         let unknown = resolve_provider(Some("nonexistent_keyring_provider"), None);
         assert_eq!(unknown.name(), "unavailable");
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_empty_token_store() {
-        let mgr = KeyringManager::default();
+        let mgr = KeyringManager::new("mock");
         assert!(!mgr.store_session("https://vault.bitwarden.com", ""));
         assert!(!mgr.store_session("", "some_token"));
     }
@@ -781,7 +781,7 @@ esac
 
     #[test]
     fn test_validation_rejects_empty_inputs() {
-        let mgr = KeyringManager::default();
+        let mgr = KeyringManager::new("mock");
         assert!(!mgr.store_token("", "access_token", "token"));
         assert!(!mgr.store_token("https://bw.local", "", "token"));
         assert!(!mgr.store_token("https://bw.local", "kind", ""));

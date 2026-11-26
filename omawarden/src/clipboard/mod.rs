@@ -386,11 +386,11 @@ mod tests {
 
     #[test]
     fn test_provider_resolution() {
-        let _guard = crate::env_lock();
-        std::env::set_var("OMA_CLIPBOARD_PROVIDER", "mock");
+        let mut env = crate::test_support::TestEnv::isolated();
+        env.set_var("OMA_CLIPBOARD_PROVIDER", "mock");
         let provider = resolve_provider(None, None);
         assert_eq!(provider.name(), "mock");
-        std::env::remove_var("OMA_CLIPBOARD_PROVIDER");
+        env.remove_var("OMA_CLIPBOARD_PROVIDER");
 
         let p_x11 = resolve_provider(Some("x11"), None);
         assert_eq!(p_x11.name(), "x11");

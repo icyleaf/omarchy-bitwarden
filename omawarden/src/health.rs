@@ -288,23 +288,22 @@ mod tests {
 
     #[test]
     fn test_system_health() {
-        let status = check_system_health("https://vault.bitwarden.com");
+        let _env = crate::test_support::TestEnv::isolated();
+        let status = check_system_health("http://127.0.0.1:1");
         assert!(status.installed);
         assert!(status.version.is_some());
     }
 
     #[test]
     fn test_system_health_respects_keyring_provider_override() {
-        let _guard = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
 
-        std::env::set_var("OMA_KEYRING_PROVIDER", "mock");
+        env.set_var("OMA_KEYRING_PROVIDER", "mock");
         let mock_status = check_system_health("http://127.0.0.1:1");
         assert!(mock_status.keyring_available);
 
-        std::env::set_var("OMA_KEYRING_PROVIDER", "nonexistent_provider");
+        env.set_var("OMA_KEYRING_PROVIDER", "nonexistent_provider");
         let unavailable_status = check_system_health("http://127.0.0.1:1");
         assert!(!unavailable_status.keyring_available);
-
-        std::env::remove_var("OMA_KEYRING_PROVIDER");
     }
 }

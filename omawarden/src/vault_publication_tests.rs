@@ -26,7 +26,11 @@ fn fixture(dir: &std::path::Path) -> VaultManager {
             ..Default::default()
         })
         .unwrap();
-    VaultManager::new("", Some(manager), None)
+    VaultManager::new(
+        "",
+        Some(manager),
+        Some(crate::keyring::KeyringManager::new("mock")),
+    )
 }
 
 fn publish_new_snapshot(vault: &VaultManager) {
@@ -48,7 +52,7 @@ fn publish_new_snapshot(vault: &VaultManager) {
 
 #[test]
 fn password_unlock_cannot_replace_a_newer_published_snapshot() {
-    let _environment = crate::env_lock();
+    let _environment = crate::test_support::TestEnv::isolated();
     let dir = tempfile::tempdir().unwrap();
     let vault = Arc::new(fixture(dir.path()));
     vault.unlock("fixture").unwrap();
@@ -70,7 +74,7 @@ fn password_unlock_cannot_replace_a_newer_published_snapshot() {
 
 #[test]
 fn quick_unlock_cannot_replace_a_newer_ciphertext_snapshot() {
-    let _environment = crate::env_lock();
+    let _environment = crate::test_support::TestEnv::isolated();
     let dir = tempfile::tempdir().unwrap();
     let vault = Arc::new(fixture(dir.path()));
     vault.unlock("fixture").unwrap();
@@ -96,7 +100,7 @@ fn quick_unlock_cannot_replace_a_newer_ciphertext_snapshot() {
 
 #[test]
 fn account_replacement_during_password_unlock_cannot_restore_the_old_account() {
-    let _environment = crate::env_lock();
+    let _environment = crate::test_support::TestEnv::isolated();
     let dir = tempfile::tempdir().unwrap();
     let vault = Arc::new(fixture(dir.path()));
     let (entered, release) = vault.before_unlock_publication.arm();
@@ -124,7 +128,7 @@ fn account_replacement_during_password_unlock_cannot_restore_the_old_account() {
 
 #[test]
 fn cache_publication_serializes_with_hard_and_soft_lock() {
-    let _environment = crate::env_lock();
+    let _environment = crate::test_support::TestEnv::isolated();
     for soft in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(fixture(dir.path()));

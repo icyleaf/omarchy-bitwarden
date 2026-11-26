@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn logout_retains_cleanup_records_through_sync_and_keyring_failures() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let storage_mgr = StorageManager::new(dir.path().join("data.json"));
         let server = "https://fixture.invalid";
@@ -1318,6 +1318,7 @@ esac
 
     #[test]
     fn test_auth_manager_status_and_lock() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_auth_data.json");
         let storage_mgr = StorageManager::new(storage_path);
@@ -1359,7 +1360,7 @@ esac
 
     #[test]
     fn test_login_apikey_network_failure() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("test_apikey_data.json");
         let storage_mgr = StorageManager::new(storage_path);
@@ -1385,7 +1386,7 @@ esac
 
     #[test]
     fn test_login_password_endpoint_404_error() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1395,17 +1396,18 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            let mut count = 0;
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..2 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
                 let resp =
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(resp.as_bytes());
-                count += 1;
-                if count >= 2 {
-                    break;
-                }
             }
         });
 
@@ -1425,7 +1427,7 @@ esac
 
     #[test]
     fn test_login_password_two_factor_required() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1435,7 +1437,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..6 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 1024];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -1443,7 +1451,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -1484,7 +1492,7 @@ esac
 
     #[test]
     fn test_login_password_webauthn_smart_default_provider_selection() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1494,7 +1502,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..6 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 1024];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -1502,7 +1516,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -1565,6 +1579,7 @@ esac
 
     #[test]
     fn test_auth_status_with_expired_token() {
+        let _environment = crate::test_support::TestEnv::isolated();
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
 
@@ -1609,6 +1624,7 @@ esac
 
     #[test]
     fn test_auth_status_with_expired_token_but_renewable_via_api_secret() {
+        let _environment = crate::test_support::TestEnv::isolated();
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
         use std::fs;
@@ -1708,6 +1724,7 @@ esac
 
     #[test]
     fn test_auth_status_custom_server_url_precedence() {
+        let _environment = crate::test_support::TestEnv::isolated();
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
         use std::fs;
@@ -1818,7 +1835,7 @@ esac
             "https://vault.bitwarden.com",
             None,
             Some(storage_mgr.clone()),
-            None,
+            Some(KeyringManager::new("mock")),
         );
         assert_eq!(auth_mgr_cloud.identity_url, None);
 
@@ -1827,7 +1844,7 @@ esac
             "https://vaultwarden.custom.local",
             None,
             Some(storage_mgr.clone()),
-            None,
+            Some(KeyringManager::new("mock")),
         );
         assert_eq!(
             auth_mgr_same.identity_url,
@@ -1839,7 +1856,7 @@ esac
             "https://vaultwarden.custom.local",
             Some(""),
             Some(storage_mgr.clone()),
-            None,
+            Some(KeyringManager::new("mock")),
         );
         assert_eq!(auth_mgr_cleared.identity_url, None);
 
@@ -1848,7 +1865,7 @@ esac
             "https://vaultwarden.custom.local",
             Some("https://new-id.custom.local"),
             Some(storage_mgr.clone()),
-            None,
+            Some(KeyringManager::new("mock")),
         );
         assert_eq!(
             auth_mgr_override.identity_url,
@@ -1858,7 +1875,7 @@ esac
 
     #[test]
     fn test_login_password_persists_email_to_config_based_on_remember_email() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -1877,7 +1894,7 @@ esac
         let email = "user@example.com";
         let password = "password123";
         let master_key =
-            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
         let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
 
         let iv = [1u8; 16];
@@ -1909,7 +1926,13 @@ esac
 
         let key_clone = enc_user_key.clone();
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -1917,7 +1940,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -1992,7 +2015,8 @@ esac
 
         let email2 = "other@example.com";
         let master_key2 =
-            derive_master_key(email2, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+            derive_master_key(email2, password, KdfType::Pbkdf2Sha256, 100_000, None, None)
+                .unwrap();
         let sym_key2 = SymmetricCryptoKey::from_master_key(&master_key2);
         let enc2 = Aes256CbcEnc::new_from_slices(&sym_key2.enc_key, &iv).unwrap();
         let mut buf2 = vec![0u8; 128];
@@ -2019,7 +2043,13 @@ esac
         let server_url2 = format!("http://127.0.0.1:{}", port2);
 
         let handle2 = thread::spawn(move || {
-            for mut stream in listener2.incoming().flatten() {
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener2,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2027,7 +2057,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -2084,7 +2114,7 @@ esac
 
     #[test]
     fn test_login_keyring_unavailable_fails_closed() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("data_unavailable.json");
         let storage_mgr = StorageManager::new(storage_path.clone());
@@ -2130,7 +2160,7 @@ esac
 
     #[test]
     fn test_login_password_keyring_store_failure_fails_closed() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -2158,7 +2188,7 @@ esac
         let email = "test@example.com";
         let password = "password";
         let master_key =
-            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
         let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
         let iv = [1u8; 16];
         let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
@@ -2190,7 +2220,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2198,7 +2234,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -2260,7 +2296,7 @@ esac
 
     #[test]
     fn test_login_apikey_keyring_store_failure_fails_closed() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -2282,7 +2318,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2337,7 +2379,7 @@ esac
 
     #[test]
     fn test_login_password_auto_unlocks_daemon() {
-        let _lock = crate::env_lock();
+        let _lock = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -2356,7 +2398,7 @@ esac
         let email = "daemon_test@example.com";
         let password = "password123";
         let master_key =
-            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
         let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
 
         let iv = [3u8; 16];
@@ -2388,7 +2430,13 @@ esac
 
         let key_clone = enc_user_key.clone();
         let http_handle = thread::spawn(move || {
-            for mut stream in http_listener.incoming().flatten() {
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &http_listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2396,7 +2444,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -2453,7 +2501,7 @@ esac
 
     #[test]
     fn test_login_password_new_device_verification_flow() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -2463,7 +2511,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..6 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2471,7 +2525,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -2516,7 +2570,7 @@ esac
 
     #[test]
     fn test_login_password_email_two_factor_flow() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -2526,7 +2580,13 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..6 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -2534,7 +2594,7 @@ esac
                 if req.contains("POST /identity/accounts/prelogin")
                     || req.contains("POST /api/accounts/prelogin")
                 {
-                    let body = r#"{"kdf":0,"kdfIterations":5000}"#;
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),

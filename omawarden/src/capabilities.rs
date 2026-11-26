@@ -908,8 +908,9 @@ mod tests {
 
     #[test]
     fn test_cross_server_cache_isolation() {
+        let mut env = crate::test_support::TestEnv::isolated();
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("OMAWARDEN_DATA_DIR", temp.path());
+        env.set_var("OMAWARDEN_DATA_DIR", temp.path());
 
         let caps = ServerCapabilities {
             server_url: "https://vault.corp.local".to_string(),
@@ -943,8 +944,6 @@ mod tests {
         assert!(load_cached_capabilities_for(Some("https://vault.corp.local/old/")).is_some());
         assert!(load_cached_capabilities_for(Some("https://vault.corp.local/new")).is_none());
         assert!(load_cached_capabilities_for(Some("https://vault.corp.local")).is_none());
-
-        std::env::remove_var("OMAWARDEN_DATA_DIR");
     }
 
     #[test]

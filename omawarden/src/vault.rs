@@ -2436,7 +2436,7 @@ pub(crate) mod tests {
 
         let email = "quick@unlock.test";
         let master_key =
-            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 600_000, None, None)
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None)
                 .expect("master key");
         let master_sym = SymmetricCryptoKey::from_master_key(master_key.as_slice());
         let raw = [42u8; 64];
@@ -2464,17 +2464,18 @@ pub(crate) mod tests {
             user_email: email.to_string(),
             credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
             kdf: Some(0),
-            kdf_iterations: Some(600_000),
+            kdf_iterations: Some(100_000),
             enc_user_key: Some(enc_user_key),
             ..Default::default()
         };
         let storage_mgr = StorageManager::new(dir.join("data.json"));
         storage_mgr.save(&storage).expect("save storage");
-        VaultManager::new("", Some(storage_mgr), None)
+        VaultManager::new("", Some(storage_mgr), Some(KeyringManager::new("mock")))
     }
 
     #[test]
     fn test_soft_lock_retains_key_and_quick_unlock_restores() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         assert!(!vault.quick_unlock_available());
@@ -2505,6 +2506,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_plain_lock_wipes_quick_unlock_slot() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2520,6 +2522,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_soft_lock_without_unlock_retains_nothing() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         assert!(!vault.soft_lock());
@@ -2529,6 +2532,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_unlock_refreshes_stale_retained_key() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2543,6 +2547,7 @@ pub(crate) mod tests {
 
     #[test]
     fn quick_unlock_wipes_the_key_when_the_cache_has_no_scoped_slot() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         let mut storage = vault.storage_mgr.load();
@@ -2561,6 +2566,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_fails_closed_on_stale_key() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2596,6 +2602,7 @@ pub(crate) mod tests {
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2643,6 +2650,7 @@ pub(crate) mod tests {
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2679,7 +2687,12 @@ pub(crate) mod tests {
 
     #[test]
     fn test_lock_generation_changes_only_when_an_unlocked_vault_locks() {
-        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
+        let _env = crate::test_support::TestEnv::isolated();
+        let vault_mgr = VaultManager::new(
+            "https://vault.example.com",
+            None,
+            Some(KeyringManager::new("mock")),
+        );
         let start = vault_mgr.lock_generation();
 
         // Locking an already locked vault is not a new lock cycle.
@@ -2699,6 +2712,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_soft_lock_on_locked_vault_keeps_existing_slot() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2712,6 +2726,7 @@ pub(crate) mod tests {
     fn test_soft_lock_is_serialized_with_restore_commit() {
         use std::time::Duration;
 
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2741,6 +2756,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_fails_closed_on_empty_vault_with_changed_wrap() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2774,6 +2790,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_allows_an_unchanged_empty_vault() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2792,6 +2809,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_unlock_rebinds_the_retained_key_so_an_empty_vault_stays_restorable() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2818,6 +2836,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_wipes_on_stale_keyed_ciphers() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2846,6 +2865,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_accepts_keyed_ciphers_with_valid_keys() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2877,6 +2897,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_quick_unlock_restore_falls_back_to_name_when_key_is_corrupt() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
         vault.unlock("master-pw").unwrap();
@@ -2998,7 +3019,12 @@ pub(crate) mod tests {
             }),
         ];
 
-        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
+        let dir = tempfile::tempdir().unwrap();
+        let vault_mgr = VaultManager::new(
+            "https://vault.example.com",
+            Some(StorageManager::new(dir.path().join("data.json"))),
+            Some(KeyringManager::new("mock")),
+        );
         let items = vault_mgr.parse_raw_items(&raw_items);
         assert_eq!(items.len(), 4);
 
@@ -3039,6 +3065,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vault_manager_lifecycle() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault_test.json");
         let storage_mgr = StorageManager::new(path);
@@ -3074,6 +3101,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_sync_allowed_when_locked_with_session() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault_sync_locked.json");
         let storage_mgr = StorageManager::new(path.clone());
@@ -3123,7 +3151,12 @@ pub(crate) mod tests {
             }),
         ];
 
-        let vault_mgr = VaultManager::new("https://vault.example.com", None, None);
+        let dir = tempfile::tempdir().unwrap();
+        let vault_mgr = VaultManager::new(
+            "https://vault.example.com",
+            Some(StorageManager::new(dir.path().join("data.json"))),
+            Some(KeyringManager::new("mock")),
+        );
         let items = vault_mgr.parse_raw_items(&raw_items);
         *vault_mgr.decrypted_items.write().unwrap() = items;
         *vault_mgr.is_unlocked.write().unwrap() = true;
@@ -3183,7 +3216,12 @@ pub(crate) mod tests {
                 "type": 1,
             }),
         ];
-        let vault_mgr = VaultManager::new("http://127.0.0.1:9", None, None);
+        let dir = tempfile::tempdir().unwrap();
+        let vault_mgr = VaultManager::new(
+            "http://127.0.0.1:9",
+            Some(StorageManager::new(dir.path().join("data.json"))),
+            Some(KeyringManager::new("mock")),
+        );
         let items = vault_mgr.parse_raw_items(&raw_items);
         *vault_mgr.decrypted_items.write().unwrap() = items;
         *vault_mgr.is_unlocked.write().unwrap() = true;
@@ -3271,6 +3309,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vault_sync_silent_reauth_with_api_secret_on_expired_token() {
+        let _env = crate::test_support::TestEnv::isolated();
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
         use std::fs;
@@ -3285,8 +3324,13 @@ pub(crate) mod tests {
 
         // Spawn mock server responding to /identity/connect/token and /api/sync
         let server_handle = thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -3436,6 +3480,7 @@ esac
 
     #[test]
     fn test_vault_sync_reauth_failure_purges_tokens_and_locks() {
+        let _env = crate::test_support::TestEnv::isolated();
         use std::fs;
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -3446,10 +3491,15 @@ esac
         let server_url = format!("http://{}", listener.local_addr().unwrap());
 
         let server_handle = thread::spawn(move || {
-            for stream in listener.incoming().take(2) {
-                let mut stream = stream.unwrap();
+            for _ in 0..2 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap();
+                let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
                 if req.contains("/connect/token") {
                     let body = serde_json::json!({
@@ -3575,6 +3625,7 @@ esac
 
     #[test]
     fn test_vault_sync_network_error_preserves_tokens() {
+        let _env = crate::test_support::TestEnv::isolated();
         use std::fs;
 
         let dir = tempfile::tempdir().unwrap();
@@ -3673,6 +3724,7 @@ esac
 
     #[test]
     fn test_vault_sync_server_502_error_preserves_tokens() {
+        let _env = crate::test_support::TestEnv::isolated();
         use std::fs;
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -3684,17 +3736,18 @@ esac
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = thread::spawn(move || {
-            let mut count = 0;
-            for mut stream in listener.incoming().flatten() {
+            for _ in 0..2 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
                 let resp =
                     "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(resp.as_bytes());
-                count += 1;
-                if count >= 2 {
-                    break;
-                }
             }
         });
 
