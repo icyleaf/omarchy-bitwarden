@@ -2082,7 +2082,7 @@ fn test_delete_cipher_organization_read_only_rejected() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("Organization ciphers are read-only."),
+        stderr.contains("You do not have permission to delete this Organization cipher."),
         "Unexpected error output: {stderr}"
     );
 }
@@ -6376,7 +6376,7 @@ fn test_restore_cipher_organization_read_only() {
 
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("Organization ciphers are read-only."));
+    assert!(stderr.contains("You do not have permission to restore this Organization cipher."));
 }
 
 #[test]
@@ -6884,7 +6884,7 @@ fn test_delete_cipher_trash_organization_read_only() {
 
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("Organization ciphers are read-only."));
+    assert!(stderr.contains("You do not have permission to delete this Organization cipher."));
 }
 
 #[test]

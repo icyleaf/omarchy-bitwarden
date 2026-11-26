@@ -119,6 +119,8 @@ Item {
     check(CipherMutation.editGuardError(orgReadOnly).indexOf("permission") !== -1, "read-only organization edit guard explains missing permission")
     check(CipherMutation.editGuardError(orgHidePass).indexOf("hidden") !== -1, "hide-password organization edit guard explains hidden passwords")
     check(CipherMutation.canDelete(login) === true, "personal login can be deleted")
+    check(CipherMutation.canDelete(orgWritable) === true, "deletable organization login (can_delete: true) can be deleted")
+    check(CipherMutation.deleteGuardError(orgWritable) === "", "deletable organization login has no delete guard error")
     check(CipherMutation.canDelete(orgReadOnly) === false, "non-deletable organization login cannot be deleted")
     check(CipherMutation.deleteGuardError(orgReadOnly).indexOf("permission") !== -1, "non-deletable organization delete guard explains missing permission")
 
