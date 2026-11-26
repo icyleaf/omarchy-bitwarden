@@ -159,7 +159,9 @@ store*) : > "$HOME/storing"; n=0; while ! test -e "$HOME/release"; do n=$((n+1))
         .spawn()
         .unwrap();
     // This used to authorize a second, local POST after a lost daemon receipt.
-    writeln!(cli.stdin.take().unwrap(), "fixture").unwrap();
+    if let Err(err) = writeln!(cli.stdin.take().unwrap(), "fixture") {
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe, "{err}");
+    }
     let mut posts = 0;
     let mut grants = 0;
     while cli.try_wait().unwrap().is_none() {

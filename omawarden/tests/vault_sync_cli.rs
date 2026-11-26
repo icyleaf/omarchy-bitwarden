@@ -299,7 +299,9 @@ fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        writeln!(cli.stdin.take().unwrap(), "fixture").unwrap();
+        if let Err(err) = writeln!(cli.stdin.take().unwrap(), "fixture") {
+            assert_eq!(err.kind(), ErrorKind::BrokenPipe, "{err}");
+        }
         let output = cli.wait_with_output().unwrap();
         (
             output.status.success(),
@@ -685,7 +687,9 @@ fn password_login_case(case: LoginCase) {
                 .path()
                 .join("omarchy-bitwarden/scoped-attachments")
                 .exists());
-            writeln!(copy.stdin.take().unwrap(), "late-old-copy").unwrap();
+            if let Err(err) = writeln!(copy.stdin.take().unwrap(), "late-old-copy") {
+                assert_eq!(err.kind(), ErrorKind::BrokenPipe, "{err}");
+            }
             assert!(!copy.wait_with_output().unwrap().status.success());
             assert!(
                 !selection.exists(),
