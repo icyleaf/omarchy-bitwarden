@@ -157,6 +157,10 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 /// Capability identifier for the `vault_get` Daemon Protocol action (ADR-0037).
 pub const CAPABILITY_VAULT_GET: &str = "vault_get";
 
+/// Capability identifier for Organization & Collection write operations and
+/// permission-aware discovery (`org_list`, `/partial`, create/edit/delete/share/collections) (ADR-0038).
+pub const CAPABILITY_ORG_WRITE: &str = "org_write";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
@@ -164,6 +168,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     "folder_crud",
     "login_totp_uri_match",
     CAPABILITY_VAULT_GET,
+    CAPABILITY_ORG_WRITE,
 ];
 
 /// Returns `true` when a `ping` response advertises the requested Daemon Capability.

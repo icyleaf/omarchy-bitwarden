@@ -541,7 +541,7 @@ ScrollView {
 
             GhostIconButton {
               objectName: "favoriteButton"
-              visible: Boolean(inspectorRoot.item && CipherMutation.isMutableType(inspectorRoot.item))
+              visible: Boolean(inspectorRoot.item && CipherMutation.canFavorite(inspectorRoot.item))
               isBusy: inspectorRoot.isFavoriteMutating
               enabled: !inspectorRoot.isFavoriteMutating
               Layout.alignment: Qt.AlignVCenter
@@ -626,14 +626,16 @@ ScrollView {
           }
         }
 
-        // Edit and delete controls for mutable ciphers
+        // Edit and delete controls for mutable ciphers (visible for layout stability;
+        // visually disabled when unauthorized on Organization Ciphers)
         GhostIconButton {
           objectName: "editButton"
           visible: Boolean(inspectorRoot.item && CipherMutation.isEditableType(inspectorRoot.item))
+          enabled: CipherMutation.canEdit(inspectorRoot.item)
           Layout.alignment: Qt.AlignTop
           iconText: "\uf044"
-          iconColor: inspectorRoot.accent
-          tooltip: "Edit item (Ctrl+E)"
+          iconColor: enabled ? inspectorRoot.accent : inspectorRoot.muted
+          tooltip: enabled ? "Edit item (Ctrl+E)" : (CipherMutation.editGuardError(inspectorRoot.item) || "Edit unavailable")
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.editRequested(inspectorRoot.item)
         }
@@ -641,9 +643,10 @@ ScrollView {
         GhostIconButton {
           objectName: "deleteButton"
           visible: Boolean(inspectorRoot.item && CipherMutation.isMutableType(inspectorRoot.item))
+          enabled: CipherMutation.canDelete(inspectorRoot.item)
           Layout.alignment: Qt.AlignTop
           iconText: "\uf1f8"
-          tooltip: "Delete item (Ctrl+D)"
+          tooltip: enabled ? "Delete item (Ctrl+D)" : (CipherMutation.deleteGuardError(inspectorRoot.item) || "Delete unavailable")
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.deleteRequested(inspectorRoot.item)
         }

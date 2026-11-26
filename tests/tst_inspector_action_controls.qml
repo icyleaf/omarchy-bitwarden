@@ -118,6 +118,47 @@ Item {
 
       // 2. Delete uses the widely available FA4 trash glyph.
       var deleteButton = findChildByName(inspector, "deleteButton")
+      var editButton = findChildByName(inspector, "editButton")
+      // Permission-aware Inspector controls on read-only Organization Cipher:
+      // Favorite stays enabled; Edit & Delete remain visible for layout stability
+      // but render visually disabled.
+      inspector.item = {
+        id: "org-ro-1",
+        name: "Shared Corp",
+        type_name: "login",
+        favorite: false,
+        organization_id: "org-1",
+        organization_name: "Acme Corp",
+        edit: false,
+        view_password: false,
+        can_delete: false,
+        can_restore: false,
+        login: { username: "svc", password: "secret", uris: [] },
+        fields: [],
+        attachments: []
+      }
+      check(favoriteButton && favoriteButton.visible && favoriteButton.enabled === true,
+            "favoriteButton stays visible and enabled on read-only Organization Cipher")
+      check(editButton && editButton.visible && editButton.enabled === false,
+            "editButton stays visible for layout stability and renders disabled on read-only Organization Cipher")
+      check(deleteButton && deleteButton.visible && deleteButton.enabled === false,
+            "deleteButton stays visible for layout stability and renders disabled on non-deletable Organization Cipher")
+      // Restore personal item for subsequent layout assertions
+      inspector.item = {
+        id: "test-login",
+        name: "GitHub",
+        type_name: "login",
+        favorite: true,
+        folder_name: "Development",
+        organization_name: "Acme Corp",
+        login: {
+          username: "octocat",
+          password: "secretpassword",
+          uris: [{ uri: "https://github.com" }]
+        },
+        fields: [],
+        attachments: []
+      }
       check(deleteButton !== null, "Inspector exposes a deleteButton control")
       if (deleteButton) {
         check(deleteButton.iconText === "\uf1f8", "deleteButton uses the trash glyph")

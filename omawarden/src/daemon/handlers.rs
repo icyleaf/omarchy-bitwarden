@@ -72,6 +72,7 @@ pub fn handle_client_with_peer(
             | "get_ssh_key"
             | "get_attachment_key"
             | "folder_list"
+            | "org_list"
     ) || (action == "totp"
         && (req.get("query").is_some() || req.get("id").is_some()));
     let is_privileged = reads_plaintext
@@ -444,6 +445,14 @@ pub fn handle_client_with_peer(
         },
         "folder_list" => match state.vault_mgr.list_folders() {
             Ok(folders) => json!({ "ok": true, "folders": folders }),
+            Err(err) => json!({ "ok": false, "error": err }),
+        },
+        "org_list" => match state.vault_mgr.list_organizations() {
+            Ok((organizations, collections)) => json!({
+                "ok": true,
+                "organizations": organizations,
+                "collections": collections,
+            }),
             Err(err) => json!({ "ok": false, "error": err }),
         },
         "folder_resolve" => {

@@ -1365,10 +1365,12 @@ Item {
     if (!root.authState || root.authState.status !== "unlocked") return
     if (!item) return
     if (!CipherMutation.isEditableType(item)) return
-    if (item.organization_id) {
-      root.errorMessage = "Organization ciphers are read-only."
+    var editGuard = CipherMutation.editGuardError(item)
+    if (editGuard) {
+      root.errorMessage = editGuard
       return
     }
+    if (!CipherMutation.canEdit(item)) return
     // Edit drafts render in place inside the Inspector (#387). The original
     // item is installed before `showCipherEditor` so the form prefills from it.
     root.cipherEditorType = item.type_name || "login"
@@ -1381,23 +1383,15 @@ Item {
     root.showCipherEditor = true
   }
 
-  // Returns the read-only error for ciphers the Overlay must not mutate, or an
-  // empty string when the cipher can be favorited/deleted.
-  function cipherMutationGuard(item) {
-    if (!CipherMutation.isMutableType(item)) return ""
-    if (CipherMutation.isOrganizationOwned(item)) return "Organization ciphers are read-only."
-    return ""
-  }
-
   function openDeleteCipherModal(item) {
     if (!root.authState || root.authState.status !== "unlocked") return
     if (!item) return
-    var guard = root.cipherMutationGuard(item)
+    var guard = CipherMutation.deleteGuardError(item)
     if (guard) {
       root.errorMessage = guard
       return
     }
-    if (!CipherMutation.canMutate(item)) return
+    if (!CipherMutation.canDelete(item)) return
     root.deleteCipherItem = item
     root.showActionPalette = false
     root.showSshKeyModal = false
@@ -1420,12 +1414,7 @@ Item {
   function toggleCipherFavorite(item) {
     if (!root.authState || root.authState.status !== "unlocked") return
     if (!item || !item.id) return
-    var guard = root.cipherMutationGuard(item)
-    if (guard) {
-      root.errorMessage = guard
-      return
-    }
-    if (!CipherMutation.canMutate(item)) return
+    if (!CipherMutation.canFavorite(item)) return
     if (cipherFavoriteProc.running) {
       root.statusMessage = "Favorite update in progress..."
       return
@@ -1448,6 +1437,69 @@ Item {
     // The update travels over stdin so no secret ever reaches argv.
     cipherFavoriteProc.command = [root.helperPath, "vault", "edit", itemId, "--stdin", "--json"]
     cipherFavoriteProc.running = true
+  }
+
+  function applyCipherFolder(itemId, folderId, folderName) {
+    root.updatingResults = true
+    root.rawVaultItems = CipherMutation.withFolder(root.rawVaultItems, itemId, folderId, folderName)
+    root.filteredItems = CipherMutation.withFolder(root.filteredItems, itemId, folderId, folderName)
+    root.updatingResults = false
+    root.updateAvailableActions()
+  }
+
+  function assignCipherFolder(item, folderId, folderName) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item || !item.id) return
+    if (!CipherMutation.canAssignFolder(item)) return
+    if (cipherFolderAssignProc.running) {
+      root.statusMessage = "Folder update in progress..."
+      return
+    }
+
+    var itemId = item.id
+    var itemName = item.name || ""
+    var prevFolderId = item.folder_id || ""
+    var prevFolderName = item.folder_name || ""
+    var nextFolderId = folderId || ""
+    var nextFolderName = nextFolderId ? (folderName || "") : ""
+
+    root.applyCipherFolder(itemId, nextFolderId, nextFolderName)
+    cipherFolderAssignProc.revision = root.vaultRevision
+    cipherFolderAssignProc.errorReported = false
+    cipherFolderAssignProc.lastStderr = ""
+    cipherFolderAssignProc.itemId = itemId
+    cipherFolderAssignProc.itemName = itemName
+    cipherFolderAssignProc.previousFolderId = prevFolderId
+    cipherFolderAssignProc.previousFolderName = prevFolderName
+    cipherFolderAssignProc.nextFolderId = nextFolderId
+    cipherFolderAssignProc.nextFolderName = nextFolderName
+    cipherFolderAssignProc.payload = JSON.stringify({ folder_id: nextFolderId })
+    cipherFolderAssignProc.command = [root.helperPath, "vault", "edit", itemId, "--stdin", "--json"]
+    cipherFolderAssignProc.running = true
+  }
+
+  function handleCipherFolderAssignSuccess(data) {
+    root.errorMessage = ""
+    var name = cipherFolderAssignProc.itemName
+    var folderName = cipherFolderAssignProc.nextFolderName
+    if (data && data.outcome === "saved_needs_sync") {
+      root.statusMessage = "Folder change for '" + name + "' saved on the server. Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = folderName
+      ? ("Moved '" + name + "' to folder '" + folderName + "'.")
+      : ("Removed '" + name + "' from folder.")
+  }
+
+  function handleCipherFolderAssignFailure(message) {
+    root.applyCipherFolder(
+      cipherFolderAssignProc.itemId,
+      cipherFolderAssignProc.previousFolderId,
+      cipherFolderAssignProc.previousFolderName
+    )
+    root.statusMessage = ""
+    root.errorMessage = message
   }
 
   function handleCipherFavoriteSuccess(data) {
@@ -2106,6 +2158,30 @@ Item {
         shortcut: "Ctrl+D",
         action: function() { root.openDeleteCipherModal(item) }
       })
+    }
+
+    if (CipherMutation.canAssignFolder(item)) {
+      var assignFolders = root.getAvailableFolders()
+      for (var af = 0; af < assignFolders.length; af++) {
+        var afObj = assignFolders[af]
+        if (!afObj || !afObj.id || afObj.id === item.folder_id) continue
+        (function(fId, fName) {
+          actions.push({
+            label: "Move to Folder: " + fName,
+            icon: "\uf07b",
+            shortcut: "",
+            action: function() { root.assignCipherFolder(item, fId, fName) }
+          })
+        })(afObj.id, afObj.name)
+      }
+      if (item.folder_id) {
+        actions.push({
+          label: "Remove from Folder",
+          icon: "\uf07b",
+          shortcut: "",
+          action: function() { root.assignCipherFolder(item, "", "") }
+        })
+      }
     }
 
     if (item.notes) {
@@ -3821,6 +3897,64 @@ Item {
       if (cipherFavoriteProc.revision !== root.vaultRevision) return
       if (code !== 0) {
         root.handleCipherFavoriteFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+  Process {
+    id: cipherFolderAssignProc
+    property string payload: ""
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property string previousFolderId: ""
+    property string previousFolderName: ""
+    property string nextFolderId: ""
+    property string nextFolderName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      if (payload) {
+        write(payload + "\n")
+        payload = ""
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherFolderAssignProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") return
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherFolderAssignProc.errorReported = true
+          root.handleCipherFolderAssignSuccess(data)
+          return
+        }
+        cipherFolderAssignProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherFolderAssignProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Folder update failed."
+        root.handleCipherFolderAssignFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        cipherFolderAssignProc.lastStderr = (text || "").trim()
+        root.handleProcessStderr(text, "omawarden:vault")
+      }
+    }
+    onExited: function(code) {
+      if (cipherFolderAssignProc.errorReported) return
+      if (cipherFolderAssignProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherFolderAssignFailure("Process exited with error code " + code)
       }
     }
   }

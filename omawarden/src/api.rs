@@ -1511,6 +1511,39 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    pub fn update_cipher_partial(
+        &self,
+        access_token: &str,
+        id: &str,
+        folder_id: Option<&str>,
+        favorite: bool,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/partial", self.urls.api_url, id);
+        let payload = json!({
+            "folderId": folder_id,
+            "favorite": favorite,
+        });
+        let mut resp = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Update cipher partial failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
     /// Deletes a cipher. For a soft delete, returns the server-reported
     /// `deletedDate` when the response carries one, so the local cache can
     /// keep the authoritative timestamp; `None` means the caller stamps it.
@@ -2323,6 +2356,10 @@ pub fn decrypt_sync_ciphers_with_context(
 
         let search_text = search_tokens.join(" ");
 
+        let is_org = org_id_opt.as_deref().is_some_and(|s| !s.is_empty());
+        let (edit, view_password, can_delete, can_restore) =
+            crate::vault::extract_cipher_permissions(c, is_org);
+
         items.push(VaultItem {
             id,
             name,
@@ -2339,6 +2376,10 @@ pub fn decrypt_sync_ciphers_with_context(
             organization_id: org_id_opt,
             organization_name: org_name_opt,
             collection_ids,
+            edit,
+            view_password,
+            can_delete,
+            can_restore,
             login: if item_type == 1 { login_val } else { None },
             card: if item_type == 3 { card_val } else { None },
             identity: if item_type == 4 { identity_val } else { None },
@@ -2633,6 +2674,60 @@ mod tests {
         assert_eq!(items[0].sub_title, "Bob Acme");
         assert!(items[0].identity.is_some());
         assert!(items[0].search_text.contains("acme global"));
+    }
+
+    #[test]
+    fn test_vault_item_permissions_fail_closed_for_org_and_default_true_for_personal() {
+        let raw_user_key = [11u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            // Personal cipher with no permission flags -> defaults true
+            json!({
+                "id": "personal-1",
+                "type": 1,
+                "organizationId": null,
+                "name": encrypt_test_string("Personal Login", &user_key),
+            }),
+            // Organization cipher with absent permission flags -> fail-closed false
+            json!({
+                "id": "org-legacy-1",
+                "type": 1,
+                "organizationId": "org-1",
+                "name": encrypt_test_string("Org Legacy", &user_key),
+            }),
+            // Organization cipher with explicit granular flags (LimitItemDeletion + hidePasswords)
+            json!({
+                "id": "org-granular-1",
+                "type": 1,
+                "organizationId": "org-1",
+                "name": encrypt_test_string("Org Granular", &user_key),
+                "edit": true,
+                "viewPassword": false,
+                "permissions": {
+                    "delete": false,
+                    "restore": true
+                }
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers_with_context(&ciphers, &[], &[], &user_key, None);
+        assert_eq!(items.len(), 3);
+
+        assert!(items[0].edit);
+        assert!(items[0].view_password);
+        assert!(items[0].can_delete);
+        assert!(items[0].can_restore);
+
+        assert!(!items[1].edit);
+        assert!(!items[1].view_password);
+        assert!(!items[1].can_delete);
+        assert!(!items[1].can_restore);
+
+        assert!(items[2].edit);
+        assert!(!items[2].view_password);
+        assert!(!items[2].can_delete);
+        assert!(items[2].can_restore);
     }
 
     #[test]
