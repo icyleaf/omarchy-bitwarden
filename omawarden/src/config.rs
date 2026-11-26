@@ -627,6 +627,7 @@ esac
 
     #[test]
     fn test_server_url_change_purges_credentials_and_cache() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let storage_path = dir.path().join("data.json");
@@ -727,11 +728,8 @@ esac
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
 
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
-        let runtime = tempdir().unwrap();
-        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
 
         // Mock daemon socket: records the actions the purge flow sends. The
         // real daemon exits on "stop", so the mock stops serving after it.
@@ -741,10 +739,12 @@ esac
         let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let rec = recorded.clone();
         let server = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = match stream {
-                    Ok(s) => s,
-                    Err(_) => break,
+            for _ in 0..8 {
+                let Ok(mut stream) = crate::test_support::accept_unix_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
                 };
                 let mut line = String::new();
                 if BufReader::new(stream.try_clone().unwrap())
@@ -814,10 +814,6 @@ esac
         );
 
         let _ = std::fs::remove_file(&sock_path);
-        old_runtime.map_or_else(
-            || std::env::remove_var("XDG_RUNTIME_DIR"),
-            |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-        );
     }
 
     #[test]
@@ -1186,6 +1182,7 @@ esac
 
     #[test]
     fn test_default_config_path_not_in_watched_plugin_directory() {
+        let _env = crate::test_support::TestEnv::isolated();
         let config_mgr = ConfigManager::default();
         let path_str = config_mgr.config_path.to_string_lossy();
         assert!(
@@ -1262,6 +1259,7 @@ esac
 
     #[test]
     fn test_mtls_client_cert_configuration_lifecycle() {
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let storage_path = dir.path().join("data.json");

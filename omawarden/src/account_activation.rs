@@ -192,10 +192,14 @@ mod tests {
 
     #[test]
     fn concurrent_attempts_on_one_cache_can_activate_only_once() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let root = tempfile::tempdir().unwrap();
         let storage = StorageManager::new(root.path().join("data.json"));
-        let vault = Arc::new(VaultManager::new("", Some(storage.clone()), None));
+        let vault = Arc::new(VaultManager::new(
+            "",
+            Some(storage.clone()),
+            Some(crate::keyring::KeyringManager::new("mock")),
+        ));
         let _daemon = TestDaemon::start(Arc::clone(&vault));
         let context = vault.unlock_context();
         let first = LoginConnection::begin(Some(&context)).unwrap();

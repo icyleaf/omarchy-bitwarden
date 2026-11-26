@@ -126,24 +126,30 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn fixture(dir: &std::path::Path) -> (Arc<VaultManager>, TcpListener) {
+        static FIXTURE_WRAP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let wrap = FIXTURE_WRAP
+            .get_or_init(|| {
+                let master = crate::crypto::derive_master_key(
+                    "fixture@example.invalid",
+                    "fixture",
+                    crate::crypto::KdfType::Pbkdf2Sha256,
+                    100_000,
+                    None,
+                    None,
+                )
+                .unwrap();
+                SymmetricCryptoKey::from_master_key(master.as_slice())
+                    .encrypt(&[42; 64])
+                    .unwrap()
+            })
+            .clone();
+
         let api = TcpListener::bind("127.0.0.1:0").unwrap();
         api.set_nonblocking(true).unwrap();
         let url = format!("http://{}", api.local_addr().unwrap());
         let keyring = dir.join("secret-tool");
         crate::write_test_executable(&keyring, "#!/bin/sh\ncase \"$*\" in\nlookup*'kind access_token'*) echo fixture-token;;\nstore*) /bin/cat >/dev/null;;\nclear*|search*) exit 0;;\n*) exit 1;;\nesac\n");
         let storage_mgr = StorageManager::new(dir.join("data.json"));
-        let master = crate::crypto::derive_master_key(
-            "fixture@example.invalid",
-            "fixture",
-            crate::crypto::KdfType::Pbkdf2Sha256,
-            100_000,
-            None,
-            None,
-        )
-        .unwrap();
-        let wrap = SymmetricCryptoKey::from_master_key(master.as_slice())
-            .encrypt(&[42; 64])
-            .unwrap();
         storage_mgr
             .save(&VaultStorage {
                 server_url: url.clone(),
@@ -224,6 +230,7 @@ mod tests {
     }
 
     fn stale_sync_after_create(cache_receipt: bool) {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let (task, mut old_sync) = sync(&mgr, &api);
@@ -259,6 +266,9 @@ mod tests {
             match api.accept() {
                 Ok((mut fresh, _)) => {
                     fresh.set_nonblocking(false).unwrap();
+                    fresh
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
                     assert_eq!(request(&mut fresh).0, "/api/sync");
                     reply(&mut fresh, json!({"ciphers":[cipher]}));
                     assert!(!refetched, "sync must not refetch indefinitely");
@@ -311,6 +321,7 @@ mod tests {
 
     #[test]
     fn out_of_order_sync_refetches_without_rolling_back_the_newer_snapshot() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let (old, mut old_stream) = sync(&mgr, &api);
@@ -331,6 +342,7 @@ mod tests {
 
     #[test]
     fn two_conflicts_stop_without_advancing_last_sync() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let (task, mut stream) = sync(&mgr, &api);
@@ -353,6 +365,7 @@ mod tests {
 
     #[test]
     fn lock_cycles_and_account_changes_cancel_late_syncs() {
+        let _environment = crate::test_support::TestEnv::isolated();
         for action in [
             "lock",
             "lock-cycle",
@@ -410,6 +423,7 @@ mod tests {
 
     #[test]
     fn a_fresh_snapshot_applies_remote_deletions() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         seed(&mgr, vec![cipher("deleted-remotely")]);
@@ -423,6 +437,7 @@ mod tests {
 
     #[test]
     fn incomplete_sync_response_preserves_cache_and_index() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let (task, mut stream) = sync(&mgr, &api);
@@ -449,6 +464,7 @@ mod tests {
 
     #[test]
     fn a_locked_sync_only_updates_ciphertext() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         mgr.lock();
@@ -463,6 +479,7 @@ mod tests {
 
     #[test]
     fn corrupted_cache_is_not_replaced_or_treated_as_empty() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         seed(&mgr, vec![cipher("retained")]);
@@ -484,6 +501,7 @@ mod tests {
 
     #[test]
     fn failed_rename_preserves_disk_index_and_last_sync() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         seed(&mgr, vec![cipher("retained")]);
@@ -513,7 +531,7 @@ mod tests {
 
     #[test]
     fn login_initial_sync_cannot_overwrite_a_newer_cache() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
@@ -539,7 +557,7 @@ mod tests {
 
     #[test]
     fn login_initial_sync_observes_an_uncached_write_from_another_manager() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
@@ -577,6 +595,7 @@ mod tests {
 
     #[test]
     fn outstanding_writes_block_sync_without_blocking_lock() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let pending = mgr.storage_mgr.begin_cipher_write().unwrap();
@@ -598,6 +617,7 @@ mod tests {
 
     #[test]
     fn login_unlock_context_is_revoked_even_by_an_already_locked_vault() {
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, _) = fixture(dir.path());
         let before = mgr.unlock_context();
@@ -613,7 +633,7 @@ mod tests {
     }
 
     fn failed_initial_sync_preserves_account(password_login: bool, status: &str, body: &str) {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let _daemon = crate::test_support::TestDaemon::start(Arc::clone(&mgr));
@@ -724,7 +744,7 @@ mod tests {
     fn login_candidate_slot(outcome: LoginPublication, previous: PreviousLogin) {
         use crate::keyring::{KIND_ACCESS_TOKEN, KIND_API_SECRET, KIND_REFRESH_TOKEN};
 
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mut mgr, api) = fixture(dir.path());
         Arc::get_mut(&mut mgr)
@@ -952,7 +972,7 @@ esac
 
     #[test]
     fn successful_login_does_not_inherit_the_previous_profile_metadata() {
-        let _environment = crate::env_lock();
+        let _environment = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let (mgr, api) = fixture(dir.path());
         let mut original = mgr.storage_mgr.load();

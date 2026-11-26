@@ -1015,7 +1015,11 @@ mod tests {
     use crate::test_support::CREDENTIAL_ID;
 
     fn unlocked_daemon() -> crate::test_support::TestDaemon {
-        let vault = std::sync::Arc::new(crate::vault::VaultManager::new("", None, None));
+        let vault = std::sync::Arc::new(crate::vault::VaultManager::new(
+            "",
+            None,
+            Some(KeyringManager::new("mock")),
+        ));
         vault.storage.write().unwrap().credential_id = Some(CREDENTIAL_ID.into());
         *vault.is_unlocked.write().unwrap() = true;
         crate::test_support::TestDaemon::start(vault)
@@ -1023,7 +1027,7 @@ mod tests {
 
     #[test]
     fn attachment_cannot_publish_plaintext_after_account_activation() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let cache = tempfile::tempdir().unwrap();
         let storage = StorageManager::new(cache.path().join("data.json"));
         storage
@@ -1037,7 +1041,7 @@ mod tests {
         let vault = std::sync::Arc::new(crate::vault::VaultManager::new(
             "",
             Some(storage.clone()),
-            None,
+            Some(KeyringManager::new("mock")),
         ));
         *vault.is_unlocked.write().unwrap() = true;
         let daemon = crate::test_support::TestDaemon::start(vault);
@@ -1140,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_missing_session_or_network_error() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let res = get_attachment("item1", "att1", "file.txt", None, false, None, None);
         if !res.ok {
             assert!(res.error.is_some());
@@ -1149,7 +1153,7 @@ mod tests {
 
     #[test]
     fn test_safe_filename_fallback() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().to_str().unwrap();
         let res = get_attachment(
@@ -1168,7 +1172,7 @@ mod tests {
 
     #[test]
     fn cached_preview_download_uses_only_the_active_slot() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         let temp_dir = tempfile::tempdir().unwrap();
         let dl_target = temp_dir.path().to_str().unwrap();
@@ -1194,8 +1198,7 @@ mod tests {
         fs::write(&old_file, b"old account attachment").unwrap();
 
         // Now download the attachment without network access (using fake token)
-        let old_data_dir = std::env::var_os("OMAWARDEN_DATA_DIR");
-        std::env::set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
+        env.set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
         let res = get_attachment(
             "test_item_999",
             "att_999",
@@ -1206,11 +1209,6 @@ mod tests {
             None,
         );
         let cleaned = clean_previews(Some("test_item_999"));
-        if let Some(old_data_dir) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old_data_dir);
-        } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
-        }
 
         assert!(
             res.ok,
@@ -1252,7 +1250,7 @@ mod tests {
 
     #[test]
     fn test_attachment_download_and_preview_return_path_without_desktop_side_effects() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         let temp_dir = tempfile::tempdir().unwrap();
         let dl_target = temp_dir.path().to_str().unwrap();
@@ -1284,10 +1282,8 @@ mod tests {
             format!("#!/bin/sh\ntouch \"{}\"\n", notify_marker.display()),
         );
 
-        let old_data_dir = std::env::var_os("OMAWARDEN_DATA_DIR");
-        let old_path = std::env::var_os("PATH");
-        std::env::set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
-        std::env::set_var("PATH", bin_dir.path());
+        env.set_var("OMAWARDEN_DATA_DIR", temp_dir.path());
+        env.set_var("PATH", bin_dir.path());
 
         let preview_res = get_attachment(
             "item_pure",
@@ -1309,16 +1305,6 @@ mod tests {
         );
 
         let cleaned = clean_previews(Some("item_pure"));
-        if let Some(old_data_dir) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old_data_dir);
-        } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
-        }
-        if let Some(old_path) = old_path {
-            std::env::set_var("PATH", old_path);
-        } else {
-            std::env::remove_var("PATH");
-        }
 
         assert!(preview_res.ok, "preview failed: {:?}", preview_res.error);
         assert_eq!(preview_res.action.as_deref(), Some("preview"));
@@ -1346,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_zero_byte_poisoned_cache_is_pruned_and_rejected() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         let preview_dir = preview_root()
             .join(CREDENTIAL_ID)
@@ -1398,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_dirty_raw_ciphertext_cache_is_pruned() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         let preview_dir = preview_root()
             .join(CREDENTIAL_ID)
@@ -1421,7 +1407,7 @@ mod tests {
 
     #[test]
     fn test_clear_preview_attachments() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         let preview_dir = preview_root()
             .join(CREDENTIAL_ID)
@@ -1438,6 +1424,7 @@ mod tests {
 
     #[test]
     fn test_unsafe_path_components_rejected() {
+        let _env = crate::test_support::TestEnv::isolated();
         assert!(is_safe_path_component(
             "f47ac10b-58cc-4372-a567-0e02b2c3d479"
         ));
@@ -1509,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_attachment_download_rejects_oversized_advertised_content_length() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1517,10 +1504,15 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+            for _ in 0..4 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
-                let n = stream.read(&mut buf).unwrap();
+                let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
 
                 if req.contains("GET /api/ciphers/item_large/attachment/att_large") {
@@ -1541,8 +1533,7 @@ mod tests {
         )
         .unwrap();
 
-        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
-        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+        env.set_var("OMAWARDEN_DATA_DIR", data_dir.path());
 
         let res = get_attachment(
             "item_large",
@@ -1553,12 +1544,6 @@ mod tests {
             Some("fake_token"),
             None,
         );
-
-        if let Some(old) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old);
-        } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
-        }
 
         assert!(!res.ok);
         let err = res.error.expect("Expected error for oversized attachment");
@@ -1574,7 +1559,7 @@ mod tests {
 
     #[test]
     fn test_attachment_download_rejects_stream_overflow() {
-        let _lock = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let _daemon = unlocked_daemon();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1582,10 +1567,15 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{}", port);
 
         let handle = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+            for _ in 0..4 {
+                let Ok(mut stream) = crate::test_support::accept_tcp_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                ) else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
-                let n = stream.read(&mut buf).unwrap();
+                let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
 
                 if req.contains("GET /api/ciphers/item_stream/attachment/att_stream") {
@@ -1621,10 +1611,8 @@ mod tests {
         )
         .unwrap();
 
-        let old_config_dir = std::env::var("XDG_CONFIG_HOME").ok();
-        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
-        std::env::set_var("XDG_CONFIG_HOME", config_dir.path());
-        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+        env.set_var("XDG_CONFIG_HOME", config_dir.path());
+        env.set_var("OMAWARDEN_DATA_DIR", data_dir.path());
 
         let res = get_attachment(
             "item_stream",
@@ -1635,17 +1623,6 @@ mod tests {
             Some("fake_token"),
             None,
         );
-
-        if let Some(old) = old_config_dir {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        if let Some(old) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old);
-        } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
-        }
 
         assert!(!res.ok);
         let err = res.error.expect("Expected error for oversized stream");

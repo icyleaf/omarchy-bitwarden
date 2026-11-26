@@ -14,6 +14,7 @@ use tempfile::tempdir;
 
 #[test]
 fn test_daemon_state_lifecycle() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -37,6 +38,7 @@ fn test_daemon_totp_action() {
 
 #[test]
 fn test_daemon_totp_action_with_item_query() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -158,6 +160,7 @@ fn test_should_touch_activity_classification() {
 
 #[test]
 fn test_handle_client_selective_activity_touch() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -310,13 +313,11 @@ fn test_handle_client_selective_activity_touch() {
 
 #[test]
 fn test_ssh_agent_ipc_actions() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     let state = Arc::new(DaemonState::new(
         StorageManager::new(dir.path().join("daemon_data.json")),
@@ -398,26 +399,14 @@ fn test_ssh_agent_ipc_actions() {
     let res = send_req(json!({ "action": "ssh_agent_apply" }));
     assert_eq!(res["ok"], false);
     assert!(res["error"].as_str().unwrap().starts_with("SSH agent: "));
-
-    for (k, v) in [
-        ("XDG_RUNTIME_DIR", old_runtime),
-        ("OMAWARDEN_CONFIG_DIR", old_config),
-    ] {
-        match v {
-            Some(v) => std::env::set_var(k, v),
-            None => std::env::remove_var(k),
-        }
-    }
 }
 
 #[test]
 fn test_ensure_daemon_running_keeps_a_running_daemon_it_should_not_replace() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_DATA_DIR", runtime.path());
     StorageManager::default()
         .save(&crate::storage::VaultStorage {
             credential_id: Some(crate::test_support::CREDENTIAL_ID.into()),
@@ -439,7 +428,11 @@ fn test_ensure_daemon_running_keeps_a_running_daemon_it_should_not_replace() {
             let listener = listener.try_clone().unwrap();
             let reply = reply.clone();
             std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
+                let mut stream = crate::test_support::accept_unix_bounded(
+                    &listener,
+                    crate::test_support::MOCK_IO_TIMEOUT,
+                )
+                .unwrap();
                 let mut line = String::new();
                 BufReader::new(stream.try_clone().unwrap())
                     .read_line(&mut line)
@@ -454,33 +447,25 @@ fn test_ensure_daemon_running_keeps_a_running_daemon_it_should_not_replace() {
         let _ = ensure_daemon_running();
         server.join().unwrap();
     }
-
-    for (key, old) in [
-        ("XDG_RUNTIME_DIR", old_runtime),
-        ("OMAWARDEN_DATA_DIR", old_data),
-    ] {
-        match old {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
 }
 
 #[test]
 fn test_incompatible_protocol_version_fails_closed_without_stop() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_data = std::env::var_os("OMAWARDEN_DATA_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_DATA_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_DATA_DIR", runtime.path());
 
     let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
     // Server answers ping with incompatible protocol_version: 99
     let server = {
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = crate::test_support::accept_unix_bounded(
+                &listener,
+                crate::test_support::MOCK_IO_TIMEOUT,
+            )
+            .unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
                 .read_line(&mut line)
@@ -515,20 +500,11 @@ fn test_incompatible_protocol_version_fails_closed_without_stop() {
 
     let _ = ensure_daemon_running();
     server.join().unwrap();
-
-    for (key, old) in [
-        ("XDG_RUNTIME_DIR", old_runtime),
-        ("OMAWARDEN_DATA_DIR", old_data),
-    ] {
-        match old {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
 }
 
 #[test]
 fn test_ping_advertises_protocol_version_1() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -585,17 +561,20 @@ fn test_protocol_version_negotiation() {
 
 #[test]
 fn test_daemon_client_send_fail_closed_on_incompatible_protocol() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
 
     let listener = std::os::unix::net::UnixListener::bind(get_socket_path()).unwrap();
     let server = {
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
             // 1. Client sends ping -> respond with incompatible protocol_version: 99
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = crate::test_support::accept_unix_bounded(
+                &listener,
+                crate::test_support::MOCK_IO_TIMEOUT,
+            )
+            .unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
                 .read_line(&mut line)
@@ -612,7 +591,11 @@ fn test_daemon_client_send_fail_closed_on_incompatible_protocol() {
             .unwrap();
 
             // 2. Client sends status -> mock responds with protocol_version: 99
-            let (mut stream2, _) = listener.accept().unwrap();
+            let mut stream2 = crate::test_support::accept_unix_bounded(
+                &listener,
+                crate::test_support::MOCK_IO_TIMEOUT,
+            )
+            .unwrap();
             let mut line2 = String::new();
             BufReader::new(stream2.try_clone().unwrap())
                 .read_line(&mut line2)
@@ -654,11 +637,6 @@ fn test_daemon_client_send_fail_closed_on_incompatible_protocol() {
     );
 
     server.join().unwrap();
-
-    match old_runtime {
-        Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
-        None => std::env::remove_var("XDG_RUNTIME_DIR"),
-    }
 }
 
 #[test]
@@ -670,7 +648,11 @@ fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
             // 1. Client sends ping to legacy v0 daemon without protocol_version
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = crate::test_support::accept_unix_bounded(
+                &listener,
+                crate::test_support::MOCK_IO_TIMEOUT,
+            )
+            .unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
                 .read_line(&mut line)
@@ -689,7 +671,11 @@ fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
             drop(stream);
 
             // 2. Client sends status to legacy v0 daemon without protocol_version
-            let (mut stream2, _) = listener.accept().unwrap();
+            let mut stream2 = crate::test_support::accept_unix_bounded(
+                &listener,
+                crate::test_support::MOCK_IO_TIMEOUT,
+            )
+            .unwrap();
             let mut line2 = String::new();
             BufReader::new(stream2.try_clone().unwrap())
                 .read_line(&mut line2)
@@ -725,6 +711,7 @@ fn test_daemon_client_send_legacy_v0_unversioned_payload_compatibility() {
 
 #[test]
 fn test_background_pings_do_not_prevent_idle_auto_lock() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -759,6 +746,7 @@ fn test_background_pings_do_not_prevent_idle_auto_lock() {
 
 #[test]
 fn test_set_auto_lock_action() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -826,10 +814,9 @@ fn test_suspend_happened_predicate() {
 
 #[test]
 fn test_suspend_drift_wipes_retained_key_while_soft_locked() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
     // The daemon caches the setting at startup; tests mirror the
     // set_quick_unlock IPC instead of rewriting config.json (which the
@@ -853,15 +840,11 @@ fn test_suspend_drift_wipes_retained_key_while_soft_locked() {
         "suspend must wipe the retained key even while soft-locked"
     );
     assert!(!state.vault_mgr.is_unlocked());
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_suspend_drift_hard_locks_unlocked_vault() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
     *state.vault_mgr.is_unlocked.write().unwrap() = true;
@@ -872,10 +855,9 @@ fn test_suspend_drift_hard_locks_unlocked_vault() {
 
 #[test]
 fn test_session_anchor_ceiling_wipes_retained_key_while_soft_locked() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
     state.set_quick_unlock_enabled(true);
 
@@ -897,23 +879,16 @@ fn test_session_anchor_ceiling_wipes_retained_key_while_soft_locked() {
         state.session_anchor.lock().unwrap().is_none(),
         "hard lock clears the anchor"
     );
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn test_quick_unlock_re_arms_unlocked_at_but_not_session_anchor() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
     let mut daemon_state = DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
@@ -945,19 +920,11 @@ fn test_quick_unlock_re_arms_unlocked_at_but_not_session_anchor() {
         "quick unlock must not extend the 12h session ceiling"
     );
     assert!(!state.vault_mgr.is_unlocked());
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_check_screen_lock_custom_detector() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -993,10 +960,9 @@ fn test_soft_lock_hard_locks_when_quick_unlock_disabled() {
     // ADR-0025: retention exists only when opted in. With quick_unlock
     // disabled, a soft lock must HARD lock: no key may survive in the
     // slot for any later restore to pick up.
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     let mut cfg = crate::config::ConfigManager::default().load();
     cfg.quick_unlock = false;
@@ -1028,11 +994,6 @@ fn test_soft_lock_hard_locks_when_quick_unlock_disabled() {
         !state.quick_unlock_ready(),
         "readiness must stay false while the feature is disabled"
     );
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
@@ -1041,10 +1002,9 @@ fn test_soft_lock_hard_locks_when_quick_unlock_is_unusable() {
     // check can actually run. Enabled-but-unusable (policy missing, no
     // pkcheck) must hard-lock, exactly like disabled: the retained key
     // could never be spent and would just sit in memory.
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempfile::tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     let mut daemon_state =
         DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
@@ -1068,19 +1028,13 @@ fn test_soft_lock_hard_locks_when_quick_unlock_is_unusable() {
         "an unusable feature must not retain a key nobody can spend"
     );
     assert!(!state.quick_unlock_ready());
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_sleep_signal_hard_locks_and_screen_signal_soft_locks() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let mut daemon_state =
         DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
     // Retention requires a usable feature, not just the setting: pin the
@@ -1111,21 +1065,16 @@ fn test_sleep_signal_hard_locks_and_screen_signal_soft_locks() {
         !state.vault_mgr.quick_unlock_available(),
         "sleep must hard-lock: no key may survive a suspend"
     );
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_quick_unlock_ipc_disabled_and_unavailable() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    let runtime = dir.path().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    env.set_var("XDG_RUNTIME_DIR", &runtime);
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let state = Arc::new(DaemonState::new(
         StorageManager::new(dir.path().join("daemon_data.json")),
         15,
@@ -1161,25 +1110,16 @@ fn test_quick_unlock_ipc_disabled_and_unavailable() {
         res["error"].as_str().unwrap().contains("unavailable"),
         "got: {res}"
     );
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_set_quick_unlock_ipc_refreshes_cache_and_ping_reports_enabled() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    let runtime = dir.path().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    env.set_var("XDG_RUNTIME_DIR", &runtime);
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let mut daemon_state = DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
     daemon_state.polkit_binary = std::path::PathBuf::new();
     let state = Arc::new(daemon_state);
@@ -1228,27 +1168,16 @@ fn test_set_quick_unlock_ipc_refreshes_cache_and_ping_reports_enabled() {
         !state.vault_mgr.quick_unlock_available(),
         "disabling through the IPC must wipe the retained key"
     );
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn test_quick_unlock_ipc_authorized_and_three_denies_wipe() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     // A real login on disk so a successful polkit check can restore.
     let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
@@ -1336,15 +1265,6 @@ exit $(cat {})
     // 4. wipe_quick_unlock action is a harmless explicit no-op.
     let res = send_req(json!({ "action": "wipe_quick_unlock" }));
     assert_eq!(res["ok"], true);
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
@@ -1353,13 +1273,11 @@ fn test_logout_requests_end_retention_with_readiness_false() {
     // logout flow (AuthManager::logout) sends "lock" followed by
     // an explicit "wipe_quick_unlock"; pin the daemon contract both
     // requests rely on: slot empty, readiness false in the ping payload.
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     let state = Arc::new(DaemonState::new(
         StorageManager::new(dir.path().join("daemon_data.json")),
@@ -1423,24 +1341,14 @@ fn test_logout_requests_end_retention_with_readiness_false() {
         res["memory_locked"].is_boolean(),
         "ping must report memory protection state: {res}"
     );
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn test_poisoned_busy_mutex_does_not_jam_quick_unlock() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
 
     // A real login on disk so the post-polkit restore can succeed.
     let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
@@ -1477,19 +1385,13 @@ fn test_poisoned_busy_mutex_does_not_jam_quick_unlock() {
         state.perform_quick_unlock().is_ok(),
         "a poisoned busy mutex must not jam quick unlock"
     );
-
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_ping_advertises_quick_unlock_only_when_ready() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
-    let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-    std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", dir.path());
     let mut daemon_state =
         DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
     // No polkit binary resolvable at startup: never ready, even with the
@@ -1524,8 +1426,7 @@ fn test_ping_advertises_quick_unlock_only_when_ready() {
     // With a binary resolved at startup, retention alone completes it.
     drop(state);
     let runtime = tempdir().unwrap();
-    let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-    std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
     // This construction caches quick_unlock=true from the config file
     // written above: the daemon-startup half of the caching contract.
     daemon_state = DaemonState::new(
@@ -1556,19 +1457,11 @@ fn test_ping_advertises_quick_unlock_only_when_ready() {
     *state.vault_mgr.quick_unlock_key.write().unwrap() =
         Some(crate::crypto::SymmetricCryptoKey::from_raw_bytes(&[9u8; 64]).unwrap());
     assert!(state.quick_unlock_ready());
-
-    old_runtime.map_or_else(
-        || std::env::remove_var("XDG_RUNTIME_DIR"),
-        |v| std::env::set_var("XDG_RUNTIME_DIR", v),
-    );
-    old_config.map_or_else(
-        || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-        |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
-    );
 }
 
 #[test]
 fn test_screen_lock_detection_functions_safe() {
+    let _env = crate::test_support::TestEnv::isolated();
     // Ensure detection functions execute safely without panicking
     let _ = is_omarchy_locked();
     let _ = is_screen_locker_running();
@@ -1616,6 +1509,7 @@ fn test_validate_socket_path_parent_symlink_rejection() {
 
 #[test]
 fn test_get_runtime_dir_permissions_and_ownership() {
+    let _env = crate::test_support::TestEnv::isolated();
     let runtime_dir = get_runtime_dir();
     assert!(runtime_dir.exists());
 
@@ -1629,6 +1523,7 @@ fn test_get_runtime_dir_permissions_and_ownership() {
 
 #[test]
 fn test_privileged_actions_require_unlocked_vault() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1688,6 +1583,7 @@ fn test_privileged_actions_require_unlocked_vault() {
 
 #[test]
 fn test_max_session_lifetime_auto_lock() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1709,6 +1605,7 @@ fn test_max_session_lifetime_auto_lock() {
 
 #[test]
 fn test_handle_client_client_context_parsing() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1760,6 +1657,7 @@ fn test_handle_client_client_context_parsing() {
 
 #[test]
 fn test_daemon_generate_password_action() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1827,10 +1725,9 @@ fn test_daemon_generate_password_action() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_stop_action_graceful_shutdown_without_process_exit() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = env::var_os("XDG_RUNTIME_DIR");
-    env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
 
     let storage_dir = tempdir().unwrap();
     let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
@@ -1859,15 +1756,11 @@ fn test_stop_action_graceful_shutdown_without_process_exit() {
     // Verify vault is locked and socket removed
     assert!(!state.vault_mgr.is_unlocked());
     assert!(!get_socket_path().exists());
-
-    match old_runtime {
-        Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
-        None => env::remove_var("XDG_RUNTIME_DIR"),
-    }
 }
 
 #[test]
 fn test_in_process_daemon_rejects_external_stop() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1901,6 +1794,7 @@ fn test_in_process_daemon_rejects_external_stop() {
 
 #[test]
 fn test_standalone_daemon_rejects_stop_without_admin() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1934,6 +1828,7 @@ fn test_standalone_daemon_rejects_stop_without_admin() {
 
 #[test]
 fn test_standalone_daemon_accepts_stop_with_admin() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1963,6 +1858,7 @@ fn test_standalone_daemon_accepts_stop_with_admin() {
 
 #[test]
 fn test_same_process_caller_authorized_to_stop() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -1994,6 +1890,7 @@ fn test_same_process_caller_authorized_to_stop() {
 
 #[test]
 fn test_daemon_fail_closed_when_peer_pid_none() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);
@@ -2052,10 +1949,9 @@ fn test_daemon_fail_closed_when_peer_pid_none() {
 
 #[test]
 fn test_programmatic_shutdown_via_handle() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = env::var_os("XDG_RUNTIME_DIR");
-    env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
 
     let storage_dir = tempdir().unwrap();
     let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
@@ -2077,20 +1973,14 @@ fn test_programmatic_shutdown_via_handle() {
     assert!(join_res.is_ok());
 
     assert!(!get_socket_path().exists());
-
-    match old_runtime {
-        Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
-        None => env::remove_var("XDG_RUNTIME_DIR"),
-    }
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn test_server_url_switch_does_not_abort_process() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = env::var_os("XDG_RUNTIME_DIR");
-    env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
 
     let config_dir = tempdir().unwrap();
     let config_path = config_dir.path().join("config.json");
@@ -2108,7 +1998,7 @@ fn test_server_url_switch_does_not_abort_process() {
 
     // Perform server URL update (ADR 0008 flow sends wipe_quick_unlock + stop)
     let config_mgr = crate::config::ConfigManager::new(Some(&config_path));
-    let keyring_mgr = crate::keyring::KeyringManager::default();
+    let keyring_mgr = crate::keyring::KeyringManager::new("mock");
     let update_opts = crate::config::ConfigUpdateOptions {
         server_url: Some("https://new.vault.example.com".to_string()),
         ..Default::default()
@@ -2119,11 +2009,6 @@ fn test_server_url_switch_does_not_abort_process() {
     // Daemon thread joins cleanly and host test continues executing
     let join_res = handle.join().expect("daemon thread panicked");
     assert!(join_res.is_ok());
-
-    match old_runtime {
-        Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
-        None => env::remove_var("XDG_RUNTIME_DIR"),
-    }
 }
 
 #[test]
@@ -2212,7 +2097,9 @@ fn test_resolve_daemon_binary_strategies() {
 
 #[test]
 fn test_daemon_launch_strategy_env_and_global_config() {
-    let _lock = crate::env_lock();
+    let mut test_env = crate::test_support::TestEnv::isolated();
+    test_env.remove_var("OMA_DAEMON_LAUNCH_STRATEGY");
+    test_env.remove_var("OMA_DAEMON_BIN");
     reset_daemon_launch_strategy();
 
     // 1. Programmatic global setting
@@ -2226,56 +2113,41 @@ fn test_daemon_launch_strategy_env_and_global_config() {
     assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
 
     // 2. OMA_DAEMON_LAUNCH_STRATEGY env keywords
-    let old_strat = env::var_os("OMA_DAEMON_LAUNCH_STRATEGY");
-    let old_bin = env::var_os("OMA_DAEMON_BIN");
-    env::remove_var("OMA_DAEMON_BIN");
-
     for val in &["system", "system-cli", "cli", "auto"] {
-        env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+        test_env.set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
         assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Auto);
     }
 
     for val in &["disabled", "none", "off", "false"] {
-        env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+        test_env.set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
         assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::Disabled);
     }
 
     for val in &["in-process", "inprocess", "host"] {
-        env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
+        test_env.set_var("OMA_DAEMON_LAUNCH_STRATEGY", val);
         assert_eq!(daemon_launch_strategy(), DaemonLaunchStrategy::InProcess);
     }
 
     // Explicit path with uppercase preserving
-    env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", "/Opt/OmaWarden/omawarden");
+    test_env.set_var("OMA_DAEMON_LAUNCH_STRATEGY", "/Opt/OmaWarden/omawarden");
     assert_eq!(
         daemon_launch_strategy(),
         DaemonLaunchStrategy::Explicit(PathBuf::from("/Opt/OmaWarden/omawarden"))
     );
 
     // OMA_DAEMON_BIN overrides OMA_DAEMON_LAUNCH_STRATEGY
-    env::set_var("OMA_DAEMON_BIN", "/Custom/Bin/omawarden");
+    test_env.set_var("OMA_DAEMON_BIN", "/Custom/Bin/omawarden");
     assert_eq!(
         daemon_launch_strategy(),
         DaemonLaunchStrategy::Explicit(PathBuf::from("/Custom/Bin/omawarden"))
     );
-
-    match old_strat {
-        Some(v) => env::set_var("OMA_DAEMON_LAUNCH_STRATEGY", v),
-        None => env::remove_var("OMA_DAEMON_LAUNCH_STRATEGY"),
-    }
-    match old_bin {
-        Some(v) => env::set_var("OMA_DAEMON_BIN", v),
-        None => env::remove_var("OMA_DAEMON_BIN"),
-    }
-    reset_daemon_launch_strategy();
 }
 
 #[test]
 fn test_ensure_daemon_running_in_foreign_host_refuses_to_spawn_foreign_host() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
-    let old_runtime = env::var_os("XDG_RUNTIME_DIR");
-    env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
 
     // Ensure no daemon is running at this socket
     assert!(!get_socket_path().exists());
@@ -2318,16 +2190,12 @@ fn test_ensure_daemon_running_in_foreign_host_refuses_to_spawn_foreign_host() {
 
     assert!(!get_socket_path().exists());
     assert!(!sentinel_path.exists());
-
-    match old_runtime {
-        Some(val) => env::set_var("XDG_RUNTIME_DIR", val),
-        None => env::remove_var("XDG_RUNTIME_DIR"),
-    }
 }
 
 #[test]
 fn test_daemon_client_builder_and_methods() {
-    let _lock = crate::env_lock();
+    let mut env = crate::test_support::TestEnv::isolated();
+    env.remove_var("OMA_DAEMON_LAUNCH_STRATEGY");
     let default_client = DaemonClient::new();
     assert_eq!(default_client.socket_path(), get_socket_path());
     assert_eq!(
@@ -2359,6 +2227,7 @@ fn test_daemon_client_builder_and_methods() {
 
 #[test]
 fn test_multi_client_differing_commits_coexistence() {
+    let _env = crate::test_support::TestEnv::isolated();
     let runtime = tempdir().unwrap();
     let storage_dir = tempdir().unwrap();
     let storage_mgr = StorageManager::new(storage_dir.path().join("data.json"));
@@ -2423,6 +2292,7 @@ fn test_multi_client_differing_commits_coexistence() {
 
 #[test]
 fn test_daemon_cipher_resolve_and_delete_privileged_gating() {
+    let _env = crate::test_support::TestEnv::isolated();
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon_data.json");
     let storage_mgr = StorageManager::new(path);

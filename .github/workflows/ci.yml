@@ -136,5 +136,7 @@ jobs:
       - name: Run QML lint, test suites and static color gate
         run: ./scripts/test-qml.sh
 
-      - name: Run workflow action pinning check
-        run: python3 tests/test_workflow_action_pinning.py
+      - name: Run workflow action pinning & runner contract checks
+        run: |
+          python3 tests/test_workflow_action_pinning.py
+          python3 tests/test_runner_scripts.py

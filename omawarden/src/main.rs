@@ -7304,7 +7304,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let vault = VaultManager::new("", Some(manager), None);
+        let vault = VaultManager::new(
+            "",
+            Some(manager),
+            Some(omawarden::keyring::KeyringManager::new("mock")),
+        );
         *vault.is_unlocked.write().unwrap() = true;
         *vault.user_key.write().unwrap() =
             Some(omawarden::crypto::SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap());

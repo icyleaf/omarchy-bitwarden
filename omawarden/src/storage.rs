@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_default_storage_path_not_in_watched_plugin_directory() {
-        let _lock = crate::env_lock();
+        let _env = crate::test_support::TestEnv::isolated();
         let storage_mgr = StorageManager::default();
         let path_str = storage_mgr.file_path.to_string_lossy();
         assert!(

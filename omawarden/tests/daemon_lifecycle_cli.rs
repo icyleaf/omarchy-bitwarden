@@ -13,14 +13,78 @@
 //!    Upon any rejected stop request, the daemon listener, vault session state, and
 //!    SSH agent socket remain intact and usable.
 
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use omawarden::daemon::{DaemonServer, DaemonState};
 use omawarden::storage::StorageManager;
 use serde_json::{json, Value};
 use tempfile::tempdir;
+
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct IsolatedProcessEnv {
+    saved: Vec<(&'static str, Option<OsString>)>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl IsolatedProcessEnv {
+    fn enter(runtime_dir: &Path) -> Self {
+        let lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = Self {
+            saved: Vec::with_capacity(10),
+            _lock: lock,
+        };
+        guard.set_var("XDG_RUNTIME_DIR", runtime_dir);
+        guard.set_var("OMAWARDEN_CONFIG_DIR", runtime_dir);
+        guard.set_var("OMAWARDEN_DATA_DIR", runtime_dir);
+        guard.set_var("OMA_DAEMON_LAUNCH_STRATEGY", "disabled");
+        guard.set_var("OMA_KEYRING_PROVIDER", "mock");
+        guard.set_var("OMA_CLIPBOARD_PROVIDER", "mock");
+        guard.remove_var("OMA_SECRET_TOOL_PATH");
+        guard.remove_var("WAYLAND_DISPLAY");
+        guard.remove_var("WAYLAND_SOCKET");
+        guard.remove_var("DISPLAY");
+        guard
+    }
+
+    fn set_var(&mut self, key: &'static str, value: impl AsRef<OsStr>) {
+        self.saved.push((key, std::env::var_os(key)));
+        std::env::set_var(key, value);
+    }
+
+    fn remove_var(&mut self, key: &'static str) {
+        self.saved.push((key, std::env::var_os(key)));
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for IsolatedProcessEnv {
+    fn drop(&mut self) {
+        for (key, previous) in self.saved.drain(..).rev() {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+fn isolated_omawarden_cmd(runtime_dir: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("OMAWARDEN_CONFIG_DIR", runtime_dir)
+        .env("OMAWARDEN_DATA_DIR", runtime_dir)
+        .env("OMA_DAEMON_LAUNCH_STRATEGY", "disabled")
+        .env("OMA_KEYRING_PROVIDER", "mock")
+        .env("OMA_CLIPBOARD_PROVIDER", "mock")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .env_remove("DISPLAY");
+    cmd
+}
 
 fn send_raw_ipc_from_child_process(socket_path: &Path, payload: &Value) -> Value {
     let script = r#"
@@ -28,6 +92,7 @@ import socket, sys
 sock_path = sys.argv[1]
 payload = sys.argv[2]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10)
 s.connect(sock_path)
 s.sendall(payload.encode('utf-8') + b'\n')
 data = b''
@@ -64,6 +129,7 @@ print(data.decode('utf-8'))
 #[test]
 fn test_in_process_daemon_rejects_external_child_processes() {
     let runtime_dir = tempdir().unwrap();
+    let _env = IsolatedProcessEnv::enter(runtime_dir.path());
     let socket_path = runtime_dir.path().join("omawarden.sock");
     let data_path = runtime_dir.path().join("daemon_data.json");
 
@@ -104,9 +170,8 @@ fn test_in_process_daemon_rejects_external_child_processes() {
     assert!(agent_status.get("socket").is_some());
 
     // 2. Real CLI child process `omawarden daemon stop` MUST also be rejected
-    let cli_output = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+    let cli_output = isolated_omawarden_cmd(runtime_dir.path())
         .args(["daemon", "stop"])
-        .env("XDG_RUNTIME_DIR", runtime_dir.path())
         .output()
         .expect("Failed to execute omawarden CLI");
 
@@ -132,6 +197,7 @@ fn test_in_process_daemon_rejects_external_child_processes() {
 #[test]
 fn test_standalone_daemon_requires_admin_from_external_child_process() {
     let runtime_dir = tempdir().unwrap();
+    let _env = IsolatedProcessEnv::enter(runtime_dir.path());
     let socket_path = runtime_dir.path().join("omawarden.sock");
     let data_path = runtime_dir.path().join("daemon_data.json");
 
@@ -171,9 +237,8 @@ fn test_standalone_daemon_requires_admin_from_external_child_process() {
     assert!(agent_status.get("socket").is_some());
 
     // 2. Dedicated CLI child process `omawarden daemon stop` sends admin: true and stops daemon
-    let cli_output = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+    let cli_output = isolated_omawarden_cmd(runtime_dir.path())
         .args(["daemon", "stop"])
-        .env("XDG_RUNTIME_DIR", runtime_dir.path())
         .output()
         .expect("Failed to execute omawarden CLI");
 
@@ -195,6 +260,7 @@ fn test_standalone_daemon_requires_admin_from_external_child_process() {
 #[test]
 fn test_standalone_daemon_accepts_raw_admin_stop_from_external_child() {
     let runtime_dir = tempdir().unwrap();
+    let _env = IsolatedProcessEnv::enter(runtime_dir.path());
     let socket_path = runtime_dir.path().join("omawarden.sock");
     let data_path = runtime_dir.path().join("daemon_data.json");
 
