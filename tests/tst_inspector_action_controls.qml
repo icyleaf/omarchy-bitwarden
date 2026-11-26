@@ -161,6 +161,26 @@ Item {
       }
       check(editButton && editButton.visible && editButton.enabled === true,
             "editButton is enabled on writable Organization Cipher (edit && view_password)")
+      check(deleteButton && deleteButton.visible && deleteButton.enabled === false,
+            "deleteButton stays disabled on LimitItemDeletion Organization Cipher (edit: true, can_delete: false)")
+      // Deletable Organization Cipher (can_delete: true) enables deleteButton
+      inspector.item = {
+        id: "org-del-1",
+        name: "Shared Deletable",
+        type_name: "login",
+        favorite: false,
+        organization_id: "org-1",
+        organization_name: "Acme Corp",
+        edit: true,
+        view_password: true,
+        can_delete: true,
+        can_restore: true,
+        login: { username: "svc", password: "secret", uris: [] },
+        fields: [],
+        attachments: []
+      }
+      check(deleteButton && deleteButton.visible && deleteButton.enabled === true,
+            "deleteButton is enabled on Organization Cipher with can_delete: true")
       // Hidden-password Organization Cipher (edit && !view_password) disables editButton
       inspector.item = {
         id: "org-hp-1",

@@ -1262,9 +1262,10 @@ impl VaultManager {
                 .organization_id
                 .as_deref()
                 .is_some_and(|s| !s.is_empty())
+                && !resolved_item.can_delete
             {
                 return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
+                    "You do not have permission to delete this Organization cipher.".into(),
                 ));
             }
 
@@ -1422,9 +1423,10 @@ impl VaultManager {
                 .organization_id
                 .as_deref()
                 .is_some_and(|s| !s.is_empty())
+                && !resolved_item.can_restore
             {
                 return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
+                    "You do not have permission to restore this Organization cipher.".into(),
                 ));
             }
 
@@ -1554,9 +1556,10 @@ impl VaultManager {
                 .organization_id
                 .as_deref()
                 .is_some_and(|s| !s.is_empty())
+                && !resolved_item.can_delete
             {
                 return Err(WriteError::Rejected(
-                    "Organization ciphers are read-only.".into(),
+                    "You do not have permission to delete this Organization cipher.".into(),
                 ));
             }
 

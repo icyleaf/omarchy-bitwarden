@@ -42,8 +42,8 @@ function canAssignFolder(item) {
   return isMutableType(item)
 }
 
-// Organization Cipher full content editing is gated by `edit && view_password`
-// (fail-closed false when absent). Deletion remains gated until Ticket #454 lands.
+// Organization Cipher editing is gated by `edit && view_password` and deletion
+// is gated by `can_delete` (`permissions.delete`), both fail-closed false when absent.
 function canEdit(item) {
   if (!isEditableType(item)) return false
   if (!isOrganizationOwned(item)) return true
@@ -59,14 +59,16 @@ function editGuardError(item) {
 }
 
 function canDelete(item) {
-  return isMutableType(item) && !isOrganizationOwned(item)
+  if (!isMutableType(item)) return false
+  if (!isOrganizationOwned(item)) return true
+  return Boolean(item.can_delete)
 }
 
 function deleteGuardError(item) {
   if (!isMutableType(item)) return ""
   if (!isOrganizationOwned(item)) return ""
   if (!item.can_delete) return "You do not have permission to delete this Organization cipher."
-  return "Organization cipher deletion is not enabled yet."
+  return ""
 }
 
 function withFolder(items, itemId, folderId, folderName) {

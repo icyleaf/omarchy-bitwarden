@@ -3303,24 +3303,28 @@ fn main() -> ExitCode {
                     let item_id = resolved["id"].as_str().unwrap_or("").to_string();
                     let item_name = resolved["name"].as_str().unwrap_or("").to_string();
 
-                    if resolved
+                    let is_org = resolved
                         .get("organization_id")
                         .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
-                    {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&json!({
-                                    "ok": false,
-                                    "error": "Organization ciphers are read-only.",
-                                }))
-                                .unwrap()
+                        .is_some_and(|s| !s.is_empty());
+                    if is_org {
+                        let can_delete = resolved
+                            .get("can_delete")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        if !can_delete {
+                            emit_vault_error(
+                                json,
+                                "You do not have permission to delete this Organization cipher.",
                             );
-                        } else {
-                            eprintln!("Error: Organization ciphers are read-only.");
+                            return ExitCode::FAILURE;
                         }
-                        return ExitCode::FAILURE;
+                        if let Err(err_msg) =
+                            ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                        {
+                            emit_vault_error(json, &err_msg);
+                            return ExitCode::FAILURE;
+                        }
                     }
 
                     // When --trash is passed, permanent deletion is implied (DELETE /ciphers/{id})
@@ -3419,24 +3423,28 @@ fn main() -> ExitCode {
                     let item_id = resolved["id"].as_str().unwrap_or("").to_string();
                     let item_name = resolved["name"].as_str().unwrap_or("").to_string();
 
-                    if resolved
+                    let is_org = resolved
                         .get("organization_id")
                         .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
-                    {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&json!({
-                                    "ok": false,
-                                    "error": "Organization ciphers are read-only.",
-                                }))
-                                .unwrap()
+                        .is_some_and(|s| !s.is_empty());
+                    if is_org {
+                        let can_restore = resolved
+                            .get("can_restore")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        if !can_restore {
+                            emit_vault_error(
+                                json,
+                                "You do not have permission to restore this Organization cipher.",
                             );
-                        } else {
-                            eprintln!("Error: Organization ciphers are read-only.");
+                            return ExitCode::FAILURE;
                         }
-                        return ExitCode::FAILURE;
+                        if let Err(err_msg) =
+                            ensure_daemon_capability(omawarden::daemon::CAPABILITY_ORG_WRITE)
+                        {
+                            emit_vault_error(json, &err_msg);
+                            return ExitCode::FAILURE;
+                        }
                     }
 
                     let mut daemon_req = json!({
