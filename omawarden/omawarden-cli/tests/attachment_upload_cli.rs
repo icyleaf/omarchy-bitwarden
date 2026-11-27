@@ -277,8 +277,15 @@ impl TestEnv {
     }
 
     fn start_daemon(&self) -> Daemon {
-        let child = self
-            .cmd()
+        self.start_daemon_with_env(&[])
+    }
+
+    fn start_daemon_with_env(&self, extra_env: &[(&str, &str)]) -> Daemon {
+        let mut cmd = self.cmd();
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let child = cmd
             .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -994,4 +1001,567 @@ fn attachment_upload_capability_gating_auto_restarts_stale_standalone_daemon() {
             .contains("Unlock the vault before uploading an attachment."),
         "After auto-restart, real daemon should be running with 'attachment_upload' capability and prompt unlock: {json_out}"
     );
+}
+
+#[test]
+fn attachment_upload_azure_single_put_end_to_end_zero_auth_and_cache_upsert() {
+    let env = TestEnv::new(500);
+    let _daemon = env.start_daemon();
+
+    let azure_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    azure_listener.set_nonblocking(true).unwrap();
+    let azure_addr = azure_listener.local_addr().unwrap();
+    let azure_sas_url = format!(
+        "http://{azure_addr}/attachments-v2/cipher-keyed-1/att-azure-single?sv=2020-08-04&se=2099-01-01T00%3A00%3A00Z&sig=single"
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_api = stop.clone();
+    let stop_az = stop.clone();
+    let api = env.api.try_clone().unwrap();
+    let base_cipher = env.keyed_cipher_json.clone();
+    let wrapped_key_capture = Arc::new(Mutex::new(String::new()));
+    let wrapped_key_srv = wrapped_key_capture.clone();
+    let sas_for_api = azure_sas_url.clone();
+
+    let api_server = thread::spawn(move || {
+        while !stop_api.load(Ordering::Relaxed) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    assert_eq!(req.method, "POST");
+                    assert_eq!(req.path, "/api/ciphers/cipher-keyed-1/attachment/v2");
+                    assert_eq!(
+                        req.headers.get("authorization").map(String::as_str),
+                        Some("Bearer fixture-token")
+                    );
+                    let payload: Value = serde_json::from_slice(&req.body).unwrap();
+                    *wrapped_key_srv.lock().unwrap() = payload["key"].as_str().unwrap().to_string();
+
+                    let mut updated = base_cipher.clone();
+                    updated["attachments"] = json!([{
+                        "id": "att-azure-single",
+                        "fileName": payload["fileName"],
+                        "key": payload["key"],
+                        "size": payload["fileSize"].to_string(),
+                        "sizeName": "97 B"
+                    }]);
+                    let resp = json!({
+                        "attachmentId": "att-azure-single",
+                        "url": sas_for_api,
+                        "fileUploadType": 1,
+                        "cipherResponse": updated,
+                    })
+                    .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        resp.len(),
+                        resp
+                    );
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let azure_captured = Arc::new(Mutex::new(Vec::<(
+        String,
+        String,
+        HashMap<String, String>,
+        Vec<u8>,
+    )>::new()));
+    let azure_cap_srv = azure_captured.clone();
+    let azure_server = thread::spawn(move || {
+        while !stop_az.load(Ordering::Relaxed) {
+            match azure_listener.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    azure_cap_srv.lock().unwrap().push((
+                        req.method,
+                        req.path,
+                        req.headers,
+                        req.body,
+                    ));
+                    let _ = stream.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n");
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let plaintext = b"azure single BlockBlob payload bytes";
+    let file_path = env.temp.path().join("cloud-cert.pem");
+    fs::write(&file_path, plaintext).unwrap();
+
+    let out = env
+        .cmd()
+        .args([
+            "attachment",
+            "upload",
+            "--item-id",
+            "cipher-keyed-1",
+            "--file",
+            file_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    stop.store(true, Ordering::Relaxed);
+    api_server.join().unwrap();
+    azure_server.join().unwrap();
+
+    assert!(
+        out.status.success(),
+        "Azure single-PUT upload failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json_out: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json_out["ok"], true);
+    assert_eq!(json_out["attachment"]["id"], "att-azure-single");
+    assert_eq!(json_out["attachment"]["fileName"], "cloud-cert.pem");
+
+    let az_reqs = azure_captured.lock().unwrap();
+    assert_eq!(az_reqs.len(), 1);
+    let (method, path, headers, body) = &az_reqs[0];
+    assert_eq!(method, "PUT");
+    assert!(path.starts_with("/attachments-v2/cipher-keyed-1/att-azure-single?"));
+    assert_eq!(
+        headers.get("x-ms-blob-type").map(String::as_str),
+        Some("BlockBlob")
+    );
+    assert_eq!(
+        headers.get("x-ms-version").map(String::as_str),
+        Some("2020-08-04")
+    );
+    assert!(headers.contains_key("x-ms-date"));
+    assert!(
+        !headers.contains_key("authorization"),
+        "Authorization header MUST NEVER be sent to Azure"
+    );
+
+    let wrapped = wrapped_key_capture.lock().unwrap().clone();
+    let raw_att_key = EncString::parse(&wrapped)
+        .unwrap()
+        .decrypt(&env.cipher_key)
+        .unwrap();
+    let att_key = SymmetricCryptoKey::from_raw_bytes(&raw_att_key).unwrap();
+    let decrypted = decrypt_attachment_blob(body, &att_key).unwrap();
+    assert_eq!(decrypted, plaintext);
+
+    // Local cache must reflect the uploaded attachment immediately
+    let cache_json: Value =
+        serde_json::from_str(&fs::read_to_string(env.temp.path().join("data/data.json")).unwrap())
+            .unwrap();
+    let cached_cipher = cache_json["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "cipher-keyed-1")
+        .unwrap();
+    assert_eq!(cached_cipher["attachments"][0]["id"], "att-azure-single");
+}
+
+#[test]
+fn attachment_upload_azure_multiblock_with_sas_renewal_and_exact_reassembly() {
+    let env = TestEnv::new(500);
+    let _daemon = env.start_daemon_with_env(&[
+        ("OMA_TEST_AZURE_SINGLE_PUT_MAX_BYTES", "80"),
+        ("OMA_TEST_AZURE_BLOCK_SIZE_BYTES", "40"),
+    ]);
+
+    let azure_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    azure_listener.set_nonblocking(true).unwrap();
+    let azure_addr = azure_listener.local_addr().unwrap();
+    let expired_sas = format!(
+        "http://{azure_addr}/attachments-v2/cipher-keyed-1/att-azure-multi?sv=2020-08-04&se=2020-01-01T00%3A00%3A00Z&sig=expired"
+    );
+    let renewed_sas = format!(
+        "http://{azure_addr}/attachments-v2/cipher-keyed-1/att-azure-multi?sv=2020-08-04&se=2099-01-01T00%3A00%3A00Z&sig=renewed"
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_api = stop.clone();
+    let stop_az = stop.clone();
+    let api = env.api.try_clone().unwrap();
+    let base_cipher = env.keyed_cipher_json.clone();
+    let wrapped_key_capture = Arc::new(Mutex::new(String::new()));
+    let wrapped_key_srv = wrapped_key_capture.clone();
+    let renew_hits = Arc::new(AtomicUsize::new(0));
+    let renew_hits_srv = renew_hits.clone();
+
+    let api_server = thread::spawn(move || {
+        while !stop_api.load(Ordering::Relaxed) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    assert_eq!(
+                        req.headers.get("authorization").map(String::as_str),
+                        Some("Bearer fixture-token")
+                    );
+                    if req.method == "POST"
+                        && req.path == "/api/ciphers/cipher-keyed-1/attachment/v2"
+                    {
+                        let payload: Value = serde_json::from_slice(&req.body).unwrap();
+                        *wrapped_key_srv.lock().unwrap() =
+                            payload["key"].as_str().unwrap().to_string();
+                        let mut updated = base_cipher.clone();
+                        updated["attachments"] = json!([{
+                            "id": "att-azure-multi",
+                            "fileName": payload["fileName"],
+                            "key": payload["key"],
+                            "size": payload["fileSize"].to_string(),
+                            "sizeName": "177 B"
+                        }]);
+                        let resp = json!({
+                            "attachmentId": "att-azure-multi",
+                            "url": expired_sas,
+                            "fileUploadType": 1,
+                            "cipherResponse": updated,
+                        })
+                        .to_string();
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                    } else if req.method == "GET"
+                        && req.path
+                            == "/api/ciphers/cipher-keyed-1/attachment/att-azure-multi/renew"
+                    {
+                        renew_hits_srv.fetch_add(1, Ordering::Relaxed);
+                        let resp = json!({
+                            "object": "attachment-fileUpload",
+                            "url": renewed_sas,
+                            "fileUploadType": 1
+                        })
+                        .to_string();
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                    } else {
+                        panic!("Unexpected API request: {} {}", req.method, req.path);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let azure_reqs = Arc::new(Mutex::new(Vec::<(
+        String,
+        String,
+        HashMap<String, String>,
+        Vec<u8>,
+    )>::new()));
+    let azure_reqs_srv = azure_reqs.clone();
+    let azure_server = thread::spawn(move || {
+        while !stop_az.load(Ordering::Relaxed) {
+            match azure_listener.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    azure_reqs_srv.lock().unwrap().push((
+                        req.method,
+                        req.path,
+                        req.headers,
+                        req.body,
+                    ));
+                    let _ = stream.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n");
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let plaintext: Vec<u8> = (0u8..120).collect();
+    let file_path = env.temp.path().join("multi-block.bin");
+    fs::write(&file_path, &plaintext).unwrap();
+
+    let out = env
+        .cmd()
+        .args([
+            "attachment",
+            "upload",
+            "--item-id",
+            "cipher-keyed-1",
+            "--file",
+            file_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    stop.store(true, Ordering::Relaxed);
+    api_server.join().unwrap();
+    azure_server.join().unwrap();
+
+    assert!(
+        out.status.success(),
+        "Azure multi-block upload failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json_out: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json_out["ok"], true);
+    assert_eq!(json_out["attachment"]["id"], "att-azure-multi");
+    assert_eq!(
+        renew_hits.load(Ordering::Relaxed),
+        1,
+        "Expired SAS URL must trigger GET .../renew exactly once"
+    );
+
+    let reqs = azure_reqs.lock().unwrap();
+    // 120 bytes plaintext -> 177 bytes EncArrayBuffer -> ceil(177/40) = 5 blocks + 1 blocklist = 6 PUTs
+    assert_eq!(reqs.len(), 6, "Expected 5 block PUTs + 1 blocklist PUT");
+
+    let mut staged_blocks = HashMap::<String, Vec<u8>>::new();
+    for (method, path, headers, body) in &reqs[..5] {
+        assert_eq!(method, "PUT");
+        assert!(
+            !headers.contains_key("authorization"),
+            "Authorization header MUST NEVER be sent to Azure"
+        );
+        let parsed = url::Url::parse(&format!("http://{azure_addr}{path}")).unwrap();
+        let params: HashMap<String, String> = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(params.get("comp").map(String::as_str), Some("block"));
+        assert_eq!(params.get("sig").map(String::as_str), Some("renewed"));
+        let block_id = params.get("blockid").unwrap().clone();
+        staged_blocks.insert(block_id, body.clone());
+    }
+
+    let (commit_method, commit_path, commit_headers, commit_body) = &reqs[5];
+    assert_eq!(commit_method, "PUT");
+    assert!(!commit_headers.contains_key("authorization"));
+    let commit_url = url::Url::parse(&format!("http://{azure_addr}{commit_path}")).unwrap();
+    assert!(commit_url
+        .query_pairs()
+        .any(|(k, v)| k == "comp" && v == "blocklist"));
+    let xml = String::from_utf8(commit_body.clone()).unwrap();
+
+    // Extract <Latest>...</Latest> block IDs in committed order and reassemble
+    let mut reassembled = Vec::new();
+    let mut rest = xml.as_str();
+    while let Some(start) = rest.find("<Latest>") {
+        let after = &rest[start + "<Latest>".len()..];
+        let end = after.find("</Latest>").unwrap();
+        let bid = &after[..end];
+        reassembled.extend_from_slice(staged_blocks.get(bid).expect("missing staged block"));
+        rest = &after[end + "</Latest>".len()..];
+    }
+
+    let wrapped = wrapped_key_capture.lock().unwrap().clone();
+    let raw_att_key = EncString::parse(&wrapped)
+        .unwrap()
+        .decrypt(&env.cipher_key)
+        .unwrap();
+    let att_key = SymmetricCryptoKey::from_raw_bytes(&raw_att_key).unwrap();
+    let decrypted = decrypt_attachment_blob(&reassembled, &att_key).unwrap();
+    assert_eq!(decrypted, plaintext);
+}
+
+#[test]
+fn attachment_upload_azure_fail_closed_and_rollback_on_bad_url_unknown_type_block_and_renew_errors()
+{
+    let env = TestEnv::new(500);
+    let _daemon = env.start_daemon_with_env(&[
+        ("OMA_TEST_AZURE_SINGLE_PUT_MAX_BYTES", "80"),
+        ("OMA_TEST_AZURE_BLOCK_SIZE_BYTES", "40"),
+    ]);
+
+    let azure_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    azure_listener.set_nonblocking(true).unwrap();
+    let azure_addr = azure_listener.local_addr().unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_api = stop.clone();
+    let stop_az = stop.clone();
+    let api = env.api.try_clone().unwrap();
+    let base_cipher = env.keyed_cipher_json.clone();
+
+    let deleted_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let deleted_ids_srv = deleted_ids.clone();
+    let step1_count = Arc::new(AtomicUsize::new(0));
+    let step1_count_srv = step1_count.clone();
+
+    let api_server = thread::spawn(move || {
+        while !stop_api.load(Ordering::Relaxed) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    if req.method == "POST"
+                        && req.path == "/api/ciphers/cipher-keyed-1/attachment/v2"
+                    {
+                        let idx = step1_count_srv.fetch_add(1, Ordering::Relaxed);
+                        let resp = match idx {
+                            // Case 0: non-HTTPS remote Azure URL
+                            0 => json!({
+                                "attachmentId": "att-bad-url",
+                                "url": "http://storage.blob.core.windows.net/attachments-v2/c/a?sig=bad",
+                                "fileUploadType": 1,
+                                "cipherResponse": base_cipher,
+                            }),
+                            // Case 1: unknown fileUploadType
+                            1 => json!({
+                                "attachmentId": "att-unknown-type",
+                                "url": "https://storage.blob.core.windows.net/attachments-v2/c/a",
+                                "fileUploadType": 99,
+                                "cipherResponse": base_cipher,
+                            }),
+                            // Case 2: Azure block PUT 500 failure
+                            2 => json!({
+                                "attachmentId": "att-block-fail",
+                                "url": format!("http://{azure_addr}/attachments-v2/c/a?sv=2020-08-04&se=2099-01-01T00%3A00%3A00Z&sig=ok"),
+                                "fileUploadType": 1,
+                                "cipherResponse": base_cipher,
+                            }),
+                            // Case 3: Expired SAS where GET .../renew returns 404
+                            _ => json!({
+                                "attachmentId": "att-renew-fail",
+                                "url": format!("http://{azure_addr}/attachments-v2/c/a?sv=2020-08-04&se=2020-01-01T00%3A00%3A00Z&sig=old"),
+                                "fileUploadType": 1,
+                                "cipherResponse": base_cipher,
+                            }),
+                        }
+                        .to_string();
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                    } else if req.method == "GET" && req.path.ends_with("/renew") {
+                        let body = r#"{"message":"not found"}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                    } else if req.method == "DELETE"
+                        && req
+                            .path
+                            .starts_with("/api/ciphers/cipher-keyed-1/attachment/")
+                    {
+                        let aid = req
+                            .path
+                            .trim_start_matches("/api/ciphers/cipher-keyed-1/attachment/")
+                            .to_string();
+                        deleted_ids_srv.lock().unwrap().push(aid);
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+                    } else {
+                        panic!("Unexpected API request: {} {}", req.method, req.path);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let azure_hits = Arc::new(AtomicUsize::new(0));
+    let azure_hits_srv = azure_hits.clone();
+    let azure_server = thread::spawn(move || {
+        while !stop_az.load(Ordering::Relaxed) {
+            match azure_listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _req = read_http_request(&mut stream);
+                    let n = azure_hits_srv.fetch_add(1, Ordering::Relaxed);
+                    if n == 0 {
+                        let _ =
+                            stream.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n");
+                    } else {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n\r\nfail",
+                        );
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+
+    let file_path = env.temp.path().join("fail-case.bin");
+    fs::write(&file_path, vec![0x55u8; 100]).unwrap();
+
+    for expected_substr in [
+        "non-HTTPS Azure",
+        "Unsupported attachment fileUploadType (99)",
+        "Azure block 1",
+        "SAS URL renewal failed",
+    ] {
+        let out = env
+            .cmd()
+            .args([
+                "attachment",
+                "upload",
+                "--item-id",
+                "cipher-keyed-1",
+                "--file",
+                file_path.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], false);
+        let err = v["error"].as_str().unwrap();
+        assert!(
+            err.contains(expected_substr),
+            "Expected error containing '{expected_substr}', got: {err}"
+        );
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    api_server.join().unwrap();
+    azure_server.join().unwrap();
+
+    assert_eq!(
+        *deleted_ids.lock().unwrap(),
+        vec![
+            "att-bad-url".to_string(),
+            "att-unknown-type".to_string(),
+            "att-block-fail".to_string(),
+            "att-renew-fail".to_string(),
+        ],
+        "Every Azure/unknown-type/renewal failure must trigger automatic rollback DELETE"
+    );
+
+    // Local cache must remain completely unchanged (still 0 attachments)
+    let cache_json: Value =
+        serde_json::from_str(&fs::read_to_string(env.temp.path().join("data/data.json")).unwrap())
+            .unwrap();
+    let cached_cipher = cache_json["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "cipher-keyed-1")
+        .unwrap();
+    assert!(cached_cipher["attachments"].as_array().unwrap().is_empty());
 }

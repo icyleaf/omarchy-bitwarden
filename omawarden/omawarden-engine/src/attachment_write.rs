@@ -8,11 +8,17 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
+use base64::Engine as _;
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
 use rand_core::RngCore;
 use serde_json::{json, Value};
+use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::api::{decrypt_sync_ciphers_with_context, ApiError, BitwardenApiClient, ClientContext};
+use crate::api::{
+    decrypt_sync_ciphers_with_context, is_loopback_host, ApiError, BitwardenApiClient,
+    ClientContext,
+};
 use crate::attachment::is_safe_path_component;
 use crate::config::{ConfigManager, DEFAULT_MAX_ATTACHMENT_SIZE_MB};
 use crate::crypto::{
@@ -29,6 +35,235 @@ pub const HARD_MAX_ATTACHMENT_SIZE_MB: u64 = 500;
 
 /// Bitwarden `FileUploadType::Direct` (Bitwarden Self-Hosted & Vaultwarden).
 pub const FILE_UPLOAD_TYPE_DIRECT: u64 = 0;
+
+/// Bitwarden `FileUploadType::Azure` (Bitwarden Cloud Azure Blob Storage).
+pub const FILE_UPLOAD_TYPE_AZURE: u64 = 1;
+
+/// Maximum encrypted payload size for a single Azure `BlockBlob` PUT (256 MiB).
+pub const AZURE_SINGLE_PUT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default sequential block size for Azure multi-block uploads (`> 256 MiB`).
+pub const AZURE_DEFAULT_BLOCK_SIZE_BYTES: usize = 100 * 1024 * 1024;
+
+/// Safety margin in seconds before SAS `se` expiration to proactively renew the SAS URL.
+pub const AZURE_SAS_RENEWAL_MARGIN_SECS: i64 = 5;
+
+/// Internal configuration for Azure Attachment V2 uploads, allowing tests to
+/// exercise multi-block splitting without allocating 256+ MiB in memory.
+#[derive(Debug, Clone, Copy)]
+pub struct AzureUploadConfig {
+    pub single_put_max_bytes: usize,
+    pub block_size_bytes: usize,
+    pub sas_renewal_margin_secs: i64,
+    pub allow_loopback_http: bool,
+}
+
+impl Default for AzureUploadConfig {
+    fn default() -> Self {
+        Self {
+            single_put_max_bytes: AZURE_SINGLE_PUT_MAX_BYTES,
+            block_size_bytes: AZURE_DEFAULT_BLOCK_SIZE_BYTES,
+            sas_renewal_margin_secs: AZURE_SAS_RENEWAL_MARGIN_SECS,
+            allow_loopback_http: cfg!(test),
+        }
+    }
+}
+
+impl AzureUploadConfig {
+    /// Resolves Azure upload parameters for an active upload session.
+    /// Test-only threshold overrides are honored strictly when `allow_loopback_http`
+    /// is true (local loopback test servers); production HTTPS origins always use
+    /// the canonical 256 MiB / 100 MiB constants.
+    pub fn for_api_origin(allow_loopback_http: bool) -> Self {
+        let mut cfg = Self {
+            allow_loopback_http,
+            ..Self::default()
+        };
+        if allow_loopback_http {
+            if let Some(v) = std::env::var("OMA_TEST_AZURE_SINGLE_PUT_MAX_BYTES")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+            {
+                cfg.single_put_max_bytes = v;
+            }
+            if let Some(v) = std::env::var("OMA_TEST_AZURE_BLOCK_SIZE_BYTES")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+            {
+                cfg.block_size_bytes = v;
+            }
+        }
+        cfg
+    }
+}
+
+/// Validates an Azure Blob Storage SAS upload URL fail-closed.
+///
+/// Requires `https://` in all production environments. Loopback `http://`
+/// (`localhost`, `127.0.0.0/8`, `::1`) is permitted ONLY when `allow_loopback_http`
+/// is true (test environments). Remote plaintext `http://` and all non-HTTP(S)
+/// schemes are always rejected.
+pub fn validate_azure_upload_url(raw_url: &str, allow_loopback_http: bool) -> Result<Url, String> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err("Azure attachment upload URL is empty.".to_string());
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|e| format!("Invalid Azure attachment upload URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| "Azure attachment upload URL is missing a host.".to_string())?;
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if allow_loopback_http && is_loopback_host(host) => Ok(parsed),
+        "http" => Err(format!(
+            "Refusing insecure non-HTTPS Azure attachment upload URL for host '{host}'."
+        )),
+        scheme => Err(format!(
+            "Unsupported scheme '{scheme}' in Azure attachment upload URL; https:// is required."
+        )),
+    }
+}
+
+/// Parses the Azure SAS `se` (signed expiry) query parameter as a UTC timestamp.
+pub fn parse_azure_sas_expiry(url: &Url) -> Option<DateTime<Utc>> {
+    let raw = url
+        .query_pairs()
+        .find(|(k, _)| k.eq_ignore_ascii_case("se"))
+        .map(|(_, v)| v.into_owned())?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%MZ") {
+        return Some(ndt.and_utc());
+    }
+    if let Ok(nd) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return nd.and_hms_opt(0, 0, 0).map(|ndt| ndt.and_utc());
+    }
+    None
+}
+
+/// Returns true when the Azure SAS URL carries a `se` expiry timestamp that is
+/// already expired or within `margin_secs` of expiring.
+pub fn azure_sas_needs_renewal(url: &Url, now: DateTime<Utc>, margin_secs: i64) -> bool {
+    match parse_azure_sas_expiry(url) {
+        Some(expiry) => expiry <= now + Duration::seconds(margin_secs),
+        None => false,
+    }
+}
+
+/// Encodes a sequential block index into a fixed-length Base64 Azure `blockid`
+/// matching Bitwarden's 48-character zero-padded decimal convention.
+pub fn azure_block_id(block_index: usize) -> String {
+    let padded = format!("{block_index:048}");
+    base64::engine::general_purpose::STANDARD.encode(padded.as_bytes())
+}
+
+/// Builds the Azure Put Block List XML commit payload (`<BlockList><Latest>...</Latest></BlockList>`).
+pub fn build_azure_block_list_xml(block_ids: &[String]) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
+    for id in block_ids {
+        xml.push_str("<Latest>");
+        xml.push_str(id);
+        xml.push_str("</Latest>");
+    }
+    xml.push_str("</BlockList>");
+    xml
+}
+
+/// Appends `comp=block&blockid=<block_id>` to an Azure SAS URL while preserving
+/// existing SAS query parameters.
+pub fn build_azure_block_url(sas_url: &Url, block_id: &str) -> Url {
+    let mut url = sas_url.clone();
+    url.query_pairs_mut()
+        .append_pair("comp", "block")
+        .append_pair("blockid", block_id);
+    url
+}
+
+/// Appends `comp=blocklist` to an Azure SAS URL while preserving existing SAS query parameters.
+pub fn build_azure_block_list_url(sas_url: &Url) -> Url {
+    let mut url = sas_url.clone();
+    url.query_pairs_mut().append_pair("comp", "blocklist");
+    url
+}
+
+/// Ensures `current_url` is not expired or within `config.sas_renewal_margin_secs`
+/// of expiring; when renewal is needed, invokes `renew_sas_url`, validates the
+/// returned URL fail-closed, and updates `current_url`.
+fn ensure_fresh_azure_sas_url<F>(
+    current_url: &mut Url,
+    config: AzureUploadConfig,
+    renew_sas_url: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    if !azure_sas_needs_renewal(current_url, Utc::now(), config.sas_renewal_margin_secs) {
+        return Ok(());
+    }
+    let renewed_raw = renew_sas_url()?;
+    let renewed = validate_azure_upload_url(&renewed_raw, config.allow_loopback_http)?;
+    *current_url = renewed;
+    Ok(())
+}
+
+/// Executes Step 2 (`FileUploadType::Azure (1)`) upload against Azure Blob Storage.
+///
+/// - Validates the initial (and any renewed) SAS URL with `validate_azure_upload_url`.
+/// - Uses a single `BlockBlob` PUT when `encrypted_blob.len() <= config.single_put_max_bytes`.
+/// - Splits into sequential `comp=block` PUTs followed by `comp=blocklist` XML commit
+///   when `encrypted_blob.len() > config.single_put_max_bytes`.
+/// - Checks the SAS `se` query parameter before single PUT, before each block, and
+///   before `comp=blocklist`, calling `renew_sas_url` when expired or nearing expiration.
+/// - Never attaches an `Authorization` header to any Azure request.
+pub fn upload_attachment_azure_with_config<F>(
+    client: &BitwardenApiClient,
+    initial_sas_url: &str,
+    encrypted_blob: &[u8],
+    config: AzureUploadConfig,
+    mut renew_sas_url: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let mut current_url = validate_azure_upload_url(initial_sas_url, config.allow_loopback_http)?;
+
+    if encrypted_blob.len() <= config.single_put_max_bytes {
+        ensure_fresh_azure_sas_url(&mut current_url, config, &mut renew_sas_url)?;
+        return client
+            .upload_attachment_azure_single(&current_url, encrypted_blob)
+            .map_err(|err| format_api_error("Attachment upload step 2 (Azure) failed", &err));
+    }
+
+    let block_size = config.block_size_bytes.max(1);
+    let mut block_ids = Vec::new();
+    for (idx, chunk) in encrypted_blob.chunks(block_size).enumerate() {
+        ensure_fresh_azure_sas_url(&mut current_url, config, &mut renew_sas_url)?;
+        let block_id = azure_block_id(idx);
+        client
+            .upload_attachment_azure_block(&current_url, &block_id, chunk)
+            .map_err(|err| {
+                format_api_error(
+                    &format!("Attachment upload step 2 (Azure block {idx}) failed"),
+                    &err,
+                )
+            })?;
+        block_ids.push(block_id);
+    }
+
+    ensure_fresh_azure_sas_url(&mut current_url, config, &mut renew_sas_url)?;
+    client
+        .commit_attachment_azure_block_list(&current_url, &block_ids)
+        .map_err(|err| format_api_error("Attachment upload step 2 (Azure blocklist) failed", &err))
+}
 
 /// Computes the effective maximum attachment upload size in MiB as
 /// `min(configured_mb, 500)`, falling back to the default when `configured_mb == 0`.
@@ -450,7 +685,8 @@ impl VaultManager {
             .filter(|v| v.is_object())
             .cloned();
 
-        // Step 2: Direct (0) multipart POST; rollback on any failure or unsupported upload type.
+        // Step 2: Direct (0) multipart POST or Azure (1) BlockBlob / multi-block PUT;
+        // rollback on any failure or unsupported upload type.
         let step2_result: Result<(), String> = match file_upload_type {
             Some(FILE_UPLOAD_TYPE_DIRECT) => client
                 .upload_attachment_direct(
@@ -461,8 +697,67 @@ impl VaultManager {
                     &prepared.encrypted_blob,
                 )
                 .map_err(|err| format_api_error("Attachment upload step 2 failed", &err)),
+            Some(FILE_UPLOAD_TYPE_AZURE) => {
+                let raw_azure_url = step1_resp
+                    .get("url")
+                    .or_else(|| step1_resp.get("Url"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                match raw_azure_url {
+                    None => Err(
+                        "Server attachment upload response is missing Azure upload 'url'."
+                            .to_string(),
+                    ),
+                    Some(azure_url) => {
+                        let azure_cfg =
+                            AzureUploadConfig::for_api_origin(client.is_loopback_http_api());
+                        upload_attachment_azure_with_config(
+                            &client,
+                            azure_url,
+                            &prepared.encrypted_blob,
+                            azure_cfg,
+                            || {
+                                let renew_resp = loop {
+                                    match client.renew_attachment_upload_url(
+                                        &active_token,
+                                        item_id,
+                                        &attachment_id,
+                                    ) {
+                                        Ok(resp) => break resp,
+                                        Err(ApiError::HttpStatus(status, _))
+                                            if matches!(status.as_u16(), 401 | 403)
+                                                && !renewed_after_rejection =>
+                                        {
+                                            renewed_after_rejection = true;
+                                            active_token = renew()?;
+                                        }
+                                        Err(err) => {
+                                            return Err(format_api_error(
+                                                "Attachment SAS URL renewal failed",
+                                                &err,
+                                            ));
+                                        }
+                                    }
+                                };
+                                renew_resp
+                                    .get("url")
+                                    .or_else(|| renew_resp.get("Url"))
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .ok_or_else(|| {
+                                        "Server attachment SAS renewal response is missing 'url'."
+                                            .to_string()
+                                    })
+                            },
+                        )
+                    }
+                }
+            }
             Some(other) => Err(format!(
-                "Unsupported attachment fileUploadType ({other}); only Direct (0) is supported."
+                "Unsupported attachment fileUploadType ({other}); only Direct (0) and Azure (1) are supported."
             )),
             None => {
                 Err("Server attachment upload response is missing 'fileUploadType'.".to_string())
@@ -715,5 +1010,347 @@ mod tests {
             .contains("Content-Disposition: form-data; name=\"data\"; filename=\"2.iv|ct|mac\""));
         assert!(body_str.contains("Content-Type: application/octet-stream"));
         assert!(body.windows(blob.len()).any(|w| w == blob.as_slice()));
+    }
+
+    #[test]
+    fn test_validate_azure_upload_url_enforces_https_and_loopback_gate() {
+        assert!(validate_azure_upload_url(
+            "https://bitwardenstorage.blob.core.windows.net/attachments-v2/c1/a1?sv=2020-08-04&se=2026-11-27T17:00:00Z&sig=abc",
+            false
+        )
+        .is_ok());
+
+        // Remote plaintext HTTP is always rejected (even when loopback test mode is enabled)
+        assert!(validate_azure_upload_url(
+            "http://bitwardenstorage.blob.core.windows.net/attachments-v2/c1/a1?sig=abc",
+            false
+        )
+        .is_err());
+        assert!(validate_azure_upload_url(
+            "http://bitwardenstorage.blob.core.windows.net/attachments-v2/c1/a1?sig=abc",
+            true
+        )
+        .is_err());
+
+        // Loopback HTTP is rejected in production mode, allowed only when loopback test mode is enabled
+        assert!(validate_azure_upload_url("http://127.0.0.1:8080/blob?sig=abc", false).is_err());
+        assert!(validate_azure_upload_url("http://localhost:8080/blob?sig=abc", false).is_err());
+        assert!(validate_azure_upload_url("http://[::1]:8080/blob?sig=abc", false).is_err());
+        assert!(validate_azure_upload_url("http://127.0.0.1:8080/blob?sig=abc", true).is_ok());
+        assert!(validate_azure_upload_url("http://localhost:8080/blob?sig=abc", true).is_ok());
+        assert!(validate_azure_upload_url("http://[::1]:8080/blob?sig=abc", true).is_ok());
+
+        // Non-HTTP(S) schemes and empty/malformed URLs fail closed
+        assert!(validate_azure_upload_url("file:///etc/passwd", true).is_err());
+        assert!(validate_azure_upload_url("ftp://example.com/blob", true).is_err());
+        assert!(validate_azure_upload_url("", true).is_err());
+        assert!(validate_azure_upload_url("not-a-url", true).is_err());
+    }
+
+    #[test]
+    fn test_azure_sas_expiry_parsing_and_renewal_detection() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-27T16:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Fresh token (60s left) does not need renewal with 5s margin
+        let fresh = url::Url::parse(
+            "https://acct.blob.core.windows.net/attachments-v2/c/a?sv=2020-08-04&se=2026-11-27T16:31:00Z&sig=x",
+        )
+        .unwrap();
+        assert!(!azure_sas_needs_renewal(&fresh, now, 5));
+
+        // Near-expiry token (3s left <= 5s margin) triggers renewal
+        let near = url::Url::parse(
+            "https://acct.blob.core.windows.net/attachments-v2/c/a?sv=2020-08-04&se=2026-11-27T16%3A30%3A03Z&sig=x",
+        )
+        .unwrap();
+        assert!(azure_sas_needs_renewal(&near, now, 5));
+
+        // Already-expired token triggers renewal
+        let expired = url::Url::parse(
+            "https://acct.blob.core.windows.net/attachments-v2/c/a?sv=2020-08-04&se=2026-11-27T16:29:50Z&sig=x",
+        )
+        .unwrap();
+        assert!(azure_sas_needs_renewal(&expired, now, 5));
+
+        // Fractional seconds format supported
+        let frac = url::Url::parse(
+            "https://acct.blob.core.windows.net/attachments-v2/c/a?se=2026-11-27T16:30:04.500Z",
+        )
+        .unwrap();
+        assert!(azure_sas_needs_renewal(&frac, now, 5));
+
+        // Missing se parameter does not spuriously renew
+        let no_se =
+            url::Url::parse("https://acct.blob.core.windows.net/attachments-v2/c/a?sig=x").unwrap();
+        assert!(!azure_sas_needs_renewal(&no_se, now, 5));
+    }
+
+    #[test]
+    fn test_azure_block_id_and_block_list_xml_and_query_urls() {
+        let id0 = azure_block_id(0);
+        let id1 = azure_block_id(1);
+        assert_eq!(id0.len(), id1.len());
+        assert_eq!(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &id0).unwrap(),
+            format!("{:048}", 0).as_bytes()
+        );
+        assert_eq!(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &id1).unwrap(),
+            format!("{:048}", 1).as_bytes()
+        );
+
+        let xml = build_azure_block_list_xml(&[id0.clone(), id1.clone()]);
+        assert_eq!(
+            xml,
+            format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><Latest>{id0}</Latest><Latest>{id1}</Latest></BlockList>"
+            )
+        );
+
+        let sas = url::Url::parse(
+            "https://acct.blob.core.windows.net/attachments-v2/c1/a1?sv=2020-08-04&sig=abc%2B123",
+        )
+        .unwrap();
+        let block_url = build_azure_block_url(&sas, &id0);
+        let block_params: std::collections::HashMap<String, String> = block_url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(block_params.get("comp").map(String::as_str), Some("block"));
+        assert_eq!(
+            block_params.get("blockid").map(String::as_str),
+            Some(id0.as_str())
+        );
+        assert_eq!(
+            block_params.get("sv").map(String::as_str),
+            Some("2020-08-04")
+        );
+        assert_eq!(block_params.get("sig").map(String::as_str), Some("abc+123"));
+
+        let list_url = build_azure_block_list_url(&sas);
+        let list_params: std::collections::HashMap<String, String> = list_url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            list_params.get("comp").map(String::as_str),
+            Some("blocklist")
+        );
+        assert_eq!(list_params.get("sig").map(String::as_str), Some("abc+123"));
+    }
+
+    struct MockAzureReq {
+        method: String,
+        target: String,
+        headers: std::collections::HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    fn read_mock_http(stream: &mut std::net::TcpStream) -> MockAzureReq {
+        use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let mut parts = line.split_whitespace();
+        let method = parts.next().unwrap().to_string();
+        let target = parts.next().unwrap().to_string();
+        let mut headers = std::collections::HashMap::new();
+        let mut len = 0usize;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim().to_ascii_lowercase();
+                let val = v.trim().to_string();
+                if key == "content-length" {
+                    len = val.parse().unwrap();
+                }
+                headers.insert(key, val);
+            }
+        }
+        let mut body = vec![0u8; len];
+        reader.read_exact(&mut body).unwrap();
+        MockAzureReq {
+            method,
+            target,
+            headers,
+            body,
+        }
+    }
+
+    #[test]
+    fn test_upload_attachment_azure_single_put_and_zero_auth_header() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let req = read_mock_http(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            req
+        });
+
+        let api_client =
+            BitwardenApiClient::for_attachment_upload(&format!("http://{addr}"), None).unwrap();
+        let sas_url = format!(
+            "http://{addr}/attachments-v2/c1/a1?sv=2020-08-04&se=2099-01-01T00%3A00%3A00Z&sig=ok"
+        );
+        let payload = vec![0x02, 0xAA, 0xBB, 0xCC, 0xDD];
+        let mut renew_calls = 0usize;
+
+        upload_attachment_azure_with_config(
+            &api_client,
+            &sas_url,
+            &payload,
+            AzureUploadConfig {
+                single_put_max_bytes: 64,
+                block_size_bytes: 32,
+                sas_renewal_margin_secs: 5,
+                allow_loopback_http: true,
+            },
+            || {
+                renew_calls += 1;
+                Ok(sas_url.clone())
+            },
+        )
+        .unwrap();
+
+        let req = server.join().unwrap();
+        assert_eq!(renew_calls, 0);
+        assert_eq!(req.method, "PUT");
+        assert_eq!(
+            req.headers.get("x-ms-blob-type").map(String::as_str),
+            Some("BlockBlob")
+        );
+        assert_eq!(
+            req.headers.get("x-ms-version").map(String::as_str),
+            Some("2020-08-04")
+        );
+        assert!(req.headers.contains_key("x-ms-date"));
+        assert!(
+            !req.headers.contains_key("authorization"),
+            "Authorization header MUST NEVER be sent to Azure"
+        );
+        assert_eq!(req.body, payload);
+    }
+
+    #[test]
+    fn test_upload_attachment_azure_multiblock_reassembly_and_sas_renewal() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reqs = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = read_mock_http(&mut stream);
+                stream
+                    .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                reqs.push(req);
+            }
+            reqs
+        });
+
+        let api_client =
+            BitwardenApiClient::for_attachment_upload(&format!("http://{addr}"), None).unwrap();
+        // Start with an already-expired SAS URL to trigger immediate renewal before block 0
+        let expired_sas = format!(
+            "http://{addr}/attachments-v2/c1/a1?sv=2020-08-04&se=2020-01-01T00%3A00%3A00Z&sig=old"
+        );
+        let fresh_sas = format!(
+            "http://{addr}/attachments-v2/c1/a1?sv=2020-08-04&se=2099-01-01T00%3A00%3A00Z&sig=renewed"
+        );
+        let payload: Vec<u8> = (0u8..100).collect();
+        let mut renew_calls = 0usize;
+
+        upload_attachment_azure_with_config(
+            &api_client,
+            &expired_sas,
+            &payload,
+            AzureUploadConfig {
+                single_put_max_bytes: 64,
+                block_size_bytes: 30,
+                sas_renewal_margin_secs: 5,
+                allow_loopback_http: true,
+            },
+            || {
+                renew_calls += 1;
+                Ok(fresh_sas.clone())
+            },
+        )
+        .unwrap();
+
+        let reqs = server.join().unwrap();
+        assert_eq!(renew_calls, 1);
+        assert_eq!(reqs.len(), 5);
+
+        // Verify 4 sequential comp=block PUTs with renewed SAS and zero Authorization header
+        let mut blocks = std::collections::HashMap::new();
+        for (idx, req) in reqs[..4].iter().enumerate() {
+            assert_eq!(req.method, "PUT");
+            assert!(!req.headers.contains_key("authorization"));
+            assert!(!req.headers.contains_key("x-ms-blob-type"));
+            let parsed = Url::parse(&format!("http://{addr}{}", req.target)).unwrap();
+            let params: std::collections::HashMap<String, String> = parsed
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            assert_eq!(params.get("comp").map(String::as_str), Some("block"));
+            assert_eq!(params.get("sig").map(String::as_str), Some("renewed"));
+            let bid = params.get("blockid").unwrap().clone();
+            assert_eq!(bid, azure_block_id(idx));
+            blocks.insert(bid, req.body.clone());
+        }
+
+        // Verify final comp=blocklist commit and reassemble blocks in committed XML order
+        let commit = &reqs[4];
+        assert_eq!(commit.method, "PUT");
+        assert!(!commit.headers.contains_key("authorization"));
+        let commit_url = Url::parse(&format!("http://{addr}{}", commit.target)).unwrap();
+        assert!(commit_url
+            .query_pairs()
+            .any(|(k, v)| k == "comp" && v == "blocklist"));
+        let xml = String::from_utf8(commit.body.clone()).unwrap();
+        let expected_ids: Vec<String> = (0..4).map(azure_block_id).collect();
+        assert_eq!(xml, build_azure_block_list_xml(&expected_ids));
+
+        let mut reassembled = Vec::new();
+        for bid in &expected_ids {
+            reassembled.extend_from_slice(blocks.get(bid).unwrap());
+        }
+        assert_eq!(reassembled, payload);
+    }
+
+    #[test]
+    fn test_upload_attachment_azure_rejects_renewed_non_https_url_fail_closed() {
+        let api_client =
+            BitwardenApiClient::for_attachment_upload("http://127.0.0.1:9", None).unwrap();
+        let expired_sas =
+            "http://127.0.0.1:9/attachments-v2/c1/a1?sv=2020-08-04&se=2020-01-01T00%3A00%3A00Z";
+        let err = upload_attachment_azure_with_config(
+            &api_client,
+            expired_sas,
+            b"secret",
+            AzureUploadConfig {
+                single_put_max_bytes: 64,
+                block_size_bytes: 32,
+                sas_renewal_margin_secs: 5,
+                allow_loopback_http: true,
+            },
+            || Ok("http://evil.example.com/attachments-v2/c1/a1?sig=bad".to_string()),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Refusing insecure non-HTTPS Azure"),
+            "Unexpected error: {err}"
+        );
     }
 }
