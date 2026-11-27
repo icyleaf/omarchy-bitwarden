@@ -28,12 +28,16 @@ ScrollView {
   property string fontFamily: ""
   property bool showWebsiteIcons: false
   property bool isFavoriteMutating: false
+  property bool isAttachmentMutating: false
+  property string attachmentErrorMessage: ""
   readonly property int keyPixelSize: Style.font.caption
   readonly property int valuePixelSize: Style.font.body
 
   signal copyRequested(string text, bool isSensitive, string label)
   signal viewAttachmentRequested(var item, var att)
   signal downloadAttachmentRequested(var item, var att)
+  signal uploadAttachmentRequested(var item)
+  signal deleteAttachmentRequested(var item, var att)
   signal exportSshKeyRequested(var item)
   signal editRequested(var item)
   signal favoriteToggled(var item)
@@ -1606,7 +1610,13 @@ ScrollView {
       // ATTACHMENTS LIST SECTION
       // --------------------------------------------------
       Rectangle {
-        visible: Boolean(inspectorRoot.item && inspectorRoot.item.attachments && inspectorRoot.item.attachments.length > 0)
+        objectName: "attachmentsSection"
+        visible: Boolean(
+          inspectorRoot.item && (
+            (inspectorRoot.item.attachments && inspectorRoot.item.attachments.length > 0)
+            || CipherMutation.canMutateAttachments(inspectorRoot.item)
+          )
+        )
         Layout.fillWidth: true
         implicitHeight: attachmentsColumnLayout.implicitHeight + 20
         radius: 6
@@ -1620,10 +1630,111 @@ ScrollView {
           anchors.margins: 10
           spacing: 8
 
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            Text {
+              objectName: "attachmentsHeaderTitle"
+              text: "Attachments (" + (inspectorRoot.item ? (inspectorRoot.item.attachments ? inspectorRoot.item.attachments.length : 0) : 0) + ")"
+              color: inspectorRoot.muted
+              font.pixelSize: inspectorRoot.keyPixelSize
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Text {
+              objectName: "attachmentBusyLabel"
+              visible: inspectorRoot.isAttachmentMutating
+              text: "Updating..."
+              color: inspectorRoot.muted
+              font.pixelSize: Style.font.caption
+            }
+
+            Rectangle {
+              id: attachFileButton
+              objectName: "attachFileButton"
+              visible: CipherMutation.canMutateAttachments(inspectorRoot.item)
+              enabled: !inspectorRoot.isAttachmentMutating
+              implicitWidth: attachBtnRow.implicitWidth + 14
+              implicitHeight: 24
+              radius: 4
+              opacity: enabled ? 1.0 : 0.45
+              color: attachMouse.containsMouse && enabled
+                ? Qt.rgba(inspectorRoot.accent.r, inspectorRoot.accent.g, inspectorRoot.accent.b, 0.16)
+                : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.06)
+              border.color: attachMouse.containsMouse && enabled ? inspectorRoot.accent : inspectorRoot.borderColor
+              border.width: 1
+
+              RowLayout {
+                id: attachBtnRow
+                anchors.centerIn: parent
+                spacing: 4
+
+                Text {
+                  text: "+ Attach"
+                  color: attachMouse.containsMouse && attachFileButton.enabled ? inspectorRoot.accent : inspectorRoot.foreground
+                  font.pixelSize: Style.font.caption
+                  font.weight: Font.Medium
+                }
+              }
+
+              MouseArea {
+                id: attachMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                enabled: attachFileButton.enabled
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: inspectorRoot.uploadAttachmentRequested(inspectorRoot.item)
+              }
+            }
+          }
+
+          // Attachment Error Alert Banner
+          Rectangle {
+            objectName: "attachmentErrorBanner"
+            visible: Boolean(inspectorRoot.attachmentErrorMessage)
+            Layout.fillWidth: true
+            implicitHeight: attachmentErrText.implicitHeight + 12
+            radius: 4
+            color: StatusPalette.tint(StatusPalette.error, 0.15)
+            border.color: StatusPalette.error
+            border.width: 1
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.margins: 6
+              spacing: 6
+
+              Text {
+                text: "\uf06a"
+                font.family: inspectorRoot.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                color: StatusPalette.danger
+              }
+
+              Text {
+                id: attachmentErrText
+                text: inspectorRoot.attachmentErrorMessage
+                color: StatusPalette.labelOnTint(StatusPalette.error, 0.15, Commons.Color.popups.background)
+                font.pixelSize: Style.font.bodySmall
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+              }
+            }
+          }
+
+          // Empty state helper when N == 0
           Text {
-            text: "Attachments (" + (inspectorRoot.item ? (inspectorRoot.item.attachments ? inspectorRoot.item.attachments.length : 0) : 0) + ")"
+            objectName: "attachmentsEmptyLabel"
+            visible: Boolean(
+              inspectorRoot.item
+              && (!inspectorRoot.item.attachments || inspectorRoot.item.attachments.length === 0)
+            )
+            Layout.fillWidth: true
+            text: "No attachments yet."
             color: inspectorRoot.muted
-            font.pixelSize: inspectorRoot.keyPixelSize
+            font.pixelSize: Style.font.caption
           }
 
           Repeater {
@@ -1674,6 +1785,7 @@ ScrollView {
                 // View / Preview Ghost Button (Only for previewable attachments)
                 GhostIconButton {
                   visible: inspectorRoot.isAttachmentPreviewable(modelData.fileName)
+                  enabled: !inspectorRoot.isAttachmentMutating
                   iconText: (inspectorRoot.loadingAttachmentId === (modelData.id || modelData.fileName)) ? "\uf021" : "\uf06e"
                   tooltip: "Preview attachment"
                   onClicked: inspectorRoot.viewAttachmentRequested(inspectorRoot.item, modelData)
@@ -1681,9 +1793,20 @@ ScrollView {
 
                 // Download Ghost Button
                 GhostIconButton {
+                  enabled: !inspectorRoot.isAttachmentMutating
                   iconText: "\uf019"
                   tooltip: "Download attachment"
                   onClicked: inspectorRoot.downloadAttachmentRequested(inspectorRoot.item, modelData)
+                }
+
+                // Delete Attachment Ghost Button
+                GhostIconButton {
+                  objectName: "deleteAttachmentButton_" + index
+                  visible: CipherMutation.canMutateAttachments(inspectorRoot.item)
+                  enabled: !inspectorRoot.isAttachmentMutating
+                  iconText: "\uf1f8"
+                  tooltip: "Delete attachment"
+                  onClicked: inspectorRoot.deleteAttachmentRequested(inspectorRoot.item, modelData)
                 }
               }
             }

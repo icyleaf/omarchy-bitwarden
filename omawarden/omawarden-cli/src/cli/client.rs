@@ -40,6 +40,20 @@ pub(crate) fn submit_attachment_upload(
     )
 }
 
+pub(crate) fn submit_attachment_delete(
+    item_id: &str,
+    attachment_id: &str,
+    expected_lock_generation: Option<u64>,
+) -> Result<Value, Value> {
+    omawarden_engine::daemon::submit_attachment_delete(
+        item_id,
+        attachment_id,
+        expected_lock_generation,
+        None,
+        || Some(zeroize::Zeroizing::new(read_auth_payload().0)),
+    )
+}
+
 pub(crate) fn vault_output_item(
     cfg: &Config,
     query: &str,

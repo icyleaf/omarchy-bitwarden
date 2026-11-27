@@ -87,6 +87,59 @@ function assignCollectionsGuardError(item) {
   return ""
 }
 
+// Attachment V2 upload and deletion are currently enabled for active personal Ciphers.
+// Organization Ciphers remain read-only until #457 unlocks writable Organization attachments.
+function canMutateAttachments(item) {
+  if (!isMutableType(item)) return false
+  if (isOrganizationOwned(item)) return false
+  if (item.deleted_at) return false
+  return true
+}
+
+function attachmentMutationGuardError(item) {
+  if (!isMutableType(item)) return ""
+  if (item.deleted_at) return "Restore this cipher from Trash before modifying its attachments."
+  if (isOrganizationOwned(item)) return "Organization cipher attachments are currently read-only."
+  return ""
+}
+
+// Replaces the matching item in `items` with `updatedItem` (leaving all other rows untouched).
+function replaceItem(items, updatedItem) {
+  var out = []
+  var src = items || []
+  if (!updatedItem || !updatedItem.id) return src.slice()
+  for (var i = 0; i < src.length; i++) {
+    var row = src[i]
+    if (row && row.id === updatedItem.id) {
+      out.push(updatedItem)
+    } else {
+      out.push(row)
+    }
+  }
+  return out
+}
+
+// Returns true when the currently open attachment preview matches the deleted attachment.
+function shouldCloseAttachmentPreview(activePreview, deletedItemId, deletedAttachmentId) {
+  if (!activePreview || !deletedItemId || !deletedAttachmentId) return false
+  return activePreview.item_id === deletedItemId && activePreview.attachment_id === deletedAttachmentId
+}
+
+// Converts a Qt FileDialog file:// URL (string or QUrl) into a local filesystem path.
+function localPathFromFileUrl(fileUrl) {
+  var raw = String(fileUrl || "").trim()
+  if (!raw) return ""
+  if (raw.indexOf("file://") === 0) {
+    var stripped = raw.slice("file://".length)
+    try {
+      return decodeURIComponent(stripped)
+    } catch (e) {
+      return stripped
+    }
+  }
+  return raw
+}
+
 function withoutItem(items, itemId) {
   var out = []
   var src = items || []

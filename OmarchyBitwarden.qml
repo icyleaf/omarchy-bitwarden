@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -360,6 +361,7 @@ Item {
   // Set after a successful create/edit so the reloaded list can select the row.
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
+  property bool showDeleteAttachmentModal: false
   property bool showShareCipherModal: false
   property bool showCollectionAssignModal: false
   property bool showFolderManagerModal: false
@@ -367,12 +369,18 @@ Item {
   property var vaultOrganizations: []
   property var vaultCollections: []
   property var deleteCipherItem: null
+  property var deleteAttachmentItem: null
+  property var deleteAttachmentTarget: null
+  property var uploadAttachmentTargetItem: null
+  property string attachmentMutatingItemId: ""
+  property string attachmentErrorMessage: ""
+  readonly property bool isAttachmentMutating: attachmentUploadProc.running || attachmentDeleteProc.running
   property var shareCipherItem: null
   property var collectionAssignItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
   // shortcuts are suspended while a draft is being edited.
-  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showShareCipherModal || root.showCollectionAssignModal || root.showFolderManagerModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showDeleteAttachmentModal || root.showShareCipherModal || root.showCollectionAssignModal || root.showFolderManagerModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -483,6 +491,7 @@ Item {
     }
 
     root.showDeleteCipherModal = false
+    root.showDeleteAttachmentModal = false
     root.showShareCipherModal = false
     root.showCollectionAssignModal = false
     root.showFolderManagerModal = false
@@ -490,6 +499,13 @@ Item {
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
+    root.deleteAttachmentItem = null
+    root.deleteAttachmentTarget = null
+    root.uploadAttachmentTargetItem = null
+    root.attachmentMutatingItemId = ""
+    root.attachmentErrorMessage = ""
+    if (attachmentUploadProc.running) attachmentUploadProc.running = false
+    if (attachmentDeleteProc.running) attachmentDeleteProc.running = false
     root.shareCipherItem = null
     root.collectionAssignItem = null
     if (cipherCollectionsProc.running) {
@@ -592,6 +608,7 @@ Item {
       root.cipherEditorEditItem = null
       root.pendingSelectItemId = ""
       root.showDeleteCipherModal = false
+      root.showDeleteAttachmentModal = false
       root.showShareCipherModal = false
       root.showCollectionAssignModal = false
       root.collectionAssignItem = null
@@ -600,6 +617,11 @@ Item {
     root.vaultOrganizations = []
     root.vaultCollections = []
       root.deleteCipherItem = null
+      root.deleteAttachmentItem = null
+      root.deleteAttachmentTarget = null
+      root.uploadAttachmentTargetItem = null
+      root.attachmentMutatingItemId = ""
+      root.attachmentErrorMessage = ""
       root.shareCipherItem = null
       root.showPasswordRevealed = false
       root.showPrivateKeyRevealed = false
@@ -678,6 +700,7 @@ Item {
     root.cipherEditorEditItem = null
     root.pendingSelectItemId = ""
     root.showDeleteCipherModal = false
+    root.showDeleteAttachmentModal = false
     root.showShareCipherModal = false
     root.showCollectionAssignModal = false
     root.showFolderManagerModal = false
@@ -685,6 +708,13 @@ Item {
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
+    root.deleteAttachmentItem = null
+    root.deleteAttachmentTarget = null
+    root.uploadAttachmentTargetItem = null
+    root.attachmentMutatingItemId = ""
+    root.attachmentErrorMessage = ""
+    if (attachmentUploadProc.running) attachmentUploadProc.running = false
+    if (attachmentDeleteProc.running) attachmentDeleteProc.running = false
     root.shareCipherItem = null
     root.collectionAssignItem = null
     if (cipherCollectionsProc.running) {
@@ -1285,6 +1315,7 @@ Item {
     root.showCustomHiddenRevealed = false
     root.activeAttachmentPreview = null
     root.loadingAttachmentId = ""
+    root.attachmentErrorMessage = ""
     root.updateTotpForSelected()
     root.updateAvailableActions()
   }
@@ -1346,6 +1377,11 @@ Item {
 
   onShowDeleteCipherModalChanged: {
     if (!root.showDeleteCipherModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
+  onShowDeleteAttachmentModalChanged: {
+    if (!root.showDeleteAttachmentModal && !root.hasActiveModal) {
       root.restoreSearchFocus()
     }
   }
@@ -1662,6 +1698,129 @@ Item {
     } else {
       root.errorMessage = message
     }
+  }
+
+  function openUploadAttachmentDialog(item) {
+    if (!item || !item.id) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (root.isAttachmentMutating) {
+      root.statusMessage = "Attachment operation in progress..."
+      return
+    }
+    if (!CipherMutation.canMutateAttachments(item)) {
+      root.attachmentErrorMessage = CipherMutation.attachmentMutationGuardError(item) || "Cannot upload attachments to this cipher."
+      return
+    }
+    root.attachmentErrorMessage = ""
+    root.uploadAttachmentTargetItem = item
+    attachmentFileDialog.open()
+  }
+
+  function submitAttachmentUpload(item, filePath) {
+    if (!item || !item.id || !filePath || root.isAttachmentMutating) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!CipherMutation.canMutateAttachments(item)) {
+      root.attachmentErrorMessage = CipherMutation.attachmentMutationGuardError(item) || "Cannot upload attachments to this cipher."
+      return
+    }
+    root.attachmentErrorMessage = ""
+    root.attachmentMutatingItemId = item.id
+    attachmentUploadProc.revision = root.vaultRevision
+    attachmentUploadProc.errorReported = false
+    attachmentUploadProc.lastStderr = ""
+    attachmentUploadProc.itemId = item.id
+    attachmentUploadProc.command = [
+      root.helperPath,
+      "attachment",
+      "upload",
+      "--item-id",
+      item.id,
+      "--file",
+      filePath,
+      "--json"
+    ]
+    attachmentUploadProc.running = true
+  }
+
+  function openDeleteAttachmentModal(item, att) {
+    if (!item || !item.id || !att || !att.id) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (root.isAttachmentMutating) {
+      root.statusMessage = "Attachment operation in progress..."
+      return
+    }
+    if (!CipherMutation.canMutateAttachments(item)) {
+      root.attachmentErrorMessage = CipherMutation.attachmentMutationGuardError(item) || "Cannot delete attachments from this cipher."
+      return
+    }
+    root.attachmentErrorMessage = ""
+    root.deleteAttachmentItem = item
+    root.deleteAttachmentTarget = att
+    root.showDeleteAttachmentModal = true
+  }
+
+  function submitAttachmentDelete() {
+    var item = root.deleteAttachmentItem
+    var att = root.deleteAttachmentTarget
+    if (!item || !item.id || !att || !att.id || root.isAttachmentMutating) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    root.attachmentErrorMessage = ""
+    root.attachmentMutatingItemId = item.id
+    if (deleteAttachmentModalComponent) {
+      deleteAttachmentModalComponent.isBusy = true
+      deleteAttachmentModalComponent.errorMessage = ""
+    }
+    attachmentDeleteProc.revision = root.vaultRevision
+    attachmentDeleteProc.errorReported = false
+    attachmentDeleteProc.lastStderr = ""
+    attachmentDeleteProc.itemId = item.id
+    attachmentDeleteProc.attachmentId = att.id
+    attachmentDeleteProc.attachmentName = att.fileName || att.id
+    attachmentDeleteProc.command = [
+      root.helperPath,
+      "attachment",
+      "delete",
+      "--item-id",
+      item.id,
+      "--attachment-id",
+      att.id,
+      "--yes",
+      "--json"
+    ]
+    attachmentDeleteProc.running = true
+  }
+
+  function applyAttachmentMutationSuccess(updatedItem, statusText, deletedItemId, deletedAttachmentId) {
+    root.attachmentMutatingItemId = ""
+    root.attachmentErrorMessage = ""
+    if (CipherMutation.shouldCloseAttachmentPreview(root.activeAttachmentPreview, deletedItemId, deletedAttachmentId)) {
+      root.activeAttachmentPreview = null
+    }
+    if (updatedItem && updatedItem.id) {
+      root.updatingResults = true
+      root.rawVaultItems = CipherMutation.replaceItem(root.rawVaultItems, updatedItem)
+      root.filteredItems = CipherMutation.replaceItem(root.filteredItems, updatedItem)
+      root.updatingResults = false
+      root.updateAvailableActions()
+    }
+    root.statusMessage = statusText
+  }
+
+  function handleAttachmentUploadFailure(message) {
+    root.attachmentMutatingItemId = ""
+    root.attachmentErrorMessage = message
+    root.logError("omarchy:attachment", message)
+  }
+
+  function handleAttachmentDeleteFailure(message) {
+    root.attachmentMutatingItemId = ""
+    if (deleteAttachmentModalComponent && root.showDeleteAttachmentModal) {
+      deleteAttachmentModalComponent.isBusy = false
+      deleteAttachmentModalComponent.errorMessage = message
+    } else {
+      root.attachmentErrorMessage = message
+    }
+    root.logError("omarchy:attachment", message)
   }
 
   function submitCipherShare(organizationId, collectionIds) {
@@ -2471,6 +2630,15 @@ Item {
       }
     }
 
+    if (CipherMutation.canMutateAttachments(item)) {
+      actions.push({
+        label: "Upload Attachment\u2026",
+        icon: "\uf093",
+        shortcut: "",
+        action: function() { root.openUploadAttachmentDialog(item) }
+      })
+    }
+
     if (item.attachments && item.attachments.length > 0) {
       for (var a = 0; a < item.attachments.length; a++) {
         var att = item.attachments[a]
@@ -2490,6 +2658,14 @@ Item {
               shortcut: "",
               action: function() { root.downloadAttachment(item, currAtt) }
             })
+            if (CipherMutation.canMutateAttachments(item)) {
+              actions.push({
+                label: "Delete Attachment: " + currAtt.fileName,
+                icon: "\uf1f8",
+                shortcut: "",
+                action: function() { root.openDeleteAttachmentModal(item, currAtt) }
+              })
+            }
           })(att)
         }
       }
@@ -3137,6 +3313,12 @@ Item {
               root.showCollectionAssignModal = false
               root.collectionAssignItem = null
             }
+          } else if (root.showDeleteAttachmentModal) {
+            if (!deleteAttachmentModalComponent || !deleteAttachmentModalComponent.isBusy) {
+              root.showDeleteAttachmentModal = false
+              root.deleteAttachmentItem = null
+              root.deleteAttachmentTarget = null
+            }
           } else if (root.showDeleteCipherModal) {
             if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
               root.showDeleteCipherModal = false
@@ -3226,6 +3408,15 @@ Item {
               root.showCollectionAssignModal = false
               root.collectionAssignItem = null
             }
+            event.accepted = true
+          }
+          return
+        }
+        if (root.showDeleteAttachmentModal) {
+          if (event.key === Qt.Key_Escape && (!deleteAttachmentModalComponent || !deleteAttachmentModalComponent.isBusy)) {
+            root.showDeleteAttachmentModal = false
+            root.deleteAttachmentItem = null
+            root.deleteAttachmentTarget = null
             event.accepted = true
           }
           return
@@ -3485,6 +3676,8 @@ Item {
                 visible: root.selectedItem !== null && !root.showCipherEditor
                 item: root.selectedItem
                 isFavoriteMutating: cipherFavoriteProc.running && cipherFavoriteProc.itemId === (root.selectedItem ? root.selectedItem.id : "")
+                isAttachmentMutating: root.isAttachmentMutating && root.attachmentMutatingItemId === (root.selectedItem ? root.selectedItem.id : "")
+                attachmentErrorMessage: root.attachmentErrorMessage
                 currentTotp: root.currentTotp
                 showPasswordRevealed: root.showPasswordRevealed
                 showPrivateKeyRevealed: root.showPrivateKeyRevealed
@@ -3501,6 +3694,8 @@ Item {
                 onCopyRequested: function(text, isSensitive, label) { root.copyToClipboard(text, isSensitive, label) }
                 onViewAttachmentRequested: function(item, att) { root.viewAttachment(item, att) }
                 onDownloadAttachmentRequested: function(item, att) { root.downloadAttachment(item, att) }
+                onUploadAttachmentRequested: function(item) { root.openUploadAttachmentDialog(item) }
+                onDeleteAttachmentRequested: function(item, att) { root.openDeleteAttachmentModal(item, att) }
                 onExportSshKeyRequested: function(item) { root.openSshKeyModal("export", item) }
                 onEditRequested: function(item) { root.openCipherEditModal(item) }
                 onFavoriteToggled: function(item) { root.toggleCipherFavorite(item) }
@@ -3865,6 +4060,48 @@ Item {
             root.showDeleteCipherModal = false
             root.deleteCipherItem = null
           }
+        }
+      }
+
+      // 10a. Delete confirmation for Cipher Attachments.
+      DeleteAttachmentModal {
+        id: deleteAttachmentModalComponent
+        active: root.showDeleteAttachmentModal
+        itemName: root.deleteAttachmentItem ? (root.deleteAttachmentItem.name || "Untitled") : ""
+        attachmentName: root.deleteAttachmentTarget ? (root.deleteAttachmentTarget.fileName || "attachment") : ""
+        attachmentSize: root.deleteAttachmentTarget ? (root.deleteAttachmentTarget.sizeName || "") : ""
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onConfirmRequested: { root.submitAttachmentDelete() }
+        onCloseRequested: {
+          if (!deleteAttachmentModalComponent.isBusy) {
+            root.showDeleteAttachmentModal = false
+            root.deleteAttachmentItem = null
+            root.deleteAttachmentTarget = null
+          }
+        }
+      }
+
+      FileDialog {
+        id: attachmentFileDialog
+        title: "Select file to attach"
+        fileMode: FileDialog.OpenFile
+        onAccepted: {
+          var targetItem = root.uploadAttachmentTargetItem
+          root.uploadAttachmentTargetItem = null
+          var localPath = CipherMutation.localPathFromFileUrl(selectedFile)
+          if (targetItem && localPath) {
+            root.submitAttachmentUpload(targetItem, localPath)
+          }
+          if (!root.hasActiveModal) root.restoreSearchFocus()
+        }
+        onRejected: {
+          root.uploadAttachmentTargetItem = null
+          if (!root.hasActiveModal) root.restoreSearchFocus()
         }
       }
 
@@ -5563,6 +5800,142 @@ Item {
       if (attachmentProc.revision !== root.vaultRevision) return
       root.loadingAttachmentId = ""
       if (code !== 0 && !root.errorMessage) root.errorMessage = "Attachment command failed."
+    }
+  }
+
+  Process {
+    id: attachmentUploadProc
+    property int revision: 0
+    property bool errorReported: false
+    property string lastStderr: ""
+    property string itemId: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (attachmentUploadProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.attachmentMutatingItemId = ""
+          return
+        }
+        var raw = (text || "").trim()
+        if (!raw) return
+        var data = null
+        try {
+          data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          attachmentUploadProc.errorReported = true
+          var attName = (data.attachment && data.attachment.fileName) ? data.attachment.fileName : "attachment"
+          root.applyAttachmentMutationSuccess(data.item, "Uploaded attachment '" + attName + "'.", "", "")
+          return
+        }
+        attachmentUploadProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = attachmentUploadProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Attachment upload failed."
+        root.handleAttachmentUploadFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (attachmentUploadProc.revision !== root.vaultRevision) return
+        var cleaned = (text || "").trim().replace(/^Error:\s*/i, "")
+        if (cleaned) {
+          attachmentUploadProc.lastStderr = cleaned
+          if (!attachmentUploadProc.errorReported && !root.attachmentErrorMessage) {
+            attachmentUploadProc.errorReported = true
+            root.handleAttachmentUploadFailure(cleaned)
+          }
+        }
+        root.handleProcessStderr(text, "omawarden:attachment:upload")
+      }
+    }
+    onExited: function(code) {
+      if (attachmentUploadProc.revision !== root.vaultRevision) return
+      if (code !== 0 && !attachmentUploadProc.errorReported) {
+        var errMsg = attachmentUploadProc.lastStderr || ("Attachment upload exited with code " + code + ".")
+        root.handleAttachmentUploadFailure(errMsg)
+      } else if (!attachmentUploadProc.errorReported) {
+        root.attachmentMutatingItemId = ""
+      }
+    }
+  }
+
+  Process {
+    id: attachmentDeleteProc
+    property int revision: 0
+    property bool errorReported: false
+    property string lastStderr: ""
+    property string itemId: ""
+    property string attachmentId: ""
+    property string attachmentName: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (attachmentDeleteProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showDeleteAttachmentModal = false
+          root.deleteAttachmentItem = null
+          root.deleteAttachmentTarget = null
+          root.attachmentMutatingItemId = ""
+          return
+        }
+        var raw = (text || "").trim()
+        if (!raw) return
+        var data = null
+        try {
+          data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          attachmentDeleteProc.errorReported = true
+          if (deleteAttachmentModalComponent) deleteAttachmentModalComponent.isBusy = false
+          root.showDeleteAttachmentModal = false
+          root.deleteAttachmentItem = null
+          root.deleteAttachmentTarget = null
+          var delName = data.file_name || attachmentDeleteProc.attachmentName || "attachment"
+          root.applyAttachmentMutationSuccess(
+            data.item,
+            "Deleted attachment '" + delName + "'.",
+            attachmentDeleteProc.itemId,
+            attachmentDeleteProc.attachmentId
+          )
+          return
+        }
+        attachmentDeleteProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = attachmentDeleteProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Attachment deletion failed."
+        root.handleAttachmentDeleteFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (attachmentDeleteProc.revision !== root.vaultRevision) return
+        var cleaned = (text || "").trim().replace(/^Error:\s*/i, "")
+        if (cleaned) {
+          attachmentDeleteProc.lastStderr = cleaned
+          var hasModalErr = Boolean(deleteAttachmentModalComponent && deleteAttachmentModalComponent.errorMessage)
+          if (!attachmentDeleteProc.errorReported && !hasModalErr && !root.attachmentErrorMessage) {
+            attachmentDeleteProc.errorReported = true
+            root.handleAttachmentDeleteFailure(cleaned)
+          }
+        }
+        root.handleProcessStderr(text, "omawarden:attachment:delete")
+      }
+    }
+    onExited: function(code) {
+      if (attachmentDeleteProc.revision !== root.vaultRevision) return
+      if (code !== 0 && !attachmentDeleteProc.errorReported) {
+        var errMsg = attachmentDeleteProc.lastStderr || ("Attachment deletion exited with code " + code + ".")
+        root.handleAttachmentDeleteFailure(errMsg)
+      } else if (!attachmentDeleteProc.errorReported) {
+        if (deleteAttachmentModalComponent) deleteAttachmentModalComponent.isBusy = false
+        root.attachmentMutatingItemId = ""
+      }
     }
   }
 }

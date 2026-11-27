@@ -1370,4 +1370,41 @@ mod tests {
             _ => panic!("Expected AttachmentAction::Upload"),
         }
     }
+
+    #[test]
+    fn test_attachment_delete_cli_parses_flags_and_aliases() {
+        for subcmd in ["delete", "rm", "remove"] {
+            let parsed = Cli::try_parse_from([
+                "omawarden",
+                "attachment",
+                subcmd,
+                "--item-id",
+                "cipher-42",
+                "--attachment-id",
+                "att-99",
+                "--yes",
+                "--json",
+            ])
+            .unwrap();
+            match parsed.command {
+                Commands::Attachment {
+                    action:
+                        AttachmentAction::Delete {
+                            item_id,
+                            attachment_id,
+                            yes,
+                            json,
+                            expected_lock_generation,
+                        },
+                } => {
+                    assert_eq!(item_id, "cipher-42");
+                    assert_eq!(attachment_id, "att-99");
+                    assert!(yes);
+                    assert!(json);
+                    assert_eq!(expected_lock_generation, None);
+                }
+                _ => panic!("Expected AttachmentAction::Delete for alias '{subcmd}'"),
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ AuthView 1.0 AuthView.qml
 CategoryTabBar 1.0 CategoryTabBar.qml
 CipherEditor 1.0 CipherEditor.qml
 CollectionAssignModal 1.0 CollectionAssignModal.qml
+DeleteAttachmentModal 1.0 DeleteAttachmentModal.qml
 DeleteCipherModal 1.0 DeleteCipherModal.qml
 DependencyCheckView 1.0 DependencyCheckView.qml
 EmptyInspector 1.0 EmptyInspector.qml

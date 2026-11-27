@@ -509,6 +509,45 @@ fn format_api_error(prefix: &str, err: &ApiError) -> String {
     }
 }
 
+/// Surgically removes `attachment_id` from a cached Cipher's `attachments` array
+/// and updates `revisionDate` from `server_response` when present.
+///
+/// Safely handles both Bitwarden's minimal `CipherMiniResponseModel` (which omits
+/// full cipher fields like `name`, `login`, `notes`, `fields`, `key`) and
+/// Vaultwarden's full-cipher response (or empty/null bodies) without dropping any
+/// existing cached fields.
+pub fn reconcile_cipher_after_attachment_delete(
+    cached_cipher: &Value,
+    server_response: &Value,
+    attachment_id: &str,
+) -> Value {
+    let mut reconciled = cached_cipher.clone();
+    if let Some(obj) = reconciled.as_object_mut() {
+        for key in ["attachments", "Attachments"] {
+            if let Some(Value::Array(arr)) = obj.get_mut(key) {
+                arr.retain(|a| {
+                    a.get("id").or_else(|| a.get("Id")).and_then(Value::as_str)
+                        != Some(attachment_id)
+                });
+            }
+        }
+
+        if let Some(rev) = server_response
+            .get("revisionDate")
+            .or_else(|| server_response.get("RevisionDate"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            obj.insert("revisionDate".to_string(), json!(rev));
+            if obj.contains_key("RevisionDate") {
+                obj.insert("RevisionDate".to_string(), json!(rev));
+            }
+        }
+    }
+    reconciled
+}
+
 impl VaultManager {
     /// Encrypts and uploads a local file as an Attachment V2 (`Direct (0)`) to an
     /// active personal Cipher, rolling back on Step 2 failure and updating local
@@ -831,6 +870,231 @@ impl VaultManager {
             let key = self.user_key.read().ok()?;
             decrypt_sync_ciphers_with_context(
                 std::slice::from_ref(cipher),
+                &updated.folders,
+                &updated.organizations,
+                key.as_ref()?,
+                updated.enc_private_key.as_deref(),
+            )
+            .pop()?
+        };
+        self.commit_cache(
+            &base,
+            updated,
+            IndexUpdate::Upsert(Box::new(item.clone())),
+            CacheSession {
+                generation,
+                unlocked: true,
+            },
+        )
+        .ok()?;
+        Some(item)
+    }
+
+    /// Deletes an attachment from an active personal Cipher via
+    /// `DELETE /api/ciphers/{id}/attachment/{attachmentId}`, reconciles local
+    /// cache atomically (`0600`) across both Bitwarden `CipherMiniResponseModel`
+    /// and Vaultwarden full-cipher responses, refreshes the in-memory index, and
+    /// immediately purges the deleted attachment's cached preview directory.
+    pub(crate) fn delete_attachment(
+        &self,
+        item_id: &str,
+        attachment_id: &str,
+        context: Option<&ClientContext>,
+    ) -> Result<Value, String> {
+        let item_id = item_id.trim();
+        let attachment_id = attachment_id.trim();
+        if item_id.is_empty() {
+            return Err("Item ID is required.".to_string());
+        }
+        if attachment_id.is_empty() {
+            return Err("Attachment ID is required.".to_string());
+        }
+        if !is_safe_path_component(item_id) || !is_safe_path_component(attachment_id) {
+            return Err("Item ID or Attachment ID contains invalid path characters.".to_string());
+        }
+
+        let generation = self.lock_generation();
+        let storage = self
+            .storage_mgr
+            .load_existing()
+            .map_err(|_| "Cannot read the vault cache.".to_string())?;
+
+        // Validate target cipher and attachment BEFORE making any HTTP request.
+        {
+            let unlocked = self
+                .is_unlocked
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            let active = self
+                .storage
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            if !*unlocked
+                || generation != self.lock_generation()
+                || !active.same_active_slot(&storage)
+            {
+                return Err("Vault session changed.".to_string());
+            }
+
+            let cipher = active
+                .ciphers
+                .iter()
+                .find(|c| c.get("id").and_then(Value::as_str) == Some(item_id))
+                .ok_or_else(|| {
+                    format!("Cipher '{item_id}' not found in local vault cache. Sync the vault and try again.")
+                })?;
+
+            // Fail closed on trashed Ciphers before any HTTP request.
+            if cipher
+                .get("deletedDate")
+                .or_else(|| cipher.get("DeletedDate"))
+                .is_some_and(|v| !v.is_null())
+            {
+                return Err(
+                    "Cannot delete an attachment from a trashed cipher. Restore the cipher first."
+                        .to_string(),
+                );
+            }
+
+            // Fail closed on Organization Ciphers before any HTTP request (until #457 lands).
+            if cipher
+                .get("organizationId")
+                .or_else(|| cipher.get("OrganizationId"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                return Err(
+                    "Organization cipher attachment deletion is not yet supported.".to_string(),
+                );
+            }
+
+            let has_attachment = cipher
+                .get("attachments")
+                .or_else(|| cipher.get("Attachments"))
+                .and_then(Value::as_array)
+                .is_some_and(|arr| {
+                    arr.iter().any(|a| {
+                        a.get("id").or_else(|| a.get("Id")).and_then(Value::as_str)
+                            == Some(attachment_id)
+                    })
+                });
+            if !has_attachment {
+                return Err(format!(
+                    "Attachment '{attachment_id}' not found on cipher '{item_id}'."
+                ));
+            }
+        }
+
+        // Resolve decrypted filename from in-memory index before deletion so we can report it.
+        let resolved_file_name = self
+            .find_item(item_id, None)
+            .and_then(|item| {
+                item.attachments
+                    .iter()
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(attachment_id))
+                    .and_then(|a| a.get("fileName").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| attachment_id.to_string());
+
+        let server = if storage.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &storage.server_url
+        };
+        let client = BitwardenApiClient::for_cipher_write(server, context)
+            .map_err(|e| format!("Could not initialize attachment delete HTTP client: {e}"))?;
+
+        let token = self.keyring_mgr.for_storage(&storage).access_token();
+        let renew = || {
+            self.renew_for_account(&storage, context, generation)
+                .map_err(|_| "Vault session expired. Please log in again.".to_string())
+        };
+        let mut active_token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
+            Some(t) => t,
+            None => renew()?,
+        };
+
+        let mut renewed_after_rejection = false;
+        let server_resp = loop {
+            match client.delete_attachment(&active_token, item_id, attachment_id) {
+                Ok(resp) => break resp,
+                Err(ApiError::HttpStatus(status, _))
+                    if matches!(status.as_u16(), 401 | 403) && !renewed_after_rejection =>
+                {
+                    renewed_after_rejection = true;
+                    active_token = renew()?;
+                }
+                Err(err) => {
+                    return Err(format_api_error("Attachment deletion failed", &err));
+                }
+            }
+        };
+
+        let updated_item = self
+            .cache_deleted_attachment_cipher(
+                &storage,
+                generation,
+                item_id,
+                attachment_id,
+                &server_resp,
+            )
+            .ok_or_else(|| {
+                "Attachment deleted on the server, but local vault cache could not be updated. Sync the vault to refresh."
+                    .to_string()
+            })?;
+
+        if let Some(slot) = storage.scoped_credential_id() {
+            if let Err(err) =
+                crate::attachment::purge_attachment_preview(slot, item_id, attachment_id)
+            {
+                crate::log_warn!(
+                    "omawarden:attachment",
+                    "Deleted attachment '{}' on '{}' but failed to purge cached preview: {}",
+                    attachment_id,
+                    item_id,
+                    err
+                );
+            }
+        }
+
+        Ok(json!({
+            "ok": true,
+            "item_id": item_id,
+            "attachment_id": attachment_id,
+            "file_name": resolved_file_name,
+            "item": updated_item,
+        }))
+    }
+
+    fn cache_deleted_attachment_cipher(
+        &self,
+        account: &VaultStorage,
+        generation: u64,
+        item_id: &str,
+        attachment_id: &str,
+        server_resp: &Value,
+    ) -> Option<crate::vault::VaultItem> {
+        let base = self.storage_mgr.cache_snapshot().ok()?;
+        if !base.storage.same_active_slot(account) {
+            return None;
+        }
+        let mut updated = base.storage.clone();
+        let existing = updated
+            .ciphers
+            .iter()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(item_id))?
+            .clone();
+        let reconciled =
+            reconcile_cipher_after_attachment_delete(&existing, server_resp, attachment_id);
+        updated
+            .ciphers
+            .retain(|c| c.get("id").and_then(Value::as_str) != Some(item_id));
+        updated.ciphers.push(reconciled.clone());
+        let item = {
+            let key = self.user_key.read().ok()?;
+            decrypt_sync_ciphers_with_context(
+                std::slice::from_ref(&reconciled),
                 &updated.folders,
                 &updated.organizations,
                 key.as_ref()?,
@@ -1351,6 +1615,108 @@ mod tests {
         assert!(
             err.contains("Refusing insecure non-HTTPS Azure"),
             "Unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_cipher_after_attachment_delete_bitwarden_mini_response() {
+        let cached = json!({
+            "id": "cipher-1",
+            "type": 1,
+            "name": "2.enc-name",
+            "key": "2.enc-key",
+            "notes": "2.enc-notes",
+            "login": { "username": "2.enc-user", "password": "2.enc-pass" },
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "attachments": [
+                { "id": "att-1", "fileName": "2.enc-a1", "size": "100" },
+                { "id": "att-2", "fileName": "2.enc-a2", "size": "200" }
+            ]
+        });
+        // Bitwarden official server returns CipherMiniResponseModel omitting login/notes/name/key
+        let mini_resp = json!({
+            "id": "cipher-1",
+            "object": "cipherMini",
+            "revisionDate": "2026-11-27T10:15:00Z",
+            "attachments": [
+                { "id": "att-2", "fileName": "2.enc-a2", "size": "200" }
+            ]
+        });
+
+        let reconciled = reconcile_cipher_after_attachment_delete(&cached, &mini_resp, "att-1");
+        assert_eq!(reconciled["name"], "2.enc-name");
+        assert_eq!(reconciled["key"], "2.enc-key");
+        assert_eq!(reconciled["notes"], "2.enc-notes");
+        assert_eq!(reconciled["login"]["username"], "2.enc-user");
+        assert_eq!(reconciled["revisionDate"], "2026-11-27T10:15:00Z");
+        let atts = reconciled["attachments"].as_array().unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0]["id"], "att-2");
+    }
+
+    #[test]
+    fn test_reconcile_cipher_after_attachment_delete_vaultwarden_full_and_null_responses() {
+        let cached = json!({
+            "id": "cipher-2",
+            "type": 2,
+            "name": "2.enc-note",
+            "notes": "2.enc-body",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "attachments": [
+                { "id": "att-only", "fileName": "2.enc-only", "size": "65" }
+            ]
+        });
+        let full_resp = json!({
+            "id": "cipher-2",
+            "type": 2,
+            "name": "2.enc-note",
+            "notes": "2.enc-body",
+            "revisionDate": "2026-11-27T12:00:00Z",
+            "attachments": []
+        });
+
+        let reconciled_full =
+            reconcile_cipher_after_attachment_delete(&cached, &full_resp, "att-only");
+        assert_eq!(reconciled_full["revisionDate"], "2026-11-27T12:00:00Z");
+        assert_eq!(reconciled_full["attachments"].as_array().unwrap().len(), 0);
+        assert_eq!(reconciled_full["notes"], "2.enc-body");
+
+        // Null / empty body still removes the attachment and preserves cached revisionDate
+        let reconciled_null =
+            reconcile_cipher_after_attachment_delete(&cached, &Value::Null, "att-only");
+        assert_eq!(reconciled_null["revisionDate"], "2026-01-01T00:00:00Z");
+        assert_eq!(reconciled_null["attachments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_purge_attachment_preview_removes_only_target_and_rejects_traversal() {
+        let _env = crate::test_support::TestEnv::isolated();
+        let slot = "0123456789abcdef0123456789abcdef";
+        let root = crate::daemon::get_runtime_dir()
+            .join("omarchy-bitwarden/scoped-attachments")
+            .join(slot)
+            .join("cipher-1");
+        let target_dir = root.join("att-del");
+        let sibling_dir = root.join("att-keep");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&sibling_dir).unwrap();
+        fs::write(target_dir.join("secret.txt"), b"top-secret").unwrap();
+        fs::write(sibling_dir.join("other.txt"), b"keep-me").unwrap();
+
+        crate::attachment::purge_attachment_preview(slot, "cipher-1", "att-del").unwrap();
+        assert!(
+            !target_dir.exists(),
+            "Deleted attachment preview dir must be purged"
+        );
+        assert!(
+            sibling_dir.join("other.txt").exists(),
+            "Sibling attachment preview must remain intact"
+        );
+
+        // Traversal components must fail closed
+        assert!(crate::attachment::purge_attachment_preview(slot, "../escape", "att-1").is_err());
+        assert!(
+            crate::attachment::purge_attachment_preview(slot, "cipher-1", "../escape").is_err()
         );
     }
 }
