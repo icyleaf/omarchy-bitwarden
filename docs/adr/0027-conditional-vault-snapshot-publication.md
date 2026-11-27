@@ -100,7 +100,8 @@ receipts and retry rules remain in
    (including the mock provider) cannot bypass credential or epoch validation.
 
    Offline authorization and final publication separately verify the daemon's
-   `shared_lock_epoch: true` ping capability. Clients require both wire
+   `shared_lock_epoch` entry in `ping.capabilities` (or the earlier top-level
+   `shared_lock_epoch: true` flag). Clients require both wire
    compatibility and this capability. With no reachable daemon, both the
    runtime and cache owner leases must be available. The holder retains those
    leases through clipboard setup. A busy owner with an unreachable socket
@@ -194,12 +195,12 @@ receipts and retry rules remain in
   not an offline merge protocol or a server consistency guarantee.
 
 ## Validation
-[Publication tests](../../omawarden/src/vault_publication_tests.rs) pause between
+[Publication tests](../../omawarden/omawarden-engine/src/vault_publication_tests.rs) pause between
 preparation and publication to exercise newer syncs, account replacement, and
-hard/soft lock. [Sync tests](../../omawarden/src/vault_sync.rs) cover out-of-order
+hard/soft lock. [Sync tests](../../omawarden/omawarden-engine/src/vault_sync.rs) cover out-of-order
 responses, uncached receipts, bounded retries, remote deletion, and login failure.
-[CLI tests](../../omawarden/tests/vault_sync_cli.rs) cover cold daemon login,
+[CLI tests](../../omawarden/omawarden-cli/tests/vault_sync_cli.rs) cover cold daemon login,
 same-server and cross-server account changes, locks on both sides of
 activation, and lost replies across daemon restart using isolated vaults.
-[Clipboard tests](../../omawarden/tests/clipboard_cli.rs) cover stale offline
+[Clipboard tests](../../omawarden/omawarden-cli/tests/clipboard_cli.rs) cover stale offline
 holders, lock fallback without a daemon, and the local logout transition.

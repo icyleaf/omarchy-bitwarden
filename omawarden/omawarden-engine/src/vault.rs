@@ -290,7 +290,13 @@ pub fn vault_output_item<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    read_vault_output(cfg, query, touch, VaultReadPurpose::Clipboard, read_unlock_password)
+    read_vault_output(
+        cfg,
+        query,
+        touch,
+        VaultReadPurpose::Clipboard,
+        read_unlock_password,
+    )
 }
 
 /// Retrieves a decrypted item for inspection or editing.
@@ -306,8 +312,14 @@ pub fn read_vault_item<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    read_vault_output(cfg, query, touch, VaultReadPurpose::Inspect, read_unlock_password)
-        .map(|found| found.map(|output| output.item))
+    read_vault_output(
+        cfg,
+        query,
+        touch,
+        VaultReadPurpose::Inspect,
+        read_unlock_password,
+    )
+    .map(|found| found.map(|output| output.item))
 }
 
 enum VaultReadPurpose {
@@ -348,13 +360,17 @@ where
     let storage_mgr = StorageManager::default();
     let lock_epoch = match purpose {
         VaultReadPurpose::Clipboard => Some(
-            crate::clipboard::current_lock_epoch(&storage_mgr.file_path)
-                .map_err(|error| format!("Could not verify the current vault lock state. {error}"))?,
+            crate::clipboard::current_lock_epoch(&storage_mgr.file_path).map_err(|error| {
+                format!("Could not verify the current vault lock state. {error}")
+            })?,
         ),
         VaultReadPurpose::Inspect => None,
     };
     let vault = VaultManager::with_identity_url(
-        &cfg.server_url, cfg.identity_url.as_deref(), Some(storage_mgr), None,
+        &cfg.server_url,
+        cfg.identity_url.as_deref(),
+        Some(storage_mgr),
+        None,
     );
     let storage = vault.storage_mgr.load();
     let key = ensure_unlocked_user_key(&vault, &storage, read_unlock_password)?;
@@ -376,11 +392,13 @@ where
     Ok(item.map(|item| VaultOutputItem {
         item,
         scope: lock_epoch.and_then(|lock_epoch| {
-            storage.credential_id.map(|credential_id| crate::clipboard::ClipboardScope::Cache {
-                path: vault.storage_mgr.file_path,
-                credential_id,
-                lock_epoch,
-            })
+            storage
+                .credential_id
+                .map(|credential_id| crate::clipboard::ClipboardScope::Cache {
+                    path: vault.storage_mgr.file_path,
+                    credential_id,
+                    lock_epoch,
+                })
         }),
     }))
 }
@@ -412,7 +430,11 @@ pub fn resolve_totp_for_query<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    let purpose = if copy { VaultReadPurpose::Clipboard } else { VaultReadPurpose::Inspect };
+    let purpose = if copy {
+        VaultReadPurpose::Clipboard
+    } else {
+        VaultReadPurpose::Inspect
+    };
     let found = match read_vault_output(cfg, query, false, purpose, read_unlock_password) {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(TotpOutput::standalone(query)),
@@ -3741,13 +3763,12 @@ pub(crate) mod tests {
 
     #[test]
     fn test_shared_lock_epoch_advances_on_lock_and_survives_quick_unlock() {
-        let _environment = crate::env_lock();
+        let mut env = crate::test_support::TestEnv::isolated();
         let runtime = tempfile::tempdir().unwrap();
         let epoch_dir = tempfile::tempdir().unwrap();
-        let mut env = crate::test_support::EnvGuard::new();
-        env.set("XDG_RUNTIME_DIR", runtime.path());
-        env.remove("WAYLAND_DISPLAY");
-        env.remove("WAYLAND_SOCKET");
+        env.set_var("XDG_RUNTIME_DIR", runtime.path());
+        env.remove_var("WAYLAND_DISPLAY");
+        env.remove_var("WAYLAND_SOCKET");
 
         let dir = tempfile::tempdir().unwrap();
         let mut vault = seeded_vault(dir.path(), "master-pw");

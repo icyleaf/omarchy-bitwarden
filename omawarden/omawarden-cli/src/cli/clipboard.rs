@@ -25,9 +25,11 @@ pub(crate) fn run_holder(args: HolderArgs) -> ExitCode {
         args.expected_lock_epoch,
     ) {
         (Some(generation), None, None, None) => Some(ClipboardScope::Session(generation)),
-        (None, Some(path), Some(credential_id), Some(lock_epoch)) => {
-            Some(ClipboardScope::Cache { path, credential_id, lock_epoch })
-        }
+        (None, Some(path), Some(credential_id), Some(lock_epoch)) => Some(ClipboardScope::Cache {
+            path,
+            credential_id,
+            lock_epoch,
+        }),
         (None, None, None, None) => None,
         _ => {
             eprintln!("Invalid clipboard holder scope");

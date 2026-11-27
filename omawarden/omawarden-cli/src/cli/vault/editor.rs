@@ -465,9 +465,7 @@ pub(crate) fn handle_editor_edit(
     let item_name = resolved["name"].as_str().unwrap_or("").to_string();
     let item_type = resolved["type"].as_str().unwrap_or("login");
 
-    let full_item = read_vault_item(cfg, &item_id, false)
-        .ok()
-        .flatten();
+    let full_item = read_vault_item(cfg, &item_id, false).ok().flatten();
 
     let initial_template =
         format_editor_template(&item_id, &item_name, item_type, full_item.as_ref());

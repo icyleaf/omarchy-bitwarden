@@ -66,8 +66,22 @@ struct EpochDaemon {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EpochAdvertisement {
+    Capabilities,
+    LegacyFlag,
+}
+
 impl EpochDaemon {
     fn new(runtime: &Path, shared_epoch: bool) -> Self {
+        Self::with_advertisement(runtime, shared_epoch, EpochAdvertisement::Capabilities)
+    }
+
+    fn with_advertisement(
+        runtime: &Path,
+        shared_epoch: bool,
+        advertisement: EpochAdvertisement,
+    ) -> Self {
         let socket = runtime.join("omawarden.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
@@ -101,7 +115,14 @@ impl EpochDaemon {
                     _ => json!({"ok":false,"error":"Unsupported fixture action"}),
                 };
                 if capability.load(Ordering::SeqCst) {
-                    reply["shared_lock_epoch"] = json!(true);
+                    match advertisement {
+                        EpochAdvertisement::Capabilities => {
+                            reply["capabilities"] = json!(["shared_lock_epoch"]);
+                        }
+                        EpochAdvertisement::LegacyFlag => {
+                            reply["shared_lock_epoch"] = json!(true);
+                        }
+                    }
                 }
                 writeln!(stream, "{reply}").unwrap();
             }
@@ -728,21 +749,25 @@ fn assert_lock_revokes_old_epoch_with_unavailable_output_gate(with_daemon: bool)
 #[test]
 fn offline_holder_requires_shared_epoch_support_from_a_live_daemon() {
     let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
-    for shared_epoch in [false, true] {
+    for (shared_epoch, advertisement) in [
+        (false, EpochAdvertisement::Capabilities),
+        (true, EpochAdvertisement::Capabilities),
+        (true, EpochAdvertisement::LegacyFlag),
+    ] {
         let clip = Clipboard::new();
         let root = clip.0.path();
         let active = "11111111111111111111111111111111";
         let cache = root.join("data.json");
         fs::write(&cache, json!({"credential_id":active}).to_string()).unwrap();
         clip.write_epoch(100);
-        let _daemon = EpochDaemon::new(root, shared_epoch);
+        let _daemon = EpochDaemon::with_advertisement(root, shared_epoch, advertisement);
         let wl_copy = root.join("wl-copy");
         let holder = holder_args(&wl_copy, &cache, active, "100");
         let copied = clip.run(cli, &holder, "fixture selection");
         assert_eq!(
             copied.status.success(),
             shared_epoch,
-            "offline publication with shared-epoch capability {shared_epoch}"
+            "offline publication with shared-epoch capability {shared_epoch} via {advertisement:?}"
         );
     }
 }
@@ -903,6 +928,29 @@ fn offline_copy_rejects_a_legacy_daemon_before_reading_the_password() {
         assert!(!root.join("omawarden.lock-epoch").exists());
         assert!(clip.paste().is_none());
     }
+}
+
+#[test]
+fn read_only_totp_does_not_require_clipboard_authorization() {
+    let cli = Path::new(env!("CARGO_BIN_EXE_omawarden"));
+    let clip = Clipboard::new();
+    let root = clip.0.path();
+    write_offline_cache(root);
+    fs::write(root.join("omawarden.lock-epoch"), "corrupt").unwrap();
+    let _daemon = EpochDaemon::new(root, false);
+
+    let output = clip.run(cli, &["totp", "offline-item"], "fixture\n");
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{reply}");
+    assert_eq!(reply["id"], "offline-item");
+    let code = reply["code"].as_str().unwrap();
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+    assert!(clip.paste().is_none());
+    assert_eq!(
+        fs::read_to_string(root.join("omawarden.lock-epoch")).unwrap(),
+        "corrupt"
+    );
 }
 
 #[test]

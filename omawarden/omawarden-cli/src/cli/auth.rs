@@ -373,7 +373,11 @@ pub(crate) fn run(action: AuthAction, cfg: &Config, config_mgr: &ConfigManager) 
         AuthAction::Lock => {
             let res = auth_mgr.lock();
             print_json_redacting_session(&res);
-            if res.ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+            if res.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         AuthAction::Logout => {
             let res = auth_mgr.logout();

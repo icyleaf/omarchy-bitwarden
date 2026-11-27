@@ -239,6 +239,7 @@ fn test_handle_client_selective_activity_touch() {
     assert!(caps.contains(&"cipher_mutation_v3"));
     assert!(caps.contains(&"folder_crud"));
     assert!(caps.contains(&"login_totp_uri_match"));
+    assert!(caps.contains(&"shared_lock_epoch"));
     assert!(caps.contains(&"vault_get"));
     assert!(caps.contains(&"org_write"));
     assert_eq!(*state.last_activity.lock().unwrap(), past);

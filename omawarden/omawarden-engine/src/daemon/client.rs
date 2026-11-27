@@ -10,7 +10,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::protocol::{
-    check_protocol_version, get_socket_path, validate_socket_path, ProtocolCheck,
+    check_protocol_version, get_socket_path, ping_has_capability, validate_socket_path,
+    ProtocolCheck, CAPABILITY_SHARED_LOCK_EPOCH,
 };
 use super::server::{lock_daemon_instance, verify_peer_credentials};
 
@@ -86,7 +87,8 @@ pub(crate) fn guard_cache_daemon(cache: &Path) -> io::Result<Option<DaemonOwnerG
     let reply: Value = serde_json::from_str(&response)?;
     if reply["ok"] != true
         || reply["pong"] != true
-        || reply["shared_lock_epoch"] != true
+        || !(ping_has_capability(&reply, CAPABILITY_SHARED_LOCK_EPOCH)
+            || reply["shared_lock_epoch"] == true)
         || check_protocol_version(&reply) != ProtocolCheck::Compatible
     {
         return Err(io::Error::other(
