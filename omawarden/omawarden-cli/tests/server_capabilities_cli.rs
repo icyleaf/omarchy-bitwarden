@@ -453,6 +453,7 @@ fn handle_custom_connection(
     version_body: &str,
     version_status: u16,
 ) {
+    let _ = stream.set_nonblocking(false);
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
