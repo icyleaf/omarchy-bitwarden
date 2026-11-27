@@ -87,19 +87,32 @@ function assignCollectionsGuardError(item) {
   return ""
 }
 
-// Attachment V2 upload and deletion are currently enabled for active personal Ciphers.
-// Organization Ciphers remain read-only until #457 unlocks writable Organization attachments.
-function canMutateAttachments(item) {
+// Attachment V2 upload and deletion controls stay visible on active mutable
+// Ciphers (including unauthorized Organization Ciphers for layout stability)
+// and are hidden on trashed Ciphers.
+function canShowAttachmentMutationControls(item) {
   if (!isMutableType(item)) return false
-  if (isOrganizationOwned(item)) return false
   if (item.deleted_at) return false
+  return true
+}
+
+// Attachment V2 upload and deletion are enabled for active personal Ciphers
+// and active Organization Ciphers where `edit && view_password` (ADR-0038).
+function canMutateAttachments(item) {
+  if (!canShowAttachmentMutationControls(item)) return false
+  if (isOrganizationOwned(item)) {
+    return Boolean(item.edit) && Boolean(item.view_password)
+  }
   return true
 }
 
 function attachmentMutationGuardError(item) {
   if (!isMutableType(item)) return ""
   if (item.deleted_at) return "Restore this cipher from Trash before modifying its attachments."
-  if (isOrganizationOwned(item)) return "Organization cipher attachments are currently read-only."
+  if (isOrganizationOwned(item)) {
+    if (!item.edit) return "You do not have permission to modify attachments on this Organization cipher."
+    if (!item.view_password) return "Cannot modify attachments on this Organization cipher because passwords are hidden."
+  }
   return ""
 }
 

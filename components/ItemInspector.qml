@@ -1614,7 +1614,7 @@ ScrollView {
         visible: Boolean(
           inspectorRoot.item && (
             (inspectorRoot.item.attachments && inspectorRoot.item.attachments.length > 0)
-            || CipherMutation.canMutateAttachments(inspectorRoot.item)
+            || CipherMutation.canShowAttachmentMutationControls(inspectorRoot.item)
           )
         )
         Layout.fillWidth: true
@@ -1654,8 +1654,11 @@ ScrollView {
             Rectangle {
               id: attachFileButton
               objectName: "attachFileButton"
-              visible: CipherMutation.canMutateAttachments(inspectorRoot.item)
-              enabled: !inspectorRoot.isAttachmentMutating
+              property string tooltip: CipherMutation.canMutateAttachments(inspectorRoot.item)
+                ? "Attach file"
+                : (CipherMutation.attachmentMutationGuardError(inspectorRoot.item) || "Attach unavailable")
+              visible: CipherMutation.canShowAttachmentMutationControls(inspectorRoot.item)
+              enabled: !inspectorRoot.isAttachmentMutating && CipherMutation.canMutateAttachments(inspectorRoot.item)
               implicitWidth: attachBtnRow.implicitWidth + 14
               implicitHeight: 24
               radius: 4
@@ -1665,6 +1668,9 @@ ScrollView {
                 : Qt.rgba(inspectorRoot.foreground.r, inspectorRoot.foreground.g, inspectorRoot.foreground.b, 0.06)
               border.color: attachMouse.containsMouse && enabled ? inspectorRoot.accent : inspectorRoot.borderColor
               border.width: 1
+              ToolTip.visible: Boolean(tooltip && attachMouse.containsMouse)
+              ToolTip.delay: 400
+              ToolTip.text: tooltip
 
               RowLayout {
                 id: attachBtnRow
@@ -1802,10 +1808,12 @@ ScrollView {
                 // Delete Attachment Ghost Button
                 GhostIconButton {
                   objectName: "deleteAttachmentButton_" + index
-                  visible: CipherMutation.canMutateAttachments(inspectorRoot.item)
-                  enabled: !inspectorRoot.isAttachmentMutating
+                  visible: CipherMutation.canShowAttachmentMutationControls(inspectorRoot.item)
+                  enabled: !inspectorRoot.isAttachmentMutating && CipherMutation.canMutateAttachments(inspectorRoot.item)
                   iconText: "\uf1f8"
-                  tooltip: "Delete attachment"
+                  tooltip: CipherMutation.canMutateAttachments(inspectorRoot.item)
+                    ? "Delete attachment"
+                    : (CipherMutation.attachmentMutationGuardError(inspectorRoot.item) || "Delete attachment unavailable")
                   onClicked: inspectorRoot.deleteAttachmentRequested(inspectorRoot.item, modelData)
                 }
               }

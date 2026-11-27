@@ -828,3 +828,350 @@ fn test_attachment_delete_capability_gating_restarts_stale_standalone_daemon() {
         "After auto-restart, fresh daemon should advertise attachment_delete and fail closed on locked vault: {resp}"
     );
 }
+
+#[test]
+fn test_attachment_delete_org_cipher_succeeds_and_refreshes_cache() {
+    let env = TestEnv::new();
+
+    let raw_user_key = [42u8; 64];
+    let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+    let raw_org_key = [77u8; 64];
+    let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+    let raw_org_cipher_key = [88u8; 64];
+    let org_cipher_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_cipher_key).unwrap();
+
+    let org_cipher_json = json!({
+        "id": "cipher-org-writable",
+        "type": 1,
+        "name": org_cipher_key.encrypt_string("Org Writable Login").unwrap(),
+        "key": org_key.encrypt(&raw_org_cipher_key).unwrap(),
+        "organizationId": "org-writable",
+        "collectionIds": ["col-w"],
+        "edit": true,
+        "viewPassword": true,
+        "deletedDate": null,
+        "revisionDate": "2026-11-26T00:00:00.000Z",
+        "login": {
+            "username": org_cipher_key.encrypt_string("ops@corp.invalid").unwrap(),
+            "password": org_cipher_key.encrypt_string("org-secret-pw").unwrap(),
+            "uris": []
+        },
+        "attachments": [
+            {
+                "id": "att-org-del",
+                "fileName": org_cipher_key.encrypt_string("obsolete.pem").unwrap(),
+                "size": "128",
+                "sizeName": "128 B"
+            },
+            {
+                "id": "att-org-keep",
+                "fileName": org_cipher_key.encrypt_string("keep.pem").unwrap(),
+                "size": "256",
+                "sizeName": "256 B"
+            }
+        ]
+    });
+
+    let data_path = env.dir().join("data/data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&data_path).unwrap()).unwrap();
+    data["organizations"].as_array_mut().unwrap().push(json!({
+        "id": "org-writable",
+        "name": "Acme Org",
+        "key": user_key.encrypt(&raw_org_key).unwrap(),
+    }));
+    data["ciphers"]
+        .as_array_mut()
+        .unwrap()
+        .push(org_cipher_json);
+    fs::write(&data_path, data.to_string()).unwrap();
+
+    let _daemon = env.start_unlocked_daemon();
+
+    let api = env.api.try_clone().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let delete_hits = Arc::new(AtomicUsize::new(0));
+    let delete_hits_bg = delete_hits.clone();
+
+    let server = thread::spawn(move || {
+        while !stop_bg.load(Ordering::SeqCst) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    if req.method == "DELETE"
+                        && req.path == "/api/ciphers/cipher-org-writable/attachment/att-org-del"
+                    {
+                        delete_hits_bg.fetch_add(1, Ordering::SeqCst);
+                        // Return Bitwarden CipherMiniResponseModel omitting encrypted fields
+                        let resp_body = json!({
+                            "id": "cipher-org-writable",
+                            "object": "cipherMini",
+                            "revisionDate": "2026-11-27T12:00:00.000Z"
+                        })
+                        .to_string();
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            resp_body.len(),
+                            resp_body
+                        );
+                        stream.write_all(http.as_bytes()).unwrap();
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let out = env
+        .cmd()
+        .args([
+            "attachment",
+            "delete",
+            "--item-id",
+            "cipher-org-writable",
+            "--attachment-id",
+            "att-org-del",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+
+    assert!(
+        out.status.success(),
+        "Org attachment delete failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(delete_hits.load(Ordering::SeqCst), 1);
+
+    let resp: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["file_name"], "obsolete.pem");
+    assert_eq!(
+        resp["item"]["name"], "Org Writable Login",
+        "Re-decrypted Organization Cipher must not degrade to Untitled: {resp}"
+    );
+    let atts = resp["item"]["attachments"].as_array().unwrap();
+    assert_eq!(atts.len(), 1);
+    assert_eq!(atts[0]["id"], "att-org-keep");
+    assert_eq!(atts[0]["fileName"], "keep.pem");
+
+    // Verify local cache file keeps 0600 permissions and immediately reflects deletion
+    let mode = fs::metadata(&data_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let get_resp = ipc(
+        &env.socket(),
+        json!({ "action": "get_item", "query": "cipher-org-writable" }),
+    );
+    assert_eq!(get_resp["ok"], true);
+    assert_eq!(get_resp["item"]["name"], "Org Writable Login");
+    assert_eq!(get_resp["item"]["attachments"].as_array().unwrap().len(), 1);
+    assert_eq!(get_resp["item"]["attachments"][0]["fileName"], "keep.pem");
+}
+
+#[test]
+fn test_attachment_delete_org_cipher_permission_and_key_guards_fail_closed_before_http() {
+    let env = TestEnv::new();
+
+    let raw_user_key = [42u8; 64];
+    let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+    let raw_org_key = [77u8; 64];
+    let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+
+    let data_path = env.dir().join("data/data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&data_path).unwrap()).unwrap();
+    data["organizations"].as_array_mut().unwrap().push(json!({
+        "id": "org-known",
+        "name": "Acme Org",
+        "key": user_key.encrypt(&raw_org_key).unwrap(),
+    }));
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": "cipher-org-ro",
+        "type": 1,
+        "name": org_key.encrypt_string("Org RO").unwrap(),
+        "organizationId": "org-known",
+        "edit": false,
+        "viewPassword": true,
+        "deletedDate": null,
+        "attachments": [{
+            "id": "att-ro",
+            "fileName": org_key.encrypt_string("ro.txt").unwrap(),
+            "size": "10",
+            "sizeName": "10 B"
+        }]
+    }));
+    ciphers.push(json!({
+        "id": "cipher-org-hidden-pw",
+        "type": 1,
+        "name": org_key.encrypt_string("Org Hidden PW").unwrap(),
+        "organizationId": "org-known",
+        "edit": true,
+        "viewPassword": false,
+        "deletedDate": null,
+        "attachments": [{
+            "id": "att-hp",
+            "fileName": org_key.encrypt_string("hp.txt").unwrap(),
+            "size": "10",
+            "sizeName": "10 B"
+        }]
+    }));
+    fs::write(&data_path, data.to_string()).unwrap();
+
+    let _daemon = env.start_unlocked_daemon();
+
+    let api = env.api.try_clone().unwrap();
+    let http_calls = Arc::new(AtomicUsize::new(0));
+    let http_calls_bg = http_calls.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let server = thread::spawn(move || {
+        while !stop_bg.load(Ordering::SeqCst) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = read_http_request(&mut stream);
+                    http_calls_bg.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    for (cipher_id, att_id, expected_substr) in [
+        ("cipher-org-ro", "att-ro", "permission"),
+        ("cipher-org-hidden-pw", "att-hp", "passwords are hidden"),
+        (
+            "cipher-org-1",
+            "att-org-1",
+            "Organization 'org-1' not found",
+        ),
+    ] {
+        let out = env
+            .cmd()
+            .args([
+                "attachment",
+                "delete",
+                "--item-id",
+                cipher_id,
+                "--attachment-id",
+                att_id,
+                "--yes",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "Expected {cipher_id} to fail closed");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], false);
+        let err = v["error"].as_str().unwrap_or("");
+        assert!(
+            err.to_lowercase().contains(&expected_substr.to_lowercase()),
+            "Expected '{expected_substr}' for {cipher_id}, got: {err}"
+        );
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert_eq!(
+        http_calls.load(Ordering::SeqCst),
+        0,
+        "Zero HTTP calls may occur for unauthorized or missing-key Organization Ciphers"
+    );
+}
+
+#[test]
+fn test_attachment_delete_stale_daemon_missing_org_write_auto_restarts() {
+    let env = TestEnv::new();
+    let sock = env.socket();
+    let _ = fs::remove_file(&sock);
+
+    let listener = UnixListener::bind(&sock).unwrap();
+    let sock_for_thread = sock.clone();
+    let stale_stopped = Arc::new(AtomicBool::new(false));
+    let stale_stopped_bg = stale_stopped.clone();
+
+    let mock_stale = thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let req: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            let mut out = stream;
+            match req["action"].as_str() {
+                Some("ping") => {
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "pong": true,
+                            "protocol_version": 1,
+                            "schema_version": 3,
+                            // Advertises attachment_delete but omits org_write
+                            "capabilities": ["cipher_mutation_v3", "attachment_delete"],
+                            "unlocked": true
+                        })
+                    );
+                }
+                Some("stop") if req["admin"] == true => {
+                    let _ = writeln!(out, "{}", json!({ "ok": true, "protocol_version": 1 }));
+                    let _ = fs::remove_file(&sock_for_thread);
+                    stale_stopped_bg.store(true, Ordering::SeqCst);
+                    break;
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        json!({ "ok": false, "error": "unexpected action", "protocol_version": 1 })
+                    );
+                }
+            }
+        }
+    });
+
+    let out = env
+        .cmd()
+        .env("OMA_DAEMON_BIN", env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "attachment",
+            "delete",
+            "--item-id",
+            "cipher-keyed-1",
+            "--attachment-id",
+            "att-1",
+            "--yes",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = mock_stale.join();
+    let _ = env.cmd().args(["daemon", "stop"]).output();
+
+    assert!(
+        stale_stopped.load(Ordering::SeqCst),
+        "CLI must auto-restart stale standalone daemon lacking 'org_write'"
+    );
+    let resp: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(resp["ok"], false);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unlock the vault"),
+        "After auto-restart, fresh daemon should advertise org_write and fail closed on locked vault: {resp}"
+    );
+}
