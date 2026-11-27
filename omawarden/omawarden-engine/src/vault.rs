@@ -135,6 +135,101 @@ pub fn validate_org_share_scope(
     Ok((trimmed_org_id, clean_cols))
 }
 
+/// Normalized Collection reassignment mode (mutually exclusive replace vs delta).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionReassignmentInput {
+    Replace(Vec<String>),
+    Delta {
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+}
+
+/// Validates and normalizes replace (`--collection-id`) vs delta (`--add` / `--remove`)
+/// collection reassignment arguments. Fails closed on combining modes, empty arguments,
+/// blank IDs, or overlapping `--add` and `--remove` IDs.
+pub fn validate_collection_reassignment_flags(
+    collection_ids: &[String],
+    add: &[String],
+    remove: &[String],
+) -> Result<CollectionReassignmentInput, String> {
+    let has_replace = !collection_ids.is_empty();
+    let has_delta = !add.is_empty() || !remove.is_empty();
+
+    if has_replace && has_delta {
+        return Err(
+            "Cannot combine --collection-id (replace mode) with --add or --remove (delta mode)."
+                .to_string(),
+        );
+    }
+    if !has_replace && !has_delta {
+        return Err(
+            "Specify either --collection-id <COL_ID>... or --add / --remove <COL_ID>... to update collections."
+                .to_string(),
+        );
+    }
+
+    if has_replace {
+        let clean = normalize_collection_ids(collection_ids);
+        if clean.is_empty() {
+            return Err(
+                "You must keep at least one collection assigned to an Organization cipher."
+                    .to_string(),
+            );
+        }
+        return Ok(CollectionReassignmentInput::Replace(clean));
+    }
+
+    let clean_add = normalize_collection_ids(add);
+    let clean_remove = normalize_collection_ids(remove);
+    if clean_add.is_empty() && clean_remove.is_empty() {
+        return Err(
+            "Specify at least one non-empty collection ID with --add or --remove.".to_string(),
+        );
+    }
+    for id in &clean_add {
+        if clean_remove.iter().any(|r| r == id) {
+            return Err(format!(
+                "Collection '{id}' cannot be specified in both --add and --remove."
+            ));
+        }
+    }
+    Ok(CollectionReassignmentInput::Delta {
+        add: clean_add,
+        remove: clean_remove,
+    })
+}
+
+/// Computes the resulting target Collection ID set from the cipher's current
+/// collections and a validated reassignment input. Fails closed if the resulting
+/// set is empty.
+pub fn compute_target_collection_ids(
+    current: &[String],
+    input: &CollectionReassignmentInput,
+) -> Result<Vec<String>, String> {
+    let target = match input {
+        CollectionReassignmentInput::Replace(ids) => normalize_collection_ids(ids),
+        CollectionReassignmentInput::Delta { add, remove } => {
+            let mut next: Vec<String> = normalize_collection_ids(current)
+                .into_iter()
+                .filter(|cid| !remove.iter().any(|r| r == cid))
+                .collect();
+            for cid in add {
+                if !next.iter().any(|existing| existing == cid) {
+                    next.push(cid.clone());
+                }
+            }
+            next
+        }
+    };
+    if target.is_empty() {
+        return Err(
+            "You must keep at least one collection assigned to an Organization cipher.".to_string(),
+        );
+    }
+    Ok(target)
+}
+
 /// Decrypted Cipher returned from either the live daemon or offline cache fallback,
 /// paired with its clipboard isolation scope.
 pub struct VaultOutputItem {

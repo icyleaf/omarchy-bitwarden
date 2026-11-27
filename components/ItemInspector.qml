@@ -38,6 +38,7 @@ ScrollView {
   signal editRequested(var item)
   signal favoriteToggled(var item)
   signal shareRequested(var item)
+  signal collectionsRequested(var item)
   signal deleteRequested(var item)
   signal closePreviewRequested()
   signal togglePasswordRevealed()
@@ -650,6 +651,18 @@ ScrollView {
           tooltip: "Share to Organization"
           fontFamily: inspectorRoot.fontFamily
           onClicked: inspectorRoot.shareRequested(inspectorRoot.item)
+        }
+
+        GhostIconButton {
+          objectName: "collectionsButton"
+          visible: Boolean(inspectorRoot.item && CipherMutation.isOrganizationOwned(inspectorRoot.item) && !inspectorRoot.item.deleted_at)
+          enabled: CipherMutation.canAssignCollections(inspectorRoot.item)
+          Layout.alignment: Qt.AlignTop
+          iconText: "\uf02c"
+          iconColor: enabled ? inspectorRoot.accent : inspectorRoot.muted
+          tooltip: enabled ? "Manage Collections" : (CipherMutation.assignCollectionsGuardError(inspectorRoot.item) || "Manage Collections unavailable")
+          fontFamily: inspectorRoot.fontFamily
+          onClicked: inspectorRoot.collectionsRequested(inspectorRoot.item)
         }
 
         GhostIconButton {

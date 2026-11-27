@@ -86,6 +86,7 @@ pub fn handle_client_with_peer(
                 | "cipher_delete_trash"
                 | "cipher_restore"
                 | "cipher_share"
+                | "cipher_collections"
                 | "cipher_resolve"
                 | "folder_create"
                 | "folder_update"
@@ -174,11 +175,25 @@ pub fn handle_client_with_peer(
             )?;
             return Ok(());
         }
+        if action == "cipher_collections" {
+            writeln!(
+                stream,
+                "{}",
+                json!({
+                    "ok": false,
+                    "outcome": "rejected",
+                    "error": "Unlock the vault before updating cipher collections.",
+                    "protocol_version": CURRENT_PROTOCOL_VERSION
+                })
+            )?;
+            return Ok(());
+        }
         if action == "cipher_resolve" {
             let verb = match req.get("purpose").and_then(Value::as_str) {
                 Some("edit") | Some("editing") => "editing",
                 Some("restore") | Some("restoring") => "restoring",
                 Some("share") | Some("sharing") => "sharing",
+                Some("collections") | Some("updating collections") => "updating collections on",
                 _ => "deleting",
             };
             writeln!(
@@ -459,6 +474,13 @@ pub fn handle_client_with_peer(
             Err(error) => error.response(),
         },
         "cipher_share" => match state.vault_mgr.share_cipher(req, client_context.as_ref()) {
+            Ok(receipt) => receipt,
+            Err(error) => error.response(),
+        },
+        "cipher_collections" => match state
+            .vault_mgr
+            .update_cipher_collections(req, client_context.as_ref())
+        {
             Ok(receipt) => receipt,
             Err(error) => error.response(),
         },

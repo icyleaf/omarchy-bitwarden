@@ -1,3 +1,4 @@
+mod collections;
 mod create;
 mod edit;
 mod editor;
@@ -185,6 +186,40 @@ pub(crate) enum VaultAction {
             help = "Confirm irreversible ownership transfer without interactive prompt (required in --json mode)"
         )]
         yes: bool,
+        #[arg(long, help = "Output response in JSON format")]
+        json: bool,
+    },
+    #[command(about = "Reassign collections on an Organization cipher")]
+    Collections {
+        #[arg(
+            value_name = "TARGET",
+            help = "Target Organization cipher name or 32-character / UUID ID"
+        )]
+        target: String,
+        #[arg(
+            long = "collection-id",
+            value_name = "COL_ID",
+            action = clap::ArgAction::Append,
+            conflicts_with_all = ["add", "remove"],
+            help = "Replace assigned collections with the specified Collection ID(s) (repeatable)"
+        )]
+        collection_ids: Vec<String>,
+        #[arg(
+            long = "add",
+            value_name = "COL_ID",
+            action = clap::ArgAction::Append,
+            conflicts_with = "collection_ids",
+            help = "Add a writable Collection ID to the cipher (repeatable)"
+        )]
+        add: Vec<String>,
+        #[arg(
+            long = "remove",
+            value_name = "COL_ID",
+            action = clap::ArgAction::Append,
+            conflicts_with = "collection_ids",
+            help = "Remove a writable Collection ID from the cipher (repeatable)"
+        )]
+        remove: Vec<String>,
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
@@ -431,6 +466,13 @@ pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
             yes,
             json,
         } => lifecycle::run_share(target, organization_id, collection_ids, yes, json),
+        VaultAction::Collections {
+            target,
+            collection_ids,
+            add,
+            remove,
+            json,
+        } => collections::run(target, collection_ids, add, remove, json),
         VaultAction::Edit {
             target,
             name,

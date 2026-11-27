@@ -120,8 +120,11 @@ Item {
       var deleteButton = findChildByName(inspector, "deleteButton")
       var editButton = findChildByName(inspector, "editButton")
       var shareButton = findChildByName(inspector, "shareButton")
+      var collectionsButton = findChildByName(inspector, "collectionsButton")
       check(shareButton !== null && shareButton.visible === true,
             "shareButton is visible on personal non-trashed Cipher")
+      check(collectionsButton !== null && collectionsButton.visible === false,
+            "collectionsButton is hidden on personal Cipher")
       // Permission-aware Inspector controls on read-only Organization Cipher:
       // Favorite stays enabled; Edit & Delete remain visible for layout stability
       // but render visually disabled; Share is hidden on Organization Ciphers.
@@ -142,6 +145,8 @@ Item {
       }
       check(shareButton && shareButton.visible === false,
             "shareButton is hidden on Organization-owned Cipher")
+      check(collectionsButton && collectionsButton.visible && collectionsButton.enabled === false,
+            "collectionsButton stays visible and renders disabled on read-only Organization Cipher")
       check(favoriteButton && favoriteButton.visible && favoriteButton.enabled === true,
             "favoriteButton stays visible and enabled on read-only Organization Cipher")
       check(editButton && editButton.visible && editButton.enabled === false,
@@ -166,6 +171,8 @@ Item {
       }
       check(editButton && editButton.visible && editButton.enabled === true,
             "editButton is enabled on writable Organization Cipher (edit && view_password)")
+      check(collectionsButton && collectionsButton.visible && collectionsButton.enabled === true,
+            "collectionsButton is enabled on writable Organization Cipher (edit && view_password)")
       check(deleteButton && deleteButton.visible && deleteButton.enabled === false,
             "deleteButton stays disabled on LimitItemDeletion Organization Cipher (edit: true, can_delete: false)")
       // Deletable Organization Cipher (can_delete: true) enables deleteButton

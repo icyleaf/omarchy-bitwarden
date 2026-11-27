@@ -147,6 +147,75 @@ pub(crate) fn validate_writable_collections(
     Ok(())
 }
 
+/// Validates Collection reassignment on an Organization Cipher using the
+/// symmetric difference between `current_ids` and `target_ids`.
+///
+/// Rejects empty target sets and verifies that every added or removed Collection
+/// exists in `storage.collections`, belongs to `org_id`, and is writable
+/// (`!read_only || manage`, failing closed when flags are absent). Untouched
+/// read-only collections that remain in both sets are preserved without error.
+pub(crate) fn validate_collection_reassignment(
+    storage: &VaultStorage,
+    org_id: &str,
+    current_ids: &[String],
+    target_ids: &[String],
+) -> Result<(), WriteError> {
+    if target_ids.is_empty() {
+        return Err(WriteError::Rejected(
+            "You must keep at least one collection assigned to an Organization cipher.".into(),
+        ));
+    }
+
+    let mut changed: Vec<&str> = Vec::new();
+    for id in target_ids {
+        if !current_ids.iter().any(|c| c == id) {
+            changed.push(id.as_str());
+        }
+    }
+    for id in current_ids {
+        if !target_ids.iter().any(|t| t == id) {
+            changed.push(id.as_str());
+        }
+    }
+
+    for col_id in changed {
+        let col = storage
+            .collections
+            .iter()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(col_id))
+            .ok_or_else(|| {
+                WriteError::Rejected(format!(
+                    "Collection '{col_id}' not found in local vault cache. Sync the vault and try again."
+                ))
+            })?;
+
+        let col_org_id = col
+            .get("organizationId")
+            .or_else(|| col.get("organization_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if col_org_id != org_id {
+            return Err(WriteError::Rejected(format!(
+                "Collection '{col_id}' does not belong to Organization '{org_id}'."
+            )));
+        }
+
+        let read_only = col
+            .get("readOnly")
+            .or_else(|| col.get("read_only"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let manage = col.get("manage").and_then(Value::as_bool).unwrap_or(false);
+        if read_only && !manage {
+            return Err(WriteError::Rejected(format!(
+                "You do not have write permission for collection '{col_id}'."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn generate_random_cipher_key() -> Result<(SymmetricCryptoKey, Zeroizing<[u8; 64]>), WriteError> {
     let mut raw = Zeroizing::new([0u8; 64]);
     rand_core::OsRng.fill_bytes(raw.as_mut());
@@ -2070,6 +2139,300 @@ impl VaultManager {
         Ok(
             json!({"ok": true, "outcome": if cached { "shared" } else { "shared_needs_sync" }, "item": receipt}),
         )
+    }
+
+    /// Reassigns Collections on an Organization Cipher via `PUT /ciphers/{id}/collections_v2`
+    /// (metadata-only, no re-encryption). Enforces `edit && view_password`, validates the
+    /// symmetric difference against writable Collections in the Cipher's Organization, and
+    /// atomically evicts the Cipher from local cache (`0600`) and in-memory index when the
+    /// server returns `unavailable: true`.
+    pub(crate) fn update_cipher_collections(
+        &self,
+        request: Value,
+        context: Option<&ClientContext>,
+    ) -> Result<Value, WriteError> {
+        let generation = self.lock_generation();
+        let storage = self
+            .storage_mgr
+            .load_existing()
+            .map_err(|_| WriteError::Rejected("Cannot read the vault cache.".into()))?;
+
+        let inner = request.get("mutation").unwrap_or(&request);
+
+        let extract_str_array = |keys: &[&str]| -> (bool, Vec<String>) {
+            let mut present = false;
+            let mut out = Vec::new();
+            for key in keys {
+                if let Some(val) = inner.get(*key) {
+                    present = true;
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let Some(s) = item.as_str() {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            (present, out)
+        };
+
+        let (replace_present, raw_replace) =
+            extract_str_array(&["collection_ids", "collectionIds"]);
+        let (add_present, raw_add) = extract_str_array(&["add", "add_collection_ids"]);
+        let (remove_present, raw_remove) = extract_str_array(&["remove", "remove_collection_ids"]);
+
+        let has_delta = add_present || remove_present;
+        if replace_present && has_delta {
+            return Err(WriteError::Rejected(
+                "Cannot combine --collection-id (replace mode) with --add or --remove (delta mode)."
+                    .into(),
+            ));
+        }
+        if !replace_present && !has_delta {
+            return Err(WriteError::Rejected(
+                "Specify either collection_ids (replace mode) or add/remove (delta mode).".into(),
+            ));
+        }
+
+        let reassignment_input = if replace_present {
+            let clean = crate::vault::normalize_collection_ids(&raw_replace);
+            if clean.is_empty() {
+                return Err(WriteError::Rejected(
+                    "You must keep at least one collection assigned to an Organization cipher."
+                        .into(),
+                ));
+            }
+            crate::vault::CollectionReassignmentInput::Replace(clean)
+        } else {
+            crate::vault::validate_collection_reassignment_flags(&[], &raw_add, &raw_remove)
+                .map_err(WriteError::Rejected)?
+        };
+
+        let (target_id, target_name, org_id, target_cols) = {
+            let unlocked = self
+                .is_unlocked
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            let active = self
+                .storage
+                .read()
+                .map_err(|_| "Vault state unavailable".to_string())?;
+            if !*unlocked
+                || generation != self.lock_generation()
+                || !active.same_active_slot(&storage)
+            {
+                return Err(WriteError::Rejected("Vault session changed.".into()));
+            }
+            drop(active);
+
+            let raw_target = inner
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    inner
+                        .get("target")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                })
+                .ok_or_else(|| WriteError::Rejected("Missing cipher target.".into()))?;
+
+            let resolved_item = match self.resolve_cipher_target(raw_target) {
+                Ok(item) => item,
+                Err(err) => {
+                    if self
+                        .resolve_cipher_target_by_state(raw_target, true)
+                        .is_ok()
+                    {
+                        return Err(WriteError::Rejected(
+                            "Cannot update collections on a cipher that is in Trash. Restore it first."
+                                .into(),
+                        ));
+                    }
+                    return Err(WriteError::Rejected(err));
+                }
+            };
+
+            let cipher_in_storage = storage
+                .ciphers
+                .iter()
+                .find(|c| c["id"] == resolved_item.id)
+                .cloned()
+                .ok_or_else(|| WriteError::Rejected("Cipher not found in local cache.".into()))?;
+
+            if resolved_item
+                .deleted_at
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+                || cipher_in_storage
+                    .get("deletedDate")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            {
+                return Err(WriteError::Rejected(
+                    "Cannot update collections on a cipher that is in Trash. Restore it first."
+                        .into(),
+                ));
+            }
+
+            let org_id = resolved_item
+                .organization_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    cipher_in_storage["organizationId"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    WriteError::Rejected(
+                        "Collection assignment is only supported for Organization ciphers.".into(),
+                    )
+                })?;
+
+            if !resolved_item.edit {
+                return Err(WriteError::Rejected(
+                    "You do not have permission to edit collections on this Organization cipher."
+                        .into(),
+                ));
+            }
+            if !resolved_item.view_password {
+                return Err(WriteError::Rejected(
+                    "Cannot modify collections on this Organization cipher because passwords are hidden."
+                        .into(),
+                ));
+            }
+
+            let current_cols: Vec<String> = cipher_in_storage
+                .get("collectionIds")
+                .or_else(|| cipher_in_storage.get("collection_ids"))
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_else(|| resolved_item.collection_ids.clone().unwrap_or_default());
+
+            let target_cols =
+                crate::vault::compute_target_collection_ids(&current_cols, &reassignment_input)
+                    .map_err(WriteError::Rejected)?;
+
+            validate_collection_reassignment(&storage, &org_id, &current_cols, &target_cols)?;
+
+            (resolved_item.id, resolved_item.name, org_id, target_cols)
+        };
+
+        let server = if storage.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &storage.server_url
+        };
+        let client = BitwardenApiClient::for_cipher_write(server, context).map_err(|_| {
+            WriteError::Rejected("Could not initialize the cipher HTTP client.".into())
+        })?;
+        let token = self.keyring_mgr.for_storage(&storage).access_token();
+        let renew = || self.renew_for_account(&storage, context, generation);
+        let mut token = match token.filter(|t| !crate::auth::is_jwt_expired(t)) {
+            Some(t) => t,
+            None => renew()?,
+        };
+        let mut renewed_after_rejection = false;
+        let _pending = self
+            .storage_mgr
+            .begin_cipher_write()
+            .map_err(|e| e.to_string())?;
+
+        let response = loop {
+            let same_account = self
+                .storage_mgr
+                .load_existing()
+                .is_ok_and(|s| s.same_active_slot(&storage));
+            let current = self
+                .is_unlocked
+                .read()
+                .is_ok_and(|unlocked| *unlocked && self.lock_generation() == generation);
+            if !same_account || !current {
+                return Err(WriteError::Rejected(
+                    "Session changed before updating cipher collections.".into(),
+                ));
+            }
+
+            match client.update_cipher_collections(&token, &target_id, &target_cols) {
+                Err(ApiError::HttpStatus(reqwest::StatusCode::UNAUTHORIZED, _))
+                    if !renewed_after_rejection =>
+                {
+                    renewed_after_rejection = true;
+                    token = renew()?;
+                }
+                result => break result?,
+            }
+        };
+
+        let unavailable = response
+            .get("unavailable")
+            .or_else(|| response.get("Unavailable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if unavailable {
+            let evicted = self
+                .cache_deleted_cipher(&storage, generation, &target_id)
+                .is_some();
+            return Ok(json!({
+                "ok": true,
+                "unavailable": true,
+                "id": target_id,
+                "name": target_name,
+                "outcome": if evicted { "evicted" } else { "evicted_needs_sync" },
+            }));
+        }
+
+        let updated_cipher = response
+            .get("cipher")
+            .or_else(|| response.get("Cipher"))
+            .filter(|v| v.is_object())
+            .or_else(|| {
+                response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|_| &response)
+            });
+
+        let (id, revision_date, cached) = if let Some(cipher) = updated_cipher {
+            let id = cipher["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&target_id)
+                .to_string();
+            let rev = cipher["revisionDate"].as_str().map(str::to_string);
+            let cached = self
+                .cache_created_cipher(&storage, generation, cipher, &id)
+                .is_some();
+            (id, rev, cached)
+        } else {
+            (target_id.clone(), None, false)
+        };
+
+        let receipt = json!({
+            "id": id,
+            "name": target_name,
+            "organization_id": org_id,
+            "collection_ids": target_cols,
+            "revisionDate": revision_date,
+        });
+        Ok(json!({
+            "ok": true,
+            "unavailable": false,
+            "id": id,
+            "outcome": if cached { "updated" } else { "updated_needs_sync" },
+            "item": receipt,
+        }))
     }
 }
 

@@ -135,6 +135,7 @@ fn test_should_touch_activity_classification() {
         "cipher_update",
         "cipher_delete",
         "cipher_share",
+        "cipher_collections",
         "cipher_resolve",
         "get_item",
         "vault_get",
@@ -2370,6 +2371,30 @@ fn test_daemon_cipher_resolve_and_delete_privileged_gating() {
     assert_eq!(
         res_resolve_share_locked["error"],
         "Unlock the vault before sharing a cipher."
+    );
+
+    let res_collections_locked = send_req(json!({
+        "action": "cipher_collections",
+        "id": "uuid-1",
+        "collection_ids": ["col-1"]
+    }));
+    assert_eq!(res_collections_locked["ok"], false);
+    assert_eq!(res_collections_locked["outcome"], "rejected");
+    assert_eq!(
+        res_collections_locked["error"],
+        "Unlock the vault before updating cipher collections."
+    );
+
+    let res_resolve_collections_locked = send_req(json!({
+        "action": "cipher_resolve",
+        "target": "site",
+        "purpose": "collections"
+    }));
+    assert_eq!(res_resolve_collections_locked["ok"], false);
+    assert_eq!(res_resolve_collections_locked["outcome"], "rejected");
+    assert_eq!(
+        res_resolve_collections_locked["error"],
+        "Unlock the vault before updating collections on a cipher."
     );
 
     // 2. Unlocked: cipher_resolve returns redacted metadata (no credentials)

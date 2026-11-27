@@ -71,6 +71,33 @@ function canShare(item) {
   return true
 }
 
+function canAssignCollections(item) {
+  if (!isMutableType(item)) return false
+  if (!isOrganizationOwned(item)) return false
+  if (item.deleted_at) return false
+  return Boolean(item.edit) && Boolean(item.view_password)
+}
+
+function assignCollectionsGuardError(item) {
+  if (!isMutableType(item)) return ""
+  if (!isOrganizationOwned(item)) return ""
+  if (item.deleted_at) return "Restore this cipher from Trash before changing its collections."
+  if (!item.edit) return "You do not have permission to manage collections on this Organization cipher."
+  if (!item.view_password) return "Cannot manage collections on this Organization cipher because passwords are hidden."
+  return ""
+}
+
+function withoutItem(items, itemId) {
+  var out = []
+  var src = items || []
+  for (var i = 0; i < src.length; i++) {
+    var row = src[i]
+    if (!row || row.id === itemId) continue
+    out.push(row)
+  }
+  return out
+}
+
 function deleteGuardError(item) {
   if (!isMutableType(item)) return ""
   if (!isOrganizationOwned(item)) return ""
