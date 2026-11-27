@@ -141,6 +141,7 @@ fn test_should_touch_activity_classification() {
         "vault_get",
         "get_ssh_key",
         "get_attachment_key",
+        "attachment_upload",
         "copy",
     ] {
         assert!(
@@ -1553,6 +1554,7 @@ fn test_privileged_actions_require_unlocked_vault() {
         json!({ "action": "get_item", "query": "test" }),
         json!({ "action": "get_ssh_key", "query": "test" }),
         json!({ "action": "get_attachment_key", "item_id": "i", "attachment_id": "a" }),
+        json!({ "action": "attachment_upload", "item_id": "i", "file_path": "/tmp/nonexistent" }),
         json!({ "action": "sync" }),
         json!({ "action": "totp", "query": "test" }),
     ];
@@ -2430,5 +2432,92 @@ fn test_daemon_cipher_resolve_and_delete_privileged_gating() {
     assert_eq!(
         res_resolve_not_found["error"],
         "Cipher 'Nonexistent' not found in vault."
+    );
+}
+
+#[test]
+fn test_attachment_upload_daemon_security_rule_9_and_capability() {
+    let _env = crate::test_support::TestEnv::isolated();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("daemon_data.json");
+    let storage_mgr = StorageManager::new(path);
+    let state = Arc::new(DaemonState::new(storage_mgr, 15));
+
+    let send_req = |req: Value| -> Value {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client(server, st);
+        });
+        let payload = format!("{req}\n");
+        client.write_all(payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        handle.join().unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+
+    // 1. ping advertises "attachment_upload" on Schema v3
+    let ping = send_req(json!({ "action": "ping" }));
+    assert_eq!(ping["ok"], true);
+    assert_eq!(ping["schema_version"], CURRENT_SCHEMA_VERSION);
+    assert!(
+        ping_has_capability(&ping, CAPABILITY_ATTACHMENT_UPLOAD),
+        "ping.capabilities must advertise 'attachment_upload': {ping}"
+    );
+
+    // 2. Locked vault fails closed before touching activity
+    let stale_time = Instant::now() - Duration::from_secs(60);
+    *state.last_activity.lock().unwrap() = stale_time;
+    let locked_res = send_req(json!({
+        "action": "attachment_upload",
+        "item_id": "item-1",
+        "file_path": "/tmp/sample.txt"
+    }));
+    assert_eq!(locked_res["ok"], false);
+    assert!(
+        locked_res["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("locked"),
+        "Expected locked error: {locked_res}"
+    );
+    assert_eq!(
+        *state.last_activity.lock().unwrap(),
+        stale_time,
+        "Rejected locked attachment_upload must not refresh idle activity"
+    );
+
+    // 3. Unlocked vault with mismatched expected_lock_generation fails closed
+    *state.vault_mgr.is_unlocked.write().unwrap() = true;
+    let gen = state.vault_mgr.lock_generation();
+    let mismatch_res = send_req(json!({
+        "action": "attachment_upload",
+        "item_id": "item-1",
+        "file_path": "/tmp/sample.txt",
+        "expected_lock_generation": gen + 99
+    }));
+    assert_eq!(mismatch_res["ok"], false);
+    assert_eq!(mismatch_res["error"], "Vault session changed.");
+    assert_eq!(
+        *state.last_activity.lock().unwrap(),
+        stale_time,
+        "Rejected generation-mismatched attachment_upload must not refresh idle activity"
+    );
+
+    // 4. Unlocked vault with matching expected_lock_generation refreshes idle activity
+    let ok_gen_res = send_req(json!({
+        "action": "attachment_upload",
+        "item_id": "item-1",
+        "file_path": "/tmp/nonexistent-file-for-rule9-test.txt",
+        "expected_lock_generation": gen
+    }));
+    assert_eq!(ok_gen_res["ok"], false);
+    assert!(
+        *state.last_activity.lock().unwrap() > stale_time,
+        "Authorized attachment_upload must refresh daemon idle activity"
     );
 }

@@ -92,6 +92,7 @@ pub fn handle_client_with_peer(
                 | "folder_update"
                 | "folder_delete"
                 | "folder_resolve"
+                | "attachment_upload"
                 | "sync"
         )
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
@@ -219,10 +220,13 @@ pub fn handle_client_with_peer(
         );
         return Ok(());
     }
-    if action == "get_attachment_key"
-        && req
-            .get("expected_lock_generation")
-            .is_some_and(|expected| session.is_none_or(|s| expected.as_u64() != Some(s.generation)))
+    if matches!(action, "get_attachment_key" | "attachment_upload")
+        && req.get("expected_lock_generation").is_some_and(|expected| {
+            let parsed = expected
+                .as_u64()
+                .or_else(|| expected.as_str().and_then(|s| s.parse::<u64>().ok()));
+            session.is_none_or(|s| parsed != Some(s.generation))
+        })
     {
         return writeln!(
             stream,
@@ -671,6 +675,20 @@ pub fn handle_client_with_peer(
                 })
             } else {
                 json!({ "ok": false, "error": "Unable to resolve attachment key (vault locked or missing item)" })
+            }
+        }
+        "attachment_upload" => {
+            let item_id = req.get("item_id").and_then(Value::as_str).unwrap_or("");
+            let file_path = req.get("file_path").and_then(Value::as_str).unwrap_or("");
+            let file_name = req.get("file_name").and_then(Value::as_str);
+            match state.vault_mgr.upload_attachment(
+                item_id,
+                file_path,
+                file_name,
+                client_context.as_ref(),
+            ) {
+                Ok(resp) => resp,
+                Err(err) => json!({ "ok": false, "error": err }),
             }
         }
         "totp" => {

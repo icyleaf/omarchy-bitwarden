@@ -1334,4 +1334,40 @@ mod tests {
             _ => panic!("Expected AttachmentAction::Download"),
         }
     }
+
+    #[test]
+    fn test_attachment_upload_cli_parses_flags() {
+        let parsed = Cli::try_parse_from([
+            "omawarden",
+            "attachment",
+            "upload",
+            "--item-id",
+            "cipher-42",
+            "--file",
+            "/tmp/cert.pem",
+            "--name",
+            "prod-cert.pem",
+            "--json",
+        ])
+        .unwrap();
+        match parsed.command {
+            Commands::Attachment {
+                action:
+                    AttachmentAction::Upload {
+                        item_id,
+                        file,
+                        name,
+                        json,
+                        expected_lock_generation,
+                    },
+            } => {
+                assert_eq!(item_id, "cipher-42");
+                assert_eq!(file, PathBuf::from("/tmp/cert.pem"));
+                assert_eq!(name.as_deref(), Some("prod-cert.pem"));
+                assert!(json);
+                assert_eq!(expected_lock_generation, None);
+            }
+            _ => panic!("Expected AttachmentAction::Upload"),
+        }
+    }
 }

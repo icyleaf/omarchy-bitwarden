@@ -17,6 +17,7 @@ pub const VERSION_WITH_BUILD_INFO: &str = concat!(
 mod account_activation;
 pub mod api;
 pub mod attachment;
+pub mod attachment_write;
 pub mod auth;
 pub mod capabilities;
 mod cipher_write;
