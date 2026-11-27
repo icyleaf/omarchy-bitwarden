@@ -310,6 +310,7 @@ fn org_list_fails_closed_when_in_process_daemon_lacks_org_write_capability() {
         while !stop_clone.load(Ordering::SeqCst) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let mut line = String::new();
                     let _ = BufReader::new(&stream).read_line(&mut line);
                     let req: Value = serde_json::from_str(&line).unwrap_or_default();
@@ -369,6 +370,7 @@ fn org_list_auto_restarts_legacy_standalone_daemon_missing_org_write() {
         while !stop_clone.load(Ordering::SeqCst) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let mut line = String::new();
                     let _ = BufReader::new(&stream).read_line(&mut line);
                     let req: Value = serde_json::from_str(&line).unwrap_or_default();

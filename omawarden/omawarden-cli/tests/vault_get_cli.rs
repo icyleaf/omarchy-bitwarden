@@ -459,6 +459,7 @@ fn vault_get_in_process_daemon_without_capability_fails_closed() {
         while !done_flag.load(Ordering::Relaxed) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -555,6 +556,7 @@ fn vault_get_missing_capability_auto_restarts_standalone_daemon() {
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
