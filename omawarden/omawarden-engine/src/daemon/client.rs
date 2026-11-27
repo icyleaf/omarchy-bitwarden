@@ -679,6 +679,7 @@ where
                 Some("folder_create") => "creating a folder",
                 Some("folder_update") => "renaming a folder",
                 Some("folder_delete") | Some("folder_resolve") => "deleting a folder",
+                Some("cipher_collections") => "updating cipher collections",
                 _ => "creating a cipher",
             };
             let err_text = if verb.contains("folder") || verb.contains("cipher") {
@@ -736,6 +737,10 @@ where
             ["folder"]["id"]
             .as_str()
             .is_some_and(|s| !s.is_empty()),
+        Some("cipher_collections") => {
+            reply["id"].as_str().is_some_and(|s| !s.is_empty())
+                || reply["item"]["id"].as_str().is_some_and(|s| !s.is_empty())
+        }
         _ => reply["item"]["id"].as_str().is_some_and(|s| !s.is_empty()),
     };
     if reply["ok"] != true || !receipt_valid {

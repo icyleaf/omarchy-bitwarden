@@ -1551,6 +1551,40 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    pub fn update_cipher_collections(
+        &self,
+        access_token: &str,
+        id: &str,
+        collection_ids: &[String],
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/collections_v2", self.urls.api_url, id);
+        let body = json!({
+            "collectionIds": collection_ids,
+        });
+        let mut resp = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&body)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Update cipher collections failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
     pub fn update_cipher(
         &self,
         access_token: &str,

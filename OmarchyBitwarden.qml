@@ -361,16 +361,18 @@ Item {
   property string pendingSelectItemId: ""
   property bool showDeleteCipherModal: false
   property bool showShareCipherModal: false
+  property bool showCollectionAssignModal: false
   property bool showFolderManagerModal: false
   property var vaultFolders: []
   property var vaultOrganizations: []
   property var vaultCollections: []
   property var deleteCipherItem: null
   property var shareCipherItem: null
+  property var collectionAssignItem: null
   // `hasActiveModal` is the overlay's single "a sub-interaction owns the
   // keyboard" gate. The Inspector Form is included so global search and list
   // shortcuts are suspended while a draft is being edited.
-  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showShareCipherModal || root.showFolderManagerModal
+  readonly property bool hasActiveModal: root.showActionPalette || root.showTypePicker || root.showSshKeyModal || root.showPasswordHistoryModal || root.showPasswordGeneratorModal || root.showCipherEditor || root.showDeleteCipherModal || root.showShareCipherModal || root.showCollectionAssignModal || root.showFolderManagerModal
   property var activeAttachmentPreview: null
   property string loadingAttachmentId: ""
 
@@ -482,12 +484,18 @@ Item {
 
     root.showDeleteCipherModal = false
     root.showShareCipherModal = false
+    root.showCollectionAssignModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
     root.shareCipherItem = null
+    root.collectionAssignItem = null
+    if (cipherCollectionsProc.running) {
+      cipherCollectionsProc.running = false
+      root.isBusy = false
+    }
     if (cipherFavoriteProc.running) cipherFavoriteProc.running = false
     if (cipherDeleteProc.running) {
       cipherDeleteProc.running = false
@@ -585,6 +593,8 @@ Item {
       root.pendingSelectItemId = ""
       root.showDeleteCipherModal = false
       root.showShareCipherModal = false
+      root.showCollectionAssignModal = false
+      root.collectionAssignItem = null
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
@@ -669,12 +679,18 @@ Item {
     root.pendingSelectItemId = ""
     root.showDeleteCipherModal = false
     root.showShareCipherModal = false
+    root.showCollectionAssignModal = false
     root.showFolderManagerModal = false
     root.vaultFolders = []
     root.vaultOrganizations = []
     root.vaultCollections = []
     root.deleteCipherItem = null
     root.shareCipherItem = null
+    root.collectionAssignItem = null
+    if (cipherCollectionsProc.running) {
+      cipherCollectionsProc.running = false
+      root.isBusy = false
+    }
     root.showPasswordRevealed = false
     root.showPrivateKeyRevealed = false
     root.showCardNumberRevealed = false
@@ -1338,6 +1354,11 @@ Item {
       root.restoreSearchFocus()
     }
   }
+  onShowCollectionAssignModalChanged: {
+    if (!root.showCollectionAssignModal && !root.hasActiveModal) {
+      root.restoreSearchFocus()
+    }
+  }
   onShowFolderManagerModalChanged: {
     if (!root.showFolderManagerModal && !root.hasActiveModal) {
       root.restoreSearchFocus()
@@ -1447,7 +1468,32 @@ Item {
     root.cipherEditorEditItem = null
     root.showDeleteCipherModal = false
     root.deleteCipherItem = null
+    root.showCollectionAssignModal = false
+    root.collectionAssignItem = null
     root.showShareCipherModal = true
+  }
+
+  function openCollectionAssignModal(item) {
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!item || !CipherMutation.isOrganizationOwned(item)) return
+    var guard = CipherMutation.assignCollectionsGuardError(item)
+    if (guard) {
+      root.errorMessage = guard
+      return
+    }
+    if (!CipherMutation.canAssignCollections(item)) return
+    root.collectionAssignItem = item
+    root.showActionPalette = false
+    root.showTypePicker = false
+    root.showSshKeyModal = false
+    root.showPasswordGeneratorModal = false
+    root.showCipherEditor = false
+    root.cipherEditorEditItem = null
+    root.showDeleteCipherModal = false
+    root.deleteCipherItem = null
+    root.showShareCipherModal = false
+    root.shareCipherItem = null
+    root.showCollectionAssignModal = true
   }
 
   // Applies the optimistic favorite flag to both the raw list and the visible
@@ -1673,6 +1719,85 @@ Item {
     if (shareCipherModalComponent) {
       shareCipherModalComponent.isBusy = false
       shareCipherModalComponent.errorMessage = message
+    } else {
+      root.errorMessage = message
+    }
+  }
+
+  function submitCipherCollections(collectionIds) {
+    var item = root.collectionAssignItem
+    if (!item || !item.id || cipherCollectionsProc.running) return
+    if (!root.authState || root.authState.status !== "unlocked") return
+    if (!collectionIds || collectionIds.length === 0) return
+    root.isBusy = true
+    if (collectionAssignModalComponent) {
+      collectionAssignModalComponent.isBusy = true
+      collectionAssignModalComponent.errorMessage = ""
+    }
+    cipherCollectionsProc.revision = root.vaultRevision
+    cipherCollectionsProc.errorReported = false
+    cipherCollectionsProc.lastStderr = ""
+    cipherCollectionsProc.itemId = item.id
+    cipherCollectionsProc.itemName = item.name || ""
+    var cmd = [root.helperPath, "vault", "collections", item.id]
+    for (var i = 0; i < collectionIds.length; i++) {
+      cmd.push("--collection-id")
+      cmd.push(String(collectionIds[i]))
+    }
+    cmd.push("--json")
+    cipherCollectionsProc.command = cmd
+    cipherCollectionsProc.running = true
+  }
+
+  function handleCipherCollectionsSuccess(data) {
+    root.isBusy = false
+    if (collectionAssignModalComponent) collectionAssignModalComponent.isBusy = false
+    root.showCollectionAssignModal = false
+    root.collectionAssignItem = null
+
+    var name = cipherCollectionsProc.itemName
+    var itemId = (data && data.id) ? data.id : cipherCollectionsProc.itemId
+
+    if (data && data.unavailable === true) {
+      // Server revoked caller access after collection removal: evict from Overlay list,
+      // clear Inspector selection, and surface a neutral toast.
+      root.updatingResults = true
+      root.rawVaultItems = CipherMutation.withoutItem(root.rawVaultItems, itemId)
+      root.filteredItems = CipherMutation.withoutItem(root.filteredItems, itemId)
+      root.selectedItem = null
+      root.selectedIndex = -1
+      root.pendingSelectItemId = ""
+      root.currentTotp = ({ code: "", ttl: 30, period: 30 })
+      root.showPasswordRevealed = false
+      root.showPrivateKeyRevealed = false
+      root.showCardNumberRevealed = false
+      root.showCardCodeRevealed = false
+      root.showCustomHiddenRevealed = false
+      root.updatingResults = false
+      root.updateAvailableActions()
+      root.invalidateVaultList()
+      root.statusMessage = "Updated collections for '" + name + "'. You no longer have access to this item, so it was removed from your vault."
+      return
+    }
+
+    var updatedId = (data && data.item && data.item.id) ? data.item.id : itemId
+    root.pendingSelectItemId = updatedId || ""
+    if (data && data.outcome === "updated_needs_sync") {
+      root.statusMessage = "Updated collections for '" + name + "'. Sync the vault to refresh the local copy."
+      root.syncVault(true, true)
+      return
+    }
+    root.statusMessage = "Updated collections for '" + name + "'."
+    root.invalidateVaultList()
+    if (vaultListProc.running) vaultListProc.running = false
+    root.loadVaultItems()
+  }
+
+  function handleCipherCollectionsFailure(message) {
+    root.isBusy = false
+    if (collectionAssignModalComponent) {
+      collectionAssignModalComponent.isBusy = false
+      collectionAssignModalComponent.errorMessage = message
     } else {
       root.errorMessage = message
     }
@@ -2278,6 +2403,15 @@ Item {
         icon: "\uf1e0",
         shortcut: "",
         action: function() { root.openShareCipherModal(item) }
+      })
+    }
+
+    if (CipherMutation.isOrganizationOwned(item) && !item.deleted_at) {
+      actions.push({
+        label: "Manage Collections",
+        icon: "\uf02c",
+        shortcut: "",
+        action: function() { root.openCollectionAssignModal(item) }
       })
     }
 
@@ -2998,6 +3132,11 @@ Item {
               root.showShareCipherModal = false
               root.shareCipherItem = null
             }
+          } else if (root.showCollectionAssignModal) {
+            if (!collectionAssignModalComponent || !collectionAssignModalComponent.isBusy) {
+              root.showCollectionAssignModal = false
+              root.collectionAssignItem = null
+            }
           } else if (root.showDeleteCipherModal) {
             if (!deleteCipherModalComponent || !deleteCipherModalComponent.isBusy) {
               root.showDeleteCipherModal = false
@@ -3076,6 +3215,16 @@ Item {
             if (!shareCipherModalComponent || !shareCipherModalComponent.isBusy) {
               root.showShareCipherModal = false
               root.shareCipherItem = null
+            }
+            event.accepted = true
+          }
+          return
+        }
+        if (root.showCollectionAssignModal) {
+          if (event.key === Qt.Key_Escape) {
+            if (!collectionAssignModalComponent || !collectionAssignModalComponent.isBusy) {
+              root.showCollectionAssignModal = false
+              root.collectionAssignItem = null
             }
             event.accepted = true
           }
@@ -3357,6 +3506,7 @@ Item {
                 onFavoriteToggled: function(item) { root.toggleCipherFavorite(item) }
                 onDeleteRequested: function(item) { root.openDeleteCipherModal(item) }
                 onShareRequested: function(item) { root.openShareCipherModal(item) }
+                onCollectionsRequested: function(item) { root.openCollectionAssignModal(item) }
                 onClosePreviewRequested: {
                   var prevItem = root.activeAttachmentPreview ? (root.activeAttachmentPreview.item_id || "") : ""
                   root.activeAttachmentPreview = null
@@ -3736,6 +3886,30 @@ Item {
           if (!shareCipherModalComponent.isBusy) {
             root.showShareCipherModal = false
             root.shareCipherItem = null
+          }
+        }
+      }
+
+      // 10c. Collection Assignment modal for Organization Ciphers.
+      CollectionAssignModal {
+        id: collectionAssignModalComponent
+        active: root.showCollectionAssignModal
+        itemName: root.collectionAssignItem ? (root.collectionAssignItem.name || "Untitled") : ""
+        organizationId: root.collectionAssignItem ? (root.collectionAssignItem.organization_id || "") : ""
+        organizationName: root.collectionAssignItem ? (root.collectionAssignItem.organization_name || "") : ""
+        initialCollectionIds: root.collectionAssignItem && Array.isArray(root.collectionAssignItem.collection_ids) ? root.collectionAssignItem.collection_ids : []
+        collections: root.vaultCollections
+        fontFamily: root.fontFamily
+        foreground: root.foreground
+        accent: root.accent
+        muted: root.muted
+        cardBackground: Commons.Color.popups.background
+        borderColor: Commons.Color.popups.border
+        onConfirmRequested: function(colIds) { root.submitCipherCollections(colIds) }
+        onCloseRequested: {
+          if (!collectionAssignModalComponent.isBusy) {
+            root.showCollectionAssignModal = false
+            root.collectionAssignItem = null
           }
         }
       }
@@ -4226,6 +4400,63 @@ Item {
       if (cipherShareProc.revision !== root.vaultRevision) return
       if (code !== 0) {
         root.handleCipherShareFailure("Process exited with error code " + code)
+      }
+    }
+  }
+
+  Process {
+    id: cipherCollectionsProc
+    property int revision: 0
+    property string itemId: ""
+    property string itemName: ""
+    property bool errorReported: false
+    property string lastStderr: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (cipherCollectionsProc.revision !== root.vaultRevision) return
+        if (!root.authState || root.authState.status !== "unlocked") {
+          root.showCollectionAssignModal = false
+          root.collectionAssignItem = null
+          return
+        }
+        var raw = (text || "").trim()
+        var data = null
+        try {
+          if (raw) data = JSON.parse(raw)
+        } catch (e) {}
+        if (data && data.ok) {
+          cipherCollectionsProc.errorReported = true
+          root.handleCipherCollectionsSuccess(data)
+          return
+        }
+        cipherCollectionsProc.errorReported = true
+        var errMsg = (data && data.error) ? data.error : ""
+        if (!errMsg) errMsg = cipherCollectionsProc.lastStderr.replace(/^Error:\s*/i, "")
+        if (!errMsg) errMsg = "Failed to update cipher collections."
+        root.handleCipherCollectionsFailure(errMsg)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var cleaned = (text || "").trim()
+        cipherCollectionsProc.lastStderr = cleaned
+        root.handleProcessStderr(text, "omawarden:vault")
+        if (cleaned && cipherCollectionsProc.revision === root.vaultRevision) {
+          var sanitized = cleaned.replace(/^Error:\s*/i, "")
+          if (sanitized && collectionAssignModalComponent && !collectionAssignModalComponent.errorMessage && !cipherCollectionsProc.errorReported) {
+            collectionAssignModalComponent.errorMessage = sanitized
+          }
+        }
+      }
+    }
+    onExited: function(code) {
+      if (cipherCollectionsProc.errorReported) return
+      if (cipherCollectionsProc.revision !== root.vaultRevision) return
+      if (code !== 0) {
+        root.handleCipherCollectionsFailure("Process exited with error code " + code)
       }
     }
   }
