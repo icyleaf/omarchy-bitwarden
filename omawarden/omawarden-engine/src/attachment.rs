@@ -111,6 +111,30 @@ pub(crate) fn clear_preview_attachments() -> io::Result<()> {
     Ok(())
 }
 
+/// Purge a single attachment's cached preview directory under the output gate.
+pub(crate) fn purge_attachment_preview(
+    credential_id: &str,
+    item_id: &str,
+    attachment_id: &str,
+) -> io::Result<()> {
+    if !crate::credential_slots::valid_id(credential_id)
+        || !is_safe_path_component(item_id)
+        || !is_safe_path_component(attachment_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid preview path component",
+        ));
+    }
+    let _output = crate::daemon::lock_session_outputs()?;
+    remove_preview_dir(
+        &preview_root()
+            .join(credential_id)
+            .join(item_id)
+            .join(attachment_id),
+    )
+}
+
 /// Clear previews explicitly, or clear one item's previews in the active slot.
 pub fn clean_previews(item_id: Option<&str>) -> io::Result<()> {
     let _output = crate::daemon::lock_session_outputs()?;

@@ -2,10 +2,11 @@ use clap::Subcommand;
 use omawarden_engine::attachment::get_attachment;
 use serde_json::{json, Value};
 use std::env;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use super::client::submit_attachment_upload;
+use super::client::{submit_attachment_delete, submit_attachment_upload};
 use super::io::emit_vault_error;
 
 #[derive(Subcommand)]
@@ -21,6 +22,22 @@ pub(crate) enum AttachmentAction {
             help = "Override stored attachment filename (single basename without separators)"
         )]
         name: Option<String>,
+        #[arg(long, help = "Output result in JSON format")]
+        json: bool,
+        #[arg(long, hide = true)]
+        expected_lock_generation: Option<u64>,
+    },
+    #[command(
+        visible_aliases = ["rm", "remove"],
+        about = "Delete an attachment from a vault cipher"
+    )]
+    Delete {
+        #[arg(long, required = true, help = "Target cipher ID")]
+        item_id: String,
+        #[arg(long, required = true, help = "Attachment ID to delete")]
+        attachment_id: String,
+        #[arg(long, short = 'y', help = "Skip interactive confirmation prompt")]
+        yes: bool,
         #[arg(long, help = "Output result in JSON format")]
         json: bool,
         #[arg(long, hide = true)]
@@ -103,6 +120,110 @@ pub(crate) fn run(action: AttachmentAction) -> ExitCode {
                             .get("error")
                             .and_then(Value::as_str)
                             .unwrap_or("Failed to upload attachment.");
+                        eprintln!("Error: {msg}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        AttachmentAction::Delete {
+            item_id,
+            attachment_id,
+            yes,
+            json,
+            expected_lock_generation,
+        } => {
+            let is_interactive = (io::stdin().is_terminal()
+                || std::env::var_os("OMA_FORCE_PROMPT").is_some())
+                && !json;
+            if !yes && !is_interactive {
+                emit_vault_error(
+                    json,
+                    "Confirmation required to delete an attachment. Pass --yes to confirm in non-interactive or --json mode.",
+                );
+                return ExitCode::FAILURE;
+            }
+
+            if !yes {
+                // Ensure the daemon is running, supports attachment_delete, and is unlocked
+                // before looking up the attachment filename and cipher name for the prompt.
+                let ping = match omawarden_engine::daemon::ensure_daemon_capability(
+                    omawarden_engine::daemon::CAPABILITY_ATTACHMENT_DELETE,
+                ) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        emit_vault_error(json, &err);
+                        return ExitCode::FAILURE;
+                    }
+                };
+                if ping["unlocked"] != true {
+                    emit_vault_error(json, "Unlock the vault before deleting an attachment.");
+                    return ExitCode::FAILURE;
+                }
+
+                let mut cipher_name = item_id.clone();
+                let mut attachment_name = attachment_id.clone();
+                if let Some(resp) = omawarden_engine::daemon::send_daemon_request(&json!({
+                    "action": "get_item",
+                    "query": item_id,
+                })) {
+                    if resp["ok"] == true {
+                        if let Some(name) = resp["item"]["name"].as_str().filter(|s| !s.is_empty())
+                        {
+                            cipher_name = name.to_string();
+                        }
+                        if let Some(atts) = resp["item"]["attachments"].as_array() {
+                            if let Some(found) = atts.iter().find(|a| {
+                                a.get("id").and_then(Value::as_str) == Some(attachment_id.as_str())
+                            }) {
+                                if let Some(fname) = found
+                                    .get("fileName")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    attachment_name = fname.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                eprint!("Delete attachment '{attachment_name}' from '{cipher_name}'? [y/N]: ");
+                let _ = io::stderr().flush();
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer).is_err() {
+                    eprintln!("Aborted.");
+                    return ExitCode::FAILURE;
+                }
+                let trimmed = answer.trim().to_ascii_lowercase();
+                if trimmed != "y" && trimmed != "yes" {
+                    eprintln!("Aborted.");
+                    return ExitCode::FAILURE;
+                }
+            }
+
+            match submit_attachment_delete(&item_id, &attachment_id, expected_lock_generation) {
+                Ok(resp) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                    } else {
+                        let file_name = resp["file_name"].as_str().unwrap_or(&attachment_id);
+                        let item_name = resp["item"]["name"].as_str().unwrap_or(&item_id);
+                        println!(
+                            "Deleted attachment '{}' ({}) from '{}' [{}]",
+                            file_name, attachment_id, item_name, item_id
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(err_val) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&err_val).unwrap());
+                    } else {
+                        let msg = err_val
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Failed to delete attachment.");
                         eprintln!("Error: {msg}");
                     }
                     ExitCode::FAILURE

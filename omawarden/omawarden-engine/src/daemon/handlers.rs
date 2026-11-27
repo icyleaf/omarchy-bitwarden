@@ -93,6 +93,7 @@ pub fn handle_client_with_peer(
                 | "folder_delete"
                 | "folder_resolve"
                 | "attachment_upload"
+                | "attachment_delete"
                 | "sync"
         )
         || ((action == "stop" || action == "set_auto_lock") && is_unlocked);
@@ -220,14 +221,15 @@ pub fn handle_client_with_peer(
         );
         return Ok(());
     }
-    if matches!(action, "get_attachment_key" | "attachment_upload")
-        && req.get("expected_lock_generation").is_some_and(|expected| {
-            let parsed = expected
-                .as_u64()
-                .or_else(|| expected.as_str().and_then(|s| s.parse::<u64>().ok()));
-            session.is_none_or(|s| parsed != Some(s.generation))
-        })
-    {
+    if matches!(
+        action,
+        "get_attachment_key" | "attachment_upload" | "attachment_delete"
+    ) && req.get("expected_lock_generation").is_some_and(|expected| {
+        let parsed = expected
+            .as_u64()
+            .or_else(|| expected.as_str().and_then(|s| s.parse::<u64>().ok()));
+        session.is_none_or(|s| parsed != Some(s.generation))
+    }) {
         return writeln!(
             stream,
             "{}",
@@ -687,6 +689,20 @@ pub fn handle_client_with_peer(
                 file_name,
                 client_context.as_ref(),
             ) {
+                Ok(resp) => resp,
+                Err(err) => json!({ "ok": false, "error": err }),
+            }
+        }
+        "attachment_delete" => {
+            let item_id = req.get("item_id").and_then(Value::as_str).unwrap_or("");
+            let attachment_id = req
+                .get("attachment_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match state
+                .vault_mgr
+                .delete_attachment(item_id, attachment_id, client_context.as_ref())
+            {
                 Ok(resp) => resp,
                 Err(err) => json!({ "ok": false, "error": err }),
             }

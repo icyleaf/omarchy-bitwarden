@@ -164,6 +164,9 @@ pub const CAPABILITY_ORG_WRITE: &str = "org_write";
 /// Capability identifier for Attachment V2 upload (`attachment_upload`) (ADR-0037).
 pub const CAPABILITY_ATTACHMENT_UPLOAD: &str = "attachment_upload";
 
+/// Capability identifier for Attachment V2 deletion (`attachment_delete`) (ADR-0037).
+pub const CAPABILITY_ATTACHMENT_DELETE: &str = "attachment_delete";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
@@ -173,6 +176,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     CAPABILITY_VAULT_GET,
     CAPABILITY_ORG_WRITE,
     CAPABILITY_ATTACHMENT_UPLOAD,
+    CAPABILITY_ATTACHMENT_DELETE,
 ];
 
 /// Returns `true` when a `ping` response advertises the requested Daemon Capability.
