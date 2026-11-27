@@ -1064,6 +1064,58 @@ impl AuthManager {
     }
 }
 
+/// Orchestrates an interactive two-factor authentication login flow using
+/// caller-injected callbacks for email dispatch, code prompting, and login submission.
+pub fn complete_interactive_two_factor<FEmail, FPrompt, FSubmit>(
+    chosen_provider: i32,
+    initial_result: AuthResult,
+    mut send_email: FEmail,
+    mut prompt_code: FPrompt,
+    mut submit_login: FSubmit,
+) -> AuthResult
+where
+    FEmail: FnMut() -> Result<(), String>,
+    FPrompt: FnMut(&str) -> String,
+    FSubmit: FnMut(Option<&str>, i32) -> AuthResult,
+{
+    if chosen_provider == 7 {
+        crate::log_info!(
+            "omawarden:auth",
+            "Requesting WebAuthn challenge from server..."
+        );
+        return submit_login(None, 7);
+    }
+
+    if chosen_provider == 1 {
+        if let Err(err) = send_email() {
+            return AuthResult {
+                ok: false,
+                status: Some("two_factor_required".to_string()),
+                error: Some(format!(
+                    "Failed to send two-factor verification email: {err}"
+                )),
+                two_factor_required: Some(true),
+                two_factor_providers: initial_result.two_factor_providers,
+                two_factor_provider: Some(1),
+                two_factor_providers2: initial_result.two_factor_providers2,
+                ..Default::default()
+            };
+        }
+    }
+
+    let prompt_label = match chosen_provider {
+        1 => "Enter Email Two-Factor Verification Code (check your email): ",
+        3 => "Touch your YubiKey or enter OTP: ",
+        _ => "Enter Two-Factor (2FA) Code: ",
+    };
+    let entered = prompt_code(prompt_label);
+    let trimmed = entered.trim();
+    if trimmed.is_empty() {
+        return initial_result;
+    }
+    submit_login(Some(trimmed), chosen_provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2632,5 +2684,103 @@ esac
         );
 
         let _ = handle.join();
+    }
+
+    #[test]
+    fn test_interactive_email_2fa_sends_verification_email_before_prompt() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let initial = AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![0, 1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            1,
+            initial,
+            || {
+                events.borrow_mut().push("send_email");
+                Ok(())
+            },
+            |label| {
+                events.borrow_mut().push("prompt");
+                assert!(label.contains("Email"));
+                "123456".to_string()
+            },
+            |code, provider| {
+                events.borrow_mut().push("submit");
+                assert_eq!(code, Some("123456"));
+                assert_eq!(provider, 1);
+                AuthResult {
+                    ok: true,
+                    ..Default::default()
+                }
+            },
+        );
+
+        assert!(result.ok);
+        assert_eq!(*events.borrow(), vec!["send_email", "prompt", "submit"]);
+    }
+
+    #[test]
+    fn test_interactive_email_2fa_aborts_prompt_when_send_email_fails() {
+        let mut prompted = false;
+        let initial = AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            1,
+            initial,
+            || Err("SMTP unavailable".to_string()),
+            |_| {
+                prompted = true;
+                "000000".to_string()
+            },
+            |_, _| unreachable!("submit should not run when send_email fails"),
+        );
+
+        assert!(!result.ok);
+        assert!(!prompted);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("SMTP unavailable")));
+    }
+
+    #[test]
+    fn test_interactive_totp_2fa_does_not_send_email() {
+        let mut sent_email = false;
+        let initial = AuthResult {
+            ok: false,
+            two_factor_required: Some(true),
+            two_factor_providers: Some(vec![0, 1]),
+            ..Default::default()
+        };
+
+        let result = complete_interactive_two_factor(
+            0,
+            initial,
+            || {
+                sent_email = true;
+                Ok(())
+            },
+            |_| "654321".to_string(),
+            |code, provider| {
+                assert_eq!(code, Some("654321"));
+                assert_eq!(provider, 0);
+                AuthResult {
+                    ok: true,
+                    ..Default::default()
+                }
+            },
+        );
+
+        assert!(result.ok);
+        assert!(!sent_email);
     }
 }

@@ -7,8 +7,16 @@ A native, zero-knowledge Bitwarden and Vaultwarden desktop overlay and daemon fo
 ### Core & Execution
 
 **Omawarden**:
-The resident pure-Rust background daemon and CLI engine that executes cryptographic derivation, in-memory vault indexing, and secret isolation.
+The pure-Rust zero-knowledge product as a whole, made of the **Omawarden Engine** and the **Omawarden CLI**.
 _Avoid_: Backend service, runner daemon, helper process
+
+**Omawarden Engine**:
+The zero-knowledge core of Omawarden, including the resident daemon, that performs cryptographic derivation, in-memory vault indexing, secret isolation, and server communication without any terminal interaction. Every frontend (Omawarden CLI, Overlay, Omawarden App) reaches vault behavior only through it.
+_Avoid_: Core, backend, library layer
+
+**Omawarden CLI**:
+The terminal frontend of Omawarden that parses commands, reads terminal input, renders human-readable or JSON output, and delegates every vault behavior to the Omawarden Engine.
+_Avoid_: Engine, command runner, CLI core
 
 **Overlay**:
 The Spotlight-style floating QML desktop window that provides keyboard-driven search, credential inspection, and actions.

@@ -1,7 +1,7 @@
 //! End-to-end CLI ↔ Daemon IPC integration tests for `omawarden vault get`
 //! and `ping.capabilities` (Daemon Capabilities) gating (#446, #447, #448, #449).
 
-use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};

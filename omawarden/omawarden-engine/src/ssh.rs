@@ -2,33 +2,17 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use clap::ValueEnum;
 use rand_core::OsRng;
 use ssh_key::private::{EcdsaKeypair, Ed25519Keypair, RsaKeypair};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SshAlgorithm {
     #[default]
-    #[value(name = "ed25519", alias = "ED25519")]
     Ed25519,
-    #[value(name = "rsa-2048", alias = "rsa2048", alias = "RSA-2048")]
     Rsa2048,
-    #[value(name = "rsa-4096", alias = "rsa4096", alias = "RSA-4096")]
     Rsa4096,
-    #[value(
-        name = "ecdsa-p256",
-        alias = "ecdsa256",
-        alias = "p256",
-        alias = "P-256"
-    )]
     EcdsaP256,
-    #[value(
-        name = "ecdsa-p384",
-        alias = "ecdsa384",
-        alias = "p384",
-        alias = "P-384"
-    )]
     EcdsaP384,
 }
 

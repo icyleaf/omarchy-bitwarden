@@ -77,6 +77,836 @@ pub enum CipherTargetResolution {
     NotFound(String),
 }
 
+/// Normalizes an optional Organization ID by trimming whitespace and dropping empty strings.
+pub fn normalize_organization_id(organization_id: Option<&str>) -> Option<String> {
+    organization_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Normalizes and deduplicates Collection IDs (trimmed, non-empty, order-preserving).
+pub fn normalize_collection_ids(collection_ids: &[String]) -> Vec<String> {
+    let mut clean: Vec<String> = Vec::new();
+    for cid in collection_ids {
+        let trimmed = cid.trim();
+        if !trimmed.is_empty() && !clean.iter().any(|c| c == trimmed) {
+            clean.push(trimmed.to_string());
+        }
+    }
+    clean
+}
+
+/// Validates and normalizes Organization & Collection scope for Cipher creation.
+pub fn validate_org_create_scope(
+    organization_id: Option<&str>,
+    collection_ids: &[String],
+) -> Result<(Option<String>, Vec<String>), String> {
+    let org_id = normalize_organization_id(organization_id);
+    let clean_cols = normalize_collection_ids(collection_ids);
+    if org_id.is_some() && clean_cols.is_empty() {
+        return Err(
+            "You must select at least one collection (--collection-id) for an Organization cipher."
+                .to_string(),
+        );
+    }
+    if org_id.is_none() && !clean_cols.is_empty() {
+        return Err("Collection IDs require --organization-id.".to_string());
+    }
+    Ok((org_id, clean_cols))
+}
+
+/// Validates and normalizes Organization & Collection scope for Cipher sharing.
+pub fn validate_org_share_scope(
+    organization_id: &str,
+    collection_ids: &[String],
+) -> Result<(String, Vec<String>), String> {
+    let trimmed_org_id = organization_id.trim().to_string();
+    if trimmed_org_id.is_empty() {
+        return Err("Target Organization ID is required to share a cipher.".to_string());
+    }
+    let clean_cols = normalize_collection_ids(collection_ids);
+    if clean_cols.is_empty() {
+        return Err(
+            "You must specify at least one collection (--collection-id) to share a cipher."
+                .to_string(),
+        );
+    }
+    Ok((trimmed_org_id, clean_cols))
+}
+
+/// Decrypted Cipher returned from either the live daemon or offline cache fallback,
+/// paired with its clipboard isolation scope.
+pub struct VaultOutputItem {
+    pub item: VaultItem,
+    pub scope: Option<crate::clipboard::ClipboardScope>,
+}
+
+/// Ensures an unlocked symmetric user key is available, falling back to the
+/// caller-injected master password callback when the vault is currently locked.
+pub fn ensure_unlocked_user_key<F>(
+    vault_mgr: &VaultManager,
+    st: &VaultStorage,
+    read_unlock_password: F,
+) -> Result<SymmetricCryptoKey, String>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    if st.enc_user_key.is_none() {
+        return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
+    }
+    st.check_unlock_credentials()?;
+    if let Some(key) = vault_mgr.get_user_key() {
+        return Ok(key);
+    }
+
+    let context = crate::daemon::send_daemon_request(&json!({ "action": "ping" }))
+        .and_then(|reply| reply["unlock_context"].as_str().map(str::to_owned));
+    let pwd = read_unlock_password().unwrap_or_else(|| zeroize::Zeroizing::new(String::new()));
+    if pwd.is_empty() {
+        return Err("Vault is locked. Please unlock the vault first using 'omawarden auth unlock' or provide Master Password.".to_string());
+    }
+
+    let user_key = vault_mgr
+        .storage_mgr
+        .unlock_user_key(&pwd, st)
+        .map_err(|e| format!("Unlock failed: {:?}", e))?;
+
+    if let Some(context) = context {
+        let _ = crate::daemon::send_daemon_request(&json!({
+            "action": "unlock", "password": pwd.as_str(), "expected_unlock_context": context,
+            "expected_credential_id": st.credential_id
+        }));
+    }
+
+    Ok(user_key)
+}
+
+/// Retrieves a decrypted `VaultItem` from the unlocked daemon, falling back to
+/// local offline cache decryption when the daemon is locked or unavailable.
+pub fn vault_output_item<F>(
+    cfg: &crate::config::Config,
+    query: &str,
+    touch: bool,
+    read_unlock_password: F,
+) -> Result<Option<VaultOutputItem>, String>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    let _ = crate::daemon::ensure_daemon_running();
+    let unlocked = crate::daemon::send_daemon_request(&json!({ "action": "status" }))
+        .is_some_and(|reply| reply["is_unlocked"] == true);
+    if unlocked {
+        let Some(mut reply) = crate::daemon::send_daemon_request(&json!({
+            "action": "get_item", "query": query, "touch": touch
+        }))
+        .filter(|reply| reply["ok"] == true) else {
+            return Ok(None);
+        };
+        let scope = reply["lock_generation"]
+            .as_u64()
+            .map(crate::clipboard::ClipboardScope::Session);
+        return Ok(serde_json::from_value(reply["item"].take())
+            .ok()
+            .map(|item| VaultOutputItem { item, scope }));
+    }
+
+    let vault =
+        VaultManager::with_identity_url(&cfg.server_url, cfg.identity_url.as_deref(), None, None);
+    let storage = vault.storage_mgr.load();
+    let key = ensure_unlocked_user_key(&vault, &storage, read_unlock_password)?;
+    let query_lower = query.to_lowercase();
+    let item = decrypt_sync_ciphers_with_context(
+        &storage.ciphers,
+        &storage.folders,
+        &storage.organizations,
+        &key,
+        storage.enc_private_key.as_deref(),
+    )
+    .into_iter()
+    .find(|item| {
+        item.deleted_at.is_none()
+            && (item.id == query
+                || item.name.eq_ignore_ascii_case(query)
+                || item.name.to_lowercase().contains(&query_lower))
+    });
+    Ok(item.map(|item| VaultOutputItem {
+        item,
+        scope: storage
+            .credential_id
+            .map(|credential_id| crate::clipboard::ClipboardScope::Cache {
+                path: vault.storage_mgr.file_path,
+                credential_id,
+            }),
+    }))
+}
+
+/// Generated TOTP code paired with optional Vault item identity and clipboard scope.
+pub struct TotpOutput {
+    pub result: crate::totp::TotpResult,
+    pub item: Option<(String, String)>,
+    pub scope: Option<crate::clipboard::ClipboardScope>,
+}
+
+impl TotpOutput {
+    pub fn standalone(secret: &str) -> Option<Self> {
+        crate::totp::generate_totp(secret, None, 6, 30).map(|result| Self {
+            result,
+            item: None,
+            scope: None,
+        })
+    }
+}
+
+/// Resolves TOTP output for a vault item query (falling back to treating `query` as a standalone seed).
+pub fn resolve_totp_for_query<F>(
+    cfg: &crate::config::Config,
+    query: &str,
+    copy: bool,
+    read_unlock_password: F,
+) -> Result<Option<TotpOutput>, String>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    let Some(found) = vault_output_item(cfg, query, false, read_unlock_password)
+        .ok()
+        .flatten()
+    else {
+        return Ok(TotpOutput::standalone(query));
+    };
+    if copy && found.scope.is_none() {
+        return Err("Could not verify the clipboard source session.".to_string());
+    }
+    let output = found
+        .item
+        .login
+        .as_ref()
+        .and_then(|login| login["totp"].as_str())
+        .and_then(|seed| crate::totp::generate_totp(seed, None, 6, 30));
+    Ok(output.map(|result| TotpOutput {
+        result,
+        item: Some((found.item.id, found.item.name)),
+        scope: found.scope,
+    }))
+}
+
+/// Resolves TOTP output directly from the running daemon for a vault item query or ID.
+pub fn resolve_totp_from_daemon(query: &str, copy: bool) -> Result<Option<TotpOutput>, String> {
+    let Some(reply) =
+        crate::daemon::send_daemon_request(&json!({ "action": "totp", "query": query }))
+            .filter(|reply| reply["ok"] == true)
+    else {
+        return Ok(None);
+    };
+    let scope = reply["lock_generation"]
+        .as_u64()
+        .map(crate::clipboard::ClipboardScope::Session);
+    if copy && scope.is_none() {
+        return Err("Could not verify the clipboard source session.".to_string());
+    }
+    Ok(reply["code"].as_str().map(|code| TotpOutput {
+        result: crate::totp::TotpResult {
+            code: code.to_owned(),
+            ttl: reply["ttl"].as_u64().unwrap_or(30),
+            period: reply["period"].as_u64().unwrap_or(30),
+        },
+        item: reply["id"]
+            .as_str()
+            .zip(reply["name"].as_str())
+            .map(|(id, name)| (id.to_owned(), name.to_owned())),
+        scope,
+    }))
+}
+
+/// Resolved field value and sensitivity metadata for `vault get <target> <field>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedVaultField {
+    pub field_name: String,
+    pub sensitive: bool,
+    pub text: String,
+    pub json_value: Value,
+    pub totp_meta: Option<(u64, u64)>,
+}
+
+fn lookup_custom_field(item: &VaultItem, query: &str) -> Result<ResolvedVaultField, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err("Custom field name cannot be empty.".to_string());
+    }
+
+    let exact = item
+        .fields
+        .iter()
+        .find(|f| f.get("name").and_then(Value::as_str) == Some(trimmed));
+    let matched = exact.or_else(|| {
+        item.fields.iter().find(|f| {
+            f.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.eq_ignore_ascii_case(trimmed))
+        })
+    });
+
+    let Some(field) = matched else {
+        return Err(format!(
+            "Field '{}' not found on cipher '{}'.",
+            trimmed, item.name
+        ));
+    };
+
+    let name = field
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(trimmed)
+        .to_string();
+    let value = field
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if value.is_empty() {
+        return Err(format!(
+            "Custom field '{}' is empty on cipher '{}'.",
+            name, item.name
+        ));
+    }
+    let ftype = field.get("type").and_then(Value::as_i64).unwrap_or(0);
+    Ok(ResolvedVaultField {
+        field_name: name,
+        sensitive: ftype == 1,
+        json_value: json!(value),
+        text: value,
+        totp_meta: None,
+    })
+}
+
+fn require_non_empty_field(
+    item: &VaultItem,
+    field_name: &str,
+    val: Option<String>,
+    sensitive: bool,
+) -> Result<ResolvedVaultField, String> {
+    match val {
+        Some(v) if !v.is_empty() => Ok(ResolvedVaultField {
+            field_name: field_name.to_string(),
+            sensitive,
+            json_value: json!(v),
+            text: v,
+            totp_meta: None,
+        }),
+        _ => Err(format!(
+            "Field '{}' is empty or not set on cipher '{}'.",
+            field_name, item.name
+        )),
+    }
+}
+
+/// Resolves a `vault get` field selector across all 5 Cipher types (Login, Secure Note,
+/// Card, Identity, SSH Key) plus Custom Field fallback, with sensitivity classification.
+pub fn resolve_vault_get_field(
+    item: &VaultItem,
+    raw_selector: &str,
+) -> Result<ResolvedVaultField, String> {
+    let trimmed = raw_selector.trim();
+    if trimmed.is_empty() {
+        return Err("Field selector cannot be empty.".to_string());
+    }
+
+    // Explicit `custom.<name>` bypasses built-in selectors (UTF-8 safe boundary check)
+    if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("custom."))
+    {
+        return lookup_custom_field(item, &trimmed[7..]);
+    }
+
+    let normalized = trimmed.to_ascii_lowercase().replace('-', "_");
+
+    // Common selectors across all 5 Cipher types
+    match normalized.as_str() {
+        "id" => return require_non_empty_field(item, "id", Some(item.id.clone()), false),
+        "name" => return require_non_empty_field(item, "name", Some(item.name.clone()), false),
+        "type" => {
+            return require_non_empty_field(item, "type", Some(item.type_name.clone()), false)
+        }
+        "notes" => {
+            return require_non_empty_field(item, "notes", item.notes.clone(), item.item_type == 2)
+        }
+        "folder" => {
+            return require_non_empty_field(item, "folder", item.folder_name.clone(), false)
+        }
+        "folder_id" => {
+            return require_non_empty_field(item, "folder_id", item.folder_id.clone(), false)
+        }
+        "organization_id" => {
+            return require_non_empty_field(
+                item,
+                "organization_id",
+                item.organization_id.clone(),
+                false,
+            )
+        }
+        "favorite" => {
+            return Ok(ResolvedVaultField {
+                field_name: "favorite".to_string(),
+                sensitive: false,
+                text: item.favorite.to_string(),
+                json_value: json!(item.favorite),
+                totp_meta: None,
+            });
+        }
+        "created_at" => {
+            return require_non_empty_field(item, "created_at", item.created_at.clone(), false)
+        }
+        "updated_at" => {
+            return require_non_empty_field(item, "updated_at", item.updated_at.clone(), false)
+        }
+        _ => {}
+    }
+
+    // Login (Type 1) selectors
+    if matches!(
+        normalized.as_str(),
+        "username" | "password" | "uri" | "uris" | "totp" | "totp_secret"
+    ) {
+        if item.item_type != 1 {
+            return Err(format!(
+                "Field '{}' is only valid for login ciphers (cipher '{}' is type '{}').",
+                normalized, item.name, item.type_name
+            ));
+        }
+        let login = item.login.as_ref();
+        return match normalized.as_str() {
+            "username" => require_non_empty_field(
+                item,
+                "username",
+                login
+                    .and_then(|l| l.get("username"))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                false,
+            ),
+            "password" => require_non_empty_field(
+                item,
+                "password",
+                login
+                    .and_then(|l| l.get("password"))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                true,
+            ),
+            "uri" => {
+                let first_uri = login
+                    .and_then(|l| l.get("uris"))
+                    .and_then(Value::as_array)
+                    .and_then(|arr| {
+                        arr.iter().find_map(|u| {
+                            u.get("uri")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                        })
+                    });
+                require_non_empty_field(item, "uri", first_uri, false)
+            }
+            "uris" => {
+                let entries: Vec<Value> = login
+                    .and_then(|l| l.get("uris"))
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|u| {
+                                let uri = u
+                                    .get("uri")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())?;
+                                let m = u.get("match").cloned().unwrap_or(Value::Null);
+                                Some(json!({ "uri": uri, "match": m }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    return Err(format!(
+                        "Field 'uris' is empty or not set on cipher '{}'.",
+                        item.name
+                    ));
+                }
+                let text = entries
+                    .iter()
+                    .filter_map(|u| u.get("uri").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ResolvedVaultField {
+                    field_name: "uris".to_string(),
+                    sensitive: false,
+                    text,
+                    json_value: Value::Array(entries),
+                    totp_meta: None,
+                })
+            }
+            "totp" => {
+                let seed = login
+                    .and_then(|l| l.get("totp"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "Field 'totp' is empty or not configured on cipher '{}'.",
+                            item.name
+                        )
+                    })?;
+                let res = crate::totp::generate_totp(seed, None, 6, 30).ok_or_else(|| {
+                    format!("Cipher '{}' has an invalid TOTP configuration.", item.name)
+                })?;
+                Ok(ResolvedVaultField {
+                    field_name: "totp".to_string(),
+                    sensitive: true,
+                    json_value: json!(res.code),
+                    text: res.code,
+                    totp_meta: Some((res.ttl, res.period)),
+                })
+            }
+            "totp_secret" => require_non_empty_field(
+                item,
+                "totp_secret",
+                login
+                    .and_then(|l| l.get("totp"))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                true,
+            ),
+            _ => unreachable!(),
+        };
+    }
+
+    // Card (Type 3) selectors
+    if let Some(card_sub) = normalized.strip_prefix("card.") {
+        let (json_key, sensitive) = match card_sub {
+            "cardholder_name" => ("cardholderName", false),
+            "brand" => ("brand", false),
+            "number" => ("number", true),
+            "exp_month" => ("expMonth", false),
+            "exp_year" => ("expYear", false),
+            "code" => ("code", true),
+            _ => return lookup_custom_field(item, trimmed),
+        };
+        if item.item_type != 3 {
+            return Err(format!(
+                "Field '{}' is only valid for card ciphers (cipher '{}' is type '{}').",
+                normalized, item.name, item.type_name
+            ));
+        }
+        let val = item
+            .card
+            .as_ref()
+            .and_then(|c| c.get(json_key))
+            .and_then(Value::as_str)
+            .map(String::from);
+        return require_non_empty_field(item, &normalized, val, sensitive);
+    }
+
+    // Identity (Type 4) selectors
+    if let Some(id_sub) = normalized.strip_prefix("identity.") {
+        let (json_key, sensitive) = match id_sub {
+            "title" => ("title", false),
+            "first_name" => ("firstName", false),
+            "middle_name" => ("middleName", false),
+            "last_name" => ("lastName", false),
+            "address1" => ("address1", false),
+            "address2" => ("address2", false),
+            "address3" => ("address3", false),
+            "city" => ("city", false),
+            "state" => ("state", false),
+            "postal_code" => ("postalCode", false),
+            "country" => ("country", false),
+            "company" => ("company", false),
+            "email" => ("email", false),
+            "phone" => ("phone", false),
+            "ssn" => ("ssn", true),
+            "username" => ("username", false),
+            "passport_number" => ("passportNumber", true),
+            "license_number" => ("licenseNumber", true),
+            _ => return lookup_custom_field(item, trimmed),
+        };
+        if item.item_type != 4 {
+            return Err(format!(
+                "Field '{}' is only valid for identity ciphers (cipher '{}' is type '{}').",
+                normalized, item.name, item.type_name
+            ));
+        }
+        let val = item
+            .identity
+            .as_ref()
+            .and_then(|id| id.get(json_key))
+            .and_then(Value::as_str)
+            .map(String::from);
+        return require_non_empty_field(item, &normalized, val, sensitive);
+    }
+
+    // SSH Key (Type 5) selectors & short aliases
+    if let Some((canonical, sensitive)) = match normalized.as_str() {
+        "ssh.private_key" | "private_key" => Some(("ssh.private_key", true)),
+        "ssh.public_key" | "public_key" => Some(("ssh.public_key", false)),
+        "ssh.fingerprint" | "fingerprint" => Some(("ssh.fingerprint", false)),
+        "ssh.passphrase" | "passphrase" => Some(("ssh.passphrase", true)),
+        _ => None,
+    } {
+        if item.item_type != 5 {
+            return Err(format!(
+                "Field '{}' is only valid for ssh_key ciphers (cipher '{}' is type '{}').",
+                canonical, item.name, item.type_name
+            ));
+        }
+        let val = match canonical {
+            "ssh.private_key" => item.ssh_key.as_ref().and_then(|s| s.private_key.clone()),
+            "ssh.public_key" => item.ssh_key.as_ref().and_then(|s| s.public_key.clone()),
+            "ssh.fingerprint" => item.ssh_key.as_ref().and_then(|s| s.fingerprint.clone()),
+            "ssh.passphrase" => item
+                .ssh_key
+                .as_ref()
+                .and_then(|s| s.passphrase.clone())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    item.fields.iter().find_map(|f| {
+                        let n = f.get("name").and_then(Value::as_str)?;
+                        if n.eq_ignore_ascii_case("passphrase") {
+                            f.get("value")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                }),
+            _ => None,
+        };
+        return require_non_empty_field(item, canonical, val, sensitive);
+    }
+
+    // Fallback to Custom Field lookup
+    lookup_custom_field(item, trimmed)
+}
+
+/// Selector for extracting a clipboard copy value from a `VaultItem`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFieldSelector<'a> {
+    Default,
+    Username,
+    Password,
+    Totp,
+    Notes,
+    PublicKey,
+    PrivateKey,
+    CustomField(&'a str),
+}
+
+/// Resolved clipboard field value and sensitivity classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCopyField {
+    pub field_name: String,
+    pub value: String,
+    pub sensitive: bool,
+}
+
+/// Extracts the requested field from a `VaultItem` for clipboard copying,
+/// returning its canonical field name, value, and sensitivity classification.
+pub fn resolve_copy_field(
+    item: &VaultItem,
+    selector: CopyFieldSelector<'_>,
+) -> Result<ResolvedCopyField, String> {
+    let (field_name, value, sensitive) = match selector {
+        CopyFieldSelector::Username => {
+            let u = item
+                .login
+                .as_ref()
+                .and_then(|l| l.get("username"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    item.identity
+                        .as_ref()
+                        .and_then(|id| id.get("username"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    item.identity
+                        .as_ref()
+                        .and_then(|id| id.get("email"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or_default()
+                .to_string();
+            ("username".to_string(), u, false)
+        }
+        CopyFieldSelector::Totp => {
+            let seed = item
+                .login
+                .as_ref()
+                .and_then(|l| l.get("totp"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if let Some(t_res) = crate::totp::generate_totp(seed, None, 6, 30) {
+                ("totp".to_string(), t_res.code, true)
+            } else {
+                return Err("Item has no valid TOTP configuration".to_string());
+            }
+        }
+        CopyFieldSelector::Notes => (
+            "notes".to_string(),
+            item.notes.clone().unwrap_or_default(),
+            false,
+        ),
+        CopyFieldSelector::PublicKey => {
+            let pk = item
+                .ssh_key
+                .as_ref()
+                .and_then(|s| s.public_key.as_deref())
+                .or_else(|| {
+                    item.card
+                        .as_ref()
+                        .and_then(|c| c.get("number"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or_default()
+                .to_string();
+            ("public_key".to_string(), pk, false)
+        }
+        CopyFieldSelector::PrivateKey => {
+            let privk = item
+                .ssh_key
+                .as_ref()
+                .and_then(|s| s.private_key.as_deref())
+                .or_else(|| {
+                    item.card
+                        .as_ref()
+                        .and_then(|c| c.get("code"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or_default()
+                .to_string();
+            ("private_key".to_string(), privk, true)
+        }
+        CopyFieldSelector::CustomField(field_name_query) => {
+            let field_name_lower = field_name_query.to_lowercase();
+            let mut found_field = None;
+            let mut found_field_type = 0i64;
+            let mut found_field_name = field_name_query.to_string();
+
+            for f in &item.fields {
+                let name = f.get("name").and_then(Value::as_str).unwrap_or("");
+                let field_type = f.get("type").and_then(Value::as_i64).unwrap_or(0);
+
+                if name == field_name_query {
+                    found_field = f.get("value").and_then(Value::as_str).map(str::to_string);
+                    found_field_type = field_type;
+                    found_field_name = name.to_string();
+                    break;
+                }
+                if name.to_lowercase() == field_name_lower {
+                    found_field = f.get("value").and_then(Value::as_str).map(str::to_string);
+                    found_field_type = field_type;
+                    found_field_name = name.to_string();
+                    break;
+                }
+            }
+
+            let field_value = match found_field {
+                Some(v) => v,
+                None => {
+                    let available: Vec<String> = item
+                        .fields
+                        .iter()
+                        .filter_map(|f| f.get("name").and_then(Value::as_str).map(str::to_string))
+                        .collect();
+                    let error_msg = if available.is_empty() {
+                        format!("Item '{}' has no custom fields", item.name)
+                    } else {
+                        format!(
+                            "Custom field '{}' not found on item '{}'. Available fields: {}",
+                            field_name_query,
+                            item.name,
+                            available.join(", ")
+                        )
+                    };
+                    return Err(error_msg);
+                }
+            };
+
+            let is_sensitive = found_field_type == 1;
+            (found_field_name, field_value, is_sensitive)
+        }
+        CopyFieldSelector::Password => {
+            let pwd = item
+                .login
+                .as_ref()
+                .and_then(|l| l.get("password"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            ("password".to_string(), pwd, true)
+        }
+        CopyFieldSelector::Default => match item.type_name.as_str() {
+            "login" => {
+                let pwd = item
+                    .login
+                    .as_ref()
+                    .and_then(|l| l.get("password"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ("password".to_string(), pwd, true)
+            }
+            "ssh_key" => {
+                let privk = item
+                    .ssh_key
+                    .as_ref()
+                    .and_then(|s| s.private_key.as_deref())
+                    .unwrap_or_default()
+                    .to_string();
+                ("private_key".to_string(), privk, true)
+            }
+            "card" => {
+                let num = item
+                    .card
+                    .as_ref()
+                    .and_then(|c| c.get("number"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ("card_number".to_string(), num, true)
+            }
+            "note" => (
+                "notes".to_string(),
+                item.notes.clone().unwrap_or_default(),
+                false,
+            ),
+            _ => {
+                let val = item
+                    .login
+                    .as_ref()
+                    .and_then(|l| l.get("password"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ("password".to_string(), val, true)
+            }
+        },
+    };
+
+    if value.is_empty() {
+        return Err(format!(
+            "Field '{}' is empty for item '{}'",
+            field_name, item.name
+        ));
+    }
+
+    Ok(ResolvedCopyField {
+        field_name,
+        value,
+        sensitive,
+    })
+}
+
 pub(crate) fn extract_cipher_permissions(raw: &Value, is_org: bool) -> (bool, bool, bool, bool) {
     let default_val = !is_org;
     let edit = raw
@@ -3848,5 +4678,156 @@ esac
         );
 
         let _ = handle.join();
+    }
+
+    #[test]
+    fn local_decryption_rejects_an_unscoped_cache_even_with_a_cached_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StorageManager::new(dir.path().join("data.json"));
+        manager
+            .save(&VaultStorage {
+                enc_user_key: Some("wrapped-fixture-key".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let vault = VaultManager::new("", Some(manager), Some(KeyringManager::new("mock")));
+        *vault.is_unlocked.write().unwrap() = true;
+        *vault.user_key.write().unwrap() =
+            Some(SymmetricCryptoKey::from_raw_bytes(&[42; 64]).unwrap());
+        let result = ensure_unlocked_user_key(&vault, &vault.storage_mgr.load(), || None);
+        assert!(matches!(result, Err(error) if error.contains("Sign in again")));
+    }
+
+    #[test]
+    fn test_normalize_and_validate_org_collection_scope() {
+        assert_eq!(
+            normalize_organization_id(Some("  org-1  ")),
+            Some("org-1".to_string())
+        );
+        assert_eq!(normalize_organization_id(Some("   ")), None);
+        assert_eq!(normalize_organization_id(None), None);
+
+        let deduped = normalize_collection_ids(&[
+            " col-1 ".to_string(),
+            "".to_string(),
+            "col-2".to_string(),
+            "col-1".to_string(),
+            "  ".to_string(),
+        ]);
+        assert_eq!(deduped, vec!["col-1", "col-2"]);
+
+        assert!(validate_org_create_scope(Some("org-1"), &[]).is_err());
+        assert!(validate_org_create_scope(None, &["col-1".to_string()]).is_err());
+        let (org, cols) =
+            validate_org_create_scope(Some(" org-1 "), &["col-1".to_string(), "col-1".to_string()])
+                .unwrap();
+        assert_eq!(org.as_deref(), Some("org-1"));
+        assert_eq!(cols, vec!["col-1"]);
+
+        assert!(validate_org_share_scope("   ", &["col-1".to_string()]).is_err());
+        assert!(validate_org_share_scope("org-1", &["  ".to_string()]).is_err());
+        let (share_org, share_cols) = validate_org_share_scope(
+            " org-1 ",
+            &[
+                "col-2".to_string(),
+                "col-1".to_string(),
+                "col-2".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(share_org, "org-1");
+        assert_eq!(share_cols, vec!["col-2", "col-1"]);
+    }
+
+    #[test]
+    fn test_resolve_vault_get_and_copy_fields_across_cipher_types() {
+        let login = VaultItem {
+            id: "id-login".into(),
+            name: "GitHub".into(),
+            item_type: 1,
+            type_name: "login".into(),
+            login: Some(json!({
+                "username": "octocat",
+                "password": "s3cr3t",
+                "uris": [{ "uri": "https://github.com", "match": 0 }]
+            })),
+            fields: vec![
+                json!({ "name": "API Key", "value": "tok_123", "type": 1 }),
+                json!({ "name": "Env", "value": "prod", "type": 0 }),
+            ],
+            ..Default::default()
+        };
+        let pwd = resolve_vault_get_field(&login, "password").unwrap();
+        assert_eq!(pwd.text, "s3cr3t");
+        assert!(pwd.sensitive);
+        let user = resolve_vault_get_field(&login, "username").unwrap();
+        assert_eq!(user.text, "octocat");
+        assert!(!user.sensitive);
+        let hidden_cf = resolve_vault_get_field(&login, "custom.api key").unwrap();
+        assert_eq!(hidden_cf.text, "tok_123");
+        assert!(hidden_cf.sensitive);
+
+        let copy_default = resolve_copy_field(&login, CopyFieldSelector::Default).unwrap();
+        assert_eq!(copy_default.field_name, "password");
+        assert_eq!(copy_default.value, "s3cr3t");
+        assert!(copy_default.sensitive);
+
+        let copy_cf = resolve_copy_field(&login, CopyFieldSelector::CustomField("env")).unwrap();
+        assert_eq!(copy_cf.field_name, "Env");
+        assert_eq!(copy_cf.value, "prod");
+        assert!(!copy_cf.sensitive);
+
+        let card = VaultItem {
+            id: "id-card".into(),
+            name: "Corp Visa".into(),
+            item_type: 3,
+            type_name: "card".into(),
+            card: Some(json!({
+                "brand": "Visa",
+                "number": "4111111111111111",
+                "code": "123"
+            })),
+            ..Default::default()
+        };
+        let card_num = resolve_vault_get_field(&card, "card.number").unwrap();
+        assert_eq!(card_num.text, "4111111111111111");
+        assert!(card_num.sensitive);
+        assert!(resolve_vault_get_field(&card, "username").is_err());
+
+        let identity = VaultItem {
+            id: "id-ident".into(),
+            name: "Personal ID".into(),
+            item_type: 4,
+            type_name: "identity".into(),
+            identity: Some(json!({
+                "firstName": "Ada",
+                "ssn": "000-00-0000"
+            })),
+            ..Default::default()
+        };
+        let ssn = resolve_vault_get_field(&identity, "identity.ssn").unwrap();
+        assert!(ssn.sensitive);
+        assert_eq!(ssn.text, "000-00-0000");
+
+        let ssh = VaultItem {
+            id: "id-ssh".into(),
+            name: "Deploy Key".into(),
+            item_type: 5,
+            type_name: "ssh_key".into(),
+            ssh_key: Some(SshMetadata {
+                is_ssh_key: true,
+                key_type: "ed25519".into(),
+                private_key: Some("PRIVATE-KEY".into()),
+                public_key: Some("ssh-ed25519 AAAA".into()),
+                fingerprint: Some("SHA256:abc".into()),
+                passphrase: Some("pass123".into()),
+            }),
+            ..Default::default()
+        };
+        let fp = resolve_vault_get_field(&ssh, "fingerprint").unwrap();
+        assert_eq!(fp.field_name, "ssh.fingerprint");
+        assert!(!fp.sensitive);
+        let privk = resolve_vault_get_field(&ssh, "private_key").unwrap();
+        assert!(privk.sensitive);
     }
 }

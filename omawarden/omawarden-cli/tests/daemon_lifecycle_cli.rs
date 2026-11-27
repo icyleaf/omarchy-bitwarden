@@ -18,8 +18,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use omawarden::daemon::{DaemonServer, DaemonState};
-use omawarden::storage::StorageManager;
+use omawarden_engine::daemon::{DaemonServer, DaemonState};
+use omawarden_engine::storage::StorageManager;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
