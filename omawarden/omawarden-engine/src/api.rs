@@ -1460,6 +1460,165 @@ impl BitwardenApiClient {
         })
     }
 
+    /// Dedicated HTTP client for Attachment V2 uploads (no redirects or retries).
+    pub(crate) fn for_attachment_upload(
+        server: &str,
+        context: Option<&ClientContext>,
+    ) -> Result<Self, ApiError> {
+        let urls = EnvironmentUrls::resolve(server, None);
+        let client = http_client_builder(Duration::from_secs(300), context, Some(server), None)?
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
+        Ok(Self {
+            server_url: urls.base_url.clone(),
+            urls,
+            client,
+            client_init_error: None,
+        })
+    }
+
+    /// Attachment V2 Step 1: register encrypted attachment metadata slot.
+    pub fn create_attachment_v2(
+        &self,
+        access_token: &str,
+        cipher_id: &str,
+        wrapped_key: &str,
+        encrypted_file_name: &str,
+        encrypted_file_size: u64,
+        last_known_revision_date: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/{}/attachment/v2", self.urls.api_url, cipher_id);
+        if !crate::attachment::is_same_origin(&self.urls.api_url, &url) {
+            return Err(ApiError::Http(
+                "Attachment V2 upload URL failed RFC 6454 same-origin validation".to_string(),
+            ));
+        }
+
+        let mut payload = json!({
+            "key": wrapped_key,
+            "fileName": encrypted_file_name,
+            "fileSize": encrypted_file_size,
+            "adminRequest": false,
+        });
+        if let Some(rev) = last_known_revision_date {
+            payload["lastKnownRevisionDate"] = json!(rev);
+        }
+
+        let mut resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Create attachment v2 failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
+    /// Attachment V2 Step 2 (`FileUploadType::Direct (0)`): upload encrypted binary
+    /// blob via multipart/form-data field `"data"` to the resolved same-origin API
+    /// endpoint (ignoring Step 1's returned `url`, Security Rule 4).
+    pub fn upload_attachment_direct(
+        &self,
+        access_token: &str,
+        cipher_id: &str,
+        attachment_id: &str,
+        encrypted_file_name: &str,
+        encrypted_blob: &[u8],
+    ) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = format!(
+            "{}/ciphers/{}/attachment/{}",
+            self.urls.api_url, cipher_id, attachment_id
+        );
+        if !crate::attachment::is_same_origin(&self.urls.api_url, &url) {
+            return Err(ApiError::Http(
+                "Direct attachment upload URL failed RFC 6454 same-origin validation".to_string(),
+            ));
+        }
+
+        let (content_type, body) = crate::attachment_write::build_attachment_multipart_body(
+            encrypted_file_name,
+            encrypted_blob,
+        );
+
+        let mut resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", content_type)
+            .body(body)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Direct attachment upload failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Attachment V2 rollback / delete: `DELETE /api/ciphers/{id}/attachment/{attachmentId}`.
+    pub fn delete_attachment(
+        &self,
+        access_token: &str,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!(
+            "{}/ciphers/{}/attachment/{}",
+            self.urls.api_url, cipher_id, attachment_id
+        );
+        if !crate::attachment::is_same_origin(&self.urls.api_url, &url) {
+            return Err(ApiError::Http(
+                "Attachment delete URL failed RFC 6454 same-origin validation".to_string(),
+            ));
+        }
+
+        let mut resp = client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Delete attachment failed (HTTP {}): {}", status, err_body),
+            ));
+        }
+
+        let content_len = resp.content_length();
+        let bytes = read_response_limited(&mut resp, content_len, MAX_API_BODY_SIZE)?;
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes).map_err(|e| ApiError::Json(e.to_string()))
+    }
+
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
         let client = self.get_client()?;
         let url = format!("{}/ciphers", self.urls.api_url);

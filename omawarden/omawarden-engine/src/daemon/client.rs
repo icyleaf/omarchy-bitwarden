@@ -773,6 +773,74 @@ where
     submit_cipher_mutation(request, read_unlock_password)
 }
 
+/// Submits an Attachment V2 upload request to the resident daemon after verifying
+/// `"attachment_upload"` capability (with standalone daemon auto-restart per ADR-0037)
+/// and ensuring the Vault is unlocked via caller-injected password retrieval (ADR-0039).
+pub fn submit_attachment_upload<F>(
+    item_id: &str,
+    file_path: &str,
+    file_name: Option<&str>,
+    expected_lock_generation: Option<u64>,
+    client_ctx: Option<&crate::api::ClientContext>,
+    read_unlock_password: F,
+) -> Result<Value, Value>
+where
+    F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
+{
+    use super::protocol::CAPABILITY_ATTACHMENT_UPLOAD;
+
+    let fail = |reason: &str| json!({ "ok": false, "error": reason });
+    let ping = ensure_daemon_capability(CAPABILITY_ATTACHMENT_UPLOAD).map_err(|e| fail(&e))?;
+
+    if ping["unlocked"] != true {
+        let password =
+            read_unlock_password().unwrap_or_else(|| zeroize::Zeroizing::new(String::new()));
+        if password.is_empty()
+            || !send_daemon_request(&json!({"action": "unlock", "password": password.as_str()}))
+                .is_some_and(|r| r["ok"] == true)
+        {
+            return Err(fail("Unlock the vault before uploading an attachment."));
+        }
+    }
+
+    let mut req = json!({
+        "action": "attachment_upload",
+        "item_id": item_id,
+        "file_path": file_path,
+    });
+    if let Some(name) = file_name {
+        req["file_name"] = json!(name);
+    }
+    if let Some(gen) = expected_lock_generation {
+        req["expected_lock_generation"] = json!(gen);
+    }
+    if let Some(ctx) = client_ctx {
+        req["client"] = json!(ctx);
+    }
+
+    let reply = DaemonClient::new()
+        .with_timeout(Some(Duration::from_secs(330)))
+        .send(&req)
+        .map_err(|e| match e {
+            DispatchError::NotSent => {
+                fail("Could not send the attachment upload request to the daemon.")
+            }
+            DispatchError::Unconfirmed => {
+                fail("Could not confirm the attachment upload. Sync the vault before trying again.")
+            }
+            DispatchError::IncompatibleProtocol { .. } => {
+                fail("Daemon protocol version is incompatible with this client.")
+            }
+            DispatchError::LaunchFailed(msg) => fail(&format!("Could not start the daemon: {msg}")),
+        })?;
+
+    if reply["ok"] == true {
+        Ok(reply)
+    } else {
+        Err(reply)
+    }
+}
+
 /// Non-interactive resolution outcome for a Cipher target query sent to the daemon.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedCipherTarget {

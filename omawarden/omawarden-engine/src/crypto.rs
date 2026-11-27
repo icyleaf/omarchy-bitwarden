@@ -496,6 +496,41 @@ pub fn parse_symmetric_key_from_decrypted_bytes(bytes: &[u8]) -> Option<Symmetri
     None
 }
 
+pub fn encrypt_attachment_blob(
+    plaintext: &[u8],
+    key: &SymmetricCryptoKey,
+) -> Result<Vec<u8>, CryptoError> {
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use rand_core::RngCore;
+    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+
+    let mac_key = key.mac_key.as_ref().ok_or(CryptoError::MacMismatch)?;
+
+    let mut iv = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut iv);
+
+    let padded_len = plaintext.len() + (16 - (plaintext.len() % 16));
+    let mut out = vec![0u8; 1 + 16 + 32 + padded_len];
+    out[0] = 0x02;
+    out[1..17].copy_from_slice(&iv);
+
+    let enc = Aes256CbcEnc::new_from_slices(&key.enc_key, &iv)
+        .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid key/iv: {}", e)))?;
+    let ct_slice = enc
+        .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut out[49..])
+        .map_err(|e| CryptoError::DecryptionFailed(format!("Encryption failed: {}", e)))?;
+    debug_assert_eq!(ct_slice.len(), padded_len);
+
+    let mut hmac = HmacSha256::new_from_slice(mac_key)
+        .map_err(|e| CryptoError::DecryptionFailed(format!("Invalid mac key: {}", e)))?;
+    hmac.update(&out[1..17]);
+    hmac.update(&out[49..]);
+    let mac = hmac.finalize().into_bytes();
+    out[17..49].copy_from_slice(&mac);
+
+    Ok(out)
+}
+
 pub fn decrypt_attachment_blob(
     blob: &[u8],
     key: &SymmetricCryptoKey,
@@ -915,5 +950,47 @@ fn test_decrypt_attachment_blob() {
     assert!(
         decrypt_attachment_blob(&bitwarden_blob, &enc_only_key).is_err(),
         "Decryption with key missing mac_key must fail"
+    );
+}
+
+#[test]
+fn test_encrypt_attachment_blob_roundtrip_and_zero_byte_layout() {
+    let raw_key = [55u8; 64];
+    let key = SymmetricCryptoKey::from_raw_bytes(&raw_key).unwrap();
+
+    // 0-byte regular file MUST encrypt to exactly 65 bytes:
+    // [0x02][16-byte IV][32-byte HMAC-SHA256][16-byte PKCS#7 padded ciphertext]
+    let empty_blob = encrypt_attachment_blob(&[], &key).unwrap();
+    assert_eq!(empty_blob.len(), 65);
+    assert_eq!(empty_blob[0], 0x02);
+    let decrypted_empty = decrypt_attachment_blob(&empty_blob, &key).unwrap();
+    assert!(decrypted_empty.is_empty());
+
+    // Non-empty binary payload round-trips cleanly and uses fresh random IVs
+    let payload = b"\x89PNG\r\n\x1a\nhello attachment payload 0123456789";
+    let blob1 = encrypt_attachment_blob(payload, &key).unwrap();
+    let blob2 = encrypt_attachment_blob(payload, &key).unwrap();
+    assert_eq!(blob1[0], 0x02);
+    assert_ne!(
+        &blob1[1..17],
+        &blob2[1..17],
+        "Each encryption must use a fresh random IV"
+    );
+    assert_eq!(decrypt_attachment_blob(&blob1, &key).unwrap(), payload);
+    assert_eq!(decrypt_attachment_blob(&blob2, &key).unwrap(), payload);
+
+    // Tampered MAC or ciphertext fails decryption
+    let mut tampered = blob1.clone();
+    tampered[20] ^= 0xFF;
+    assert!(decrypt_attachment_blob(&tampered, &key).is_err());
+
+    // Key without mac_key MUST fail closed (Security Rule 8)
+    let enc_only_key = SymmetricCryptoKey {
+        enc_key: key.enc_key.clone(),
+        mac_key: None,
+    };
+    assert_eq!(
+        encrypt_attachment_blob(payload, &enc_only_key).unwrap_err(),
+        CryptoError::MacMismatch
     );
 }

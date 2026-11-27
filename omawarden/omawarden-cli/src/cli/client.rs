@@ -24,6 +24,22 @@ pub(crate) fn submit_ssh_cipher(request: &Value) -> Result<Value, Value> {
     })
 }
 
+pub(crate) fn submit_attachment_upload(
+    item_id: &str,
+    file_path: &str,
+    file_name: Option<&str>,
+    expected_lock_generation: Option<u64>,
+) -> Result<Value, Value> {
+    omawarden_engine::daemon::submit_attachment_upload(
+        item_id,
+        file_path,
+        file_name,
+        expected_lock_generation,
+        None,
+        || Some(zeroize::Zeroizing::new(read_auth_payload().0)),
+    )
+}
+
 pub(crate) fn vault_output_item(
     cfg: &Config,
     query: &str,

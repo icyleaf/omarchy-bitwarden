@@ -161,6 +161,9 @@ pub const CAPABILITY_VAULT_GET: &str = "vault_get";
 /// permission-aware discovery (`org_list`, `/partial`, create/edit/delete/share/collections) (ADR-0038).
 pub const CAPABILITY_ORG_WRITE: &str = "org_write";
 
+/// Capability identifier for Attachment V2 upload (`attachment_upload`) (ADR-0037).
+pub const CAPABILITY_ATTACHMENT_UPLOAD: &str = "attachment_upload";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
@@ -169,6 +172,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     "login_totp_uri_match",
     CAPABILITY_VAULT_GET,
     CAPABILITY_ORG_WRITE,
+    CAPABILITY_ATTACHMENT_UPLOAD,
 ];
 
 /// Returns `true` when a `ping` response advertises the requested Daemon Capability.
