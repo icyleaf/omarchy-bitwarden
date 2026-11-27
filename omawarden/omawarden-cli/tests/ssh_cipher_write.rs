@@ -1,6 +1,6 @@
 //! Real CLI + daemon, with synthetic encrypted storage and a loopback API.
 //! Hold or truncate the server reply to force the otherwise timing-sensitive paths.
-use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use omawarden::clipboard::{ClipboardProvider, ClipboardScope};
+use omawarden_engine::clipboard::{ClipboardProvider, ClipboardScope};
 
 /// Runs in a dedicated CLI process with the clipboard text on stdin.
 pub(super) fn hold_selection(
@@ -40,7 +40,7 @@ pub(super) fn hold_selection(
         .name("clipboard-expiry".into())
         .spawn(move || {
             if ready_rx
-                .recv_timeout(omawarden::clipboard::CLIPBOARD_SETUP_TIMEOUT)
+                .recv_timeout(omawarden_engine::clipboard::CLIPBOARD_SETUP_TIMEOUT)
                 .is_ok()
             {
                 if timeout.is_zero() {

@@ -227,7 +227,7 @@ fn a_second_daemon_cannot_replace_the_live_login_authority() {
 
 #[test]
 fn legacy_cache_requires_sign_in_for_cli_and_daemon_unlock() {
-    use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+    use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
     use std::process::Stdio;
     use std::time::Instant;
 
@@ -411,7 +411,7 @@ fn a_lost_rejection_keeps_the_attempt_for_safe_cleanup() {
 }
 
 fn password_login_case(case: LoginCase) {
-    use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+    use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
     use std::process::Stdio;
     use std::time::Instant;
     let dir = tempfile::tempdir().unwrap();

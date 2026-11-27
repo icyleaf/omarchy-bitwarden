@@ -432,6 +432,43 @@ impl ConfigManager {
     }
 }
 
+impl Config {
+    /// Looks up a configuration value by canonical key name or CLI alias.
+    pub fn get_value(&self, key: &str) -> Option<String> {
+        match key {
+            "server_url" => Some(self.server_url.clone()),
+            "identity_url" => Some(self.identity_url.as_deref().unwrap_or("").to_string()),
+            "download_dir" => Some(self.download_dir.clone()),
+            "auto_lock_minutes" | "auto_lock" => Some(self.auto_lock_minutes.to_string()),
+            "clipboard_clear_seconds" | "clipboard_clear" => {
+                Some(self.clipboard_clear_seconds.to_string())
+            }
+            "email" => Some(self.email.clone()),
+            "remember_email" => Some(self.remember_email.to_string()),
+            "check_updates" => Some(self.check_updates.to_string()),
+            "log_level" => Some(self.log_level.clone()),
+            "show_website_icons" => Some(self.show_website_icons.to_string()),
+            "remember_last_search" => Some(self.remember_last_search.to_string()),
+            "max_attachment_size_mb" | "max_attachment_size" => {
+                Some(self.max_attachment_size_mb.to_string())
+            }
+            "client_cert_path" | "client_cert" => {
+                Some(self.client_cert_path.as_deref().unwrap_or("").to_string())
+            }
+            "client_key_path" | "client_key" => {
+                Some(self.client_key_path.as_deref().unwrap_or("").to_string())
+            }
+            "client_cert_server" => {
+                Some(self.client_cert_server.as_deref().unwrap_or("").to_string())
+            }
+            "ssh_agent_enabled" | "ssh_agent" => Some(self.ssh_agent_enabled.to_string()),
+            "quick_unlock" => Some(self.quick_unlock.to_string()),
+            "ssh_agent_confirm" => Some(self.ssh_agent_confirm.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigUpdateOptions {
     pub server_url: Option<String>,
@@ -1350,5 +1387,91 @@ esac
         assert_eq!(cfg_cleared.client_cert_path, None);
         assert_eq!(cfg_cleared.client_key_path, None);
         assert_eq!(cfg_cleared.client_cert_server, None);
+    }
+
+    #[test]
+    fn test_config_get_value_keys_and_aliases() {
+        let cfg = Config {
+            server_url: "https://vault.example.com".to_string(),
+            identity_url: Some("https://id.example.com".to_string()),
+            download_dir: "/tmp/downloads".to_string(),
+            auto_lock_minutes: 30,
+            clipboard_clear_seconds: 45,
+            email: "user@example.com".to_string(),
+            remember_email: false,
+            check_updates: false,
+            log_level: "debug".to_string(),
+            show_website_icons: false,
+            remember_last_search: true,
+            max_attachment_size_mb: 250,
+            client_cert_path: Some("/tmp/cert.pem".to_string()),
+            client_key_path: Some("/tmp/key.pem".to_string()),
+            client_cert_server: Some("https://vault.example.com".to_string()),
+            ssh_agent_enabled: true,
+            ssh_agent_confirm: "always".to_string(),
+            quick_unlock: true,
+        };
+
+        assert_eq!(
+            cfg.get_value("server_url").as_deref(),
+            Some("https://vault.example.com")
+        );
+        assert_eq!(
+            cfg.get_value("identity_url").as_deref(),
+            Some("https://id.example.com")
+        );
+        assert_eq!(
+            cfg.get_value("download_dir").as_deref(),
+            Some("/tmp/downloads")
+        );
+        assert_eq!(cfg.get_value("auto_lock_minutes").as_deref(), Some("30"));
+        assert_eq!(cfg.get_value("auto_lock").as_deref(), Some("30"));
+        assert_eq!(
+            cfg.get_value("clipboard_clear_seconds").as_deref(),
+            Some("45")
+        );
+        assert_eq!(cfg.get_value("clipboard_clear").as_deref(), Some("45"));
+        assert_eq!(cfg.get_value("email").as_deref(), Some("user@example.com"));
+        assert_eq!(cfg.get_value("remember_email").as_deref(), Some("false"));
+        assert_eq!(cfg.get_value("check_updates").as_deref(), Some("false"));
+        assert_eq!(cfg.get_value("log_level").as_deref(), Some("debug"));
+        assert_eq!(
+            cfg.get_value("show_website_icons").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            cfg.get_value("remember_last_search").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            cfg.get_value("max_attachment_size_mb").as_deref(),
+            Some("250")
+        );
+        assert_eq!(cfg.get_value("max_attachment_size").as_deref(), Some("250"));
+        assert_eq!(
+            cfg.get_value("client_cert_path").as_deref(),
+            Some("/tmp/cert.pem")
+        );
+        assert_eq!(
+            cfg.get_value("client_cert").as_deref(),
+            Some("/tmp/cert.pem")
+        );
+        assert_eq!(
+            cfg.get_value("client_key_path").as_deref(),
+            Some("/tmp/key.pem")
+        );
+        assert_eq!(cfg.get_value("client_key").as_deref(), Some("/tmp/key.pem"));
+        assert_eq!(
+            cfg.get_value("client_cert_server").as_deref(),
+            Some("https://vault.example.com")
+        );
+        assert_eq!(cfg.get_value("ssh_agent_enabled").as_deref(), Some("true"));
+        assert_eq!(cfg.get_value("ssh_agent").as_deref(), Some("true"));
+        assert_eq!(cfg.get_value("quick_unlock").as_deref(), Some("true"));
+        assert_eq!(
+            cfg.get_value("ssh_agent_confirm").as_deref(),
+            Some("always")
+        );
+        assert_eq!(cfg.get_value("unknown_key"), None);
     }
 }

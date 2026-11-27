@@ -1183,7 +1183,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "omawarden"
+name = "omawarden-cli"
+version = "0.12.2"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "libc",
+ "omawarden-engine",
+ "pkcs8 0.11.0",
+ "rand 0.8.8",
+ "rpassword",
+ "rsa",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "url",
+ "which",
+ "zeroize",
+]
+
+[[package]]
+name = "omawarden-engine"
 version = "0.12.2"
 dependencies = [
  "aes",
@@ -1192,7 +1213,6 @@ dependencies = [
  "base64 0.23.1",
  "cbc",
  "chrono",
- "clap",
  "hkdf",
  "hmac 0.12.1",
  "libc",
@@ -1202,7 +1222,6 @@ dependencies = [
  "rand_core 0.6.4",
  "regex",
  "reqwest",
- "rpassword",
  "rsa",
  "serde",
  "serde_json",

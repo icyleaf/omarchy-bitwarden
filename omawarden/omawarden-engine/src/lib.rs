@@ -1,3 +1,19 @@
+/// Semantic version of the Omawarden Engine crate.
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Short Git commit hash captured at build time.
+pub const GIT_HASH: &str = env!("GIT_HASH");
+/// UTC build date (`YYYY-MM-DD`) captured at build time.
+pub const BUILD_DATE: &str = env!("BUILD_DATE");
+/// Formatted version string (`<version> (<git_hash> <build_date>)`) shared with `omawarden-cli --version`.
+pub const VERSION_WITH_BUILD_INFO: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("GIT_HASH"),
+    " ",
+    env!("BUILD_DATE"),
+    ")"
+);
+
 mod account_activation;
 pub mod api;
 pub mod attachment;

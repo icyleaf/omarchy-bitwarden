@@ -9,7 +9,7 @@
 //! 3. On-demand auto-restart of stale standalone daemons when advanced features are used.
 //! 4. Friendly, explicit guidance when an in-process host daemon cannot be terminated.
 
-use omawarden::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -892,7 +892,7 @@ fn test_matching_version_create_and_edit_all_fields_saved() {
     assert_eq!(ping_res["ok"], true);
     assert_eq!(
         ping_res["schema_version"],
-        omawarden::daemon::CURRENT_SCHEMA_VERSION,
+        omawarden_engine::daemon::CURRENT_SCHEMA_VERSION,
         "New daemon must advertise current schema_version"
     );
 

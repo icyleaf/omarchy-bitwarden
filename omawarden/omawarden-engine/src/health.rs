@@ -37,9 +37,9 @@ pub struct HealthStatus {
 }
 
 pub fn check_system_health(server_url: &str) -> HealthStatus {
-    let version = env!("CARGO_PKG_VERSION").to_string();
-    let commit = env!("GIT_HASH").to_string();
-    let build_date = env!("BUILD_DATE").to_string();
+    let version = crate::ENGINE_VERSION.to_string();
+    let commit = crate::GIT_HASH.to_string();
+    let build_date = crate::BUILD_DATE.to_string();
     let server_clean = server_url.trim_end_matches('/');
 
     // 1. Check server reachability

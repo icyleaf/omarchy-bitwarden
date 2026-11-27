@@ -213,7 +213,7 @@ fn vault_item_and_totp_copies_validate_the_generation_that_supplied_the_value() 
                     let request: Value = serde_json::from_str(&line).unwrap();
                     let action = request["action"].as_str().unwrap();
                     let response = match action {
-                        "ping" => json!({"commit":env!("GIT_HASH"), "unlocked":true}),
+                        "ping" => json!({"commit":omawarden_engine::GIT_HASH, "unlocked":true}),
                         "status" => json!({"is_unlocked":true}),
                         "get_item" => json!({"ok":true,"lock_generation":41,"item":{
                             "id":"fixture","name":"Fixture","type":1,"type_name":"login",

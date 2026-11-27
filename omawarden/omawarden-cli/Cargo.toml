@@ -1,0 +1,29 @@
+[package]
+name = "omawarden-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "High-performance and low memory Bitwarden CLI (Designed for Omarchy Plugin)"
+
+[[bin]]
+name = "omawarden"
+path = "src/main.rs"
+
+[dependencies]
+omawarden-engine = { path = "../omawarden-engine" }
+clap = { version = "4.5", features = ["derive", "env"] }
+libc = "0.2"
+rpassword = "7.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.17"
+url = "2.5"
+which = "8.0"
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+base64 = "0.23"
+rand = "0.8"
+rsa = { version = "0.9", features = ["sha2", "sha1"] }
+pkcs8 = { version = "0.11", features = ["std"] }
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "crypto", "alloc", "encryption"] }

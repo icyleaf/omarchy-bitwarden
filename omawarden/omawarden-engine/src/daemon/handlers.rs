@@ -239,8 +239,8 @@ pub fn handle_client_with_peer(
             "ssh_write_receipt": true,
             "account_activation_v1": true,
             "unlock_context": state.vault_mgr.unlock_context(),
-            "version": env!("CARGO_PKG_VERSION"),
-            "commit": env!("GIT_HASH"),
+            "version": crate::ENGINE_VERSION,
+            "commit": crate::GIT_HASH,
             "unlocked": is_unlocked,
             "quick_unlock": state.quick_unlock_ready(),
             // The daemon's cached setting, so `auth quick-unlock-check` can
