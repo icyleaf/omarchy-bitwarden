@@ -541,14 +541,21 @@ impl DaemonState {
 
     /// Hard lock (ADR-0025). Returns whether output cleanup also succeeded.
     pub fn lock(&self) -> bool {
+        self.lock_with_epoch().0
+    }
+
+    /// Hard lock with the shared epoch advanced by this transition, when it
+    /// could be advanced. The IPC reply uses this to distinguish a completed
+    /// daemon transition from a client that must advance its local fallback.
+    pub(crate) fn lock_with_epoch(&self) -> (bool, Option<u64>) {
         let _restore = self
             .vault_mgr
             .restore_guard
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let outputs_cleared = self.vault_mgr.hard_lock_inner();
+        let outcome = self.vault_mgr.hard_lock_inner();
         self.reset_session_timers();
-        outputs_cleared
+        (outcome.outputs_cleared, outcome.lock_epoch)
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key

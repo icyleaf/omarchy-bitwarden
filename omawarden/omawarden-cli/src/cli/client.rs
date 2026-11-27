@@ -64,6 +64,16 @@ pub(crate) fn vault_output_item(
     })
 }
 
+pub(crate) fn read_vault_item(
+    cfg: &Config,
+    query: &str,
+    touch: bool,
+) -> Result<Option<omawarden_engine::vault::VaultItem>, String> {
+    omawarden_engine::vault::read_vault_item(cfg, query, touch, || {
+        Some(zeroize::Zeroizing::new(read_auth_payload().0))
+    })
+}
+
 fn prompt_candidate_selection(candidates: &[Value], target: &str) -> Option<Value> {
     eprintln!("Multiple ciphers matched '{}':", target);
     for (idx, item) in candidates.iter().enumerate() {

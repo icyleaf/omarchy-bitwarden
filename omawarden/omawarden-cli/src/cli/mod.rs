@@ -134,6 +134,8 @@ enum Commands {
         cache_path: Option<PathBuf>,
         #[arg(long, requires = "cache_path")]
         expected_credential_id: Option<String>,
+        #[arg(long, requires = "cache_path")]
+        expected_lock_epoch: Option<u64>,
         #[arg(index = 2)]
         legacy_path: Option<PathBuf>,
     },
@@ -260,6 +262,7 @@ pub(crate) fn run() -> ExitCode {
             expected_lock_generation,
             cache_path,
             expected_credential_id,
+            expected_lock_epoch,
             legacy_path,
         } => clipboard::run_holder(clipboard::HolderArgs {
             seconds,
@@ -269,6 +272,7 @@ pub(crate) fn run() -> ExitCode {
             expected_lock_generation,
             cache_path,
             expected_credential_id,
+            expected_lock_epoch,
             legacy_path,
         }),
         Commands::Daemon {

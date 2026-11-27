@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::storage::StorageManager;
+use crate::vault::VaultManager;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
@@ -238,6 +239,7 @@ fn test_handle_client_selective_activity_touch() {
     assert!(caps.contains(&"cipher_mutation_v3"));
     assert!(caps.contains(&"folder_crud"));
     assert!(caps.contains(&"login_totp_uri_match"));
+    assert!(caps.contains(&"shared_lock_epoch"));
     assert!(caps.contains(&"vault_get"));
     assert!(caps.contains(&"org_write"));
     assert_eq!(*state.last_activity.lock().unwrap(), past);
@@ -2610,5 +2612,93 @@ fn test_attachment_delete_daemon_security_rule_9_and_capability() {
     assert!(
         *state.last_activity.lock().unwrap() > stale_time,
         "Authorized attachment_delete must refresh daemon idle activity"
+    );
+}
+
+#[test]
+fn test_lock_ipc_reports_the_shared_epoch() {
+    let mut env = crate::test_support::TestEnv::isolated();
+    let runtime = tempdir().unwrap();
+    let epoch_dir = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", config_dir.path());
+    env.remove_var("WAYLAND_DISPLAY");
+    env.remove_var("WAYLAND_SOCKET");
+    std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "10").unwrap();
+
+    let mut vault = VaultManager::new(
+        "",
+        Some(StorageManager::new(runtime.path().join("data.json"))),
+        None,
+    );
+    vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+    let mut state = DaemonState::new(StorageManager::new(runtime.path().join("data.json")), 15);
+    state.vault_mgr = Arc::new(vault);
+    let state = Arc::new(state);
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let handled = {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let _ = handle_client(server, state);
+        })
+    };
+    writeln!(client, "{}", json!({"action": "lock"})).unwrap();
+    client.flush().unwrap();
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    handled.join().unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["outputs_cleared"], true);
+    assert_eq!(reply["lock_epoch"], 11);
+    assert_eq!(
+        std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+        "11"
+    );
+}
+
+#[test]
+fn test_lock_advances_epoch_even_when_cleanup_is_pending() {
+    let mut env = crate::test_support::TestEnv::isolated();
+    let runtime = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let epoch_dir = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    env.set_var("XDG_RUNTIME_DIR", runtime.path());
+    env.set_var("OMAWARDEN_CONFIG_DIR", config_dir.path());
+    env.set_var("WAYLAND_DISPLAY", "fixture-wayland");
+    env.set_var("OMA_CLIPBOARD_PROVIDER", "wayland");
+    env.set_var(
+        "PATH",
+        format!("{}:/usr/bin:/bin", runtime.path().display()),
+    );
+
+    let wl_copy = runtime.path().join("wl-copy");
+    crate::write_test_executable(
+        &wl_copy,
+        "#!/bin/sh\n\
+         if [ \"${1:-}\" = --clear ]; then\n\
+           [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
+           exec rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+         fi\n\
+         exec cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+    );
+    std::fs::write(runtime.path().join("fail-clear"), "").unwrap();
+    std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "80").unwrap();
+
+    let mut vault = crate::vault::tests::seeded_vault(cache_dir.path(), "master-pw");
+    vault.lock_epoch_dir = Some(epoch_dir.path().to_path_buf());
+    vault.unlock("master-pw").unwrap();
+    let storage_mgr = vault.storage_mgr.clone();
+    let mut state = DaemonState::new(storage_mgr, 0);
+    state.vault_mgr = Arc::new(vault);
+
+    let (outputs_cleared, lock_epoch) = state.lock_with_epoch();
+    assert!(!outputs_cleared, "the failing clear must be reported");
+    assert_eq!(lock_epoch, Some(81));
+    assert_eq!(
+        std::fs::read_to_string(epoch_dir.path().join("omawarden.lock-epoch")).unwrap(),
+        "81"
     );
 }

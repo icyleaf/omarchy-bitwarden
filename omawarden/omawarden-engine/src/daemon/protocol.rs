@@ -167,9 +167,13 @@ pub const CAPABILITY_ATTACHMENT_UPLOAD: &str = "attachment_upload";
 /// Capability identifier for Attachment V2 deletion (`attachment_delete`) (ADR-0037).
 pub const CAPABILITY_ATTACHMENT_DELETE: &str = "attachment_delete";
 
+/// Capability identifier for cross-process lock epochs used by offline copies.
+pub const CAPABILITY_SHARED_LOCK_EPOCH: &str = "shared_lock_epoch";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
+    CAPABILITY_SHARED_LOCK_EPOCH,
     "cipher_mutation_v3",
     "folder_crud",
     "login_totp_uri_match",
