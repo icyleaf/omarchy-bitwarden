@@ -1565,3 +1565,379 @@ fn attachment_upload_azure_fail_closed_and_rollback_on_bad_url_unknown_type_bloc
         .unwrap();
     assert!(cached_cipher["attachments"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn test_attachment_upload_org_cipher_wraps_under_org_cipher_key_and_refreshes_cache() {
+    let env = TestEnv::new(500);
+
+    // Provision a real Organization with org_key (wrapped under user_key) and a writable
+    // keyed Organization Cipher (cipher.key wrapped under org_key).
+    let raw_org_key = [77u8; 64];
+    let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+    let raw_org_cipher_key = [88u8; 64];
+    let org_cipher_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_cipher_key).unwrap();
+
+    let org_cipher_json = json!({
+        "id": "cipher-org-writable",
+        "type": 1,
+        "name": org_cipher_key.encrypt_string("Org Writable Login").unwrap(),
+        "key": org_key.encrypt(&raw_org_cipher_key).unwrap(),
+        "organizationId": "org-writable",
+        "collectionIds": ["col-w"],
+        "folderId": null,
+        "favorite": false,
+        "edit": true,
+        "viewPassword": true,
+        "deletedDate": null,
+        "revisionDate": "2026-11-26T00:00:00.000Z",
+        "login": {
+            "username": org_cipher_key.encrypt_string("ops@corp.invalid").unwrap(),
+            "password": org_cipher_key.encrypt_string("org-secret-pw").unwrap(),
+            "uris": []
+        },
+        "attachments": []
+    });
+
+    let data_path = env.temp.path().join("data/data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&data_path).unwrap()).unwrap();
+    data["organizations"].as_array_mut().unwrap().push(json!({
+        "id": "org-writable",
+        "name": "Acme Org",
+        "key": env.user_key.encrypt(&raw_org_key).unwrap(),
+    }));
+    data["ciphers"]
+        .as_array_mut()
+        .unwrap()
+        .push(org_cipher_json.clone());
+    fs::write(&data_path, data.to_string()).unwrap();
+
+    let _daemon = env.start_daemon();
+
+    let plaintext = b"org-shared-tls-certificate-bytes";
+    let file_path = env.temp.path().join("org-cert.pem");
+    fs::write(&file_path, plaintext).unwrap();
+
+    let api = env.api.try_clone().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let captured_step1: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let captured_step1_bg = captured_step1.clone();
+    let captured_blob: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+    let captured_blob_bg = captured_blob.clone();
+    let mut updated_org_cipher = org_cipher_json.clone();
+
+    let server = thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let req = read_http_request(&mut stream);
+                    if req.method == "POST"
+                        && req.path == "/api/ciphers/cipher-org-writable/attachment/v2"
+                    {
+                        let body_json: Value = serde_json::from_slice(&req.body).unwrap();
+                        *captured_step1_bg.lock().unwrap() = Some(body_json.clone());
+                        updated_org_cipher["attachments"] = json!([{
+                            "id": "att-org-new",
+                            "fileName": body_json["fileName"],
+                            "key": body_json["key"],
+                            "size": body_json["fileSize"].to_string(),
+                            "sizeName": "97 B"
+                        }]);
+                        let resp_body = json!({
+                            "attachmentId": "att-org-new",
+                            "fileUploadType": 0,
+                            "url": "/ciphers/cipher-org-writable/attachment/att-org-new",
+                            "cipherResponse": updated_org_cipher,
+                        })
+                        .to_string();
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            resp_body.len(),
+                            resp_body
+                        );
+                        stream.write_all(http.as_bytes()).unwrap();
+                    } else if req.method == "POST"
+                        && req.path == "/api/ciphers/cipher-org-writable/attachment/att-org-new"
+                    {
+                        let ct = req.headers.get("content-type").unwrap();
+                        let (_hdrs, blob) = extract_multipart_data_part(ct, &req.body);
+                        *captured_blob_bg.lock().unwrap() = Some(blob);
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                            .unwrap();
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let out = env
+        .cmd()
+        .args([
+            "attachment",
+            "upload",
+            "--item-id",
+            "cipher-org-writable",
+            "--file",
+            file_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+
+    assert!(
+        out.status.success(),
+        "Org attachment upload failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resp: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["attachment"]["id"], "att-org-new");
+    assert_eq!(resp["attachment"]["fileName"], "org-cert.pem");
+    assert_eq!(
+        resp["item"]["name"], "Org Writable Login",
+        "Re-decrypted Organization Cipher must not degrade to Untitled: {resp}"
+    );
+
+    // Cryptographic verification: wrapped key and fileName MUST decrypt under org_cipher_key
+    // and MUST NOT decrypt under user_key or org_key.
+    let step1 = captured_step1.lock().unwrap().clone().unwrap();
+    let wrapped_key = step1["key"].as_str().unwrap();
+    let enc_file_name = step1["fileName"].as_str().unwrap();
+
+    assert!(
+        EncString::parse(wrapped_key)
+            .unwrap()
+            .decrypt(&env.user_key)
+            .is_err(),
+        "Organization attachment key must NEVER be wrapped under user_key"
+    );
+    assert!(
+        EncString::parse(enc_file_name)
+            .unwrap()
+            .decrypt_string(&env.user_key)
+            .is_err(),
+        "Organization attachment fileName must NEVER be encrypted under user_key"
+    );
+
+    let dec_name = EncString::parse(enc_file_name)
+        .unwrap()
+        .decrypt_string(&org_cipher_key)
+        .expect("fileName must decrypt under org cipher_key");
+    assert_eq!(dec_name, "org-cert.pem");
+
+    let raw_att_key = EncString::parse(wrapped_key)
+        .unwrap()
+        .decrypt(&org_cipher_key)
+        .expect("wrapped key must decrypt under org cipher_key");
+    let att_key = SymmetricCryptoKey::from_raw_bytes(&raw_att_key).unwrap();
+    let blob = captured_blob.lock().unwrap().clone().unwrap();
+    assert_eq!(decrypt_attachment_blob(&blob, &att_key).unwrap(), plaintext);
+
+    // Daemon in-memory cache immediately reflects the new decrypted attachment
+    let get_resp = ipc(
+        &env.temp.path().join("omawarden.sock"),
+        json!({ "action": "get_item", "query": "cipher-org-writable" }),
+    );
+    assert_eq!(get_resp["ok"], true);
+    assert_eq!(get_resp["item"]["name"], "Org Writable Login");
+    let atts = get_resp["item"]["attachments"].as_array().unwrap();
+    assert_eq!(atts.len(), 1);
+    assert_eq!(atts[0]["fileName"], "org-cert.pem");
+}
+
+#[test]
+fn test_attachment_upload_org_cipher_permission_and_key_guards_fail_closed_before_http() {
+    let env = TestEnv::new(500);
+
+    let raw_org_key = [77u8; 64];
+    let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+
+    let data_path = env.temp.path().join("data/data.json");
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&data_path).unwrap()).unwrap();
+    data["organizations"].as_array_mut().unwrap().push(json!({
+        "id": "org-known",
+        "name": "Acme Org",
+        "key": env.user_key.encrypt(&raw_org_key).unwrap(),
+    }));
+    let ciphers = data["ciphers"].as_array_mut().unwrap();
+    ciphers.push(json!({
+        "id": "cipher-org-ro",
+        "type": 1,
+        "name": org_key.encrypt_string("Org RO").unwrap(),
+        "organizationId": "org-known",
+        "edit": false,
+        "viewPassword": true,
+        "deletedDate": null,
+        "attachments": []
+    }));
+    ciphers.push(json!({
+        "id": "cipher-org-hidden-pw",
+        "type": 1,
+        "name": org_key.encrypt_string("Org Hidden PW").unwrap(),
+        "organizationId": "org-known",
+        "edit": true,
+        "viewPassword": false,
+        "deletedDate": null,
+        "attachments": []
+    }));
+    fs::write(&data_path, data.to_string()).unwrap();
+
+    let _daemon = env.start_daemon();
+
+    let file_path = env.temp.path().join("blocked.txt");
+    fs::write(&file_path, b"blocked").unwrap();
+
+    let api = env.api.try_clone().unwrap();
+    let http_calls = Arc::new(AtomicUsize::new(0));
+    let http_calls_bg = http_calls.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let server = thread::spawn(move || {
+        while !stop_bg.load(Ordering::SeqCst) {
+            match api.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = read_http_request(&mut stream);
+                    http_calls_bg.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    for (cipher_id, expected_substr) in [
+        ("cipher-org-ro", "permission"),
+        ("cipher-org-hidden-pw", "passwords are hidden"),
+        ("cipher-org-1", "Organization 'org-1' not found"),
+    ] {
+        let out = env
+            .cmd()
+            .args([
+                "attachment",
+                "upload",
+                "--item-id",
+                cipher_id,
+                "--file",
+                file_path.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "Expected {cipher_id} to fail closed");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], false);
+        let err = v["error"].as_str().unwrap_or("");
+        assert!(
+            err.to_lowercase().contains(&expected_substr.to_lowercase()),
+            "Expected '{expected_substr}' for {cipher_id}, got: {err}"
+        );
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert_eq!(
+        http_calls.load(Ordering::SeqCst),
+        0,
+        "Zero HTTP calls may occur for unauthorized or missing-key Organization Ciphers"
+    );
+}
+
+#[test]
+fn test_attachment_upload_stale_daemon_missing_org_write_auto_restarts() {
+    let env = TestEnv::new(500);
+    let sock = env.temp.path().join("omawarden.sock");
+    let _ = fs::remove_file(&sock);
+
+    let listener = UnixListener::bind(&sock).unwrap();
+    let sock_for_thread = sock.clone();
+    let stale_stopped = Arc::new(AtomicBool::new(false));
+    let stale_stopped_bg = stale_stopped.clone();
+
+    let mock_stale = thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let req: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            let mut out = stream;
+            match req["action"].as_str() {
+                Some("ping") => {
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "pong": true,
+                            "protocol_version": 1,
+                            "schema_version": 3,
+                            // Advertises attachment_upload but omits org_write
+                            "capabilities": ["cipher_mutation_v3", "attachment_upload"],
+                            "unlocked": true
+                        })
+                    );
+                }
+                Some("stop") if req["admin"] == true => {
+                    let _ = writeln!(out, "{}", json!({ "ok": true, "protocol_version": 1 }));
+                    let _ = fs::remove_file(&sock_for_thread);
+                    stale_stopped_bg.store(true, Ordering::SeqCst);
+                    break;
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        json!({ "ok": false, "error": "unexpected action", "protocol_version": 1 })
+                    );
+                }
+            }
+        }
+    });
+
+    let file_path = env.temp.path().join("cap-check.txt");
+    fs::write(&file_path, b"hello").unwrap();
+
+    let out = env
+        .cmd()
+        .env("OMA_DAEMON_BIN", env!("CARGO_BIN_EXE_omawarden"))
+        .args([
+            "attachment",
+            "upload",
+            "--item-id",
+            "cipher-keyed-1",
+            "--file",
+            file_path.to_str().unwrap(),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = mock_stale.join();
+    let _ = env.cmd().args(["daemon", "stop"]).output();
+
+    assert!(
+        stale_stopped.load(Ordering::SeqCst),
+        "CLI must auto-restart stale standalone daemon lacking 'org_write'"
+    );
+    let resp: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(resp["ok"], false);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unlock the vault"),
+        "After auto-restart, fresh daemon should advertise org_write and fail closed on locked vault: {resp}"
+    );
+}

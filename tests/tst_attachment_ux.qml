@@ -121,9 +121,9 @@ Item {
         fields: [],
         attachments: [{ id: "att-t", fileName: "old.txt", sizeName: "10 B" }]
       }
-      var orgLogin = {
+      var orgWritableLogin = {
         id: "o1",
-        name: "Corp Login",
+        name: "Corp Writable Login",
         type_name: "login",
         deleted_at: null,
         organization_id: "org-1",
@@ -133,19 +133,67 @@ Item {
         fields: [],
         attachments: [{ id: "att-o", fileName: "corp.pem", sizeName: "2 KB" }]
       }
+      var orgReadOnlyLogin = {
+        id: "o2",
+        name: "Corp Read-Only Login",
+        type_name: "login",
+        deleted_at: null,
+        organization_id: "org-1",
+        edit: false,
+        view_password: true,
+        login: { username: "svc", password: "pw", uris: [] },
+        fields: [],
+        attachments: [{ id: "att-ro", fileName: "ro.pem", sizeName: "1 KB" }]
+      }
+      var orgReadOnlyEmptyLogin = {
+        id: "o2-empty",
+        name: "Corp Read-Only Empty",
+        type_name: "login",
+        deleted_at: null,
+        organization_id: "org-1",
+        edit: false,
+        view_password: true,
+        login: { username: "svc", password: "pw", uris: [] },
+        fields: [],
+        attachments: []
+      }
+      var orgHiddenPwLogin = {
+        id: "o3",
+        name: "Corp Hidden PW Login",
+        type_name: "login",
+        deleted_at: null,
+        organization_id: "org-1",
+        edit: true,
+        view_password: false,
+        login: { username: "svc", password: "pw", uris: [] },
+        fields: [],
+        attachments: [{ id: "att-hp", fileName: "hp.pem", sizeName: "1 KB" }]
+      }
 
       Assert.check(CipherMutation.canMutateAttachments(personalLogin) === true,
         "canMutateAttachments is true for active personal Cipher")
       Assert.check(CipherMutation.canMutateAttachments(trashedLogin) === false,
         "canMutateAttachments is false for trashed Cipher")
-      Assert.check(CipherMutation.canMutateAttachments(orgLogin) === false,
-        "canMutateAttachments is false for Organization Cipher until #457")
+      Assert.check(CipherMutation.canMutateAttachments(orgWritableLogin) === true,
+        "canMutateAttachments is true for writable Organization Cipher (edit && view_password)")
+      Assert.check(CipherMutation.canMutateAttachments(orgReadOnlyLogin) === false,
+        "canMutateAttachments is false for read-only Organization Cipher (!edit)")
+      Assert.check(CipherMutation.canMutateAttachments(orgHiddenPwLogin) === false,
+        "canMutateAttachments is false for hidden-password Organization Cipher (!view_password)")
+      Assert.check(CipherMutation.canShowAttachmentMutationControls(orgReadOnlyLogin) === true,
+        "canShowAttachmentMutationControls stays true for active unauthorized Organization Cipher")
+      Assert.check(CipherMutation.canShowAttachmentMutationControls(trashedLogin) === false,
+        "canShowAttachmentMutationControls is false for trashed Cipher")
       Assert.check(CipherMutation.attachmentMutationGuardError(trashedLogin).indexOf("Trash") !== -1,
         "attachmentMutationGuardError returns actionable Trash error")
-      Assert.check(CipherMutation.attachmentMutationGuardError(orgLogin).indexOf("Organization") !== -1,
-        "attachmentMutationGuardError returns actionable Organization error")
+      Assert.check(CipherMutation.attachmentMutationGuardError(orgWritableLogin) === "",
+        "attachmentMutationGuardError is empty for writable Organization Cipher")
+      Assert.check(CipherMutation.attachmentMutationGuardError(orgReadOnlyLogin).indexOf("permission") !== -1,
+        "attachmentMutationGuardError returns specific permission error when !edit")
+      Assert.check(CipherMutation.attachmentMutationGuardError(orgHiddenPwLogin).indexOf("passwords are hidden") !== -1,
+        "attachmentMutationGuardError returns specific hidden-password error when !view_password")
 
-      var listBefore = [personalLogin, orgLogin]
+      var listBefore = [personalLogin, orgWritableLogin]
       var updatedPersonal = Object.assign({}, personalLogin, {
         attachments: [{ id: "att-1", fileName: "recovery.txt", sizeName: "64 B" }]
       })
@@ -223,15 +271,56 @@ Item {
         "Attachment Error Alert Banner becomes visible when attachmentErrorMessage is set")
       inspector.attachmentErrorMessage = ""
 
-      // 4. ItemInspector: read-only Organization Cipher hides mutation controls
-      inspector.item = orgLogin
+      // 4. ItemInspector: writable vs unauthorized Organization Ciphers
+      inspector.item = orgWritableLogin
       Assert.check(section.visible === true,
-        "Attachments section remains visible on Organization Cipher with existing attachments")
+        "Attachments section is visible on writable Organization Cipher")
+      Assert.check(attachBtn.visible === true && attachBtn.enabled === true,
+        "+ Attach button is visible and enabled on writable Organization Cipher (edit && view_password)")
+      var orgWritableDeleteBtn = findChildByName(inspector, "deleteAttachmentButton_0")
+      Assert.check(orgWritableDeleteBtn !== null && orgWritableDeleteBtn.visible === true && orgWritableDeleteBtn.enabled === true,
+        "Per-row Delete button is visible and enabled on writable Organization Cipher")
+
+      // Read-only Organization Cipher (!edit): controls stay visible for layout stability, visually disabled
+      inspector.item = orgReadOnlyLogin
+      Assert.check(section.visible === true,
+        "Attachments section remains visible on read-only Organization Cipher")
+      Assert.check(attachBtn.visible === true && attachBtn.enabled === false,
+        "+ Attach button stays visible and renders disabled on read-only Organization Cipher")
+      Assert.check(attachBtn.tooltip.indexOf("permission") !== -1,
+        "+ Attach button tooltip explains missing permission on read-only Organization Cipher")
+      var orgRoDeleteBtn = findChildByName(inspector, "deleteAttachmentButton_0")
+      Assert.check(orgRoDeleteBtn !== null && orgRoDeleteBtn.visible === true && orgRoDeleteBtn.enabled === false,
+        "Per-row Delete button stays visible and renders disabled on read-only Organization Cipher")
+      Assert.check(orgRoDeleteBtn.tooltip.indexOf("permission") !== -1,
+        "Per-row Delete button tooltip explains missing permission on read-only Organization Cipher")
+
+      // Read-only Organization Cipher with 0 attachments: section and disabled + Attach stay visible
+      inspector.item = orgReadOnlyEmptyLogin
+      Assert.check(section.visible === true,
+        "Attachments (0) section stays visible on active unauthorized Organization Cipher for layout stability")
+      Assert.check(attachBtn.visible === true && attachBtn.enabled === false,
+        "+ Attach button stays visible and disabled at N == 0 on read-only Organization Cipher")
+
+      // Hidden-password Organization Cipher (edit && !view_password): visually disabled with specific error
+      inspector.item = orgHiddenPwLogin
+      Assert.check(attachBtn.visible === true && attachBtn.enabled === false,
+        "+ Attach button stays visible and renders disabled when view_password is false")
+      Assert.check(attachBtn.tooltip.indexOf("passwords are hidden") !== -1,
+        "+ Attach button tooltip explains hidden passwords when view_password is false")
+      var orgHpDeleteBtn = findChildByName(inspector, "deleteAttachmentButton_0")
+      Assert.check(orgHpDeleteBtn !== null && orgHpDeleteBtn.visible === true && orgHpDeleteBtn.enabled === false,
+        "Per-row Delete button stays visible and renders disabled when view_password is false")
+      Assert.check(orgHpDeleteBtn.tooltip.indexOf("passwords are hidden") !== -1,
+        "Per-row Delete button tooltip explains hidden passwords when view_password is false")
+
+      // Trashed Cipher hides mutation controls
+      inspector.item = trashedLogin
       Assert.check(attachBtn.visible === false,
-        "+ Attach button is hidden on Organization Cipher until #457")
-      var orgRowDeleteBtn = findChildByName(inspector, "deleteAttachmentButton_0")
-      Assert.check(orgRowDeleteBtn !== null && orgRowDeleteBtn.visible === false,
-        "Per-row Delete button is hidden on Organization Cipher until #457")
+        "+ Attach button is hidden on trashed Cipher")
+      var trashedDeleteBtn = findChildByName(inspector, "deleteAttachmentButton_0")
+      Assert.check(trashedDeleteBtn !== null && trashedDeleteBtn.visible === false,
+        "Per-row Delete button is hidden on trashed Cipher")
 
       // 5. DeleteAttachmentModal behavioral seam
       deleteAttModal.active = true

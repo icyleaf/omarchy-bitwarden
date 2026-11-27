@@ -474,13 +474,12 @@ pub(crate) fn build_attachment_multipart_body(
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
-/// Resolves the target encryption key for a personal Cipher:
-/// unwraps `cipher.key` under `user_key` when present, or falls back to `user_key`
-/// for legacy unkeyed personal Ciphers. Fails closed if `cipher.key` is present
+/// Unwraps `cipher.key` under `parent_key` when present, or returns `parent_key`
+/// directly for legacy unkeyed Ciphers. Fails closed if `cipher.key` is present
 /// but malformed or undecryptable.
-fn resolve_personal_cipher_key(
+fn unwrap_cipher_key_with_parent(
     cipher: &Value,
-    user_key: &SymmetricCryptoKey,
+    parent_key: &SymmetricCryptoKey,
 ) -> Result<SymmetricCryptoKey, String> {
     let Some(enc_cipher_key) = cipher
         .get("key")
@@ -488,18 +487,67 @@ fn resolve_personal_cipher_key(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     else {
-        return Ok(user_key.clone());
+        return Ok(parent_key.clone());
     };
 
     let parsed = EncString::parse(enc_cipher_key)
         .map_err(|_| "Malformed cipher encryption key; cannot wrap attachment key.".to_string())?;
     let decrypted = Zeroizing::new(
         parsed
-            .decrypt(user_key)
+            .decrypt(parent_key)
             .map_err(|_| "Could not decrypt cipher encryption key.".to_string())?,
     );
     parse_symmetric_key_from_decrypted_bytes(&decrypted)
         .ok_or_else(|| "Invalid decrypted cipher encryption key length.".to_string())
+}
+
+/// Authorizes Attachment V2 mutations and resolves the target encryption key for
+/// a personal or Organization Cipher.
+///
+/// - Personal Ciphers: unwraps `cipher.key` under `user_key` (or falls back to
+///   `user_key` for legacy unkeyed personal Ciphers).
+/// - Organization Ciphers: enforces `edit && view_password` (fail-closed false
+///   when absent), resolves `org_key` strictly via `resolve_org_key` with zero
+///   `user_key` fallback, and unwraps `cipher.key` under `org_key` (or uses
+///   `org_key` directly for legacy unkeyed Organization Ciphers).
+pub(crate) fn resolve_attachment_cipher_key(
+    storage: &VaultStorage,
+    cipher: &Value,
+    user_key: &SymmetricCryptoKey,
+) -> Result<SymmetricCryptoKey, String> {
+    let org_id = cipher
+        .get("organizationId")
+        .or_else(|| cipher.get("OrganizationId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(oid) = org_id {
+        let (edit, view_password, _, _) = crate::vault::extract_cipher_permissions(cipher, true);
+        if !edit {
+            return Err(
+                "You do not have permission to modify attachments on this Organization cipher."
+                    .to_string(),
+            );
+        }
+        if !view_password {
+            return Err(
+                "Cannot modify attachments on this Organization cipher because passwords are hidden."
+                    .to_string(),
+            );
+        }
+        let org_key = crate::cipher_write::resolve_org_key(storage, user_key, oid).map_err(
+            |err| match err {
+                crate::ssh_write::WriteError::Rejected(msg) => msg,
+                crate::ssh_write::WriteError::Unknown => {
+                    format!("Could not resolve encryption key for Organization '{oid}'.")
+                }
+            },
+        )?;
+        return unwrap_cipher_key_with_parent(cipher, &org_key);
+    }
+
+    unwrap_cipher_key_with_parent(cipher, user_key)
 }
 
 fn format_api_error(prefix: &str, err: &ApiError) -> String {
@@ -549,9 +597,33 @@ pub fn reconcile_cipher_after_attachment_delete(
 }
 
 impl VaultManager {
-    /// Encrypts and uploads a local file as an Attachment V2 (`Direct (0)`) to an
-    /// active personal Cipher, rolling back on Step 2 failure and updating local
-    /// cache and in-memory index only after Step 2 succeeds.
+    fn authorize_and_resolve_attachment_key(
+        &self,
+        active: &VaultStorage,
+        cipher: &Value,
+    ) -> Result<SymmetricCryptoKey, String> {
+        let user_key_guard = self
+            .user_key
+            .read()
+            .map_err(|_| "Vault key unavailable".to_string())?;
+        let user_key = user_key_guard
+            .as_ref()
+            .ok_or_else(|| "Vault is locked. Please unlock the vault first.".to_string())?;
+        resolve_attachment_cipher_key(active, cipher, user_key)
+    }
+
+    fn authorize_attachment_mutation(
+        &self,
+        active: &VaultStorage,
+        cipher: &Value,
+    ) -> Result<(), String> {
+        self.authorize_and_resolve_attachment_key(active, cipher)
+            .map(|_| ())
+    }
+
+    /// Encrypts and uploads a local file as an Attachment V2 (`Direct (0)` or `Azure (1)`) to an
+    /// active personal or writable Organization Cipher, rolling back on Step 2 failure and updating
+    /// local cache and in-memory index only after Step 2 succeeds.
     pub(crate) fn upload_attachment(
         &self,
         item_id: &str,
@@ -620,32 +692,13 @@ impl VaultManager {
                 );
             }
 
-            // Fail closed on Organization Ciphers before any HTTP request (until org unlock slice lands).
-            if cipher
-                .get("organizationId")
-                .or_else(|| cipher.get("OrganizationId"))
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty())
-            {
-                return Err(
-                    "Organization cipher attachment upload is not yet supported.".to_string(),
-                );
-            }
-
             let rev = cipher
                 .get("revisionDate")
                 .or_else(|| cipher.get("RevisionDate"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
 
-            let user_key_guard = self
-                .user_key
-                .read()
-                .map_err(|_| "Vault key unavailable".to_string())?;
-            let user_key = user_key_guard
-                .as_ref()
-                .ok_or_else(|| "Vault is locked. Please unlock the vault first.".to_string())?;
-            let key = resolve_personal_cipher_key(cipher, user_key)?;
+            let key = self.authorize_and_resolve_attachment_key(&active, cipher)?;
             (key, rev)
         };
 
@@ -956,17 +1009,9 @@ impl VaultManager {
                 );
             }
 
-            // Fail closed on Organization Ciphers before any HTTP request (until #457 lands).
-            if cipher
-                .get("organizationId")
-                .or_else(|| cipher.get("OrganizationId"))
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty())
-            {
-                return Err(
-                    "Organization cipher attachment deletion is not yet supported.".to_string(),
-                );
-            }
+            // Enforce Organization permissions (edit && view_password) and fail-closed org_key
+            // resolution BEFORE making any HTTP request (zero user_key fallback).
+            self.authorize_attachment_mutation(&active, cipher)?;
 
             let has_attachment = cipher
                 .get("attachments")
@@ -1718,5 +1763,139 @@ mod tests {
         assert!(
             crate::attachment::purge_attachment_preview(slot, "cipher-1", "../escape").is_err()
         );
+    }
+
+    #[test]
+    fn test_resolve_attachment_cipher_key_org_key_isolation_and_fail_closed_permissions() {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use rsa::rand_core::OsRng as RsaOsRng;
+        use rsa::{Oaep, RsaPrivateKey};
+        use sha1::Sha1;
+
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&[11u8; 64]).unwrap();
+        let org_key_raw = [77u8; 64];
+        let org_key = SymmetricCryptoKey::from_raw_bytes(&org_key_raw).unwrap();
+        let cipher_key_raw = [88u8; 64];
+        let cipher_key = SymmetricCryptoKey::from_raw_bytes(&cipher_key_raw).unwrap();
+
+        // Generate an RSA keypair to test RSA-wrapped org_key (encType 4)
+        let mut rsa_rng = RsaOsRng;
+        let rsa_priv = RsaPrivateKey::new(&mut rsa_rng, 2048).unwrap();
+        let rsa_pub = rsa_priv.to_public_key();
+        let pkcs8_der = rsa_priv.to_pkcs8_der().unwrap();
+        let _spki = rsa_pub.to_public_key_der().unwrap();
+        let enc_priv_key = user_key.encrypt(pkcs8_der.as_bytes()).unwrap();
+        let rsa_ct = rsa_pub
+            .encrypt(&mut rsa_rng, Oaep::new::<Sha1>(), &org_key_raw)
+            .unwrap();
+        let org_key_rsa_enc = format!(
+            "4.{}",
+            base64::engine::general_purpose::STANDARD.encode(&rsa_ct)
+        );
+        let org_key_sym_enc = user_key.encrypt(&org_key_raw).unwrap();
+
+        let storage = VaultStorage {
+            enc_private_key: Some(enc_priv_key),
+            organizations: vec![
+                json!({ "id": "org-sym", "key": org_key_sym_enc }),
+                json!({ "id": "org-rsa", "key": org_key_rsa_enc }),
+                json!({ "id": "org-bad", "key": "not-an-enc-string" }),
+            ],
+            ..Default::default()
+        };
+
+        // 1. Writable keyed Organization Cipher unwraps cipher.key strictly under org_key
+        let keyed_org_cipher = json!({
+            "id": "c-org-keyed",
+            "organizationId": "org-sym",
+            "edit": true,
+            "viewPassword": true,
+            "key": org_key.encrypt(&cipher_key_raw).unwrap(),
+        });
+        let resolved = resolve_attachment_cipher_key(&storage, &keyed_org_cipher, &user_key)
+            .expect("writable keyed org cipher must resolve cipher_key");
+        assert_eq!(resolved.enc_key, cipher_key.enc_key);
+        assert_eq!(resolved.mac_key, cipher_key.mac_key);
+
+        // 2. Writable Organization Cipher whose cipher.key was wrongly wrapped under user_key fails closed
+        let wrong_wrap_cipher = json!({
+            "id": "c-org-wrong-wrap",
+            "organizationId": "org-sym",
+            "edit": true,
+            "viewPassword": true,
+            "key": user_key.encrypt(&cipher_key_raw).unwrap(),
+        });
+        assert!(
+            resolve_attachment_cipher_key(&storage, &wrong_wrap_cipher, &user_key).is_err(),
+            "org cipher.key wrapped under user_key must never decrypt or fall back"
+        );
+
+        // 3. Writable legacy unkeyed Organization Cipher (RSA-wrapped org_key) resolves org_key, never user_key
+        let legacy_rsa_org_cipher = json!({
+            "id": "c-org-rsa-legacy",
+            "organizationId": "org-rsa",
+            "edit": true,
+            "viewPassword": true,
+            "key": null,
+        });
+        let resolved_rsa =
+            resolve_attachment_cipher_key(&storage, &legacy_rsa_org_cipher, &user_key)
+                .expect("writable legacy RSA org cipher must resolve org_key");
+        assert_eq!(resolved_rsa.enc_key, org_key.enc_key);
+        assert_eq!(resolved_rsa.mac_key, org_key.mac_key);
+        assert_ne!(resolved_rsa.enc_key, user_key.enc_key);
+
+        // 4. Read-only (edit == false), hidden-password (viewPassword == false), and pre-upgrade
+        //    omitted flags all fail closed before key resolution.
+        let ro_cipher = json!({
+            "id": "c-org-ro",
+            "organizationId": "org-sym",
+            "edit": false,
+            "viewPassword": true,
+        });
+        let err_ro = resolve_attachment_cipher_key(&storage, &ro_cipher, &user_key).unwrap_err();
+        assert!(
+            err_ro.to_lowercase().contains("permission"),
+            "unexpected ro error: {err_ro}"
+        );
+
+        let hidden_pw_cipher = json!({
+            "id": "c-org-hp",
+            "organizationId": "org-sym",
+            "edit": true,
+            "viewPassword": false,
+        });
+        let err_hp =
+            resolve_attachment_cipher_key(&storage, &hidden_pw_cipher, &user_key).unwrap_err();
+        assert!(
+            err_hp.to_lowercase().contains("passwords are hidden"),
+            "unexpected hidden-password error: {err_hp}"
+        );
+
+        let omitted_flags_cipher = json!({
+            "id": "c-org-omitted",
+            "organizationId": "org-sym",
+        });
+        assert!(
+            resolve_attachment_cipher_key(&storage, &omitted_flags_cipher, &user_key).is_err(),
+            "omitted edit/viewPassword flags on Organization Cipher must fail closed"
+        );
+
+        // 5. Missing or undecryptable org_key fails closed without user_key fallback
+        let missing_org_cipher = json!({
+            "id": "c-org-missing",
+            "organizationId": "org-unknown",
+            "edit": true,
+            "viewPassword": true,
+        });
+        assert!(resolve_attachment_cipher_key(&storage, &missing_org_cipher, &user_key).is_err());
+
+        let bad_org_cipher = json!({
+            "id": "c-org-bad",
+            "organizationId": "org-bad",
+            "edit": true,
+            "viewPassword": true,
+        });
+        assert!(resolve_attachment_cipher_key(&storage, &bad_org_cipher, &user_key).is_err());
     }
 }

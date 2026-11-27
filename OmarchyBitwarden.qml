@@ -2630,7 +2630,7 @@ Item {
       }
     }
 
-    if (CipherMutation.canMutateAttachments(item)) {
+    if (CipherMutation.canShowAttachmentMutationControls(item)) {
       actions.push({
         label: "Upload Attachment\u2026",
         icon: "\uf093",
@@ -2658,7 +2658,7 @@ Item {
               shortcut: "",
               action: function() { root.downloadAttachment(item, currAtt) }
             })
-            if (CipherMutation.canMutateAttachments(item)) {
+            if (CipherMutation.canShowAttachmentMutationControls(item)) {
               actions.push({
                 label: "Delete Attachment: " + currAtt.fileName,
                 icon: "\uf1f8",

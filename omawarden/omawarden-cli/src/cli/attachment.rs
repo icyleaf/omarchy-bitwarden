@@ -145,11 +145,12 @@ pub(crate) fn run(action: AttachmentAction) -> ExitCode {
             }
 
             if !yes {
-                // Ensure the daemon is running, supports attachment_delete, and is unlocked
+                // Ensure the daemon is running, supports attachment_delete + org_write, and is unlocked
                 // before looking up the attachment filename and cipher name for the prompt.
-                let ping = match omawarden_engine::daemon::ensure_daemon_capability(
+                let ping = match omawarden_engine::daemon::ensure_daemon_capabilities(&[
                     omawarden_engine::daemon::CAPABILITY_ATTACHMENT_DELETE,
-                ) {
+                    omawarden_engine::daemon::CAPABILITY_ORG_WRITE,
+                ]) {
                     Ok(p) => p,
                     Err(err) => {
                         emit_vault_error(json, &err);

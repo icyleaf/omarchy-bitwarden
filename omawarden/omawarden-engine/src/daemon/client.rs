@@ -539,10 +539,18 @@ pub fn cipher_mutation_required_schema_version(request: &Value) -> u32 {
     }
 }
 
-/// Ensures the running daemon advertises `capability` in `ping.capabilities`,
-/// attempting an on-demand restart of a stale standalone daemon when absent (ADR-0037).
-pub fn ensure_daemon_capability(capability: &str) -> Result<Value, String> {
+/// Verifies that the resident daemon advertises every required Daemon Capability
+/// (ADR-0037), automatically restarting a stale standalone daemon when any capability
+/// is missing, and failing closed naming the missing capability if restart fails.
+pub fn ensure_daemon_capabilities(capabilities: &[&str]) -> Result<Value, String> {
     use super::protocol::ping_has_capability;
+
+    let missing_capability = |ping: &Value| -> Option<&str> {
+        capabilities
+            .iter()
+            .copied()
+            .find(|cap| !ping_has_capability(ping, cap))
+    };
 
     if let Err(e @ DispatchError::IncompatibleProtocol { .. }) = ensure_daemon_running() {
         return Err(e.to_string());
@@ -556,9 +564,9 @@ pub fn ensure_daemon_capability(capability: &str) -> Result<Value, String> {
         Err(_) => return Err("Daemon unavailable.".to_string()),
     };
 
-    if ping_has_capability(&ping, capability) {
+    let Some(missing) = missing_capability(&ping) else {
         return Ok(ping);
-    }
+    };
 
     // Attempt on-demand auto-restart of stale standalone daemon (ADR-0037)
     let stop_req = json!({ "action": "stop", "admin": true });
@@ -572,17 +580,23 @@ pub fn ensure_daemon_capability(capability: &str) -> Result<Value, String> {
                 Ok(p) => p,
                 Err(_) => return Err("Daemon unavailable after restart.".to_string()),
             };
-            if ping_has_capability(&ping, capability) {
-                return Ok(ping);
+            if let Some(still_missing) = missing_capability(&ping) {
+                return Err(format!(
+                    "The running daemon was restarted, but still does not advertise required capability '{still_missing}'. Check OMA_DAEMON_BIN or update your installation."
+                ));
             }
-            Err(format!(
-                "The running daemon was restarted, but still does not advertise required capability '{capability}'. Check OMA_DAEMON_BIN or update your installation."
-            ))
+            Ok(ping)
         }
         _ => Err(format!(
-            "The running daemon does not support required capability '{capability}' and could not be restarted (it may be hosted in-process). Restart the daemon or its host application to apply the update."
+            "The running daemon does not support required capability '{missing}' and could not be restarted (it may be hosted in-process). Restart the daemon or its host application to apply the update."
         )),
     }
+}
+
+/// Ensures the running daemon advertises `capability` in `ping.capabilities`,
+/// attempting an on-demand restart of a stale standalone daemon when absent (ADR-0037).
+pub fn ensure_daemon_capability(capability: &str) -> Result<Value, String> {
+    ensure_daemon_capabilities(&[capability])
 }
 
 /// Submits a Cipher or Folder mutation request to the daemon with `schema_version`
@@ -787,10 +801,11 @@ pub fn submit_attachment_upload<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    use super::protocol::CAPABILITY_ATTACHMENT_UPLOAD;
+    use super::protocol::{CAPABILITY_ATTACHMENT_UPLOAD, CAPABILITY_ORG_WRITE};
 
     let fail = |reason: &str| json!({ "ok": false, "error": reason });
-    let ping = ensure_daemon_capability(CAPABILITY_ATTACHMENT_UPLOAD).map_err(|e| fail(&e))?;
+    let ping = ensure_daemon_capabilities(&[CAPABILITY_ATTACHMENT_UPLOAD, CAPABILITY_ORG_WRITE])
+        .map_err(|e| fail(&e))?;
 
     if ping["unlocked"] != true {
         let password =
@@ -854,10 +869,11 @@ pub fn submit_attachment_delete<F>(
 where
     F: FnOnce() -> Option<zeroize::Zeroizing<String>>,
 {
-    use super::protocol::CAPABILITY_ATTACHMENT_DELETE;
+    use super::protocol::{CAPABILITY_ATTACHMENT_DELETE, CAPABILITY_ORG_WRITE};
 
     let fail = |reason: &str| json!({ "ok": false, "error": reason });
-    let ping = ensure_daemon_capability(CAPABILITY_ATTACHMENT_DELETE).map_err(|e| fail(&e))?;
+    let ping = ensure_daemon_capabilities(&[CAPABILITY_ATTACHMENT_DELETE, CAPABILITY_ORG_WRITE])
+        .map_err(|e| fail(&e))?;
 
     if ping["unlocked"] != true {
         let password =
