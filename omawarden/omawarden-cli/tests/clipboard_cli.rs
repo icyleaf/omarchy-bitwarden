@@ -853,6 +853,25 @@ fn assert_offline_copy_requires_current_epoch(copy_args: &[&str], expected: &str
     }
     let captured: u64 = fs::read_to_string(&epoch_path).unwrap().parse().unwrap();
 
+    // Publication of the epoch precedes release of the sampling owner leases.
+    // Wait for that handoff before asking a separate CLI to take over ownership.
+    for name in ["omawarden.instance.lock", "data.daemon.lock"] {
+        let owner = File::open(root.join(name)).unwrap();
+        loop {
+            match owner.try_lock() {
+                Ok(()) => {
+                    owner.unlock().unwrap();
+                    break;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    assert!(Instant::now() < deadline, "sampling retained {name}");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("could not inspect {name}: {error}"),
+            }
+        }
+    }
+
     let lock = command().args(["auth", "lock"]).output().unwrap();
     assert!(
         lock.status.success(),

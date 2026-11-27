@@ -878,9 +878,9 @@ fn a_held_offline_copy_is_rejected_after_a_lock_with_pending_cleanup() {
         "#!/bin/sh\n\
              if [ \"${1:-}\" = --clear ]; then\n\
                [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
-               exec /usr/bin/rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+               exec rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
              fi\n\
-             exec /usr/bin/cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+             exec cat > \"$XDG_RUNTIME_DIR/selection\"\n",
     )
     .unwrap();
     std::fs::set_permissions(
@@ -899,6 +899,7 @@ fn a_held_offline_copy_is_rejected_after_a_lock_with_pending_cleanup() {
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("OMAWARDEN_DATA_DIR", dir.path())
             .env("OMAWARDEN_CONFIG_DIR", dir.path())
+            .env("OMA_CLIPBOARD_PROVIDER", "wayland")
             .env("WAYLAND_DISPLAY", "fixture-wayland");
         cmd
     };

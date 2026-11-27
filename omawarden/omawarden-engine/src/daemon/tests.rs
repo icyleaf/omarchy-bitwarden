@@ -2678,9 +2678,9 @@ fn test_lock_advances_epoch_even_when_cleanup_is_pending() {
         "#!/bin/sh\n\
          if [ \"${1:-}\" = --clear ]; then\n\
            [ -e \"$XDG_RUNTIME_DIR/fail-clear\" ] && exit 1\n\
-           exec /usr/bin/rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
+           exec rm -f \"$XDG_RUNTIME_DIR/selection\"\n\
          fi\n\
-         exec /usr/bin/cat > \"$XDG_RUNTIME_DIR/selection\"\n",
+         exec cat > \"$XDG_RUNTIME_DIR/selection\"\n",
     );
     std::fs::write(runtime.path().join("fail-clear"), "").unwrap();
     std::fs::write(epoch_dir.path().join("omawarden.lock-epoch"), "80").unwrap();
