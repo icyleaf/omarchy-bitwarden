@@ -1619,6 +1619,191 @@ impl BitwardenApiClient {
         serde_json::from_slice(&bytes).map_err(|e| ApiError::Json(e.to_string()))
     }
 
+    /// Returns true when the configured Bitwarden API origin is a local loopback
+    /// `http://` server (used exclusively in local test environments).
+    pub(crate) fn is_loopback_http_api(&self) -> bool {
+        url::Url::parse(&self.urls.api_url)
+            .is_ok_and(|u| u.scheme() == "http" && u.host_str().is_some_and(is_loopback_host))
+    }
+
+    /// Attachment V2 Azure SAS renewal: `GET /api/ciphers/{id}/attachment/{attachmentId}/renew`
+    /// with Bearer auth on the same-origin Bitwarden API endpoint (Security Rule 4).
+    pub fn renew_attachment_upload_url(
+        &self,
+        access_token: &str,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!(
+            "{}/ciphers/{}/attachment/{}/renew",
+            self.urls.api_url, cipher_id, attachment_id
+        );
+        if !crate::attachment::is_same_origin(&self.urls.api_url, &url) {
+            return Err(ApiError::Http(
+                "Attachment SAS renewal URL failed RFC 6454 same-origin validation".to_string(),
+            ));
+        }
+
+        let mut resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Renew attachment upload URL failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
+    fn build_azure_upload_client() -> Result<Client, ApiError> {
+        Client::builder()
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(ApiError::from)
+    }
+
+    fn azure_sas_version(sas_url: &url::Url) -> Option<String> {
+        sas_url
+            .query_pairs()
+            .find(|(k, _)| k.eq_ignore_ascii_case("sv"))
+            .map(|(_, v)| v.into_owned())
+            .filter(|v| !v.is_empty())
+    }
+
+    fn azure_rfc1123_date() -> String {
+        chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+    }
+
+    /// Attachment V2 Step 2 (`FileUploadType::Azure (1)`), payloads `<= 256 MiB`:
+    /// single `PUT` to the validated Azure SAS URL with `x-ms-blob-type: BlockBlob`
+    /// and strictly zero `Authorization` header.
+    pub fn upload_attachment_azure_single(
+        &self,
+        sas_url: &url::Url,
+        encrypted_blob: &[u8],
+    ) -> Result<(), ApiError> {
+        let client = Self::build_azure_upload_client()?;
+        let mut req = client
+            .put(sas_url.as_str())
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-date", Self::azure_rfc1123_date())
+            .header("Content-Type", "application/octet-stream");
+        if let Some(sv) = Self::azure_sas_version(sas_url) {
+            req = req.header("x-ms-version", sv);
+        }
+
+        let mut resp = req
+            .body(encrypted_blob.to_vec())
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Azure single-PUT attachment upload failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Attachment V2 Step 2 (`FileUploadType::Azure (1)`), multi-block stage:
+    /// `PUT <sas_url>&comp=block&blockid=<base64>` with strictly zero `Authorization` header.
+    pub fn upload_attachment_azure_block(
+        &self,
+        sas_url: &url::Url,
+        block_id: &str,
+        block_bytes: &[u8],
+    ) -> Result<(), ApiError> {
+        let client = Self::build_azure_upload_client()?;
+        let block_url = crate::attachment_write::build_azure_block_url(sas_url, block_id);
+        let mut req = client
+            .put(block_url.as_str())
+            .header("x-ms-date", Self::azure_rfc1123_date())
+            .header("Content-Type", "application/octet-stream");
+        if let Some(sv) = Self::azure_sas_version(sas_url) {
+            req = req.header("x-ms-version", sv);
+        }
+
+        let mut resp = req
+            .body(block_bytes.to_vec())
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Azure Put Block upload failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Attachment V2 Step 2 (`FileUploadType::Azure (1)`), multi-block commit:
+    /// `PUT <sas_url>&comp=blocklist` with XML block list and strictly zero `Authorization` header.
+    pub fn commit_attachment_azure_block_list(
+        &self,
+        sas_url: &url::Url,
+        block_ids: &[String],
+    ) -> Result<(), ApiError> {
+        let client = Self::build_azure_upload_client()?;
+        let list_url = crate::attachment_write::build_azure_block_list_url(sas_url);
+        let xml = crate::attachment_write::build_azure_block_list_xml(block_ids);
+        let mut req = client
+            .put(list_url.as_str())
+            .header("x-ms-date", Self::azure_rfc1123_date())
+            .header("Content-Type", "application/xml; charset=utf-8");
+        if let Some(sv) = Self::azure_sas_version(sas_url) {
+            req = req.header("x-ms-version", sv);
+        }
+
+        let mut resp = req.body(xml.into_bytes()).send().map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!(
+                    "Azure Put Block List commit failed (HTTP {}): {}",
+                    status, err_body
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
         let client = self.get_client()?;
         let url = format!("{}/ciphers", self.urls.api_url);
