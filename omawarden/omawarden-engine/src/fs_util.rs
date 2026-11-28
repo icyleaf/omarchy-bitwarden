@@ -35,7 +35,10 @@ pub fn atomic_write_file<P: AsRef<Path>>(
     mode: u32,
 ) -> std::io::Result<()> {
     let dest = path.as_ref();
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
 
     if !parent.exists() {
         fs::create_dir_all(parent)?;

@@ -2498,6 +2498,21 @@ impl VaultManager {
         self.user_key.read().ok().and_then(|k| k.clone())
     }
 
+    /// Exports the unlocked personal Vault in the requested format strictly inside the engine.
+    pub fn export_personal_vault(
+        &self,
+        format: crate::vault_export::VaultExportFormat,
+    ) -> Result<crate::vault_export::VaultExportResult, String> {
+        let user_key = self
+            .get_user_key()
+            .ok_or_else(|| "Vault is locked. Please unlock the vault first.".to_string())?;
+        let storage = self
+            .storage
+            .read()
+            .map_err(|_| "Vault storage lock poisoned.".to_string())?;
+        crate::vault_export::export_personal_vault(&storage, &user_key, format)
+    }
+
     /// Returns joined Organizations and Collections from local storage with
     /// fail-closed permission defaults (`read_only: true`, `hide_passwords: true`,
     /// `manage: false`) and decrypted Collection names when Organization keys are available.

@@ -170,6 +170,9 @@ pub const CAPABILITY_ATTACHMENT_DELETE: &str = "attachment_delete";
 /// Capability identifier for cross-process lock epochs used by offline copies.
 pub const CAPABILITY_SHARED_LOCK_EPOCH: &str = "shared_lock_epoch";
 
+/// Capability identifier for personal Vault export and import (`vault_export`, `vault_import`) (ADR-0037).
+pub const CAPABILITY_VAULT_EXPORT_IMPORT: &str = "vault_export_import";
+
 /// Authoritative list of fine-grained local Daemon Protocol capabilities advertised
 /// in `ping.capabilities` (ADR-0037).
 pub const DAEMON_CAPABILITIES: &[&str] = &[
@@ -181,6 +184,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     CAPABILITY_ORG_WRITE,
     CAPABILITY_ATTACHMENT_UPLOAD,
     CAPABILITY_ATTACHMENT_DELETE,
+    CAPABILITY_VAULT_EXPORT_IMPORT,
 ];
 
 /// Returns `true` when a `ping` response advertises the requested Daemon Capability.

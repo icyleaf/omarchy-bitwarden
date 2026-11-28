@@ -673,6 +673,7 @@ pub fn should_touch_activity(action: &str, req: &Value) -> bool {
             | "folder_resolve"
             | "get_item"
             | "vault_get"
+            | "vault_export"
             | "get_ssh_key"
             | "get_attachment_key"
             | "attachment_upload"
