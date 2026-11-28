@@ -192,8 +192,12 @@ pub(crate) fn handle_vault_export(
             return ExitCode::FAILURE;
         }
 
+        let format_label = match format {
+            VaultExportFormat::Csv => "CSV",
+            _ => "JSON",
+        };
         eprint!(
-            "Warning: Exporting your Vault in unencrypted plaintext JSON will expose all secrets without encryption.\nContinue? [y/N] "
+            "Warning: Exporting your Vault in unencrypted plaintext {format_label} will expose all secrets without encryption.\nContinue? [y/N] "
         );
         let _ = io::stderr().flush();
         let mut input = String::new();
@@ -317,16 +321,33 @@ pub(crate) fn handle_vault_export(
     let skipped = reply.get("skipped").cloned().unwrap_or_else(|| json!({}));
     let warnings = reply.get("warnings").cloned().unwrap_or_else(|| json!([]));
 
+    let emit_human_warnings = |warnings_val: &Value| {
+        if let Some(arr) = warnings_val.as_array() {
+            for w in arr {
+                if let Some(msg) = w.as_str() {
+                    eprintln!("Warning: {msg}");
+                }
+            }
+        }
+    };
+
     if to_stdout {
         let mut stdout = io::stdout().lock();
-        if let Err(e) = stdout
+        let write_res = stdout
             .write_all(content.as_bytes())
-            .and_then(|_| stdout.write_all(b"\n"))
-            .and_then(|_| stdout.flush())
-        {
+            .and_then(|_| {
+                if content.ends_with('\n') {
+                    Ok(())
+                } else {
+                    stdout.write_all(b"\n")
+                }
+            })
+            .and_then(|_| stdout.flush());
+        if let Err(e) = write_res {
             emit_vault_error(false, &format!("Failed to write export to stdout: {e}"));
             return ExitCode::FAILURE;
         }
+        emit_human_warnings(&warnings);
         return ExitCode::SUCCESS;
     }
 
@@ -359,6 +380,7 @@ pub(crate) fn handle_vault_export(
             "Exported {item_count} item(s) and {folder_count} folder(s) to {}.",
             target.display()
         );
+        emit_human_warnings(&warnings);
     }
 
     ExitCode::SUCCESS

@@ -23,6 +23,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
 base64 = "0.23"
+csv = "1.3"
 rand = "0.8"
 rsa = { version = "0.9", features = ["sha2", "sha1"] }
 pkcs8 = { version = "0.11", features = ["std"] }

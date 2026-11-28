@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -16,6 +18,7 @@ pub enum VaultExportFormat {
     EncryptedJson,
     AccountEncryptedJson,
     Json,
+    Csv,
 }
 
 impl VaultExportFormat {
@@ -25,8 +28,9 @@ impl VaultExportFormat {
             "encrypted_json" => Ok(Self::EncryptedJson),
             "account_encrypted_json" => Ok(Self::AccountEncryptedJson),
             "json" => Ok(Self::Json),
+            "csv" => Ok(Self::Csv),
             other => Err(format!(
-                "Unsupported export format '{other}'. Supported formats: encrypted_json, account_encrypted_json, json."
+                "Unsupported export format '{other}'. Supported formats: encrypted_json, account_encrypted_json, json, csv."
             )),
         }
     }
@@ -37,12 +41,13 @@ impl VaultExportFormat {
             Self::EncryptedJson => "encrypted_json",
             Self::AccountEncryptedJson => "account_encrypted_json",
             Self::Json => "json",
+            Self::Csv => "csv",
         }
     }
 
     /// Returns `true` when this format writes unencrypted secrets.
     pub fn is_plaintext(self) -> bool {
-        matches!(self, Self::Json)
+        matches!(self, Self::Json | Self::Csv)
     }
 
     /// Returns `true` when this format requires a user-supplied export password.
@@ -58,6 +63,7 @@ impl VaultExportFormat {
                 format!("bitwarden_encrypted_export_{ts}.json")
             }
             Self::Json => format!("bitwarden_export_{ts}.json"),
+            Self::Csv => format!("bitwarden_export_{ts}.csv"),
         }
     }
 }
@@ -284,6 +290,12 @@ pub fn export_personal_vault(
                 return Err("Export password is not used for plaintext json export.".to_string());
             }
             export_personal_vault_plaintext_json(storage, user_key)
+        }
+        VaultExportFormat::Csv => {
+            if export_password.is_some() {
+                return Err("Export password is not used for CSV export.".to_string());
+            }
+            export_personal_vault_csv(storage, user_key)
         }
     }
 }
@@ -1069,6 +1081,291 @@ pub fn export_personal_vault_account_encrypted_json(
     })
 }
 
+const BITWARDEN_CSV_HEADERS: [&str; 12] = [
+    "folder",
+    "favorite",
+    "type",
+    "name",
+    "notes",
+    "fields",
+    "reprompt",
+    "archivedDate",
+    "login_uri",
+    "login_username",
+    "login_password",
+    "login_totp",
+];
+
+fn format_skipped_count(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+struct ZeroizingVecWriter(Zeroizing<Vec<u8>>);
+
+impl ZeroizingVecWriter {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::new()))
+    }
+
+    fn into_inner_string(mut self) -> Result<Zeroizing<String>, String> {
+        let bytes = std::mem::take(&mut *self.0);
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(Zeroizing::new(s)),
+            Err(e) => {
+                let mut invalid = e.into_bytes();
+                invalid.zeroize();
+                Err("CSV export produced non-UTF-8 output.".to_string())
+            }
+        }
+    }
+}
+
+impl std::io::Write for ZeroizingVecWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes the personal Vault into official Bitwarden RFC 4180 CSV (`csv`).
+///
+/// Exports Login (`"login"`) and Secure Note (`"note"`) personal ciphers using the exact
+/// case-sensitive Bitwarden CSV header row. Excludes Trash, Organization ciphers, and
+/// Attachments, and skips Cards, Identities, and SSH Keys with structured counts and warnings.
+pub fn export_personal_vault_csv(
+    storage: &VaultStorage,
+    user_key: &SymmetricCryptoKey,
+) -> Result<VaultExportResult, String> {
+    let mut folder_map: HashMap<String, String> = HashMap::new();
+    for f in &storage.folders {
+        let Some(id) = non_empty_str(f.get("id")) else {
+            continue;
+        };
+        let name = decrypt_cipher_string(f.get("name").and_then(Value::as_str), user_key)
+            .unwrap_or_default();
+        folder_map.insert(id, name);
+    }
+
+    let mut writer = csv::Writer::from_writer(ZeroizingVecWriter::new());
+    writer
+        .write_record(BITWARDEN_CSV_HEADERS)
+        .map_err(|e| format!("Failed to write CSV header row: {e}"))?;
+
+    let mut used_folders: HashSet<String> = HashSet::new();
+    let mut item_count: usize = 0;
+    let mut skipped_cards: usize = 0;
+    let mut skipped_identities: usize = 0;
+    let mut skipped_ssh_keys: usize = 0;
+    let mut skipped_other: usize = 0;
+
+    for c in &storage.ciphers {
+        if is_excluded_personal_cipher(c) {
+            continue;
+        }
+
+        let cipher_type = c.get("type").and_then(Value::as_i64).unwrap_or(1);
+        match cipher_type {
+            1 | 2 => {}
+            3 => {
+                skipped_cards += 1;
+                continue;
+            }
+            4 => {
+                skipped_identities += 1;
+                continue;
+            }
+            5 => {
+                skipped_ssh_keys += 1;
+                continue;
+            }
+            _ => {
+                skipped_other += 1;
+                continue;
+            }
+        }
+
+        let id = c
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let cipher_key = resolve_personal_cipher_key(c, &id, user_key)?;
+
+        let folder_name = non_empty_str(c.get("folderId"))
+            .and_then(|fid| {
+                folder_map.get(&fid).map(|name| {
+                    used_folders.insert(fid);
+                    name.as_str()
+                })
+            })
+            .unwrap_or("");
+        let favorite = if c.get("favorite").and_then(Value::as_bool).unwrap_or(false) {
+            "1"
+        } else {
+            ""
+        };
+        let type_str = if cipher_type == 2 { "note" } else { "login" };
+        let name = Zeroizing::new(
+            decrypt_cipher_string(c.get("name").and_then(Value::as_str), &cipher_key)
+                .unwrap_or_default(),
+        );
+        let notes = Zeroizing::new(
+            decrypt_cipher_string(c.get("notes").and_then(Value::as_str), &cipher_key)
+                .unwrap_or_default(),
+        );
+
+        let mut field_lines: Vec<Zeroizing<String>> = Vec::new();
+        if let Some(fields_arr) = c.get("fields").and_then(Value::as_array) {
+            for f in fields_arr {
+                let fname =
+                    Zeroizing::new(decrypt_opt_field(f, "name", &cipher_key).unwrap_or_default());
+                let fval =
+                    Zeroizing::new(decrypt_opt_field(f, "value", &cipher_key).unwrap_or_default());
+                field_lines.push(Zeroizing::new(format!(
+                    "{}: {}",
+                    fname.as_str(),
+                    fval.as_str()
+                )));
+            }
+        }
+        let fields_cell = Zeroizing::new(
+            field_lines
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        drop(field_lines);
+
+        let reprompt = if c.get("reprompt").and_then(Value::as_i64).unwrap_or(0) != 0 {
+            "1"
+        } else {
+            "0"
+        };
+        let archived_date = non_empty_str(c.get("archivedDate").or_else(|| c.get("archived_date")))
+            .unwrap_or_default();
+
+        let login_obj = (cipher_type == 1)
+            .then(|| c.get("login").or_else(|| c.get("Login")))
+            .flatten()
+            .filter(|v| !v.is_null());
+
+        let (login_uri, login_username, login_password, login_totp) = if let Some(l) = login_obj {
+            let mut uris: Vec<Zeroizing<String>> = Vec::new();
+            if let Some(uris_arr) = l.get("uris").and_then(Value::as_array) {
+                for u in uris_arr {
+                    if let Some(uri) =
+                        decrypt_opt_field(u, "uri", &cipher_key).filter(|s| !s.is_empty())
+                    {
+                        uris.push(Zeroizing::new(uri));
+                    }
+                }
+            }
+            let uri_cell = Zeroizing::new(
+                uris.iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            drop(uris);
+            let username =
+                Zeroizing::new(decrypt_opt_field(l, "username", &cipher_key).unwrap_or_default());
+            let password =
+                Zeroizing::new(decrypt_opt_field(l, "password", &cipher_key).unwrap_or_default());
+            let totp =
+                Zeroizing::new(decrypt_opt_field(l, "totp", &cipher_key).unwrap_or_default());
+            (uri_cell, username, password, totp)
+        } else {
+            (
+                Zeroizing::new(String::new()),
+                Zeroizing::new(String::new()),
+                Zeroizing::new(String::new()),
+                Zeroizing::new(String::new()),
+            )
+        };
+
+        writer
+            .write_record([
+                folder_name,
+                favorite,
+                type_str,
+                name.as_str(),
+                notes.as_str(),
+                fields_cell.as_str(),
+                reprompt,
+                archived_date.as_str(),
+                login_uri.as_str(),
+                login_username.as_str(),
+                login_password.as_str(),
+                login_totp.as_str(),
+            ])
+            .map_err(|e| format!("Failed to serialize CSV record for cipher '{id}': {e}"))?;
+        item_count += 1;
+    }
+
+    let csv_text = writer
+        .into_inner()
+        .map_err(|e| format!("Failed to finalize CSV export buffer: {e}"))?
+        .into_inner_string()?;
+
+    let mut skipped = Map::new();
+    let mut parts: Vec<String> = Vec::new();
+    if skipped_cards > 0 {
+        skipped.insert("cards".to_string(), Value::from(skipped_cards));
+        parts.push(format_skipped_count(skipped_cards, "Card", "Cards"));
+    }
+    if skipped_identities > 0 {
+        skipped.insert("identities".to_string(), Value::from(skipped_identities));
+        parts.push(format_skipped_count(
+            skipped_identities,
+            "Identity",
+            "Identities",
+        ));
+    }
+    if skipped_ssh_keys > 0 {
+        skipped.insert("ssh_keys".to_string(), Value::from(skipped_ssh_keys));
+        parts.push(format_skipped_count(
+            skipped_ssh_keys,
+            "SSH Key",
+            "SSH Keys",
+        ));
+    }
+    if skipped_other > 0 {
+        skipped.insert("other".to_string(), Value::from(skipped_other));
+        parts.push(format_skipped_count(
+            skipped_other,
+            "unsupported item",
+            "unsupported items",
+        ));
+    }
+
+    let total_skipped = skipped_cards + skipped_identities + skipped_ssh_keys + skipped_other;
+    let mut warnings = Vec::new();
+    if total_skipped > 0 {
+        warnings.push(format!(
+            "Skipped {total_skipped} item(s) not supported by Bitwarden CSV export ({}). Use --format json or --format encrypted_json for a full-fidelity backup.",
+            parts.join(", ")
+        ));
+    }
+
+    Ok(VaultExportResult {
+        format: VaultExportFormat::Csv,
+        content: csv_text,
+        item_count,
+        folder_count: used_folders.len(),
+        skipped,
+        warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1687,5 +1984,258 @@ mod tests {
                 .unwrap(),
             "SHA256:FP"
         );
+    }
+
+    #[test]
+    fn csv_format_parsing_properties_and_default_filename() {
+        assert_eq!(
+            VaultExportFormat::parse("csv").unwrap(),
+            VaultExportFormat::Csv
+        );
+        assert_eq!(
+            VaultExportFormat::parse(" CSV ").unwrap(),
+            VaultExportFormat::Csv
+        );
+        assert_eq!(VaultExportFormat::Csv.as_str(), "csv");
+        assert!(VaultExportFormat::Csv.is_plaintext());
+        assert!(!VaultExportFormat::Csv.requires_password());
+
+        let name = VaultExportFormat::Csv.default_filename();
+        assert!(name.starts_with("bitwarden_export_"));
+        assert!(name.ends_with(".csv"));
+        let ts = &name["bitwarden_export_".len()..name.len() - ".csv".len()];
+        assert_eq!(ts.len(), 14);
+        assert!(ts.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn csv_export_serializes_login_and_note_with_rfc4180_escaping_and_skips_unsupported_types() {
+        let user_key = make_key(0x5D);
+        let item_key_raw = [0x88u8; 64];
+        let item_key = SymmetricCryptoKey::from_raw_bytes(&item_key_raw).unwrap();
+        let enc_item_key = user_key.encrypt(&item_key_raw).unwrap();
+        let enc = |s: &str| user_key.encrypt_string(s).unwrap();
+        let enc_item = |s: &str| item_key.encrypt_string(s).unwrap();
+
+        let storage = VaultStorage {
+            folders: vec![
+                json!({ "id": "folder-work", "name": enc("Work, \"HQ\"") }),
+                json!({ "id": "folder-empty", "name": enc("Unused Folder") }),
+            ],
+            ciphers: vec![
+                // 1. Login with per-item key, commas/quotes/multiline notes, multiple URIs, custom fields, archivedDate
+                json!({
+                    "id": "cipher-login",
+                    "organizationId": null,
+                    "folderId": "folder-work",
+                    "type": 1,
+                    "reprompt": 1,
+                    "key": enc_item_key,
+                    "name": enc_item("GitHub, \"Main\""),
+                    "notes": enc_item("Line 1, with comma\nLine 2 \"quoted\""),
+                    "favorite": true,
+                    "archivedDate": "2026-03-01T00:00:00Z",
+                    "deletedDate": null,
+                    "login": {
+                        "username": enc_item("octocat"),
+                        "password": enc_item("p@ss,w\"rd"),
+                        "totp": enc_item("JBSWY3DPEHPK3PXP"),
+                        "uris": [
+                            { "uri": enc_item("https://github.com/login"), "match": 0 },
+                            { "uri": enc_item("https://api.github.com"), "match": 1 }
+                        ]
+                    },
+                    "fields": [
+                        { "name": enc_item("Env"), "value": enc_item("prod"), "type": 0, "linkedId": null },
+                        { "name": enc_item("Token"), "value": enc_item("tok-999"), "type": 1, "linkedId": null },
+                        { "name": enc_item("MFA"), "value": enc_item("true"), "type": 2, "linkedId": null },
+                        { "name": enc_item("LinkedUser"), "value": null, "type": 3, "linkedId": 100 }
+                    ],
+                    "attachments": [
+                        { "id": "att-1", "fileName": enc_item("secret.txt"), "size": "42" }
+                    ]
+                }),
+                // 2. Secure Note (no folder, not favorite, reprompt 0)
+                json!({
+                    "id": "cipher-note",
+                    "organizationId": null,
+                    "folderId": null,
+                    "type": 2,
+                    "reprompt": 0,
+                    "name": enc("Recovery Codes"),
+                    "notes": enc("code-1\ncode-2"),
+                    "favorite": false,
+                    "deletedDate": null,
+                    "secureNote": { "type": 0 }
+                }),
+                // 3. Card (skipped)
+                json!({
+                    "id": "cipher-card-1",
+                    "organizationId": null,
+                    "folderId": "folder-empty",
+                    "type": 3,
+                    "name": enc("Visa"),
+                    "deletedDate": null,
+                    "card": { "number": enc("4111222233334444") }
+                }),
+                json!({
+                    "id": "cipher-card-2",
+                    "organizationId": null,
+                    "folderId": null,
+                    "type": 3,
+                    "name": enc("Mastercard"),
+                    "deletedDate": null,
+                    "card": { "number": enc("5500111122223333") }
+                }),
+                // 4. Identity (skipped)
+                json!({
+                    "id": "cipher-identity",
+                    "organizationId": null,
+                    "folderId": null,
+                    "type": 4,
+                    "name": enc("Alice ID"),
+                    "deletedDate": null,
+                    "identity": { "firstName": enc("Alice") }
+                }),
+                // 5. SSH Key (skipped)
+                json!({
+                    "id": "cipher-ssh",
+                    "organizationId": null,
+                    "folderId": null,
+                    "type": 5,
+                    "name": enc("Prod Key"),
+                    "deletedDate": null,
+                    "sshKey": {
+                        "privateKey": enc("PRIVATE"),
+                        "publicKey": enc("PUBLIC"),
+                        "keyFingerprint": enc("SHA256:FP")
+                    }
+                }),
+                // 6. Trash cipher (excluded, not counted in skipped)
+                json!({
+                    "id": "cipher-trash",
+                    "organizationId": null,
+                    "type": 1,
+                    "name": enc("Deleted Login"),
+                    "deletedDate": "2026-02-10T00:00:00Z",
+                    "login": { "username": enc("gone"), "password": enc("gone") }
+                }),
+                // 7. Organization cipher (excluded, not counted in skipped)
+                json!({
+                    "id": "cipher-org",
+                    "organizationId": "org-1234",
+                    "type": 1,
+                    "name": enc("Org Login"),
+                    "deletedDate": null,
+                    "login": { "username": enc("orguser"), "password": enc("orgpw") }
+                }),
+            ],
+            ..Default::default()
+        };
+
+        // Password must be rejected for CSV
+        assert!(
+            export_personal_vault(&storage, &user_key, VaultExportFormat::Csv, Some("pw")).is_err()
+        );
+
+        let result =
+            export_personal_vault(&storage, &user_key, VaultExportFormat::Csv, None).unwrap();
+        assert_eq!(result.format, VaultExportFormat::Csv);
+        assert_eq!(result.item_count, 2);
+        assert_eq!(result.folder_count, 1);
+        assert_eq!(result.skipped.get("cards"), Some(&json!(2)));
+        assert_eq!(result.skipped.get("identities"), Some(&json!(1)));
+        assert_eq!(result.skipped.get("ssh_keys"), Some(&json!(1)));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("2 Cards"));
+        assert!(result.warnings[0].contains("1 Identity"));
+        assert!(result.warnings[0].contains("1 SSH Key"));
+
+        // Verify exact official Bitwarden CSV header and RFC 4180 parsing
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(result.content.as_bytes());
+        let headers: Vec<&str> = rdr.headers().unwrap().iter().collect();
+        assert_eq!(
+            headers,
+            vec![
+                "folder",
+                "favorite",
+                "type",
+                "name",
+                "notes",
+                "fields",
+                "reprompt",
+                "archivedDate",
+                "login_uri",
+                "login_username",
+                "login_password",
+                "login_totp",
+            ]
+        );
+
+        let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.len(), 2);
+
+        // Row 0: Login
+        assert_eq!(&rows[0][0], "Work, \"HQ\"");
+        assert_eq!(&rows[0][1], "1");
+        assert_eq!(&rows[0][2], "login");
+        assert_eq!(&rows[0][3], "GitHub, \"Main\"");
+        assert_eq!(&rows[0][4], "Line 1, with comma\nLine 2 \"quoted\"");
+        assert_eq!(
+            &rows[0][5],
+            "Env: prod\nToken: tok-999\nMFA: true\nLinkedUser: "
+        );
+        assert_eq!(&rows[0][6], "1");
+        assert_eq!(&rows[0][7], "2026-03-01T00:00:00Z");
+        assert_eq!(
+            &rows[0][8],
+            "https://github.com/login,https://api.github.com"
+        );
+        assert_eq!(&rows[0][9], "octocat");
+        assert_eq!(&rows[0][10], "p@ss,w\"rd");
+        assert_eq!(&rows[0][11], "JBSWY3DPEHPK3PXP");
+
+        // Row 1: Secure Note
+        assert_eq!(&rows[1][0], "");
+        assert_eq!(&rows[1][1], "");
+        assert_eq!(&rows[1][2], "note");
+        assert_eq!(&rows[1][3], "Recovery Codes");
+        assert_eq!(&rows[1][4], "code-1\ncode-2");
+        assert_eq!(&rows[1][5], "");
+        assert_eq!(&rows[1][6], "0");
+        assert_eq!(&rows[1][7], "");
+        assert_eq!(&rows[1][8], "");
+        assert_eq!(&rows[1][9], "");
+        assert_eq!(&rows[1][10], "");
+        assert_eq!(&rows[1][11], "");
+    }
+
+    #[test]
+    fn csv_export_without_skipped_types_emits_empty_skipped_and_warnings() {
+        let user_key = make_key(0x6E);
+        let enc = |s: &str| user_key.encrypt_string(s).unwrap();
+        let storage = VaultStorage {
+            ciphers: vec![json!({
+                "id": "cipher-note",
+                "organizationId": null,
+                "folderId": null,
+                "type": 2,
+                "name": enc("Just a note"),
+                "notes": enc("hello"),
+                "favorite": false,
+                "deletedDate": null,
+                "secureNote": { "type": 0 }
+            })],
+            ..Default::default()
+        };
+
+        let result =
+            export_personal_vault(&storage, &user_key, VaultExportFormat::Csv, None).unwrap();
+        assert_eq!(result.item_count, 1);
+        assert_eq!(result.folder_count, 0);
+        assert!(result.skipped.is_empty());
+        assert!(result.warnings.is_empty());
     }
 }
