@@ -4,6 +4,7 @@ mod edit;
 mod editor;
 mod export;
 mod get;
+mod import;
 mod lifecycle;
 mod read;
 
@@ -437,6 +438,37 @@ pub(crate) enum VaultAction {
         #[arg(long, help = "Output structured JSON status envelope")]
         json: bool,
     },
+    #[command(about = "Import personal Vault items and folders from a Bitwarden export file")]
+    Import {
+        #[arg(value_name = "FILE", help = "Path to Bitwarden export file")]
+        file: PathBuf,
+        #[arg(
+            long,
+            default_value = "auto",
+            value_name = "FORMAT",
+            help = "Import format (auto, encrypted_json, account_encrypted_json, json, csv)"
+        )]
+        format: String,
+        #[arg(
+            long,
+            value_name = "NAME_OR_ID",
+            help = "Route all imported items into a single Folder (existing UUID/name or new name)"
+        )]
+        folder: Option<String>,
+        #[arg(
+            long,
+            help = "Validate, normalize, and preview import plan without modifying the Vault"
+        )]
+        dry_run: bool,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip interactive confirmation prompt (required in non-interactive or --json mode)"
+        )]
+        yes: bool,
+        #[arg(long, help = "Output structured JSON status envelope")]
+        json: bool,
+    },
 }
 
 pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
@@ -585,5 +617,13 @@ pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
             force,
             json,
         ),
+        VaultAction::Import {
+            file,
+            format,
+            folder,
+            dry_run,
+            yes,
+            json,
+        } => import::handle_vault_import(&file, &format, folder.as_deref(), dry_run, yes, json),
     }
 }

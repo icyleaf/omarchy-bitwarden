@@ -2514,6 +2514,102 @@ impl VaultManager {
         crate::vault_export::export_personal_vault(&storage, &user_key, format, export_password)
     }
 
+    /// Validates, normalizes, reconciles Folders, and (unless `dry_run` is true) submits
+    /// an additive `POST /api/ciphers/import` batch followed by immediate Vault `sync`.
+    pub fn import_personal_vault(
+        &self,
+        file_path: Option<&std::path::Path>,
+        raw_content: Option<&str>,
+        format: crate::vault_import::VaultImportFormat,
+        folder_override: Option<&str>,
+        dry_run: bool,
+        context: Option<&ClientContext>,
+    ) -> Result<crate::vault_import::VaultImportSummary, String> {
+        let user_key = self
+            .get_user_key()
+            .ok_or_else(|| "Vault is locked. Please unlock the vault first.".to_string())?;
+
+        let raw_bytes: zeroize::Zeroizing<Vec<u8>> = if let Some(path) = file_path {
+            crate::vault_import::read_bounded_import_file(path)?
+        } else if let Some(content) = raw_content {
+            zeroize::Zeroizing::new(content.as_bytes().to_vec())
+        } else {
+            return Err("Missing import file path or payload content.".to_string());
+        };
+
+        let plan = {
+            let storage = self
+                .storage
+                .read()
+                .map_err(|_| "Vault storage lock poisoned.".to_string())?;
+            crate::vault_import::plan_personal_vault_import(
+                &storage,
+                &user_key,
+                &raw_bytes,
+                format,
+                folder_override,
+            )?
+        };
+        drop(raw_bytes);
+
+        if dry_run {
+            return Ok(plan.to_summary(true));
+        }
+
+        let session = self.cache_session().map_err(|e| e.to_string())?;
+        if !session.unlocked {
+            return Err("Vault is locked. Please unlock the vault first.".to_string());
+        }
+        let account = self
+            .storage_mgr
+            .snapshot()
+            .map_err(|e| format!("Cannot read the vault cache: {e}"))?
+            .storage;
+        let server = if account.server_url.is_empty() {
+            &self.server_url
+        } else {
+            &account.server_url
+        };
+        let identity = account.credential_identity_url(self.identity_url.as_deref());
+        let client = BitwardenApiClient::with_options(server, identity, context);
+        let token = self.keyring_mgr.for_storage(&account).access_token();
+        let mut token = match token {
+            Some(token) if !crate::auth::is_jwt_expired(&token) => token,
+            _ => self.renew_for_account(&account, context, session.generation)?,
+        };
+
+        let mut renewed_after_rejection = false;
+        loop {
+            match client.import_ciphers(&token, &plan.request_payload) {
+                Ok(()) => break,
+                Err(crate::api::ApiError::HttpStatus(status, _))
+                    if !renewed_after_rejection
+                        && (status == reqwest::StatusCode::UNAUTHORIZED
+                            || status == reqwest::StatusCode::FORBIDDEN) =>
+                {
+                    renewed_after_rejection = true;
+                    token = self.renew_for_account(&account, context, session.generation)?;
+                }
+                Err(crate::api::ApiError::HttpStatus(status, err_body)) => {
+                    if let Some(formatted) = crate::vault_import::format_import_validation_errors(
+                        &err_body,
+                        &plan.cipher_names,
+                    ) {
+                        return Err(formatted);
+                    }
+                    return Err(format!("Vault import failed (HTTP {status}): {err_body}"));
+                }
+                Err(err) => return Err(format!("Vault import failed: {err:?}")),
+            }
+        }
+
+        // Immediately trigger Vault sync to reconcile local encrypted storage and in-memory index.
+        self.sync_with_client(context)
+            .map_err(|e| format!("Import succeeded on server, but post-import sync failed: {e}"))?;
+
+        Ok(plan.to_summary(false))
+    }
+
     /// Returns joined Organizations and Collections from local storage with
     /// fail-closed permission defaults (`read_only: true`, `hide_passwords: true`,
     /// `manage: false`) and decrypted Collection names when Organization keys are available.

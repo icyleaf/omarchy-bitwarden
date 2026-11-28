@@ -1957,6 +1957,33 @@ impl BitwardenApiClient {
         read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
     }
 
+    /// Bulk-imports personal folders and ciphers via `POST /api/ciphers/import`.
+    /// Enforces RFC 6454 same-origin validation before attaching Bearer authorization.
+    pub fn import_ciphers(&self, access_token: &str, payload: &Value) -> Result<(), ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers/import", self.urls.api_url);
+        if !crate::attachment::is_same_origin(&self.urls.api_url, &url) {
+            return Err(ApiError::Http(
+                "Vault import URL failed RFC 6454 same-origin validation".to_string(),
+            ));
+        }
+        let mut resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(status, err_body));
+        }
+
+        Ok(())
+    }
+
     pub fn update_cipher_partial(
         &self,
         access_token: &str,

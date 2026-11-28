@@ -70,6 +70,7 @@ pub fn handle_client_with_peer(
             | "get_item"
             | "vault_get"
             | "vault_export"
+            | "vault_import"
             | "get_ssh_key"
             | "get_attachment_key"
             | "folder_list"
@@ -678,6 +679,40 @@ pub fn handle_client_with_peer(
                         "folder_count": exported.folder_count,
                         "skipped": exported.skipped,
                         "warnings": exported.warnings,
+                    }),
+                    Err(err) => json!({ "ok": false, "error": err }),
+                },
+                Err(err) => json!({ "ok": false, "error": err }),
+            }
+        }
+        "vault_import" => {
+            let format_raw = req.get("format").and_then(Value::as_str).unwrap_or("auto");
+            let file_path = req
+                .get("file_path")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from);
+            let content = req.get("content").and_then(Value::as_str);
+            let folder_override = req.get("folder").and_then(Value::as_str);
+            let dry_run = req.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
+
+            match crate::vault_import::VaultImportFormat::parse(format_raw) {
+                Ok(format) => match state.vault_mgr.import_personal_vault(
+                    file_path.as_deref(),
+                    content,
+                    format,
+                    folder_override,
+                    dry_run,
+                    client_context.as_ref(),
+                ) {
+                    Ok(summary) => json!({
+                        "ok": true,
+                        "dry_run": summary.dry_run,
+                        "detected_format": summary.detected_format,
+                        "cipher_count": summary.cipher_count,
+                        "folders_reused": summary.folders_reused,
+                        "folders_created": summary.folders_created,
+                        "skipped_unsupported": summary.skipped_unsupported,
+                        "warnings": summary.warnings,
                     }),
                     Err(err) => json!({ "ok": false, "error": err }),
                 },

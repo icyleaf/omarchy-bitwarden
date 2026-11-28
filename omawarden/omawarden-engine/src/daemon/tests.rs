@@ -141,6 +141,7 @@ fn test_should_touch_activity_classification() {
         "get_item",
         "vault_get",
         "vault_export",
+        "vault_import",
         "get_ssh_key",
         "get_attachment_key",
         "attachment_upload",
