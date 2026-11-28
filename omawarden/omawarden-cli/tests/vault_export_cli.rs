@@ -1501,3 +1501,304 @@ fn vault_export_encrypted_json_interactive_tty_password_prompt_and_mismatch() {
     let inner: Value = serde_json::from_str(&inner_str).unwrap();
     assert_eq!(inner["items"].as_array().unwrap().len(), 5);
 }
+
+#[test]
+fn vault_export_csv_human_json_stdout_and_guards() {
+    let env = TestVaultEnv::new(true);
+
+    // 1. Non-TTY without --allow-plaintext fails closed
+    let blocked = env.run_cli(&["vault", "export", "--format", "csv"], None);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("--allow-plaintext"));
+
+    // 2. --output - with --json fails closed
+    let conflict = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--output",
+            "-",
+            "--json",
+        ],
+        None,
+    );
+    assert!(!conflict.status.success());
+    let conflict_env: Value = serde_json::from_slice(&conflict.stdout).unwrap();
+    assert_eq!(conflict_env["ok"], false);
+
+    // 3. --password-stdin is rejected for CSV
+    let pw_flag = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--password-stdin",
+        ],
+        None,
+    );
+    assert!(!pw_flag.status.success());
+    assert!(String::from_utf8_lossy(&pw_flag.stderr).contains("encrypted_json"));
+
+    // 4. Human mode file export writes atomic 0600 RFC 4180 CSV and emits stderr skipped warning
+    let csv_file = env.temp.path().join("export.csv");
+    let human_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--output",
+            csv_file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        human_out.status.success(),
+        "human CSV export failed: stderr={}",
+        String::from_utf8_lossy(&human_out.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&csv_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let human_stdout = String::from_utf8_lossy(&human_out.stdout);
+    assert!(human_stdout.contains("Exported 2 item(s) and 1 folder(s)"));
+    let human_stderr = String::from_utf8_lossy(&human_out.stderr);
+    assert!(
+        human_stderr.contains("Warning:")
+            && human_stderr.contains("1 Card")
+            && human_stderr.contains("1 Identity")
+            && human_stderr.contains("1 SSH Key"),
+        "expected skipped-item warning on stderr, got: {human_stderr}"
+    );
+
+    let csv_bytes = fs::read(&csv_file).unwrap();
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(csv_bytes.as_slice());
+    let headers: Vec<&str> = rdr.headers().unwrap().iter().collect();
+    assert_eq!(
+        headers,
+        vec![
+            "folder",
+            "favorite",
+            "type",
+            "name",
+            "notes",
+            "fields",
+            "reprompt",
+            "archivedDate",
+            "login_uri",
+            "login_username",
+            "login_password",
+            "login_totp",
+        ]
+    );
+    let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(&rows[0][0], "Work");
+    assert_eq!(&rows[0][1], "1");
+    assert_eq!(&rows[0][2], "login");
+    assert_eq!(&rows[0][3], "GitHub Production");
+    assert_eq!(&rows[0][6], "1");
+    assert_eq!(
+        &rows[0][8],
+        "https://github.com/login,https://api.github.com"
+    );
+    assert_eq!(&rows[0][9], "octocat");
+    assert_eq!(&rows[0][10], "super-secret-login-pw");
+    assert_eq!(&rows[0][11], "JBSWY3DPEHPK3PXP");
+    assert_eq!(&rows[1][2], "note");
+    assert_eq!(&rows[1][6], "0");
+
+    // 5. Overwrite protection refuses without --force, overwrites with --force
+    let no_force = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--output",
+            csv_file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!no_force.status.success());
+    let with_force = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--force",
+            "--output",
+            csv_file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(with_force.status.success());
+
+    // 6. --json mode returns structured skipped counts and warnings
+    let json_csv_file = env.temp.path().join("export_json_mode.csv");
+    let json_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--json",
+            "--output",
+            json_csv_file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(json_out.status.success());
+    assert!(
+        json_out.stderr.is_empty(),
+        "expected empty stderr in --json mode, got: {}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["format"], "csv");
+    assert_eq!(envelope["item_count"], 2);
+    assert_eq!(envelope["folder_count"], 1);
+    assert_eq!(envelope["skipped"]["cards"], 1);
+    assert_eq!(envelope["skipped"]["identities"], 1);
+    assert_eq!(envelope["skipped"]["ssh_keys"], 1);
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("1 Card"));
+
+    // 7. Directory output creates bitwarden_export_YYYYMMDDHHMMSS.csv with 0600 permissions
+    let out_dir = env.temp.path().join("csv_dir");
+    fs::create_dir(&out_dir).unwrap();
+    let dir_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--json",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(dir_out.status.success());
+    let dir_env: Value = serde_json::from_slice(&dir_out.stdout).unwrap();
+    let generated_path = PathBuf::from(dir_env["output"].as_str().unwrap());
+    let generated_name = generated_path.file_name().unwrap().to_str().unwrap();
+    assert!(generated_name.starts_with("bitwarden_export_"));
+    assert!(generated_name.ends_with(".csv"));
+    assert_eq!(
+        fs::metadata(&generated_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    // 8. Non-TTY --output - streams CSV to stdout and skipped-item warning to stderr
+    let stdout_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--output",
+            "-",
+        ],
+        None,
+    );
+    assert!(stdout_out.status.success());
+    assert!(
+        !stdout_out.stdout.ends_with(b"\n\n"),
+        "CSV stdout must not have an extra trailing blank line"
+    );
+    let mut stdout_rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(stdout_out.stdout.as_slice());
+    assert_eq!(stdout_rdr.records().count(), 2);
+    let stdout_stderr = String::from_utf8_lossy(&stdout_out.stderr);
+    assert!(stdout_stderr.contains("Warning:") && stdout_stderr.contains("1 SSH Key"));
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_export_csv_interactive_tty_guards_and_confirmation() {
+    let env = TestVaultEnv::new(true);
+
+    // 1. --output - on interactive TTY without --force fails closed
+    let (status_tty_stdout, out_tty_stdout) = run_cli_in_controlling_pty(
+        &env,
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--allow-plaintext",
+            "--output",
+            "-",
+        ],
+        &[],
+    );
+    assert!(!status_tty_stdout.success());
+    assert!(
+        out_tty_stdout.contains("Refusing to write plaintext export to an interactive terminal"),
+        "expected TTY stdout guard error, got: {out_tty_stdout}"
+    );
+
+    // 2. Interactive y/N confirmation declines on 'n'
+    let declined_file = env.temp.path().join("tty_csv_declined.csv");
+    let (status_no, out_no) = run_cli_in_controlling_pty(
+        &env,
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--output",
+            declined_file.to_str().unwrap(),
+        ],
+        &[("Continue? [y/N]", "n\n")],
+    );
+    assert!(!status_no.success());
+    assert!(
+        out_no.contains("plaintext CSV"),
+        "expected plaintext CSV prompt, got: {out_no}"
+    );
+    assert!(!declined_file.exists());
+
+    // 3. Interactive y/N confirmation succeeds on 'y' and emits skipped-item warning
+    let accepted_file = env.temp.path().join("tty_csv_accepted.csv");
+    let (status_yes, out_yes) = run_cli_in_controlling_pty(
+        &env,
+        &[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--output",
+            accepted_file.to_str().unwrap(),
+        ],
+        &[("Continue? [y/N]", "y\n")],
+    );
+    assert!(
+        status_yes.success(),
+        "interactive CSV export failed: out={out_yes}"
+    );
+    assert!(out_yes.contains("1 Card") && out_yes.contains("1 SSH Key"));
+    assert_eq!(
+        fs::metadata(&accepted_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

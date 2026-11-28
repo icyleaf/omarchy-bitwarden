@@ -401,7 +401,7 @@ pub(crate) enum VaultAction {
             long,
             default_value = "encrypted_json",
             value_name = "FORMAT",
-            help = "Export format (encrypted_json, account_encrypted_json, json)"
+            help = "Export format (encrypted_json, account_encrypted_json, json, csv)"
         )]
         format: String,
         #[arg(
