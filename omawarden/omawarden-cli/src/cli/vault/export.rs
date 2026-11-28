@@ -55,7 +55,10 @@ fn trim_single_trailing_newline(buf: &mut Zeroizing<String>) {
     }
 }
 
-fn read_bounded_password(reader: impl Read, label: &str) -> Result<Zeroizing<String>, String> {
+pub(super) fn read_bounded_password(
+    reader: impl Read,
+    label: &str,
+) -> Result<Zeroizing<String>, String> {
     let mut raw = Zeroizing::new(Vec::new());
     reader
         .take(MAX_PASSWORD_BYTES + 1)
@@ -82,7 +85,7 @@ fn read_bounded_password(reader: impl Read, label: &str) -> Result<Zeroizing<Str
     Ok(pw)
 }
 
-fn read_password_file(path: &Path) -> Result<Zeroizing<String>, String> {
+pub(super) fn read_password_file(path: &Path) -> Result<Zeroizing<String>, String> {
     let label = format!("Password file '{}'", path.display());
     let meta = fs::metadata(path)
         .map_err(|e| format!("Failed to inspect password file '{}': {e}", path.display()))?;

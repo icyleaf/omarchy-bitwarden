@@ -398,6 +398,31 @@ impl TestImportEnv {
             .output()
             .unwrap()
     }
+
+    fn run_cli_with_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> Output {
+        let dir = self.temp.path();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_omawarden"))
+            .args(args)
+            .env_clear()
+            .env("HOME", dir)
+            .env("PATH", dir)
+            .env("XDG_RUNTIME_DIR", dir)
+            .env("OMAWARDEN_DATA_DIR", dir)
+            .env("OMAWARDEN_CONFIG_DIR", dir)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin_bytes)
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
 }
 
 fn run_cli_in_controlling_pty(
@@ -948,4 +973,557 @@ fn locked_vault_and_stale_inprocess_daemon_fail_closed() {
             .contains("vault_export_import"),
         "got: {stale_res}"
     );
+}
+
+#[test]
+fn pre_kdf_dos_bounds_and_v2_cose_rejected_before_password_prompt_or_daemon() {
+    // Even on a LOCKED vault without any password flags, pre-flight must reject DoS KDF bounds
+    // and V2 COSE exports BEFORE prompting for a password or contacting the daemon.
+    let env = TestImportEnv::new(false);
+
+    let dos_cases = [
+        (
+            "pbkdf2-low.json",
+            json!({
+                "encrypted": true,
+                "passwordProtected": true,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "kdfType": 0,
+                "kdfIterations": 4999,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "2.iv|ct|mac"
+            }),
+            "kdfIterations",
+        ),
+        (
+            "pbkdf2-high.json",
+            json!({
+                "encrypted": true,
+                "passwordProtected": true,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "kdfType": 0,
+                "kdfIterations": 2000001,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "2.iv|ct|mac"
+            }),
+            "kdfIterations",
+        ),
+        (
+            "argon2-mem-high.json",
+            json!({
+                "encrypted": true,
+                "passwordProtected": true,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "kdfType": 1,
+                "kdfIterations": 3,
+                "kdfMemory": 2048,
+                "kdfParallelism": 4,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "2.iv|ct|mac"
+            }),
+            "kdfMemory",
+        ),
+    ];
+
+    for (filename, payload, expected_substr) in dos_cases {
+        let path = env.temp.path().join(filename);
+        fs::write(&path, serde_json::to_string(&payload).unwrap()).unwrap();
+        let out = env.run_cli(&[
+            "vault",
+            "import",
+            path.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ]);
+        assert!(!out.status.success(), "{filename} should fail closed");
+        let res: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(res["ok"], false);
+        let err = res["error"].as_str().unwrap();
+        assert!(
+            err.contains(expected_substr),
+            "{filename}: expected '{expected_substr}' in '{err}'"
+        );
+        assert!(
+            !err.to_ascii_lowercase().contains("locked"),
+            "{filename}: must fail before daemon unlock check, got: {err}"
+        );
+    }
+
+    let v2_cases = [
+        (
+            "v2-validation.json",
+            json!({
+                "encrypted": true,
+                "encKeyValidation_DO_NOT_EDIT": "7.hEShAQ==",
+                "folders": [],
+                "items": []
+            }),
+        ),
+        (
+            "v2-blob.json",
+            json!({
+                "encrypted": true,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "{\"format_version\":2}"
+            }),
+        ),
+    ];
+
+    for (filename, payload) in v2_cases {
+        let path = env.temp.path().join(filename);
+        fs::write(&path, serde_json::to_string(&payload).unwrap()).unwrap();
+        let out = env.run_cli(&[
+            "vault",
+            "import",
+            path.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ]);
+        assert!(!out.status.success(), "{filename} should fail closed");
+        let res: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(res["ok"], false);
+        let err = res["error"].as_str().unwrap();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "{filename}: expected V2 COSE error, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn encrypted_json_import_zero_argv_password_dry_run_folder_and_wrong_password() {
+    let env = TestImportEnv::new(true);
+
+    // Export current vault to password-protected encrypted_json via --password-stdin
+    let enc_file = env.temp.path().join("backup-enc.json");
+    let export_out = env.run_cli_with_stdin(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "encrypted_json",
+            "--output",
+            enc_file.to_str().unwrap(),
+            "--password-stdin",
+            "--json",
+        ],
+        b"super-secret-export-pass\n",
+    );
+    assert!(
+        export_out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+
+    // 1. --password-file pointing to a directory fails closed
+    let dir_out = env.run_cli(&[
+        "vault",
+        "import",
+        enc_file.to_str().unwrap(),
+        "--password-file",
+        env.temp.path().to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(!dir_out.status.success());
+    let dir_res: Value = serde_json::from_slice(&dir_out.stdout).unwrap();
+    assert!(
+        dir_res["error"].as_str().unwrap().contains("directory"),
+        "got: {dir_res}"
+    );
+
+    // 2. --password-file exceeding 4 KiB cap fails closed
+    let huge_pw_file = env.temp.path().join("huge.pw");
+    fs::write(&huge_pw_file, vec![b'a'; 5000]).unwrap();
+    let huge_out = env.run_cli(&[
+        "vault",
+        "import",
+        enc_file.to_str().unwrap(),
+        "--password-file",
+        huge_pw_file.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(!huge_out.status.success());
+    let huge_res: Value = serde_json::from_slice(&huge_out.stdout).unwrap();
+    assert!(
+        huge_res["error"].as_str().unwrap().contains("4096"),
+        "got: {huge_res}"
+    );
+
+    // 3. Wrong password fails immediately on encKeyValidation_DO_NOT_EDIT with zero HTTP calls
+    let wrong_out = env.run_cli_with_stdin(
+        &[
+            "vault",
+            "import",
+            enc_file.to_str().unwrap(),
+            "--password-stdin",
+            "--yes",
+            "--json",
+        ],
+        b"wrong-password\n",
+    );
+    assert!(!wrong_out.status.success());
+    let wrong_res: Value = serde_json::from_slice(&wrong_out.stdout).unwrap();
+    assert_eq!(wrong_res["ok"], false);
+    assert!(
+        wrong_res["error"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("invalid import password"),
+        "got: {wrong_res}"
+    );
+    assert_eq!(env.server.state.lock().unwrap().import_calls, 0);
+
+    // 4. --dry-run with --password-stdin succeeds with zero HTTP calls
+    let dry_out = env.run_cli_with_stdin(
+        &[
+            "vault",
+            "import",
+            enc_file.to_str().unwrap(),
+            "--password-stdin",
+            "--folder",
+            "EncryptedRestore",
+            "--dry-run",
+            "--json",
+        ],
+        b"super-secret-export-pass\n",
+    );
+    assert!(
+        dry_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&dry_out.stderr)
+    );
+    let dry_res: Value = serde_json::from_slice(&dry_out.stdout).unwrap();
+    assert_eq!(dry_res["ok"], true);
+    assert_eq!(dry_res["dry_run"], true);
+    assert_eq!(dry_res["detected_format"], "encrypted_json");
+    assert_eq!(dry_res["cipher_count"], 1);
+    assert_eq!(dry_res["folders_created"], 1);
+    assert_eq!(env.server.state.lock().unwrap().import_calls, 0);
+
+    // 5. Real import via --password-file + --folder + --yes submits and syncs
+    let pw_file = env.temp.path().join("import.pw");
+    fs::write(&pw_file, "super-secret-export-pass\n").unwrap();
+    let imp_out = env.run_cli(&[
+        "vault",
+        "import",
+        enc_file.to_str().unwrap(),
+        "--password-file",
+        pw_file.to_str().unwrap(),
+        "--folder",
+        "EncryptedRestore",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        imp_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&imp_out.stderr)
+    );
+    let imp_res: Value = serde_json::from_slice(&imp_out.stdout).unwrap();
+    assert_eq!(imp_res["ok"], true);
+    assert_eq!(imp_res["dry_run"], false);
+    assert_eq!(imp_res["detected_format"], "encrypted_json");
+    assert_eq!(imp_res["cipher_count"], 1);
+    assert_eq!(imp_res["folders_created"], 1);
+    {
+        let st = env.server.state.lock().unwrap();
+        assert_eq!(st.import_calls, 1);
+        assert_eq!(st.sync_calls, 1);
+    }
+
+    // 6. Interactive PTY `rpassword` prompt on --dry-run succeeds without echoing password
+    let (pty_status, pty_output) = run_cli_in_controlling_pty(
+        &env,
+        &["vault", "import", enc_file.to_str().unwrap(), "--dry-run"],
+        &["super-secret-export-pass\n"],
+    );
+    assert!(pty_status.success(), "PTY dry-run failed: {pty_output}");
+    assert!(
+        pty_output.contains("Import password:"),
+        "expected prompt in PTY output: {pty_output}"
+    );
+    assert!(
+        pty_output.contains("would import 1 item(s)"),
+        "expected dry-run summary in PTY output: {pty_output}"
+    );
+    assert!(
+        !pty_output.contains("super-secret-export-pass"),
+        "password must not be echoed in PTY output: {pty_output}"
+    );
+}
+
+#[test]
+fn account_encrypted_json_v1_import_unkeyed_and_per_item_keyed_and_wrong_account() {
+    let env = TestImportEnv::new(true);
+
+    // 1. Account-restricted export from a DIFFERENT account fails closed immediately
+    let foreign_key = SymmetricCryptoKey::from_raw_bytes(&[99u8; 64]).unwrap();
+    let foreign_doc = json!({
+        "encrypted": true,
+        "encKeyValidation_DO_NOT_EDIT": foreign_key.encrypt_string("foreign-uuid").unwrap(),
+        "folders": [],
+        "items": [{
+            "type": 2,
+            "name": foreign_key.encrypt_string("Foreign Note").unwrap(),
+            "secureNote": { "type": 0 }
+        }]
+    });
+    let foreign_file = env.temp.path().join("foreign-acct.json");
+    fs::write(&foreign_file, serde_json::to_string(&foreign_doc).unwrap()).unwrap();
+
+    let foreign_out = env.run_cli(&[
+        "vault",
+        "import",
+        foreign_file.to_str().unwrap(),
+        "--yes",
+        "--json",
+    ]);
+    assert!(!foreign_out.status.success());
+    let foreign_res: Value = serde_json::from_slice(&foreign_out.stdout).unwrap();
+    assert_eq!(foreign_res["ok"], false);
+    assert!(
+        foreign_res["error"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("account"),
+        "got: {foreign_res}"
+    );
+    assert_eq!(env.server.state.lock().unwrap().import_calls, 0);
+
+    // 2. Valid V1 account-restricted export with BOTH legacy unkeyed and modern per-item-keyed ciphers
+    let item_key_bytes = [77u8; 64];
+    let item_key = SymmetricCryptoKey::from_raw_bytes(&item_key_bytes).unwrap();
+    let wrapped_item_key = env.user_key.encrypt(&item_key_bytes).unwrap();
+
+    let valid_v1 = json!({
+        "encrypted": true,
+        "encKeyValidation_DO_NOT_EDIT": env.user_key.encrypt_string("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        "folders": [{
+            "id": "v1-folder-new",
+            "name": env.user_key.encrypt_string("AccountV1Folder").unwrap()
+        }],
+        "items": [
+            {
+                "type": 1,
+                "folderId": "v1-folder-new",
+                "name": env.user_key.encrypt_string("V1 Unkeyed Login").unwrap(),
+                "favorite": false,
+                "reprompt": 0,
+                "login": {
+                    "username": env.user_key.encrypt_string("unkeyed_user").unwrap(),
+                    "password": env.user_key.encrypt_string("unkeyed-secret-1").unwrap(),
+                    "uris": []
+                }
+            },
+            {
+                "type": 1,
+                "folderId": "v1-folder-new",
+                "key": wrapped_item_key,
+                "name": item_key.encrypt_string("V1 Keyed Login").unwrap(),
+                "favorite": true,
+                "reprompt": 1,
+                "login": {
+                    "username": item_key.encrypt_string("keyed_user").unwrap(),
+                    "password": item_key.encrypt_string("keyed-secret-2").unwrap(),
+                    "uris": [{ "uri": item_key.encrypt_string("https://keyed.test").unwrap(), "match": 0 }]
+                }
+            }
+        ]
+    });
+    let valid_file = env.temp.path().join("valid-v1-acct.json");
+    fs::write(&valid_file, serde_json::to_string(&valid_v1).unwrap()).unwrap();
+
+    let imp_out = env.run_cli(&[
+        "vault",
+        "import",
+        valid_file.to_str().unwrap(),
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        imp_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&imp_out.stderr)
+    );
+    let imp_res: Value = serde_json::from_slice(&imp_out.stdout).unwrap();
+    assert_eq!(imp_res["ok"], true);
+    assert_eq!(imp_res["detected_format"], "account_encrypted_json");
+    assert_eq!(imp_res["cipher_count"], 2);
+    assert_eq!(imp_res["folders_created"], 1);
+
+    // Verify fresh re-encryption on POST /api/ciphers/import and post-import sync
+    {
+        let st = env.server.state.lock().unwrap();
+        assert_eq!(st.import_calls, 1);
+        assert_eq!(st.sync_calls, 1);
+        let req = &st.import_requests[0];
+        assert!(req["ciphers"][1].get("key").is_none());
+        assert_eq!(
+            decrypt_cipher_string(
+                req["ciphers"][1]["login"]["password"].as_str(),
+                &env.user_key
+            )
+            .as_deref(),
+            Some("keyed-secret-2")
+        );
+    }
+
+    let get_unkeyed = env.run_cli(&["vault", "get", "V1 Unkeyed Login", "--password"]);
+    assert!(get_unkeyed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_unkeyed.stdout).trim(),
+        "unkeyed-secret-1"
+    );
+
+    let get_keyed = env.run_cli(&["vault", "get", "V1 Keyed Login", "--password"]);
+    assert!(get_keyed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_keyed.stdout).trim(),
+        "keyed-secret-2"
+    );
+}
+
+#[test]
+fn full_four_format_export_import_round_trip() {
+    let env = TestImportEnv::new(true);
+
+    // Seed a rich Login cipher so CSV and all 3 JSON formats have meaningful content
+    let seed_file = env.temp.path().join("seed.json");
+    fs::write(
+        &seed_file,
+        serde_json::to_string(&json!({
+            "encrypted": false,
+            "folders": [{ "id": "seed-f1", "name": "RoundTripFolder" }],
+            "items": [{
+                "type": 1,
+                "folderId": "seed-f1",
+                "name": "RoundTrip Login",
+                "notes": "Line 1\nLine 2",
+                "favorite": true,
+                "reprompt": 0,
+                "login": {
+                    "username": "rt_user",
+                    "password": "rt_password_485",
+                    "totp": "JBSWY3DPEHPK3PXP",
+                    "uris": [{ "uri": "https://roundtrip.test", "match": 0 }]
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let seed_out = env.run_cli(&[
+        "vault",
+        "import",
+        seed_file.to_str().unwrap(),
+        "--yes",
+        "--json",
+    ]);
+    assert!(seed_out.status.success());
+
+    let pw_file = env.temp.path().join("rt.pw");
+    fs::write(&pw_file, "round-trip-pass-485\n").unwrap();
+
+    // Export in all 4 formats
+    let enc_json_path = env.temp.path().join("rt-encrypted.json");
+    let acct_json_path = env.temp.path().join("rt-account.json");
+    let plain_json_path = env.temp.path().join("rt-plain.json");
+    let csv_path = env.temp.path().join("rt.csv");
+
+    assert!(env
+        .run_cli(&[
+            "vault",
+            "export",
+            "--format",
+            "encrypted_json",
+            "--output",
+            enc_json_path.to_str().unwrap(),
+            "--password-file",
+            pw_file.to_str().unwrap(),
+            "--json",
+        ])
+        .status
+        .success());
+    assert!(env
+        .run_cli(&[
+            "vault",
+            "export",
+            "--format",
+            "account_encrypted_json",
+            "--output",
+            acct_json_path.to_str().unwrap(),
+            "--json",
+        ])
+        .status
+        .success());
+    assert!(env
+        .run_cli(&[
+            "vault",
+            "export",
+            "--format",
+            "json",
+            "--output",
+            plain_json_path.to_str().unwrap(),
+            "--allow-plaintext",
+            "--json",
+        ])
+        .status
+        .success());
+    assert!(env
+        .run_cli(&[
+            "vault",
+            "export",
+            "--format",
+            "csv",
+            "--output",
+            csv_path.to_str().unwrap(),
+            "--allow-plaintext",
+            "--json",
+        ])
+        .status
+        .success());
+
+    // Import each of the 4 exported files back using `--format auto` and verify counts + detected format
+    let formats: [(&Path, &str, bool); 4] = [
+        (&enc_json_path, "encrypted_json", true),
+        (&acct_json_path, "account_encrypted_json", false),
+        (&plain_json_path, "json", false),
+        (&csv_path, "csv", false),
+    ];
+
+    for (path, expected_format, needs_pw) in formats {
+        let mut args = vec![
+            "vault",
+            "import",
+            path.to_str().unwrap(),
+            "--folder",
+            expected_format,
+            "--yes",
+            "--json",
+        ];
+        if needs_pw {
+            args.push("--password-file");
+            args.push(pw_file.to_str().unwrap());
+        }
+        let out = env.run_cli(&args);
+        assert!(
+            out.status.success(),
+            "round-trip import failed for {expected_format}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let res: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(res["ok"], true, "format {expected_format}");
+        assert_eq!(res["detected_format"], expected_format);
+        assert_eq!(res["cipher_count"], 2, "format {expected_format}: {res}");
+        assert_eq!(res["folders_created"], 1, "format {expected_format}: {res}");
+    }
+
+    // Total imports = 1 seed + 4 round-trips = 5; total syncs = 5
+    let st = env.server.state.lock().unwrap();
+    assert_eq!(st.import_calls, 5);
+    assert_eq!(st.sync_calls, 5);
 }

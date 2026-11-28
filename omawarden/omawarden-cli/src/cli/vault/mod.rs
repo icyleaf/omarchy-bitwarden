@@ -457,6 +457,19 @@ pub(crate) enum VaultAction {
         folder: Option<String>,
         #[arg(
             long,
+            conflicts_with = "password_file",
+            help = "Read import password from standard input (Zero-Argv compliant)"
+        )]
+        password_stdin: bool,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "password_stdin",
+            help = "Read import password from a file (Zero-Argv compliant)"
+        )]
+        password_file: Option<PathBuf>,
+        #[arg(
+            long,
             help = "Validate, normalize, and preview import plan without modifying the Vault"
         )]
         dry_run: bool,
@@ -621,9 +634,20 @@ pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
             file,
             format,
             folder,
+            password_stdin,
+            password_file,
             dry_run,
             yes,
             json,
-        } => import::handle_vault_import(&file, &format, folder.as_deref(), dry_run, yes, json),
+        } => import::handle_vault_import(
+            &file,
+            &format,
+            folder.as_deref(),
+            password_stdin,
+            password_file.as_deref(),
+            dry_run,
+            yes,
+            json,
+        ),
     }
 }

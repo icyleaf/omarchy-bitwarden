@@ -693,6 +693,10 @@ pub fn handle_client_with_peer(
                 .map(std::path::PathBuf::from);
             let content = req.get("content").and_then(Value::as_str);
             let folder_override = req.get("folder").and_then(Value::as_str);
+            let import_password = req
+                .get("import_password")
+                .and_then(Value::as_str)
+                .map(|s| zeroize::Zeroizing::new(s.to_string()));
             let dry_run = req.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
 
             match crate::vault_import::VaultImportFormat::parse(format_raw) {
@@ -701,6 +705,7 @@ pub fn handle_client_with_peer(
                     content,
                     format,
                     folder_override,
+                    import_password.as_deref().map(String::as_str),
                     dry_run,
                     client_context.as_ref(),
                 ) {
