@@ -657,9 +657,19 @@ pub fn handle_client_with_peer(
             }
         }
         "vault_export" => {
-            let format_raw = req.get("format").and_then(Value::as_str).unwrap_or("json");
+            let format_raw = req
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("encrypted_json");
+            let export_password = req
+                .get("export_password")
+                .and_then(Value::as_str)
+                .map(|s| zeroize::Zeroizing::new(s.to_string()));
             match crate::vault_export::VaultExportFormat::parse(format_raw) {
-                Ok(format) => match state.vault_mgr.export_personal_vault(format) {
+                Ok(format) => match state
+                    .vault_mgr
+                    .export_personal_vault(format, export_password.as_deref().map(String::as_str))
+                {
                     Ok(exported) => json!({
                         "ok": true,
                         "format": exported.format.as_str(),

@@ -2502,6 +2502,7 @@ impl VaultManager {
     pub fn export_personal_vault(
         &self,
         format: crate::vault_export::VaultExportFormat,
+        export_password: Option<&str>,
     ) -> Result<crate::vault_export::VaultExportResult, String> {
         let user_key = self
             .get_user_key()
@@ -2510,7 +2511,7 @@ impl VaultManager {
             .storage
             .read()
             .map_err(|_| "Vault storage lock poisoned.".to_string())?;
-        crate::vault_export::export_personal_vault(&storage, &user_key, format)
+        crate::vault_export::export_personal_vault(&storage, &user_key, format, export_password)
     }
 
     /// Returns joined Organizations and Collections from local storage with

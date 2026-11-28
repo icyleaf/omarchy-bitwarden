@@ -6,12 +6,14 @@ use omawarden_engine::fs_util::atomic_write_file;
 use omawarden_engine::vault_export::VaultExportFormat;
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::super::io::emit_vault_error;
+
+const MAX_PASSWORD_BYTES: u64 = 4096;
 
 fn resolve_output_path(output: Option<&Path>, format: VaultExportFormat) -> PathBuf {
     match output {
@@ -42,9 +44,97 @@ fn ensure_overwrite_allowed(path: &Path, force: bool, json_mode: bool) -> Result
     Ok(())
 }
 
+fn trim_single_trailing_newline(buf: &mut Zeroizing<String>) {
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    } else if buf.ends_with('\r') {
+        buf.pop();
+    }
+}
+
+fn read_bounded_password(reader: impl Read, label: &str) -> Result<Zeroizing<String>, String> {
+    let mut raw = Zeroizing::new(Vec::new());
+    reader
+        .take(MAX_PASSWORD_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("Failed to read {label}: {e}"))?;
+    if raw.len() as u64 > MAX_PASSWORD_BYTES {
+        return Err(format!(
+            "{label} exceeds maximum allowed size of {MAX_PASSWORD_BYTES} bytes."
+        ));
+    }
+
+    let mut pw = match String::from_utf8(std::mem::take(&mut *raw)) {
+        Ok(s) => Zeroizing::new(s),
+        Err(e) => {
+            let mut bytes = e.into_bytes();
+            bytes.zeroize();
+            return Err(format!("{label} is not valid UTF-8."));
+        }
+    };
+    trim_single_trailing_newline(&mut pw);
+    if pw.is_empty() {
+        return Err(format!("{label} cannot be empty."));
+    }
+    Ok(pw)
+}
+
+fn read_password_file(path: &Path) -> Result<Zeroizing<String>, String> {
+    let label = format!("Password file '{}'", path.display());
+    let meta = fs::metadata(path)
+        .map_err(|e| format!("Failed to inspect password file '{}': {e}", path.display()))?;
+    if meta.is_dir() {
+        return Err(format!(
+            "Password file '{}' is a directory; expected a regular file.",
+            path.display()
+        ));
+    }
+    if meta.len() > MAX_PASSWORD_BYTES {
+        return Err(format!(
+            "{label} exceeds maximum allowed size of {MAX_PASSWORD_BYTES} bytes."
+        ));
+    }
+
+    let file = fs::File::open(path)
+        .map_err(|e| format!("Failed to open password file '{}': {e}", path.display()))?;
+    read_bounded_password(file, &label)
+}
+
+fn read_password_stdin() -> Result<Zeroizing<String>, String> {
+    let stdin = io::stdin();
+    read_bounded_password(stdin.lock(), "Export password from stdin")
+}
+
+fn prompt_export_password_interactive() -> Result<Zeroizing<String>, String> {
+    eprint!("Export password: ");
+    let _ = io::stderr().flush();
+    let pw = Zeroizing::new(
+        rpassword::read_password()
+            .map_err(|e| format!("Failed to read export password from terminal: {e}"))?,
+    );
+    if pw.is_empty() {
+        return Err("Export password cannot be empty.".to_string());
+    }
+    eprint!("Confirm export password: ");
+    let _ = io::stderr().flush();
+    let confirm = Zeroizing::new(
+        rpassword::read_password()
+            .map_err(|e| format!("Failed to read password confirmation from terminal: {e}"))?,
+    );
+    if *pw != *confirm {
+        return Err("Export passwords do not match.".to_string());
+    }
+    Ok(pw)
+}
+
 pub(crate) fn handle_vault_export(
     format_raw: &str,
     output: Option<&Path>,
+    password_stdin: bool,
+    password_file: Option<&Path>,
     allow_plaintext: bool,
     force: bool,
     json_mode: bool,
@@ -56,6 +146,14 @@ pub(crate) fn handle_vault_export(
             return ExitCode::FAILURE;
         }
     };
+
+    if !format.requires_password() && (password_stdin || password_file.is_some()) {
+        emit_vault_error(
+            json_mode,
+            "--password-stdin and --password-file are only valid with --format encrypted_json.",
+        );
+        return ExitCode::FAILURE;
+    }
 
     let to_stdout = output == Some(Path::new("-"));
 
@@ -110,6 +208,37 @@ pub(crate) fn handle_vault_export(
         }
     }
 
+    let mut export_password: Option<Zeroizing<String>> = if format.requires_password() {
+        if let Some(path) = password_file {
+            match read_password_file(path) {
+                Ok(pw) => Some(pw),
+                Err(err) => {
+                    emit_vault_error(json_mode, &err);
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else if password_stdin {
+            match read_password_stdin() {
+                Ok(pw) => Some(pw),
+                Err(err) => {
+                    emit_vault_error(json_mode, &err);
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            if !io::stdin().is_terminal() || json_mode {
+                emit_vault_error(
+                    json_mode,
+                    "Export password required for encrypted_json. Supply --password-stdin, --password-file <PATH>, or run in an interactive terminal.",
+                );
+                return ExitCode::FAILURE;
+            }
+            None
+        }
+    } else {
+        None
+    };
+
     let ping = match ensure_daemon_capability(CAPABILITY_VAULT_EXPORT_IMPORT) {
         Ok(p) => p,
         Err(err) => {
@@ -123,12 +252,33 @@ pub(crate) fn handle_vault_export(
         return ExitCode::FAILURE;
     }
 
-    let req = json!({
-        "action": "vault_export",
-        "format": format.as_str(),
-    });
+    if format.requires_password() && export_password.is_none() {
+        match prompt_export_password_interactive() {
+            Ok(pw) => export_password = Some(pw),
+            Err(err) => {
+                emit_vault_error(json_mode, &err);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
-    let reply = match dispatch_daemon_request(&req) {
+    let req = if let Some(ref pw) = export_password {
+        json!({
+            "action": "vault_export",
+            "format": format.as_str(),
+            "export_password": pw.as_str(),
+        })
+    } else {
+        json!({
+            "action": "vault_export",
+            "format": format.as_str(),
+        })
+    };
+
+    let reply = dispatch_daemon_request(&req);
+    drop(export_password);
+
+    let reply = match reply {
         Ok(r) => r,
         Err(DispatchError::IncompatibleProtocol { .. }) => {
             emit_vault_error(

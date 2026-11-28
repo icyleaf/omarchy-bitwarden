@@ -57,6 +57,145 @@ impl From<u32> for KdfType {
     }
 }
 
+pub const PBKDF2_EXPORT_MIN_ITERATIONS: u32 = 5_000;
+pub const PBKDF2_EXPORT_MAX_ITERATIONS: u32 = 2_000_000;
+pub const PBKDF2_EXPORT_DEFAULT_ITERATIONS: u32 = 600_000;
+
+pub const ARGON2_EXPORT_MIN_ITERATIONS: u32 = 2;
+pub const ARGON2_EXPORT_MAX_ITERATIONS: u32 = 10;
+pub const ARGON2_EXPORT_DEFAULT_ITERATIONS: u32 = 3;
+
+pub const ARGON2_EXPORT_MIN_MEMORY_MB: u32 = 16;
+pub const ARGON2_EXPORT_MAX_MEMORY_MB: u32 = 1_024;
+pub const ARGON2_EXPORT_DEFAULT_MEMORY_MB: u32 = 64;
+
+pub const ARGON2_EXPORT_MIN_PARALLELISM: u32 = 1;
+pub const ARGON2_EXPORT_MAX_PARALLELISM: u32 = 16;
+pub const ARGON2_EXPORT_DEFAULT_PARALLELISM: u32 = 4;
+
+/// Validated KDF configuration for Bitwarden password-protected Vault exports and imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKdfConfig {
+    Pbkdf2Sha256 {
+        iterations: u32,
+    },
+    Argon2id {
+        iterations: u32,
+        memory_mb: u32,
+        parallelism: u32,
+    },
+}
+
+impl ExportKdfConfig {
+    pub fn default_pbkdf2() -> Self {
+        Self::Pbkdf2Sha256 {
+            iterations: PBKDF2_EXPORT_DEFAULT_ITERATIONS,
+        }
+    }
+
+    /// Strict fail-closed bounds validation (never silently clamps).
+    pub fn validate(&self) -> Result<(), CryptoError> {
+        match *self {
+            Self::Pbkdf2Sha256 { iterations } => {
+                if !(PBKDF2_EXPORT_MIN_ITERATIONS..=PBKDF2_EXPORT_MAX_ITERATIONS)
+                    .contains(&iterations)
+                {
+                    return Err(CryptoError::InvalidKdfParams);
+                }
+                Ok(())
+            }
+            Self::Argon2id {
+                iterations,
+                memory_mb,
+                parallelism,
+            } => {
+                if !(ARGON2_EXPORT_MIN_ITERATIONS..=ARGON2_EXPORT_MAX_ITERATIONS)
+                    .contains(&iterations)
+                    || !(ARGON2_EXPORT_MIN_MEMORY_MB..=ARGON2_EXPORT_MAX_MEMORY_MB)
+                        .contains(&memory_mb)
+                    || !(ARGON2_EXPORT_MIN_PARALLELISM..=ARGON2_EXPORT_MAX_PARALLELISM)
+                        .contains(&parallelism)
+                {
+                    return Err(CryptoError::InvalidKdfParams);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Stretches a 32-byte PRK into a 64-byte `SymmetricCryptoKey` (`enc_key` + `mac_key`)
+/// using RFC 5869 Section 2.3 HKDF-Expand ONLY (`Hkdf::<Sha256>::from_prk`).
+///
+/// This matches Bitwarden's official password-protected export key stretching and
+/// intentionally differs from `SymmetricCryptoKey::from_master_key()` (which performs
+/// HKDF-Extract + Expand).
+pub fn stretch_prk(prk: &[u8]) -> Result<SymmetricCryptoKey, CryptoError> {
+    if prk.len() != 32 {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    let hkdf = Hkdf::<Sha256>::from_prk(prk).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let mut enc_key = LockedKey32::new_zeroed();
+    let mut mac_key = LockedKey32::new_zeroed();
+
+    hkdf.expand(b"enc", enc_key.as_mut_slice())
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+    hkdf.expand(b"mac", mac_key.as_mut_slice())
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+
+    Ok(SymmetricCryptoKey {
+        enc_key,
+        mac_key: Some(mac_key),
+    })
+}
+
+/// Derives the 64-byte `SymmetricCryptoKey` for a Bitwarden password-protected Vault export/import.
+///
+/// Enforces strict KDF parameter bounds fail-closed before deriving, uses the exact raw UTF-8
+/// bytes of `salt` (never Base64-decoded, trimmed, or lowercased), and stretches the 32-byte
+/// KDF output via RFC 5869 HKDF-Expand-only (`stretch_prk`).
+pub fn derive_export_key(
+    password: &str,
+    salt: &str,
+    kdf_config: &ExportKdfConfig,
+) -> Result<SymmetricCryptoKey, CryptoError> {
+    kdf_config.validate()?;
+    if salt.is_empty() {
+        return Err(CryptoError::InvalidKdfParams);
+    }
+
+    let mut prk = LockedKey32::new_zeroed();
+    match *kdf_config {
+        ExportKdfConfig::Pbkdf2Sha256 { iterations } => {
+            pbkdf2::pbkdf2_hmac::<Sha256>(
+                password.as_bytes(),
+                salt.as_bytes(),
+                iterations,
+                prk.as_mut_slice(),
+            );
+        }
+        ExportKdfConfig::Argon2id {
+            iterations,
+            memory_mb,
+            parallelism,
+        } => {
+            let memory_kib = memory_mb
+                .checked_mul(1024)
+                .ok_or(CryptoError::InvalidKdfParams)?;
+            let params = Params::new(memory_kib, iterations, parallelism, Some(32))
+                .map_err(|_| CryptoError::InvalidKdfParams)?;
+            let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
+            let salt_sha = Zeroizing::new(Sha256::digest(salt.as_bytes()));
+            argon2
+                .hash_password_into(password.as_bytes(), &salt_sha[..], prk.as_mut_slice())
+                .map_err(|_| CryptoError::InvalidKdfParams)?;
+        }
+    }
+
+    stretch_prk(prk.as_slice())
+}
+
 pub fn derive_master_key(
     email: &str,
     password: &str,
@@ -992,5 +1131,210 @@ fn test_encrypt_attachment_blob_roundtrip_and_zero_byte_layout() {
     assert_eq!(
         encrypt_attachment_blob(payload, &enc_only_key).unwrap_err(),
         CryptoError::MacMismatch
+    );
+}
+
+#[test]
+fn test_stretch_prk_matches_rfc5869_expand_only_and_differs_from_master_key() {
+    let prk = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd, 0xef,
+    ];
+
+    let stretched = stretch_prk(&prk).unwrap();
+    let enc_hex: String = stretched
+        .enc_key
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let mac_hex: String = stretched
+        .mac_key
+        .as_ref()
+        .unwrap()
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    assert_eq!(
+        enc_hex,
+        "9a2e5a0f8441c14e6f1f6ef0dc1be3df6f103466aa2b0a375f9d419d2c3d453d"
+    );
+    assert_eq!(
+        mac_hex,
+        "e0aaa7bad3d32283a6912b0a2b17e70cd9bf4d80a07f3662f704e16af4ebbf8a"
+    );
+
+    // Regression guard: stretch_prk (HKDF-Expand-only) MUST differ from from_master_key (Extract+Expand)
+    let legacy = SymmetricCryptoKey::from_master_key(&prk);
+    assert_ne!(stretched.enc_key.as_slice(), legacy.enc_key.as_slice());
+    assert_ne!(
+        stretched.mac_key.as_ref().unwrap().as_slice(),
+        legacy.mac_key.as_ref().unwrap().as_slice()
+    );
+
+    // Reject invalid PRK lengths
+    assert_eq!(
+        stretch_prk(&[0u8; 16]).unwrap_err(),
+        CryptoError::InvalidKeyLength
+    );
+}
+
+#[test]
+fn test_derive_export_key_pbkdf2_and_argon2id_interop_vectors() {
+    let password = "correct horse battery staple";
+    let salt = "Oy0xcgVRzxQ+9NpB5GLehw==";
+
+    // PBKDF2-HMAC-SHA256 vector (uses exact raw UTF-8 bytes of Base64 salt, case-sensitive)
+    let pbkdf2_cfg = ExportKdfConfig::Pbkdf2Sha256 { iterations: 5_000 };
+    let pb_key = derive_export_key(password, salt, &pbkdf2_cfg).unwrap();
+    let pb_enc_hex: String = pb_key
+        .enc_key
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let pb_mac_hex: String = pb_key
+        .mac_key
+        .as_ref()
+        .unwrap()
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    assert_eq!(
+        pb_enc_hex,
+        "d4fee07d0fe6533679f1271d2a0525a0c9c8e464bcbb645cdb32c40cfa4b9d11"
+    );
+    assert_eq!(
+        pb_mac_hex,
+        "363a3012d0243c4206e9a11b2108f2e79f171f47e020d8aaacc0a5a37d8d4b95"
+    );
+
+    // Lowercasing the salt MUST yield a different key (proving salt is not lowercased)
+    let pb_key_lower = derive_export_key(password, &salt.to_lowercase(), &pbkdf2_cfg).unwrap();
+    assert_ne!(pb_key.enc_key.as_slice(), pb_key_lower.enc_key.as_slice());
+
+    // Argon2id v0x13 vector (SHA-256(salt UTF-8 bytes) + Argon2id + HKDF-Expand-only)
+    let argon2_cfg = ExportKdfConfig::Argon2id {
+        iterations: 2,
+        memory_mb: 16,
+        parallelism: 1,
+    };
+    let ar_key = derive_export_key(password, salt, &argon2_cfg).unwrap();
+    let ar_enc_hex: String = ar_key
+        .enc_key
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let ar_mac_hex: String = ar_key
+        .mac_key
+        .as_ref()
+        .unwrap()
+        .as_slice()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    assert_eq!(
+        ar_enc_hex,
+        "2c3944234d05f6b5966cce32eae24b42a96d9cb0c375f73a0c16f31f2286ebc6"
+    );
+    assert_eq!(
+        ar_mac_hex,
+        "d777940713367dbc253947a97a3632c3b5c6821e93f508750b3c9d3577f5e61b"
+    );
+}
+
+#[test]
+fn test_export_kdf_config_bounds_validation_fail_closed() {
+    // Valid PBKDF2 boundaries
+    assert!(ExportKdfConfig::Pbkdf2Sha256 { iterations: 5_000 }
+        .validate()
+        .is_ok());
+    assert!(ExportKdfConfig::Pbkdf2Sha256 {
+        iterations: 2_000_000
+    }
+    .validate()
+    .is_ok());
+
+    // Out-of-bounds PBKDF2
+    assert_eq!(
+        ExportKdfConfig::Pbkdf2Sha256 { iterations: 4_999 }
+            .validate()
+            .unwrap_err(),
+        CryptoError::InvalidKdfParams
+    );
+    assert_eq!(
+        ExportKdfConfig::Pbkdf2Sha256 {
+            iterations: 2_000_001
+        }
+        .validate()
+        .unwrap_err(),
+        CryptoError::InvalidKdfParams
+    );
+
+    // Valid Argon2id boundaries
+    assert!(ExportKdfConfig::Argon2id {
+        iterations: 2,
+        memory_mb: 16,
+        parallelism: 1,
+    }
+    .validate()
+    .is_ok());
+    assert!(ExportKdfConfig::Argon2id {
+        iterations: 10,
+        memory_mb: 1_024,
+        parallelism: 16,
+    }
+    .validate()
+    .is_ok());
+
+    // Out-of-bounds Argon2id
+    for bad in [
+        ExportKdfConfig::Argon2id {
+            iterations: 1,
+            memory_mb: 64,
+            parallelism: 4,
+        },
+        ExportKdfConfig::Argon2id {
+            iterations: 11,
+            memory_mb: 64,
+            parallelism: 4,
+        },
+        ExportKdfConfig::Argon2id {
+            iterations: 3,
+            memory_mb: 15,
+            parallelism: 4,
+        },
+        ExportKdfConfig::Argon2id {
+            iterations: 3,
+            memory_mb: 1_025,
+            parallelism: 4,
+        },
+        ExportKdfConfig::Argon2id {
+            iterations: 3,
+            memory_mb: 64,
+            parallelism: 0,
+        },
+        ExportKdfConfig::Argon2id {
+            iterations: 3,
+            memory_mb: 64,
+            parallelism: 17,
+        },
+    ] {
+        assert_eq!(bad.validate().unwrap_err(), CryptoError::InvalidKdfParams);
+        assert_eq!(
+            derive_export_key("pw", "Oy0xcgVRzxQ+9NpB5GLehw==", &bad).unwrap_err(),
+            CryptoError::InvalidKdfParams
+        );
+    }
+
+    // Empty salt rejected fail-closed
+    assert_eq!(
+        derive_export_key("pw", "", &ExportKdfConfig::default_pbkdf2()).unwrap_err(),
+        CryptoError::InvalidKdfParams
     );
 }
