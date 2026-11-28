@@ -2,6 +2,7 @@ mod collections;
 mod create;
 mod edit;
 mod editor;
+mod export;
 mod get;
 mod lifecycle;
 mod read;
@@ -394,6 +395,35 @@ pub(crate) enum VaultAction {
         #[arg(long, help = "Output response in JSON format")]
         json: bool,
     },
+    #[command(about = "Export personal Vault items and folders")]
+    Export {
+        #[arg(
+            long,
+            default_value = "json",
+            value_name = "FORMAT",
+            help = "Export format (json)"
+        )]
+        format: String,
+        #[arg(
+            short = 'o',
+            long = "output",
+            value_name = "PATH",
+            help = "Destination file path, directory, or '-' for stdout"
+        )]
+        output: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Confirm unencrypted plaintext export without interactive prompt"
+        )]
+        allow_plaintext: bool,
+        #[arg(
+            long,
+            help = "Overwrite an existing file or allow plaintext stdout on an interactive terminal"
+        )]
+        force: bool,
+        #[arg(long, help = "Output structured JSON status envelope")]
+        json: bool,
+    },
 }
 
 pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
@@ -525,5 +555,12 @@ pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
             },
             cfg,
         ),
+        VaultAction::Export {
+            format,
+            output,
+            allow_plaintext,
+            force,
+            json,
+        } => export::handle_vault_export(&format, output.as_deref(), allow_plaintext, force, json),
     }
 }

@@ -69,6 +69,7 @@ pub fn handle_client_with_peer(
             | "search"
             | "get_item"
             | "vault_get"
+            | "vault_export"
             | "get_ssh_key"
             | "get_attachment_key"
             | "folder_list"
@@ -652,6 +653,24 @@ pub fn handle_client_with_peer(
                 Ok(crate::vault::CipherTargetResolution::NotFound(err)) => {
                     json!({ "ok": false, "error": err })
                 }
+                Err(err) => json!({ "ok": false, "error": err }),
+            }
+        }
+        "vault_export" => {
+            let format_raw = req.get("format").and_then(Value::as_str).unwrap_or("json");
+            match crate::vault_export::VaultExportFormat::parse(format_raw) {
+                Ok(format) => match state.vault_mgr.export_personal_vault(format) {
+                    Ok(exported) => json!({
+                        "ok": true,
+                        "format": exported.format.as_str(),
+                        "content": exported.content.as_str(),
+                        "item_count": exported.item_count,
+                        "folder_count": exported.folder_count,
+                        "skipped": exported.skipped,
+                        "warnings": exported.warnings,
+                    }),
+                    Err(err) => json!({ "ok": false, "error": err }),
+                },
                 Err(err) => json!({ "ok": false, "error": err }),
             }
         }

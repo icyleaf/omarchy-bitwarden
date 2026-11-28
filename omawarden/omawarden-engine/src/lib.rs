@@ -44,6 +44,7 @@ pub mod storage;
 pub mod totp;
 pub mod vault;
 mod vault_cache;
+pub mod vault_export;
 mod vault_sync;
 pub mod webauthn;
 

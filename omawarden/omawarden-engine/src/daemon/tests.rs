@@ -140,6 +140,7 @@ fn test_should_touch_activity_classification() {
         "cipher_resolve",
         "get_item",
         "vault_get",
+        "vault_export",
         "get_ssh_key",
         "get_attachment_key",
         "attachment_upload",
@@ -160,6 +161,13 @@ fn test_should_touch_activity_classification() {
     // Explicit touch: true must override passive actions
     let req_touch_true = json!({ "action": "ping", "touch": true });
     assert!(should_touch_activity("ping", &req_touch_true));
+}
+
+#[test]
+fn test_vault_export_import_capability_and_schema_v3() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 3);
+    assert_eq!(CAPABILITY_VAULT_EXPORT_IMPORT, "vault_export_import");
+    assert!(DAEMON_CAPABILITIES.contains(&CAPABILITY_VAULT_EXPORT_IMPORT));
 }
 
 #[test]
