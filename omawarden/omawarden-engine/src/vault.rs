@@ -2516,12 +2516,14 @@ impl VaultManager {
 
     /// Validates, normalizes, reconciles Folders, and (unless `dry_run` is true) submits
     /// an additive `POST /api/ciphers/import` batch followed by immediate Vault `sync`.
+    #[allow(clippy::too_many_arguments)]
     pub fn import_personal_vault(
         &self,
         file_path: Option<&std::path::Path>,
         raw_content: Option<&str>,
         format: crate::vault_import::VaultImportFormat,
         folder_override: Option<&str>,
+        import_password: Option<&str>,
         dry_run: bool,
         context: Option<&ClientContext>,
     ) -> Result<crate::vault_import::VaultImportSummary, String> {
@@ -2548,6 +2550,7 @@ impl VaultManager {
                 &raw_bytes,
                 format,
                 folder_override,
+                import_password,
             )?
         };
         drop(raw_bytes);

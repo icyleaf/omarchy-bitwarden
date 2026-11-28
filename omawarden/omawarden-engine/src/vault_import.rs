@@ -8,7 +8,12 @@ use serde_json::{json, Map, Value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::api::decrypt_cipher_string;
-use crate::crypto::SymmetricCryptoKey;
+use crate::crypto::{
+    derive_export_key, parse_symmetric_key_from_decrypted_bytes, CryptoError, EncString,
+    ExportKdfConfig, SymmetricCryptoKey, ARGON2_EXPORT_MAX_ITERATIONS, ARGON2_EXPORT_MAX_MEMORY_MB,
+    ARGON2_EXPORT_MAX_PARALLELISM, ARGON2_EXPORT_MIN_ITERATIONS, ARGON2_EXPORT_MIN_MEMORY_MB,
+    ARGON2_EXPORT_MIN_PARALLELISM, PBKDF2_EXPORT_MAX_ITERATIONS, PBKDF2_EXPORT_MIN_ITERATIONS,
+};
 use crate::storage::VaultStorage;
 
 /// Hard upper bound on import file size (50 MiB) enforced before parsing.
@@ -229,18 +234,25 @@ pub fn inspect_import_bytes(
         return Err("Import file is empty.".to_string());
     }
 
+    let mut parsed_json_doc: Option<Value> = None;
     let detected = if trimmed.starts_with('{') {
         let doc: Value = serde_json::from_str(stripped)
             .map_err(|e| format!("Invalid JSON syntax in import file: {e}"))?;
         let obj = doc.as_object().ok_or_else(|| {
             "Invalid JSON import file: top-level value must be a JSON object.".to_string()
         })?;
-        match obj.get("encrypted").and_then(Value::as_bool) {
+        let d = match obj.get("encrypted").and_then(Value::as_bool) {
             Some(true) => {
-                let password_protected = obj
-                    .get("passwordProtected")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let password_protected = match obj.get("passwordProtected") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => {
+                        return Err(
+                            "Invalid encrypted JSON import file: 'passwordProtected' must be a boolean."
+                                .to_string(),
+                        )
+                    }
+                };
                 if password_protected {
                     DetectedImportFormat::EncryptedJson
                 } else {
@@ -266,7 +278,9 @@ pub fn inspect_import_bytes(
                     );
                 }
             }
-        }
+        };
+        parsed_json_doc = Some(doc);
+        d
     } else if is_bitwarden_csv_header(stripped)? {
         DetectedImportFormat::Csv
     } else {
@@ -284,7 +298,208 @@ pub fn inspect_import_bytes(
         ));
     }
 
+    if let Some(obj) = parsed_json_doc.as_ref().and_then(Value::as_object) {
+        match detected {
+            DetectedImportFormat::EncryptedJson => {
+                validate_password_protected_preflight(obj)?;
+            }
+            DetectedImportFormat::AccountEncryptedJson => {
+                validate_account_encrypted_v1_preflight(obj)?;
+            }
+            DetectedImportFormat::Json | DetectedImportFormat::Csv => {}
+        }
+    }
+
     Ok(detected)
+}
+
+fn is_cose_enc_string(raw: &str) -> bool {
+    raw.trim_start().starts_with("7.")
+}
+
+fn v2_cose_unsupported_error(detail: &str) -> String {
+    format!(
+        "Unsupported export format: V2 Account-Restricted COSE exports ({detail}) are not supported. Re-export using Password-Protected Encrypted JSON or V1 Account-Restricted Encrypted JSON."
+    )
+}
+
+fn parse_strict_u32(obj: &Map<String, Value>, key: &str) -> Result<u32, String> {
+    let val = obj.get(key).ok_or_else(|| {
+        format!("Invalid encrypted_json export: missing required integer '{key}'.")
+    })?;
+    let n = val.as_u64().ok_or_else(|| {
+        format!("Invalid encrypted_json export: '{key}' must be a non-negative integer.")
+    })?;
+    u32::try_from(n).map_err(|_| {
+        format!("Invalid encrypted_json export: '{key}' value {n} is out of allowed range.")
+    })
+}
+
+fn parse_and_validate_export_kdf(obj: &Map<String, Value>) -> Result<ExportKdfConfig, String> {
+    let kdf_type = parse_strict_u32(obj, "kdfType")?;
+    let config = match kdf_type {
+        0 => {
+            let iterations = parse_strict_u32(obj, "kdfIterations")?;
+            if !(PBKDF2_EXPORT_MIN_ITERATIONS..=PBKDF2_EXPORT_MAX_ITERATIONS).contains(&iterations)
+            {
+                return Err(format!(
+                    "Invalid PBKDF2 kdfIterations ({iterations}): must be an integer between {PBKDF2_EXPORT_MIN_ITERATIONS} and {PBKDF2_EXPORT_MAX_ITERATIONS}."
+                ));
+            }
+            ExportKdfConfig::Pbkdf2Sha256 { iterations }
+        }
+        1 => {
+            let iterations = parse_strict_u32(obj, "kdfIterations")?;
+            if !(ARGON2_EXPORT_MIN_ITERATIONS..=ARGON2_EXPORT_MAX_ITERATIONS).contains(&iterations)
+            {
+                return Err(format!(
+                    "Invalid Argon2id kdfIterations ({iterations}): must be an integer between {ARGON2_EXPORT_MIN_ITERATIONS} and {ARGON2_EXPORT_MAX_ITERATIONS}."
+                ));
+            }
+            let memory_mb = parse_strict_u32(obj, "kdfMemory")?;
+            if !(ARGON2_EXPORT_MIN_MEMORY_MB..=ARGON2_EXPORT_MAX_MEMORY_MB).contains(&memory_mb) {
+                return Err(format!(
+                    "Invalid Argon2id kdfMemory ({memory_mb} MiB): must be an integer between {ARGON2_EXPORT_MIN_MEMORY_MB} and {ARGON2_EXPORT_MAX_MEMORY_MB} MiB."
+                ));
+            }
+            let parallelism = parse_strict_u32(obj, "kdfParallelism")?;
+            if !(ARGON2_EXPORT_MIN_PARALLELISM..=ARGON2_EXPORT_MAX_PARALLELISM)
+                .contains(&parallelism)
+            {
+                return Err(format!(
+                    "Invalid Argon2id kdfParallelism ({parallelism}): must be an integer between {ARGON2_EXPORT_MIN_PARALLELISM} and {ARGON2_EXPORT_MAX_PARALLELISM}."
+                ));
+            }
+            ExportKdfConfig::Argon2id {
+                iterations,
+                memory_mb,
+                parallelism,
+            }
+        }
+        other => {
+            return Err(format!(
+                "Unsupported encrypted_json kdfType ({other}): expected 0 (PBKDF2-HMAC-SHA256) or 1 (Argon2id)."
+            ));
+        }
+    };
+
+    config
+        .validate()
+        .map_err(|e| format!("Invalid encrypted_json KDF parameters: {e}"))?;
+    Ok(config)
+}
+
+fn validate_password_protected_preflight(
+    obj: &Map<String, Value>,
+) -> Result<ExportKdfConfig, String> {
+    let kdf = parse_and_validate_export_kdf(obj)?;
+
+    for req_field in ["salt", "encKeyValidation_DO_NOT_EDIT", "data"] {
+        let present = obj
+            .get(req_field)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if !present {
+            return Err(format!(
+                "Invalid encrypted_json export: missing or empty required string '{req_field}'."
+            ));
+        }
+    }
+
+    Ok(kdf)
+}
+
+fn validate_account_encrypted_v1_preflight(obj: &Map<String, Value>) -> Result<(), String> {
+    if let Some(validation) = obj
+        .get("encKeyValidation_DO_NOT_EDIT")
+        .and_then(Value::as_str)
+    {
+        if is_cose_enc_string(validation) {
+            return Err(v2_cose_unsupported_error(
+                "enc_type = 7 on encKeyValidation_DO_NOT_EDIT",
+            ));
+        }
+    }
+
+    if let Some(data_val) = obj.get("data").filter(|v| !v.is_null()) {
+        match data_val {
+            Value::String(s) => {
+                if is_cose_enc_string(s) {
+                    return Err(v2_cose_unsupported_error("enc_type = 7 sealed blob data"));
+                }
+                if s.contains("\"format_version\"") || s.contains("format_version") {
+                    return Err(v2_cose_unsupported_error(
+                        "sealed blob data containing format_version",
+                    ));
+                }
+                if !obj.contains_key("items") {
+                    return Err(v2_cose_unsupported_error("sealed blob data"));
+                }
+            }
+            Value::Object(map) => {
+                if map.contains_key("format_version") || !obj.contains_key("items") {
+                    return Err(v2_cose_unsupported_error(
+                        "sealed blob data containing format_version",
+                    ));
+                }
+            }
+            _ => {
+                if !obj.contains_key("items") {
+                    return Err(v2_cose_unsupported_error("sealed blob data"));
+                }
+            }
+        }
+    }
+
+    if let Some(folders) = obj.get("folders").and_then(Value::as_array) {
+        for (idx, f) in folders.iter().enumerate() {
+            if let Some(name) = f.get("name").and_then(Value::as_str) {
+                if is_cose_enc_string(name) {
+                    return Err(v2_cose_unsupported_error(&format!(
+                        "enc_type = 7 on folder #{idx} name"
+                    )));
+                }
+            }
+        }
+    }
+
+    if let Some(items) = obj.get("items").and_then(Value::as_array) {
+        for (idx, item) in items.iter().enumerate() {
+            if let Some(key) = item.get("key").and_then(Value::as_str) {
+                if is_cose_enc_string(key) {
+                    return Err(v2_cose_unsupported_error(&format!(
+                        "enc_type = 7 on cipher #{idx} key"
+                    )));
+                }
+            }
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                if is_cose_enc_string(name) {
+                    return Err(v2_cose_unsupported_error(&format!(
+                        "enc_type = 7 on cipher #{idx} name"
+                    )));
+                }
+            }
+        }
+    }
+
+    let has_validation = obj
+        .get("encKeyValidation_DO_NOT_EDIT")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !has_validation {
+        return Err(
+            "Invalid account_encrypted_json export: missing or empty 'encKeyValidation_DO_NOT_EDIT'."
+                .to_string(),
+        );
+    }
+
+    if !obj.get("items").is_some_and(Value::is_array) {
+        return Err(
+            "Invalid account_encrypted_json export: missing or invalid 'items' array.".to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 fn is_bitwarden_csv_header(content: &str) -> Result<bool, String> {
@@ -1267,6 +1482,635 @@ fn encrypt_cipher_for_import(
     Ok(Value::Object(obj))
 }
 
+fn decrypt_authenticated_bytes(
+    raw: &str,
+    key: &SymmetricCryptoKey,
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let enc = EncString::parse(raw)?;
+    if enc.enc_type != 2 {
+        return Err(CryptoError::UnsupportedCipherType(enc.enc_type));
+    }
+    enc.decrypt(key).map(Zeroizing::new)
+}
+
+fn decrypt_authenticated_string(
+    raw: &str,
+    key: &SymmetricCryptoKey,
+) -> Result<Zeroizing<String>, CryptoError> {
+    let mut bytes = decrypt_authenticated_bytes(raw, key)?;
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(s) => Ok(Zeroizing::new(s)),
+        Err(e) => {
+            let mut bad = e.into_bytes();
+            bad.zeroize();
+            Err(CryptoError::Utf8Error)
+        }
+    }
+}
+
+fn decrypt_opt_enc_str(
+    obj: &Map<String, Value>,
+    field: &str,
+    cipher_key: &SymmetricCryptoKey,
+    ctx: &str,
+) -> Result<Option<String>, String> {
+    match obj.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            if s.is_empty() {
+                return Ok(None);
+            }
+            if is_cose_enc_string(s) {
+                return Err(v2_cose_unsupported_error(&format!(
+                    "enc_type = 7 on {ctx}.{field}"
+                )));
+            }
+            let decrypted = decrypt_authenticated_string(s, cipher_key)
+                .map_err(|e| format!("Failed to decrypt {ctx} field '{field}': {e}"))?;
+            if decrypted.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(decrypted.as_str().to_string()))
+            }
+        }
+        Some(_) => Err(format!(
+            "Malformed {ctx}: field '{field}' must be an encrypted string or null."
+        )),
+    }
+}
+
+fn parse_password_protected_encrypted_json(
+    content: &str,
+    import_password: Option<&str>,
+) -> Result<ParsedImportData, String> {
+    let doc: Value = serde_json::from_str(content)
+        .map_err(|e| format!("Invalid JSON syntax in import file: {e}"))?;
+    let obj = doc.as_object().ok_or_else(|| {
+        "Invalid JSON import file: top-level value must be a JSON object.".to_string()
+    })?;
+
+    let kdf_config = validate_password_protected_preflight(obj)?;
+
+    let password = import_password.filter(|s| !s.is_empty()).ok_or_else(|| {
+        "Import password is required for password-protected encrypted_json import.".to_string()
+    })?;
+
+    let salt = obj
+        .get("salt")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Invalid encrypted_json export: missing 'salt'.".to_string())?;
+    let enc_validation = obj
+        .get("encKeyValidation_DO_NOT_EDIT")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Invalid encrypted_json export: missing 'encKeyValidation_DO_NOT_EDIT'.".to_string()
+        })?;
+    let enc_data = obj
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Invalid encrypted_json export: missing 'data'.".to_string())?;
+
+    let mut derived_key = derive_export_key(password, salt, &kdf_config)
+        .map_err(|e| format!("Failed to derive import decryption key: {e}"))?;
+
+    let validation_res = decrypt_authenticated_string(enc_validation, &derived_key);
+    if let Err(err) = validation_res {
+        derived_key.zeroize();
+        return Err(match err {
+            CryptoError::MacMismatch | CryptoError::DecryptionFailed(_) => {
+                "Invalid import password: key validation failed (MAC mismatch).".to_string()
+            }
+            other => format!(
+                "Invalid import password: failed to validate 'encKeyValidation_DO_NOT_EDIT': {other}"
+            ),
+        });
+    }
+
+    let plaintext_json = decrypt_authenticated_string(enc_data, &derived_key)
+        .map_err(|e| format!("Failed to decrypt encrypted_json payload: {e}"));
+    derived_key.zeroize();
+    let plaintext_json = plaintext_json?;
+
+    parse_plaintext_json(plaintext_json.as_str())
+}
+
+fn resolve_account_export_item_key(
+    iobj: &Map<String, Value>,
+    user_key: &SymmetricCryptoKey,
+    ctx: &str,
+) -> Result<SymmetricCryptoKey, String> {
+    match iobj.get("key") {
+        None | Some(Value::Null) => Ok(user_key.clone()),
+        Some(Value::String(s)) if s.is_empty() => Ok(user_key.clone()),
+        Some(Value::String(enc_key_str)) => {
+            if is_cose_enc_string(enc_key_str) {
+                return Err(v2_cose_unsupported_error(&format!(
+                    "enc_type = 7 on {ctx} key"
+                )));
+            }
+            let raw_bytes = decrypt_authenticated_bytes(enc_key_str, user_key)
+                .map_err(|e| format!("Failed to decrypt per-item key for {ctx}: {e}"))?;
+            parse_symmetric_key_from_decrypted_bytes(raw_bytes.as_slice())
+                .ok_or_else(|| format!("Invalid symmetric key length for per-item key on {ctx}."))
+        }
+        Some(_) => Err(format!(
+            "Malformed {ctx}: field 'key' must be an encrypted string or null."
+        )),
+    }
+}
+
+fn parse_account_encrypted_json_v1(
+    content: &str,
+    user_key: &SymmetricCryptoKey,
+) -> Result<ParsedImportData, String> {
+    let doc: Value = serde_json::from_str(content)
+        .map_err(|e| format!("Invalid JSON syntax in import file: {e}"))?;
+    let obj = doc.as_object().ok_or_else(|| {
+        "Invalid JSON import file: top-level value must be a JSON object.".to_string()
+    })?;
+
+    validate_account_encrypted_v1_preflight(obj)?;
+
+    let enc_validation = obj
+        .get("encKeyValidation_DO_NOT_EDIT")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Invalid account_encrypted_json export: missing 'encKeyValidation_DO_NOT_EDIT'."
+                .to_string()
+        })?;
+    if decrypt_authenticated_string(enc_validation, user_key).is_err() {
+        return Err(
+            "Account key validation failed: this account-restricted export belongs to a different Bitwarden account or encryption key."
+                .to_string(),
+        );
+    }
+
+    let mut folders = Vec::new();
+    let mut folder_id_to_idx: HashMap<String, usize> = HashMap::new();
+
+    if let Some(folders_val) = obj.get("folders") {
+        if !folders_val.is_null() {
+            let arr = folders_val.as_array().ok_or_else(|| {
+                "Invalid account_encrypted_json import file: 'folders' must be an array."
+                    .to_string()
+            })?;
+            for (idx, f) in arr.iter().enumerate() {
+                let fobj = f
+                    .as_object()
+                    .ok_or_else(|| format!("Malformed folder #{idx}: expected a JSON object."))?;
+                let fctx = format!("folder #{idx}");
+                let name = decrypt_opt_enc_str(fobj, "name", user_key, &fctx)?
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| format!("Malformed {fctx}: missing or empty 'name'."))?;
+                let source_id = opt_non_empty_str(fobj, "id", &fctx)?;
+                let folder_idx = folders.len();
+                if let Some(ref sid) = source_id {
+                    folder_id_to_idx.entry(sid.clone()).or_insert(folder_idx);
+                }
+                folders.push(NormalizedFolder { source_id, name });
+            }
+        }
+    }
+
+    let items_arr = obj.get("items").and_then(Value::as_array).ok_or_else(|| {
+        "Invalid account_encrypted_json import file: missing or invalid 'items' array.".to_string()
+    })?;
+
+    let mut ciphers = Vec::new();
+    let mut skipped_unsupported = Vec::new();
+
+    for (idx, item) in items_arr.iter().enumerate() {
+        let Some(iobj) = item.as_object() else {
+            return Err(format!(
+                "Malformed {}: expected a JSON object.",
+                cipher_label(idx, None)
+            ));
+        };
+
+        let raw_ctx = cipher_label(idx, None);
+        let cipher_type = iobj
+            .get("type")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("Malformed {raw_ctx}: missing or non-integer 'type'."))?;
+
+        // Unsupported newer Bitwarden cipher types (6: Bank Account, 7: Driver's License, 8: Passport)
+        if matches!(cipher_type, 6..=8) {
+            let skipped_name = resolve_account_export_item_key(iobj, user_key, &raw_ctx)
+                .ok()
+                .and_then(|ck| {
+                    decrypt_opt_enc_str(iobj, "name", &ck, &raw_ctx)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            skipped_unsupported.push(SkippedUnsupportedCipher {
+                index: idx,
+                name: skipped_name,
+                cipher_type,
+            });
+            continue;
+        }
+
+        if !matches!(cipher_type, 1..=5) {
+            return Err(format!(
+                "Malformed {raw_ctx}: unsupported cipher type {cipher_type} (expected 1-5)."
+            ));
+        }
+
+        let mut cipher_key = resolve_account_export_item_key(iobj, user_key, &raw_ctx)?;
+        let dec_name = decrypt_opt_enc_str(iobj, "name", &cipher_key, &raw_ctx)?;
+        let label = cipher_label(idx, dec_name.as_deref());
+        let name = dec_name
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| format!("Malformed {label}: missing or empty 'name'."))?;
+
+        let notes = decrypt_opt_enc_str(iobj, "notes", &cipher_key, &label)?;
+        let favorite = match iobj.get("favorite") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(format!("Malformed {label}: 'favorite' must be a boolean.")),
+        };
+        let reprompt = match iobj.get("reprompt") {
+            None | Some(Value::Null) => 0,
+            Some(v) => v
+                .as_i64()
+                .ok_or_else(|| format!("Malformed {label}: 'reprompt' must be an integer."))?,
+        };
+        let archived_date = opt_non_empty_str(iobj, "archivedDate", &label)?;
+        let raw_folder_id = opt_non_empty_str(iobj, "folderId", &label)?;
+        let imported_folder_idx = raw_folder_id
+            .as_ref()
+            .and_then(|fid| folder_id_to_idx.get(fid).copied());
+
+        // Custom fields
+        let mut fields = Vec::new();
+        if let Some(fields_val) = iobj.get("fields") {
+            if !fields_val.is_null() {
+                let farr = fields_val
+                    .as_array()
+                    .ok_or_else(|| format!("Malformed {label}: 'fields' must be an array."))?;
+                for (fidx, fv) in farr.iter().enumerate() {
+                    let fobj = fv.as_object().ok_or_else(|| {
+                        format!("Malformed {label}: field[{fidx}] must be a JSON object.")
+                    })?;
+                    let ftype = match fobj.get("type") {
+                        None | Some(Value::Null) => 0,
+                        Some(v) => v.as_i64().ok_or_else(|| {
+                            format!("Malformed {label}: field[{fidx}].type must be an integer.")
+                        })?,
+                    };
+                    let linked_id = match fobj.get("linkedId") {
+                        None | Some(Value::Null) => None,
+                        Some(v) => Some(v.as_i64().ok_or_else(|| {
+                            format!(
+                                "Malformed {label}: field[{fidx}].linkedId must be an integer or null."
+                            )
+                        })?),
+                    };
+                    fields.push(NormalizedField {
+                        name: decrypt_opt_enc_str(fobj, "name", &cipher_key, &label)?,
+                        value: decrypt_opt_enc_str(fobj, "value", &cipher_key, &label)?,
+                        field_type: ftype,
+                        linked_id,
+                    });
+                }
+            }
+        }
+
+        // Password history: filter out null/empty entries and cap at 5
+        let mut password_history = Vec::new();
+        if let Some(hist_val) = iobj.get("passwordHistory") {
+            if !hist_val.is_null() {
+                let harr = hist_val.as_array().ok_or_else(|| {
+                    format!("Malformed {label}: 'passwordHistory' must be an array.")
+                })?;
+                for entry in harr {
+                    let Some(hobj) = entry.as_object() else {
+                        continue;
+                    };
+                    let Some(pw) = decrypt_opt_enc_str(hobj, "password", &cipher_key, &label)?
+                    else {
+                        continue;
+                    };
+                    let last_used_date = hobj
+                        .get("lastUsedDate")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    password_history.push(NormalizedPasswordHistoryEntry {
+                        last_used_date,
+                        password: pw,
+                    });
+                    if password_history.len() >= MAX_PASSWORD_HISTORY_ENTRIES {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut login = None;
+        let mut secure_note = None;
+        let mut card = None;
+        let mut identity = None;
+        let mut ssh_key = None;
+
+        match cipher_type {
+            1 => {
+                let lobj = iobj
+                    .get("login")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        format!(
+                            "Malformed {label}: Login cipher (type 1) is missing 'login' object."
+                        )
+                    })?;
+                let mut uris = Vec::new();
+                if let Some(uris_val) = lobj.get("uris") {
+                    if !uris_val.is_null() {
+                        let uarr = uris_val.as_array().ok_or_else(|| {
+                            format!("Malformed {label}: 'login.uris' must be an array.")
+                        })?;
+                        for (uidx, uv) in uarr.iter().enumerate() {
+                            let uobj = uv.as_object().ok_or_else(|| {
+                                format!(
+                                    "Malformed {label}: login.uris[{uidx}] must be a JSON object."
+                                )
+                            })?;
+                            let uri_match = match uobj.get("match") {
+                                None | Some(Value::Null) => None,
+                                Some(v) => Some(v.as_i64().ok_or_else(|| {
+                                    format!(
+                                        "Malformed {label}: login.uris[{uidx}].match must be an integer or null."
+                                    )
+                                })?),
+                            };
+                            uris.push(NormalizedLoginUri {
+                                uri: decrypt_opt_enc_str(uobj, "uri", &cipher_key, &label)?,
+                                uri_match,
+                            });
+                        }
+                    }
+                }
+
+                let mut fido2_credentials = Vec::new();
+                if let Some(fido_val) = lobj.get("fido2Credentials") {
+                    if !fido_val.is_null() {
+                        let farr = fido_val.as_array().ok_or_else(|| {
+                            format!("Malformed {label}: 'login.fido2Credentials' must be an array.")
+                        })?;
+                        for (fidx, fv) in farr.iter().enumerate() {
+                            let fobj = fv.as_object().ok_or_else(|| {
+                                format!(
+                                    "Malformed {label}: login.fido2Credentials[{fidx}] must be a JSON object."
+                                )
+                            })?;
+                            fido2_credentials.push(NormalizedFido2Credential {
+                                credential_id: decrypt_opt_enc_str(
+                                    fobj,
+                                    "credentialId",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                key_type: decrypt_opt_enc_str(
+                                    fobj,
+                                    "keyType",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                key_algorithm: decrypt_opt_enc_str(
+                                    fobj,
+                                    "keyAlgorithm",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                key_curve: decrypt_opt_enc_str(
+                                    fobj,
+                                    "keyCurve",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                key_value: decrypt_opt_enc_str(
+                                    fobj,
+                                    "keyValue",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                rp_id: decrypt_opt_enc_str(fobj, "rpId", &cipher_key, &label)?,
+                                user_handle: decrypt_opt_enc_str(
+                                    fobj,
+                                    "userHandle",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                user_name: decrypt_opt_enc_str(
+                                    fobj,
+                                    "userName",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                counter: decrypt_opt_enc_str(fobj, "counter", &cipher_key, &label)?,
+                                rp_name: decrypt_opt_enc_str(fobj, "rpName", &cipher_key, &label)?,
+                                user_display_name: decrypt_opt_enc_str(
+                                    fobj,
+                                    "userDisplayName",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                discoverable: decrypt_opt_enc_str(
+                                    fobj,
+                                    "discoverable",
+                                    &cipher_key,
+                                    &label,
+                                )?,
+                                creation_date: opt_non_empty_str(fobj, "creationDate", &label)?,
+                            });
+                        }
+                    }
+                }
+
+                let http_authentication_enabled = match lobj.get("httpAuthenticationEnabled") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Bool(b)) => Some(*b),
+                    Some(_) => {
+                        return Err(format!(
+                            "Malformed {label}: 'login.httpAuthenticationEnabled' must be a boolean."
+                        ));
+                    }
+                };
+
+                login = Some(NormalizedLogin {
+                    username: decrypt_opt_enc_str(lobj, "username", &cipher_key, &label)?,
+                    password: decrypt_opt_enc_str(lobj, "password", &cipher_key, &label)?,
+                    totp: decrypt_opt_enc_str(lobj, "totp", &cipher_key, &label)?,
+                    password_revision_date: opt_non_empty_str(
+                        lobj,
+                        "passwordRevisionDate",
+                        &label,
+                    )?,
+                    http_authentication_enabled,
+                    uris,
+                    fido2_credentials,
+                });
+            }
+            2 => {
+                let note_type = match iobj.get("secureNote") {
+                    None | Some(Value::Null) => 0,
+                    Some(Value::Object(sn)) => match sn.get("type") {
+                        None | Some(Value::Null) => 0,
+                        Some(v) => v.as_i64().ok_or_else(|| {
+                            format!("Malformed {label}: 'secureNote.type' must be an integer.")
+                        })?,
+                    },
+                    Some(_) => {
+                        return Err(format!(
+                            "Malformed {label}: 'secureNote' must be a JSON object."
+                        ))
+                    }
+                };
+                secure_note = Some(NormalizedSecureNote { note_type });
+            }
+            3 => {
+                let cobj = iobj.get("card").and_then(Value::as_object).ok_or_else(|| {
+                    format!("Malformed {label}: Card cipher (type 3) is missing 'card' object.")
+                })?;
+                card = Some(NormalizedCard {
+                    cardholder_name: decrypt_opt_enc_str(
+                        cobj,
+                        "cardholderName",
+                        &cipher_key,
+                        &label,
+                    )?,
+                    brand: decrypt_opt_enc_str(cobj, "brand", &cipher_key, &label)?,
+                    number: decrypt_opt_enc_str(cobj, "number", &cipher_key, &label)?,
+                    exp_month: decrypt_opt_enc_str(cobj, "expMonth", &cipher_key, &label)?,
+                    exp_year: decrypt_opt_enc_str(cobj, "expYear", &cipher_key, &label)?,
+                    code: decrypt_opt_enc_str(cobj, "code", &cipher_key, &label)?,
+                });
+            }
+            4 => {
+                let idobj = iobj
+                    .get("identity")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        format!(
+                            "Malformed {label}: Identity cipher (type 4) is missing 'identity' object."
+                        )
+                    })?;
+                identity = Some(NormalizedIdentity {
+                    title: decrypt_opt_enc_str(idobj, "title", &cipher_key, &label)?,
+                    first_name: decrypt_opt_enc_str(idobj, "firstName", &cipher_key, &label)?,
+                    middle_name: decrypt_opt_enc_str(idobj, "middleName", &cipher_key, &label)?,
+                    last_name: decrypt_opt_enc_str(idobj, "lastName", &cipher_key, &label)?,
+                    address1: decrypt_opt_enc_str(idobj, "address1", &cipher_key, &label)?,
+                    address2: decrypt_opt_enc_str(idobj, "address2", &cipher_key, &label)?,
+                    address3: decrypt_opt_enc_str(idobj, "address3", &cipher_key, &label)?,
+                    city: decrypt_opt_enc_str(idobj, "city", &cipher_key, &label)?,
+                    state: decrypt_opt_enc_str(idobj, "state", &cipher_key, &label)?,
+                    postal_code: decrypt_opt_enc_str(idobj, "postalCode", &cipher_key, &label)?,
+                    country: decrypt_opt_enc_str(idobj, "country", &cipher_key, &label)?,
+                    company: decrypt_opt_enc_str(idobj, "company", &cipher_key, &label)?,
+                    email: decrypt_opt_enc_str(idobj, "email", &cipher_key, &label)?,
+                    phone: decrypt_opt_enc_str(idobj, "phone", &cipher_key, &label)?,
+                    ssn: decrypt_opt_enc_str(idobj, "ssn", &cipher_key, &label)?,
+                    username: decrypt_opt_enc_str(idobj, "username", &cipher_key, &label)?,
+                    passport_number: decrypt_opt_enc_str(
+                        idobj,
+                        "passportNumber",
+                        &cipher_key,
+                        &label,
+                    )?,
+                    license_number: decrypt_opt_enc_str(
+                        idobj,
+                        "licenseNumber",
+                        &cipher_key,
+                        &label,
+                    )?,
+                });
+            }
+            5 => {
+                let sobj = iobj
+                    .get("sshKey")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        format!(
+                            "Malformed {label}: SSH Key cipher (type 5) is missing 'sshKey' object."
+                        )
+                    })?;
+                let private_key =
+                    decrypt_opt_enc_str(sobj, "privateKey", &cipher_key, &label)?.ok_or_else(
+                        || {
+                            format!(
+                                "Malformed {label}: SSH Key cipher requires non-empty 'privateKey', 'publicKey', and 'keyFingerprint'."
+                            )
+                        },
+                    )?;
+                let public_key =
+                    decrypt_opt_enc_str(sobj, "publicKey", &cipher_key, &label)?.ok_or_else(
+                        || {
+                            format!(
+                                "Malformed {label}: SSH Key cipher requires non-empty 'privateKey', 'publicKey', and 'keyFingerprint'."
+                            )
+                        },
+                    )?;
+                let key_fingerprint =
+                    decrypt_opt_enc_str(sobj, "keyFingerprint", &cipher_key, &label)?
+                        .or(decrypt_opt_enc_str(sobj, "fingerprint", &cipher_key, &label)?)
+                        .ok_or_else(|| {
+                            format!(
+                                "Malformed {label}: SSH Key cipher requires non-empty 'privateKey', 'publicKey', and 'keyFingerprint'."
+                            )
+                        })?;
+                ssh_key = Some(NormalizedSshKey {
+                    private_key,
+                    public_key,
+                    key_fingerprint,
+                });
+            }
+            _ => unreachable!("filtered above"),
+        }
+
+        cipher_key.zeroize();
+
+        ciphers.push(NormalizedCipher {
+            cipher_type,
+            name,
+            notes,
+            favorite,
+            reprompt,
+            archived_date,
+            imported_folder_idx,
+            raw_folder_id,
+            fields,
+            password_history,
+            login,
+            secure_note,
+            card,
+            identity,
+            ssh_key,
+        });
+    }
+
+    let mut warnings = Vec::new();
+    if !skipped_unsupported.is_empty() {
+        let names: Vec<String> = skipped_unsupported
+            .iter()
+            .map(|s| format!("'{}' (type {})", s.name, s.cipher_type))
+            .collect();
+        warnings.push(format!(
+            "Skipped {} unsupported cipher(s) (Types 6-8): {}.",
+            skipped_unsupported.len(),
+            names.join(", ")
+        ));
+    }
+
+    Ok(ParsedImportData {
+        folders,
+        ciphers,
+        skipped_unsupported,
+        warnings,
+    })
+}
+
 /// Validates, normalizes, reconciles Folders, checks Bitwarden Cloud batch limits, and
 /// builds the encrypted `POST /api/ciphers/import` payload strictly inside the engine.
 pub fn plan_personal_vault_import(
@@ -1275,6 +2119,7 @@ pub fn plan_personal_vault_import(
     raw_bytes: &[u8],
     requested_format: VaultImportFormat,
     folder_override: Option<&str>,
+    import_password: Option<&str>,
 ) -> Result<PlannedVaultImport, String> {
     let detected = inspect_import_bytes(raw_bytes, requested_format)?;
 
@@ -1282,14 +2127,21 @@ pub fn plan_personal_vault_import(
         .map_err(|_| "Import file is not valid UTF-8.".to_string())?;
     let stripped = strip_utf8_bom(text);
 
+    if detected != DetectedImportFormat::EncryptedJson && import_password.is_some() {
+        return Err(format!(
+            "Import password is not used for {} import.",
+            detected.as_str()
+        ));
+    }
+
     let parsed = match detected {
         DetectedImportFormat::Json => parse_plaintext_json(stripped)?,
         DetectedImportFormat::Csv => parse_bitwarden_csv(stripped)?,
-        DetectedImportFormat::EncryptedJson | DetectedImportFormat::AccountEncryptedJson => {
-            return Err(format!(
-                "Detected format '{}' is encrypted; encrypted JSON import is not yet supported in this release.",
-                detected.as_str()
-            ));
+        DetectedImportFormat::EncryptedJson => {
+            parse_password_protected_encrypted_json(stripped, import_password)?
+        }
+        DetectedImportFormat::AccountEncryptedJson => {
+            parse_account_encrypted_json_v1(stripped, user_key)?
         }
     };
 
@@ -1520,7 +2372,10 @@ fn extract_cipher_index_from_validation_key(key: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::api::decrypt_cipher_string;
-    use crate::vault_export::{export_personal_vault_csv, export_personal_vault_plaintext_json};
+    use crate::vault_export::{
+        export_personal_vault_account_encrypted_json, export_personal_vault_csv,
+        export_personal_vault_encrypted_json, export_personal_vault_plaintext_json,
+    };
 
     fn test_user_key() -> SymmetricCryptoKey {
         SymmetricCryptoKey::from_raw_bytes(&[7u8; 64]).unwrap()
@@ -1607,8 +2462,9 @@ mod tests {
             }]
         });
         let raw = serde_json::to_vec(&valid_json).unwrap();
-        let plan = plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Json, None)
-            .unwrap();
+        let plan =
+            plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Json, None, None)
+                .unwrap();
         assert_eq!(plan.cipher_count, 1);
         let c = &plan.request_payload["ciphers"][0];
         assert!(c["organizationId"].is_null());
@@ -1635,9 +2491,15 @@ mod tests {
             ]
         });
         let raw_bad = serde_json::to_vec(&invalid_json).unwrap();
-        let err =
-            plan_personal_vault_import(&storage, &key, &raw_bad, VaultImportFormat::Json, None)
-                .unwrap_err();
+        let err = plan_personal_vault_import(
+            &storage,
+            &key,
+            &raw_bad,
+            VaultImportFormat::Json,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("#1"), "expected index 1, got: {err}");
         assert!(
             err.contains("Broken SSH Key"),
@@ -1671,8 +2533,9 @@ mod tests {
             }]
         });
         let raw = serde_json::to_vec(&doc).unwrap();
-        let plan = plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None)
-            .unwrap();
+        let plan =
+            plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None, None)
+                .unwrap();
         let hist = plan.request_payload["ciphers"][0]["passwordHistory"]
             .as_array()
             .unwrap();
@@ -1704,8 +2567,9 @@ mod tests {
             ]
         });
         let raw = serde_json::to_vec(&doc).unwrap();
-        let plan = plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None)
-            .unwrap();
+        let plan =
+            plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None, None)
+                .unwrap();
         assert_eq!(plan.cipher_count, 2);
         assert_eq!(plan.skipped_unsupported.len(), 3);
         assert_eq!(plan.warnings.len(), 1);
@@ -1728,6 +2592,7 @@ mod tests {
             &key,
             &serde_json::to_vec(&bad).unwrap(),
             VaultImportFormat::Auto,
+            None,
             None,
         )
         .unwrap_err();
@@ -1758,8 +2623,9 @@ mod tests {
             ]
         });
         let raw = serde_json::to_vec(&doc).unwrap();
-        let plan = plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None)
-            .unwrap();
+        let plan =
+            plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, None, None)
+                .unwrap();
 
         assert_eq!(plan.folders_reused, 2);
         assert_eq!(plan.folders_created, 1);
@@ -1784,9 +2650,15 @@ mod tests {
         );
 
         // --folder override matching existing folder by name
-        let plan_existing =
-            plan_personal_vault_import(&storage, &key, &raw, VaultImportFormat::Auto, Some("Work"))
-                .unwrap();
+        let plan_existing = plan_personal_vault_import(
+            &storage,
+            &key,
+            &raw,
+            VaultImportFormat::Auto,
+            Some("Work"),
+            None,
+        )
+        .unwrap();
         assert_eq!(plan_existing.folders_reused, 1);
         assert_eq!(plan_existing.folders_created, 0);
         assert!(plan_existing.request_payload["folders"]
@@ -1808,6 +2680,7 @@ mod tests {
             &raw,
             VaultImportFormat::Auto,
             Some("Quarantine"),
+            None,
         )
         .unwrap();
         assert_eq!(plan_new.folders_reused, 0);
@@ -1845,6 +2718,7 @@ mod tests {
             &serde_json::to_vec(&doc).unwrap(),
             VaultImportFormat::Json,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("7000"), "got: {err}");
@@ -1858,6 +2732,7 @@ mod tests {
             &key,
             &serde_json::to_vec(&doc_f).unwrap(),
             VaultImportFormat::Json,
+            None,
             None,
         )
         .unwrap_err();
@@ -1880,6 +2755,7 @@ mod tests {
             &key,
             csv_data.as_bytes(),
             VaultImportFormat::Auto,
+            None,
             None,
         )
         .unwrap();
@@ -1944,6 +2820,7 @@ mod tests {
             json_export.content.as_bytes(),
             VaultImportFormat::Auto,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(json_plan.cipher_count, 1);
@@ -1955,6 +2832,7 @@ mod tests {
             &key,
             csv_export.content.as_bytes(),
             VaultImportFormat::Auto,
+            None,
             None,
         )
         .unwrap();
@@ -1979,6 +2857,496 @@ mod tests {
         assert!(
             formatted.contains("maximum length of 10000"),
             "got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn enforces_pre_kdf_dos_bounds_fail_closed() {
+        let make_pbkdf2 = |iters: Value| {
+            serde_json::to_vec(&json!({
+                "encrypted": true,
+                "passwordProtected": true,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "kdfType": 0,
+                "kdfIterations": iters,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "2.iv|ct|mac"
+            }))
+            .unwrap()
+        };
+
+        // PBKDF2 valid boundaries: 5,000 and 2,000,000
+        assert_eq!(
+            inspect_import_bytes(&make_pbkdf2(json!(5_000)), VaultImportFormat::Auto).unwrap(),
+            DetectedImportFormat::EncryptedJson
+        );
+        assert_eq!(
+            inspect_import_bytes(&make_pbkdf2(json!(2_000_000)), VaultImportFormat::Auto).unwrap(),
+            DetectedImportFormat::EncryptedJson
+        );
+
+        // PBKDF2 out-of-bounds & non-integer rejected fail-closed
+        for bad in [
+            json!(4_999),
+            json!(2_000_001),
+            json!(0),
+            json!(-1),
+            json!(600_000.5),
+            json!("600000"),
+            json!(null),
+        ] {
+            let err = inspect_import_bytes(&make_pbkdf2(bad.clone()), VaultImportFormat::Auto)
+                .unwrap_err();
+            assert!(
+                err.contains("kdfIterations") || err.contains("PBKDF2"),
+                "expected PBKDF2 KDF error for {bad}, got: {err}"
+            );
+        }
+
+        let make_argon2 = |iters: Value, mem: Value, par: Value| {
+            serde_json::to_vec(&json!({
+                "encrypted": true,
+                "passwordProtected": true,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "kdfType": 1,
+                "kdfIterations": iters,
+                "kdfMemory": mem,
+                "kdfParallelism": par,
+                "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+                "data": "2.iv|ct|mac"
+            }))
+            .unwrap()
+        };
+
+        // Argon2id valid boundaries
+        assert_eq!(
+            inspect_import_bytes(
+                &make_argon2(json!(2), json!(16), json!(1)),
+                VaultImportFormat::Auto
+            )
+            .unwrap(),
+            DetectedImportFormat::EncryptedJson
+        );
+        assert_eq!(
+            inspect_import_bytes(
+                &make_argon2(json!(10), json!(1_024), json!(16)),
+                VaultImportFormat::Auto
+            )
+            .unwrap(),
+            DetectedImportFormat::EncryptedJson
+        );
+
+        // Argon2id out-of-bounds & non-integer rejected fail-closed
+        let bad_argon2_cases = [
+            (json!(1), json!(64), json!(4)),
+            (json!(11), json!(64), json!(4)),
+            (json!(3.5), json!(64), json!(4)),
+            (json!(3), json!(15), json!(4)),
+            (json!(3), json!(1_025), json!(4)),
+            (json!(3), json!("64"), json!(4)),
+            (json!(3), json!(64), json!(0)),
+            (json!(3), json!(64), json!(17)),
+            (json!(3), json!(64), json!(null)),
+        ];
+        for (i, m, p) in bad_argon2_cases {
+            let err = inspect_import_bytes(
+                &make_argon2(i.clone(), m.clone(), p.clone()),
+                VaultImportFormat::Auto,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("Argon2id") || err.contains("kdf"),
+                "expected Argon2id KDF error for ({i}, {m}, {p}), got: {err}"
+            );
+        }
+
+        // Unsupported kdfType
+        let bad_type = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "passwordProtected": true,
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "kdfType": 2,
+            "kdfIterations": 600_000,
+            "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+            "data": "2.iv|ct|mac"
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&bad_type, VaultImportFormat::Auto).unwrap_err();
+        assert!(err.contains("kdfType"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_v2_account_restricted_cose_exports_fail_closed() {
+        // 1. enc_type = 7 on encKeyValidation_DO_NOT_EDIT
+        let v2_validation = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "encKeyValidation_DO_NOT_EDIT": "7.hEShAQ==",
+            "folders": [],
+            "items": []
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&v2_validation, VaultImportFormat::Auto).unwrap_err();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "expected V2 COSE error, got: {err}"
+        );
+
+        // 2. enc_type = 7 on folder name
+        let v2_folder = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+            "folders": [{ "id": "f1", "name": "7.hEShAQ==" }],
+            "items": []
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&v2_folder, VaultImportFormat::Auto).unwrap_err();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "expected V2 COSE error, got: {err}"
+        );
+
+        // 3. enc_type = 7 on cipher key
+        let v2_cipher_key = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+            "folders": [],
+            "items": [{
+                "type": 2,
+                "name": "2.iv|ct|mac",
+                "key": "7.hEShAQ=="
+            }]
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&v2_cipher_key, VaultImportFormat::Auto).unwrap_err();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "expected V2 COSE error, got: {err}"
+        );
+
+        // 4. Sealed blob `data` containing "format_version"
+        let v2_blob_str = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "encKeyValidation_DO_NOT_EDIT": "2.iv|ct|mac",
+            "data": "{\"format_version\":2,\"cose\":\"7.abc\"}"
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&v2_blob_str, VaultImportFormat::Auto).unwrap_err();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "expected V2 COSE error, got: {err}"
+        );
+
+        let v2_blob_obj = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "data": { "format_version": 2 }
+        }))
+        .unwrap();
+        let err = inspect_import_bytes(&v2_blob_obj, VaultImportFormat::Auto).unwrap_err();
+        assert!(
+            err.contains("V2") && err.contains("COSE"),
+            "expected V2 COSE error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypted_json_pbkdf2_and_argon2id_import_round_trip_and_wrong_password() {
+        let key = test_user_key();
+        let mut src_storage = empty_storage();
+        src_storage.kdf = Some(0);
+        src_storage.kdf_iterations = Some(5_000);
+        src_storage.folders =
+            vec![json!({ "id": "f1", "name": key.encrypt_string("Work").unwrap() })];
+        src_storage.ciphers = vec![
+            json!({
+                "id": "c1",
+                "organizationId": null,
+                "folderId": "f1",
+                "type": 1,
+                "name": key.encrypt_string("Encrypted Login").unwrap(),
+                "notes": key.encrypt_string("Secret note").unwrap(),
+                "favorite": true,
+                "reprompt": 1,
+                "login": {
+                    "username": key.encrypt_string("alice").unwrap(),
+                    "password": key.encrypt_string("correct-horse-battery").unwrap(),
+                    "totp": key.encrypt_string("JBSWY3DPEHPK3PXP").unwrap(),
+                    "uris": [{ "uri": key.encrypt_string("https://example.com").unwrap(), "match": 0 }]
+                }
+            }),
+            json!({
+                "id": "c2",
+                "organizationId": null,
+                "folderId": null,
+                "type": 5,
+                "name": key.encrypt_string("SSH Prod").unwrap(),
+                "favorite": false,
+                "reprompt": 0,
+                "sshKey": {
+                    "privateKey": key.encrypt_string("-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----").unwrap(),
+                    "publicKey": key.encrypt_string("ssh-ed25519 AAAA user@host").unwrap(),
+                    "keyFingerprint": key.encrypt_string("SHA256:abc123").unwrap()
+                }
+            }),
+        ];
+
+        // 1. PBKDF2 export -> import round-trip
+        let exported_pbkdf2 =
+            export_personal_vault_encrypted_json(&src_storage, &key, "export-pass-123").unwrap();
+
+        // Missing password fails closed
+        let err_missing = plan_personal_vault_import(
+            &empty_storage(),
+            &key,
+            exported_pbkdf2.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err_missing.to_ascii_lowercase().contains("password"),
+            "got: {err_missing}"
+        );
+
+        // Wrong password fails immediately on encKeyValidation_DO_NOT_EDIT MAC check
+        let err_wrong = plan_personal_vault_import(
+            &empty_storage(),
+            &key,
+            exported_pbkdf2.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            Some("wrong-password"),
+        )
+        .unwrap_err();
+        assert!(
+            err_wrong.to_ascii_lowercase().contains("invalid")
+                && err_wrong.to_ascii_lowercase().contains("password"),
+            "got: {err_wrong}"
+        );
+
+        // Correct password succeeds and decrypts/re-encrypts into a fresh account key
+        let dest_key = SymmetricCryptoKey::from_raw_bytes(&[9u8; 64]).unwrap();
+        let plan = plan_personal_vault_import(
+            &empty_storage(),
+            &dest_key,
+            exported_pbkdf2.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            Some("export-pass-123"),
+        )
+        .unwrap();
+        assert_eq!(plan.detected_format, DetectedImportFormat::EncryptedJson);
+        assert_eq!(plan.cipher_count, 2);
+        assert_eq!(plan.folders_created, 1);
+        assert_eq!(
+            decrypt_cipher_string(
+                plan.request_payload["ciphers"][0]["name"].as_str(),
+                &dest_key
+            )
+            .as_deref(),
+            Some("Encrypted Login")
+        );
+        assert_eq!(
+            decrypt_cipher_string(
+                plan.request_payload["ciphers"][0]["login"]["password"].as_str(),
+                &dest_key
+            )
+            .as_deref(),
+            Some("correct-horse-battery")
+        );
+        assert_eq!(
+            decrypt_cipher_string(
+                plan.request_payload["ciphers"][1]["sshKey"]["keyFingerprint"].as_str(),
+                &dest_key
+            )
+            .as_deref(),
+            Some("SHA256:abc123")
+        );
+
+        // 2. Argon2id export -> import round-trip
+        src_storage.kdf = Some(1);
+        src_storage.kdf_iterations = Some(2);
+        src_storage.kdf_memory = Some(16);
+        src_storage.kdf_parallelism = Some(1);
+        let exported_argon2 =
+            export_personal_vault_encrypted_json(&src_storage, &key, "argon-pass-456").unwrap();
+        let argon_plan = plan_personal_vault_import(
+            &empty_storage(),
+            &dest_key,
+            exported_argon2.content.as_bytes(),
+            VaultImportFormat::EncryptedJson,
+            Some("Restored"),
+            Some("argon-pass-456"),
+        )
+        .unwrap();
+        assert_eq!(argon_plan.cipher_count, 2);
+        assert_eq!(argon_plan.folders_created, 1);
+        assert_eq!(
+            decrypt_cipher_string(
+                argon_plan.request_payload["folders"][0]["name"].as_str(),
+                &dest_key
+            )
+            .as_deref(),
+            Some("Restored")
+        );
+
+        // 3. Independently precomputed fixed Bitwarden interoperability vector
+        // (PBKDF2-HMAC-SHA256 5,000 iters, raw UTF-8 Base64 salt, RFC 5869 HKDF-Expand-only,
+        // AES-256-CBC + HMAC-SHA256; computed independently outside Rust via Python + OpenSSL).
+        let vector_doc = serde_json::to_vec(&json!({
+            "encrypted": true,
+            "passwordProtected": true,
+            "salt": "Oy0xcgVRzxQ+9NpB5GLehw==",
+            "kdfType": 0,
+            "kdfIterations": 5_000,
+            "encKeyValidation_DO_NOT_EDIT": "2.AQIDBAUGBwgJCgsMDQ4PEA==|AEl6C4y/SBquQMYHYE+pu9LYEUE8n07aM9gVd1rcpLLpXEM/lsK2B4doQLelSVaf|/4TeysufgifF0NwMogvYY3sjt9V9HV+m4t3WTnWhHX0=",
+            "data": "2.ERITFBUWFxgZGhscHR4fIA==|/AfDF53N9Voo2wJsYSUoFGZ7XYszH6FerplpWu481KQ/Ha5sfp7oNXTpe4rSGeyi0fqRFqeDVduDnH+FcRdjNx1IDxDdWA3eRC0BpVETirOWlOzfdKBJSXGdnd0BlndguqpwK10Wjod6nf0jCPezO4XDsyVSaBmI60UcDcCLBdhjTO1nYF08/NiuquC9P/JEZ2BnQXTh0B5wnh3nozx82sHAwU4sxR/7LRgJCpc58gA=|7tzP1h1LYxEi9CDc6zcqHmS0E82PxHwB3/+NmSxWlGk="
+        }))
+        .unwrap();
+        let vec_plan = plan_personal_vault_import(
+            &empty_storage(),
+            &dest_key,
+            &vector_doc,
+            VaultImportFormat::Auto,
+            None,
+            Some("correct horse battery staple"),
+        )
+        .unwrap();
+        assert_eq!(vec_plan.cipher_count, 1);
+        assert_eq!(
+            decrypt_cipher_string(
+                vec_plan.request_payload["ciphers"][0]["notes"].as_str(),
+                &dest_key
+            )
+            .as_deref(),
+            Some("Verified via independent Python HKDF-Expand-only")
+        );
+    }
+
+    #[test]
+    fn account_encrypted_json_v1_import_unkeyed_and_per_item_keyed_and_wrong_account() {
+        let account_key = test_user_key();
+        let other_account_key = SymmetricCryptoKey::from_raw_bytes(&[42u8; 64]).unwrap();
+
+        let item_key_bytes = [13u8; 64];
+        let item_key = SymmetricCryptoKey::from_raw_bytes(&item_key_bytes).unwrap();
+        let wrapped_item_key = account_key.encrypt(&item_key_bytes).unwrap();
+
+        let mut src_storage = empty_storage();
+        src_storage.folders = vec![json!({
+            "id": "folder-v1",
+            "name": account_key.encrypt_string("Banking").unwrap()
+        })];
+        src_storage.ciphers = vec![
+            // Legacy unkeyed cipher (encrypted directly with user_key)
+            json!({
+                "id": "legacy-1",
+                "organizationId": null,
+                "folderId": "folder-v1",
+                "type": 1,
+                "name": account_key.encrypt_string("Legacy Login").unwrap(),
+                "notes": account_key.encrypt_string("Old format").unwrap(),
+                "favorite": false,
+                "reprompt": 0,
+                "login": {
+                    "username": account_key.encrypt_string("legacy_user").unwrap(),
+                    "password": account_key.encrypt_string("legacy_pass").unwrap(),
+                    "uris": [{ "uri": account_key.encrypt_string("https://legacy.test").unwrap(), "match": 0 }]
+                }
+            }),
+            // Modern per-item-keyed cipher (fields encrypted with item_key, key wrapped under user_key)
+            json!({
+                "id": "keyed-1",
+                "organizationId": null,
+                "folderId": "folder-v1",
+                "type": 3,
+                "key": wrapped_item_key,
+                "name": item_key.encrypt_string("Corporate Card").unwrap(),
+                "favorite": true,
+                "reprompt": 1,
+                "card": {
+                    "cardholderName": item_key.encrypt_string("Alice").unwrap(),
+                    "brand": item_key.encrypt_string("Visa").unwrap(),
+                    "number": item_key.encrypt_string("4111111111111111").unwrap(),
+                    "expMonth": item_key.encrypt_string("12").unwrap(),
+                    "expYear": item_key.encrypt_string("2030").unwrap(),
+                    "code": item_key.encrypt_string("123").unwrap()
+                }
+            }),
+        ];
+
+        let exported =
+            export_personal_vault_account_encrypted_json(&src_storage, &account_key).unwrap();
+
+        // Wrong account key fails immediately on encKeyValidation_DO_NOT_EDIT
+        let err_wrong_acct = plan_personal_vault_import(
+            &empty_storage(),
+            &other_account_key,
+            exported.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err_wrong_acct.to_ascii_lowercase().contains("account")
+                || err_wrong_acct.to_ascii_lowercase().contains("key"),
+            "got: {err_wrong_acct}"
+        );
+
+        // Providing an import_password for account_encrypted_json fails closed
+        let err_pw = plan_personal_vault_import(
+            &empty_storage(),
+            &account_key,
+            exported.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            Some("unused-pass"),
+        )
+        .unwrap_err();
+        assert!(err_pw.contains("not used"), "got: {err_pw}");
+
+        // Same account key succeeds, unwraps per-item key, and re-encrypts fresh under user_key
+        let plan = plan_personal_vault_import(
+            &empty_storage(),
+            &account_key,
+            exported.content.as_bytes(),
+            VaultImportFormat::Auto,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.detected_format,
+            DetectedImportFormat::AccountEncryptedJson
+        );
+        assert_eq!(plan.cipher_count, 2);
+        assert_eq!(plan.folders_created, 1);
+        assert_eq!(
+            decrypt_cipher_string(
+                plan.request_payload["folders"][0]["name"].as_str(),
+                &account_key
+            )
+            .as_deref(),
+            Some("Banking")
+        );
+
+        let c0 = &plan.request_payload["ciphers"][0];
+        assert!(c0["organizationId"].is_null());
+        assert_eq!(
+            decrypt_cipher_string(c0["login"]["password"].as_str(), &account_key).as_deref(),
+            Some("legacy_pass")
+        );
+
+        let c1 = &plan.request_payload["ciphers"][1];
+        assert!(c1.get("key").is_none());
+        assert_eq!(
+            decrypt_cipher_string(c1["name"].as_str(), &account_key).as_deref(),
+            Some("Corporate Card")
+        );
+        assert_eq!(
+            decrypt_cipher_string(c1["card"]["number"].as_str(), &account_key).as_deref(),
+            Some("4111111111111111")
         );
     }
 }
