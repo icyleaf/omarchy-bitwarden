@@ -1,6 +1,9 @@
 //! End-to-end CLI ↔ Daemon IPC & PTY integration tests for `omawarden vault export` (#481).
 
-use omawarden_engine::crypto::{derive_master_key, KdfType, SymmetricCryptoKey};
+use omawarden_engine::crypto::{
+    derive_export_key, derive_master_key, parse_symmetric_key_from_decrypted_bytes, EncString,
+    ExportKdfConfig, KdfType, SymmetricCryptoKey,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -309,6 +312,30 @@ impl TestVaultEnv {
         }
         cmd.output().unwrap()
     }
+
+    fn run_cli_with_stdin(&self, args: &[&str], cwd: Option<&Path>, stdin_data: &[u8]) -> Output {
+        let dir = self.temp.path();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
+        cmd.args(args)
+            .env_clear()
+            .env("HOME", dir)
+            .env("PATH", dir)
+            .env("XDG_RUNTIME_DIR", dir)
+            .env("OMAWARDEN_DATA_DIR", dir)
+            .env("OMAWARDEN_CONFIG_DIR", dir)
+            .env("OMA_KEYRING_PROVIDER", "secret-tool")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(wd) = cwd {
+            cmd.current_dir(wd);
+        }
+        let mut child = cmd.spawn().unwrap();
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(stdin_data);
+        }
+        child.wait_with_output().unwrap()
+    }
 }
 
 #[cfg(unix)]
@@ -323,6 +350,7 @@ fn run_cli_in_pty(
     let dir = env.temp.path();
 
     let (master_file, slave_in, slave_out) = unsafe {
+        use std::os::unix::fs::OpenOptionsExt;
         let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
         assert!(master_fd >= 0, "posix_openpt failed");
         assert_eq!(libc::grantpt(master_fd), 0, "grantpt failed");
@@ -333,6 +361,7 @@ fn run_cli_in_pty(
         let slave_a = fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NOCTTY)
             .open(&slave_name)
             .expect("open PTY slave");
         let slave_b = slave_a.try_clone().expect("clone PTY slave");
@@ -985,4 +1014,490 @@ fn vault_export_auto_restarts_stale_standalone_daemon_lacking_capability() {
             .contains("locked"),
         "expected locked error after auto-restart, got: {payload}"
     );
+}
+
+#[test]
+fn vault_export_defaults_to_encrypted_json_with_password_stdin_and_default_filename() {
+    let env = TestVaultEnv::new(true);
+
+    // 1. Omitted --format and omitted --output -> defaults to encrypted_json + bitwarden_encrypted_export_YYYYMMDDHHMMSS.json
+    let cwd_dir = env.temp.path().join("cwd-encrypted");
+    fs::create_dir_all(&cwd_dir).unwrap();
+    let out = env.run_cli_with_stdin(
+        &["vault", "export", "--password-stdin", "--json"],
+        Some(&cwd_dir),
+        b"my-export-passphrase\n",
+    );
+    assert!(
+        out.status.success(),
+        "default encrypted_json export failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["format"], "encrypted_json");
+    assert_eq!(envelope["item_count"], 5);
+    assert_eq!(envelope["folder_count"], 1);
+
+    let out_name = envelope["output"].as_str().unwrap();
+    assert!(
+        out_name.starts_with("bitwarden_encrypted_export_") && out_name.ends_with(".json"),
+        "unexpected default filename: {out_name}"
+    );
+    let ts = &out_name["bitwarden_encrypted_export_".len()..out_name.len() - ".json".len()];
+    assert_eq!(ts.len(), 14);
+    assert!(ts.chars().all(|c| c.is_ascii_digit()));
+
+    let written_path = cwd_dir.join(out_name);
+    let mode = fs::metadata(&written_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "encrypted export file must be 0600");
+
+    // Verify Bitwarden-compatible decryption using independent derive_export_key
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&written_path).unwrap()).unwrap();
+    assert_eq!(doc["encrypted"], true);
+    assert_eq!(doc["passwordProtected"], true);
+    assert_eq!(doc["kdfType"], 0);
+    assert_eq!(doc["kdfIterations"], 100_000);
+    let salt = doc["salt"].as_str().unwrap();
+    assert_eq!(salt.len(), 24);
+
+    let export_key = derive_export_key(
+        "my-export-passphrase",
+        salt,
+        &ExportKdfConfig::Pbkdf2Sha256 {
+            iterations: 100_000,
+        },
+    )
+    .unwrap();
+    let val_enc = EncString::parse(doc["encKeyValidation_DO_NOT_EDIT"].as_str().unwrap()).unwrap();
+    assert_eq!(val_enc.enc_type, 2);
+    let uuid = val_enc.decrypt_string(&export_key).unwrap();
+    assert_eq!(uuid.len(), 36);
+
+    let data_enc = EncString::parse(doc["data"].as_str().unwrap()).unwrap();
+    assert_eq!(data_enc.enc_type, 2);
+    let inner_str = data_enc.decrypt_string(&export_key).unwrap();
+    assert!(inner_str.starts_with("{\n  \"encrypted\": false,\n"));
+    let inner: Value = serde_json::from_str(&inner_str).unwrap();
+    assert_eq!(inner["items"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        inner["items"][0]["login"]["password"],
+        "super-secret-login-pw"
+    );
+
+    // 2. --output <directory> also generates bitwarden_encrypted_export_YYYYMMDDHHMMSS.json inside directory
+    let target_dir = env.temp.path().join("dir-encrypted");
+    fs::create_dir_all(&target_dir).unwrap();
+    let out_dir = env.run_cli_with_stdin(
+        &[
+            "vault",
+            "export",
+            "--output",
+            target_dir.to_str().unwrap(),
+            "--password-stdin",
+            "--json",
+        ],
+        None,
+        b"dir-passphrase\r\n",
+    );
+    assert!(out_dir.status.success());
+    let dir_env: Value = serde_json::from_slice(&out_dir.stdout).unwrap();
+    let dir_out_path = PathBuf::from(dir_env["output"].as_str().unwrap());
+    assert_eq!(dir_out_path.parent().unwrap(), target_dir.as_path());
+    assert!(dir_out_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("bitwarden_encrypted_export_"));
+    assert_eq!(
+        fs::metadata(&dir_out_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn vault_export_encrypted_json_with_password_file_and_rule11_guards() {
+    let env = TestVaultEnv::new(true);
+
+    // 1. Valid --password-file with trailing CRLF
+    let pw_file = env.temp.path().join("export.pw");
+    fs::write(&pw_file, "file-export-secret\r\n").unwrap();
+    let out_file = env.temp.path().join("from_pw_file.json");
+    let out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--output",
+            out_file.to_str().unwrap(),
+            "--password-file",
+            pw_file.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "password-file export failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&out_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&out_file).unwrap()).unwrap();
+    let export_key = derive_export_key(
+        "file-export-secret",
+        doc["salt"].as_str().unwrap(),
+        &ExportKdfConfig::Pbkdf2Sha256 {
+            iterations: 100_000,
+        },
+    )
+    .unwrap();
+    let inner_str = EncString::parse(doc["data"].as_str().unwrap())
+        .unwrap()
+        .decrypt_string(&export_key)
+        .unwrap();
+    let inner: Value = serde_json::from_str(&inner_str).unwrap();
+    assert_eq!(inner["items"].as_array().unwrap().len(), 5);
+
+    // 2. --password-file pointing to a directory MUST fail closed
+    let pw_dir = env.temp.path().join("pw-dir");
+    fs::create_dir_all(&pw_dir).unwrap();
+    let bad_dir_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--output",
+            env.temp.path().join("nope1.json").to_str().unwrap(),
+            "--password-file",
+            pw_dir.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(!bad_dir_out.status.success());
+    let payload: Value = serde_json::from_slice(&bad_dir_out.stdout).unwrap();
+    assert_eq!(payload["ok"], false);
+    assert!(payload["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("directory"));
+
+    // 3. --password-file exceeding 4 KiB cap MUST fail closed
+    let big_pw_file = env.temp.path().join("big.pw");
+    fs::write(&big_pw_file, vec![b'a'; 4097]).unwrap();
+    let bad_big_out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--output",
+            env.temp.path().join("nope2.json").to_str().unwrap(),
+            "--password-file",
+            big_pw_file.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(!bad_big_out.status.success());
+    let payload: Value = serde_json::from_slice(&bad_big_out.stdout).unwrap();
+    assert_eq!(payload["ok"], false);
+    assert!(payload["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("maximum allowed size"));
+
+    // 4. --password-stdin and --password-file are mutually exclusive
+    let conflict = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--password-stdin",
+            "--password-file",
+            pw_file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!conflict.status.success());
+
+    // 5. Rule 11 Zero-Argv: --password in argv MUST be rejected fail-closed
+    let argv_pw = env.run_cli(&["vault", "export", "--password", "leaked"], None);
+    assert!(!argv_pw.status.success());
+
+    // 6. Non-interactive encrypted_json without --password-stdin or --password-file fails closed
+    let missing_pw = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--output",
+            env.temp.path().join("nope3.json").to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(!missing_pw.status.success());
+
+    // 7. --password-file with account_encrypted_json fails closed
+    let wrong_fmt_pw = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "account_encrypted_json",
+            "--password-file",
+            pw_file.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(!wrong_fmt_pw.status.success());
+}
+
+#[test]
+fn vault_export_account_encrypted_json_v1_0600_schema_and_exclusions() {
+    let env = TestVaultEnv::new(true);
+    let cwd_dir = env.temp.path().join("cwd-account-enc");
+    fs::create_dir_all(&cwd_dir).unwrap();
+
+    // Does NOT require --allow-plaintext and uses bitwarden_encrypted_export_YYYYMMDDHHMMSS.json
+    let out = env.run_cli(
+        &[
+            "vault",
+            "export",
+            "--format",
+            "account_encrypted_json",
+            "--json",
+        ],
+        Some(&cwd_dir),
+    );
+    assert!(
+        out.status.success(),
+        "account_encrypted_json export failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["format"], "account_encrypted_json");
+    assert_eq!(envelope["item_count"], 5);
+    assert_eq!(envelope["folder_count"], 1);
+
+    let out_name = envelope["output"].as_str().unwrap();
+    assert!(out_name.starts_with("bitwarden_encrypted_export_") && out_name.ends_with(".json"));
+    let written_path = cwd_dir.join(out_name);
+    assert_eq!(
+        fs::metadata(&written_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&written_path).unwrap()).unwrap();
+    assert_eq!(doc["encrypted"], true);
+    assert!(doc.get("passwordProtected").is_none());
+
+    let user_key = SymmetricCryptoKey::from_raw_bytes(&[42u8; 64]).unwrap();
+    let val_enc = EncString::parse(doc["encKeyValidation_DO_NOT_EDIT"].as_str().unwrap()).unwrap();
+    assert_eq!(val_enc.enc_type, 2);
+    let uuid = val_enc.decrypt_string(&user_key).unwrap();
+    assert_eq!(uuid.len(), 36);
+
+    // Folder remains encrypted under user_key
+    assert_eq!(
+        EncString::parse(doc["folders"][0]["name"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap(),
+        "Work"
+    );
+
+    let items = doc["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(!items
+        .iter()
+        .any(|i| i["id"] == "88888888-8888-8888-8888-888888888888"));
+    assert!(!items
+        .iter()
+        .any(|i| i["id"] == "99999999-9999-9999-9999-999999999999"));
+
+    // Login preserves per-item key and excludes attachments
+    assert!(items[0].get("attachments").is_none());
+    let wrapped_item_key = EncString::parse(items[0]["key"].as_str().unwrap()).unwrap();
+    let item_key =
+        parse_symmetric_key_from_decrypted_bytes(&wrapped_item_key.decrypt(&user_key).unwrap())
+            .unwrap();
+    assert_eq!(
+        EncString::parse(items[0]["login"]["password"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&item_key)
+            .unwrap(),
+        "super-secret-login-pw"
+    );
+}
+
+#[cfg(unix)]
+fn run_cli_in_controlling_pty(
+    env: &TestVaultEnv,
+    args: &[&str],
+    prompt_responses: &[(&str, &str)],
+) -> (std::process::ExitStatus, String) {
+    use std::ffi::CStr;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::process::CommandExt;
+
+    let dir = env.temp.path();
+
+    let (master_file, slave_in, slave_out, slave_err) = unsafe {
+        use std::os::unix::fs::OpenOptionsExt;
+        let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master_fd >= 0, "posix_openpt failed");
+        assert_eq!(libc::grantpt(master_fd), 0, "grantpt failed");
+        assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt failed");
+        let name_ptr = libc::ptsname(master_fd);
+        assert!(!name_ptr.is_null(), "ptsname failed");
+        let slave_name = CStr::from_ptr(name_ptr).to_str().unwrap().to_string();
+        let slave_a = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&slave_name)
+            .expect("open PTY slave");
+        let slave_b = slave_a.try_clone().expect("clone PTY slave");
+        let slave_c = slave_a.try_clone().expect("clone PTY slave");
+        (fs::File::from_raw_fd(master_fd), slave_a, slave_b, slave_c)
+    };
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_omawarden"));
+    cmd.args(args)
+        .env_clear()
+        .env("HOME", dir)
+        .env("PATH", dir)
+        .env("XDG_RUNTIME_DIR", dir)
+        .env("OMAWARDEN_DATA_DIR", dir)
+        .env("OMAWARDEN_CONFIG_DIR", dir)
+        .env("OMA_KEYRING_PROVIDER", "secret-tool")
+        .stdin(Stdio::from(slave_in))
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err));
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(cmd);
+
+    let mut master_writer = master_file.try_clone().unwrap();
+    let expected: Vec<(String, String)> = prompt_responses
+        .iter()
+        .map(|(p, r)| ((*p).to_string(), (*r).to_string()))
+        .collect();
+
+    let master_fd_raw = master_file.into_raw_fd();
+    let reader_handle = thread::spawn(move || {
+        let mut f = unsafe { fs::File::from_raw_fd(master_fd_raw) };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut next_idx = 0usize;
+        let mut search_from = 0usize;
+        loop {
+            match f.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if next_idx < expected.len() {
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(pos) = text[search_from..].find(&expected[next_idx].0) {
+                            search_from += pos + expected[next_idx].0.len();
+                            // Brief yield so rpassword finishes tcsetattr(TCSAFLUSH) before we write
+                            thread::sleep(Duration::from_millis(25));
+                            let _ = master_writer.write_all(expected[next_idx].1.as_bytes());
+                            let _ = master_writer.flush();
+                            next_idx += 1;
+                        }
+                    }
+                }
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).replace("\r\n", "\n")
+    });
+
+    let status = child.wait().unwrap();
+    let pty_output = reader_handle.join().unwrap();
+    (status, pty_output)
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_export_encrypted_json_interactive_tty_password_prompt_and_mismatch() {
+    let env = TestVaultEnv::new(true);
+
+    // 1. Mismatched password confirmation fails closed without writing output file
+    let bad_file = env.temp.path().join("tty_mismatch.json");
+    let (status_bad, out_bad) = run_cli_in_controlling_pty(
+        &env,
+        &["vault", "export", "--output", bad_file.to_str().unwrap()],
+        &[
+            ("Export password:", "first-secret\n"),
+            ("Confirm export password:", "different-secret\n"),
+        ],
+    );
+    assert!(!status_bad.success());
+    assert!(
+        out_bad.contains("do not match"),
+        "expected mismatch error in PTY output, got: {out_bad}"
+    );
+    assert!(!bad_file.exists());
+
+    // 2. Matching password confirmation succeeds and does NOT echo password to PTY
+    let ok_file = env.temp.path().join("tty_encrypted.json");
+    let (status_ok, out_ok) = run_cli_in_controlling_pty(
+        &env,
+        &["vault", "export", "--output", ok_file.to_str().unwrap()],
+        &[
+            ("Export password:", "tty-secret-pass\n"),
+            ("Confirm export password:", "tty-secret-pass\n"),
+        ],
+    );
+    assert!(
+        status_ok.success(),
+        "interactive encrypted_json export failed: out={out_ok}"
+    );
+    assert!(
+        !out_ok.contains("tty-secret-pass"),
+        "password must not be echoed to terminal output"
+    );
+    assert_eq!(
+        fs::metadata(&ok_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&ok_file).unwrap()).unwrap();
+    let export_key = derive_export_key(
+        "tty-secret-pass",
+        doc["salt"].as_str().unwrap(),
+        &ExportKdfConfig::Pbkdf2Sha256 {
+            iterations: 100_000,
+        },
+    )
+    .unwrap();
+    let inner_str = EncString::parse(doc["data"].as_str().unwrap())
+        .unwrap()
+        .decrypt_string(&export_key)
+        .unwrap();
+    let inner: Value = serde_json::from_str(&inner_str).unwrap();
+    assert_eq!(inner["items"].as_array().unwrap().len(), 5);
 }

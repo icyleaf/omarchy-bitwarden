@@ -399,9 +399,9 @@ pub(crate) enum VaultAction {
     Export {
         #[arg(
             long,
-            default_value = "json",
+            default_value = "encrypted_json",
             value_name = "FORMAT",
-            help = "Export format (json)"
+            help = "Export format (encrypted_json, account_encrypted_json, json)"
         )]
         format: String,
         #[arg(
@@ -411,6 +411,19 @@ pub(crate) enum VaultAction {
             help = "Destination file path, directory, or '-' for stdout"
         )]
         output: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "password_file",
+            help = "Read export password from standard input (Zero-Argv compliant)"
+        )]
+        password_stdin: bool,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "password_stdin",
+            help = "Read export password from a file (Zero-Argv compliant)"
+        )]
+        password_file: Option<PathBuf>,
         #[arg(
             long,
             help = "Confirm unencrypted plaintext export without interactive prompt"
@@ -558,9 +571,19 @@ pub(crate) fn run(action: VaultAction, cfg: &Config) -> ExitCode {
         VaultAction::Export {
             format,
             output,
+            password_stdin,
+            password_file,
             allow_plaintext,
             force,
             json,
-        } => export::handle_vault_export(&format, output.as_deref(), allow_plaintext, force, json),
+        } => export::handle_vault_export(
+            &format,
+            output.as_deref(),
+            password_stdin,
+            password_file.as_deref(),
+            allow_plaintext,
+            force,
+            json,
+        ),
     }
 }
